@@ -157,6 +157,7 @@ Do not move it under `apps/` unless it becomes an actual product web app.
 ## Documentation Rules
 
 - Keep docs concise and split by stable topic.
+- Document important implementation and application knowledge by default: architecture decisions, feature behavior, platform constraints, performance budgets, persistence formats, FFI contracts, build/release flows, and non-obvious tradeoffs should leave a written record.
 - Update docs when scope, architecture, or product principles change.
 - Add ADRs in `docs/adr/` for important architectural decisions.
 - Avoid duplicating the same requirement across many files; link to the source document instead.
