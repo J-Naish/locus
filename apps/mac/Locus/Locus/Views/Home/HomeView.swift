@@ -8,6 +8,7 @@ struct HomeView: View {
     @State private var selectedEntryID: WorkspaceEntry.ID?
     @State private var isFolderImporterPresented = false
     @State private var didStartInitialFolderLoad = false
+    @State private var workspaceRootURL: URL?
     // Folder loads can overlap when users refresh or choose another folder
     // quickly; only the latest generation is allowed to update visible state.
     @State private var workspaceLoadGeneration: UInt64 = 0
@@ -32,9 +33,11 @@ struct HomeView: View {
             RuntimeStatusView(status: runtimeStatus)
             WorkspaceContentView(
                 state: workspaceState,
+                rootURL: workspaceRootURL,
                 selectedEntryID: $selectedEntryID,
                 openFolder: openFolder,
                 refresh: refreshWorkspace,
+                openParentFolder: openParentFolder,
                 reveal: revealInFinder,
                 performOpenAction: performOpenAction
             )
@@ -72,7 +75,7 @@ struct HomeView: View {
         }
 
         didStartInitialFolderLoad = true
-        startWorkspaceLoad(initialFolderURL)
+        startWorkspaceLoad(initialFolderURL, rootURL: initialFolderURL)
     }
 
     @MainActor
@@ -82,13 +85,7 @@ struct HomeView: View {
 
     @MainActor
     private func refreshWorkspace() {
-        let folderURL: URL
-        switch workspaceState {
-        case let .ready(currentFolderURL, _, _):
-            folderURL = currentFolderURL
-        case let .failed(currentFolderURL?, _):
-            folderURL = currentFolderURL
-        default:
+        guard let folderURL = workspaceState.folderURL else {
             return
         }
 
@@ -105,7 +102,7 @@ struct HomeView: View {
                 return
             }
 
-            startWorkspaceLoad(folderURL)
+            startWorkspaceLoad(folderURL, rootURL: folderURL)
         case let .failure(error):
             // SwiftUI's .fileImporter delivers user cancellation as a Cocoa
             // user-cancelled error or as Swift's CancellationError. Treat both
@@ -140,7 +137,11 @@ struct HomeView: View {
     }
 
     @MainActor
-    private func startWorkspaceLoad(_ folderURL: URL) {
+    private func startWorkspaceLoad(_ folderURL: URL, rootURL: URL? = nil) {
+        if let rootURL {
+            workspaceRootURL = rootURL
+        }
+
         workspaceLoadGeneration &+= 1
         let generation = workspaceLoadGeneration
 
@@ -197,6 +198,19 @@ struct HomeView: View {
     }
 
     @MainActor
+    private func openParentFolder() {
+        guard let folderURL = workspaceState.folderURL,
+              let parentFolderURL = WorkspaceNavigation.parentFolderURL(
+                for: folderURL,
+                within: workspaceRootURL
+              ) else {
+            return
+        }
+
+        startWorkspaceLoad(parentFolderURL)
+    }
+
+    @MainActor
     private func performOpenAction(_ action: WorkspaceEntryOpenAction) {
         switch action {
         case let .browseFolder(url):
@@ -208,8 +222,8 @@ struct HomeView: View {
 
     @MainActor
     private func selectedEntryIDForReload(of folderURL: URL) -> WorkspaceEntry.ID? {
-        guard case let .ready(currentFolderURL, _, _) = workspaceState,
-              currentFolderURL == folderURL else {
+        guard case .ready = workspaceState,
+              workspaceState.folderURL == folderURL else {
             return nil
         }
 
@@ -268,9 +282,11 @@ private struct RuntimeStatusView: View {
 
 private struct WorkspaceContentView: View {
     let state: WorkspaceState
+    let rootURL: URL?
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let openFolder: () -> Void
     let refresh: () -> Void
+    let openParentFolder: () -> Void
     let reveal: (WorkspaceEntry) -> Void
     let performOpenAction: (WorkspaceEntryOpenAction) -> Void
 
@@ -286,8 +302,10 @@ private struct WorkspaceContentView: View {
                     folderURL: folderURL,
                     snapshot: snapshot,
                     loadedAt: loadedAt,
+                    rootURL: rootURL,
                     selectedEntryID: $selectedEntryID,
                     refresh: refresh,
+                    openParentFolder: openParentFolder,
                     reveal: reveal,
                     performOpenAction: performOpenAction
                 )
@@ -339,8 +357,10 @@ private struct WorkspaceBrowserView: View {
     let folderURL: URL
     let snapshot: WorkspaceSnapshot
     let loadedAt: Date
+    let rootURL: URL?
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let refresh: () -> Void
+    let openParentFolder: () -> Void
     let reveal: (WorkspaceEntry) -> Void
     let performOpenAction: (WorkspaceEntryOpenAction) -> Void
     @State private var searchQuery = ""
@@ -352,8 +372,10 @@ private struct WorkspaceBrowserView: View {
                 folderURL: folderURL,
                 snapshot: snapshot,
                 loadedAt: loadedAt,
+                rootURL: rootURL,
                 searchQuery: $searchQuery,
                 isSearchFocused: $isSearchFocused,
+                openParentFolder: openParentFolder,
                 refresh: refresh
             )
 
@@ -429,8 +451,10 @@ private struct WorkspaceToolbarView: View {
     let folderURL: URL
     let snapshot: WorkspaceSnapshot
     let loadedAt: Date
+    let rootURL: URL?
     @Binding var searchQuery: String
     let isSearchFocused: FocusState<Bool>.Binding
+    let openParentFolder: () -> Void
     let refresh: () -> Void
 
     var body: some View {
@@ -457,6 +481,13 @@ private struct WorkspaceToolbarView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
+            Button(action: openParentFolder) {
+                Label("Parent Folder", systemImage: "arrow.up")
+            }
+            .labelStyle(.iconOnly)
+            .disabled(parentFolderURL == nil)
+            .help(parentFolderHelp)
+
             TextField("Search", text: $searchQuery)
                 .textFieldStyle(.roundedBorder)
                 .focused(isSearchFocused)
@@ -471,6 +502,22 @@ private struct WorkspaceToolbarView: View {
             .keyboardShortcut("r", modifiers: [.command])
             .help("Refresh")
         }
+    }
+
+    private var parentFolderURL: URL? {
+        WorkspaceNavigation.parentFolderURL(for: folderURL, within: rootURL)
+    }
+
+    private var parentFolderHelp: String {
+        guard let parentFolderURL else {
+            return "No parent folder"
+        }
+
+        let displayName = parentFolderURL.lastPathComponent.isEmpty
+            ? parentFolderURL.path(percentEncoded: false)
+            : parentFolderURL.lastPathComponent
+
+        return "Open \(displayName)"
     }
 }
 
@@ -652,6 +699,17 @@ private enum WorkspaceState: Equatable, Sendable {
     case loading(folderURL: URL)
     case ready(folderURL: URL, snapshot: WorkspaceSnapshot, loadedAt: Date)
     case failed(folderURL: URL?, message: String)
+}
+
+private extension WorkspaceState {
+    var folderURL: URL? {
+        switch self {
+        case let .loading(folderURL), let .ready(folderURL, _, _), let .failed(folderURL?, _):
+            return folderURL
+        case .idle, .failed(nil, _):
+            return nil
+        }
+    }
 }
 
 private extension WorkspaceEntry {
