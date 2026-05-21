@@ -318,6 +318,7 @@ private struct WorkspaceBrowserView: View {
     let refresh: () -> Void
     let reveal: (WorkspaceEntry) -> Void
     let openExternally: (WorkspaceEntry) -> Void
+    @State private var searchQuery = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -325,6 +326,7 @@ private struct WorkspaceBrowserView: View {
                 folderURL: folderURL,
                 snapshot: snapshot,
                 loadedAt: loadedAt,
+                searchQuery: $searchQuery,
                 refresh: refresh
             )
 
@@ -339,14 +341,40 @@ private struct WorkspaceBrowserView: View {
                     description: Text("Files and folders will appear here.")
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if visibleEntries.isEmpty {
+                ContentUnavailableView(
+                    "No Results",
+                    systemImage: "magnifyingglass",
+                    description: Text(verbatim: "No items match \"\(searchQuery)\".")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 WorkspaceEntriesTable(
-                    entries: snapshot.entries,
+                    entries: visibleEntries,
                     selectedEntryID: $selectedEntryID,
                     reveal: reveal,
                     openExternally: openExternally
                 )
             }
+        }
+        .onChange(of: searchQuery) {
+            clearSelectionIfNeeded()
+        }
+        .onChange(of: snapshot.entries) {
+            clearSelectionIfNeeded()
+        }
+        .onChange(of: folderURL) {
+            searchQuery = ""
+        }
+    }
+
+    private var visibleEntries: [WorkspaceEntry] {
+        WorkspaceEntrySearch.filteredEntries(snapshot.entries, query: searchQuery)
+    }
+
+    private func clearSelectionIfNeeded() {
+        if !WorkspaceEntrySearch.shouldKeepSelection(selectedEntryID, in: visibleEntries) {
+            selectedEntryID = nil
         }
     }
 }
@@ -355,6 +383,7 @@ private struct WorkspaceToolbarView: View {
     let folderURL: URL
     let snapshot: WorkspaceSnapshot
     let loadedAt: Date
+    @Binding var searchQuery: String
     let refresh: () -> Void
 
     var body: some View {
@@ -380,6 +409,11 @@ private struct WorkspaceToolbarView: View {
             Text(loadedAt, style: .time)
                 .font(.callout)
                 .foregroundStyle(.secondary)
+
+            TextField("Search", text: $searchQuery)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 180)
+                .accessibilityLabel("Search files and folders")
 
             Button(action: refresh) {
                 Label("Refresh", systemImage: "arrow.clockwise")

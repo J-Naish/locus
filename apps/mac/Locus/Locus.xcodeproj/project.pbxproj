@@ -12,6 +12,8 @@
 		1A0000010000000000000003 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000013 /* HomeView.swift */; };
 		1A0000010000000000000004 /* CoreBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000014 /* CoreBridgeTests.swift */; };
 		1A0000010000000000000042 /* FinderService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000043 /* FinderService.swift */; };
+		1A0000010000000000000045 /* WorkspaceEntrySearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000046 /* WorkspaceEntrySearch.swift */; };
+		1A0000010000000000000047 /* WorkspaceEntrySearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000048 /* WorkspaceEntrySearchTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -33,6 +35,8 @@
 		1A0000010000000000000014 /* CoreBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreBridgeTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000015 /* LocusCoreBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LocusCoreBridge.h; sourceTree = "<group>"; };
 		1A0000010000000000000043 /* FinderService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderService.swift; sourceTree = "<group>"; };
+		1A0000010000000000000046 /* WorkspaceEntrySearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntrySearch.swift; sourceTree = "<group>"; };
+		1A0000010000000000000048 /* WorkspaceEntrySearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntrySearchTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -77,6 +81,7 @@
 			isa = PBXGroup;
 			children = (
 				1A0000010000000000000014 /* CoreBridgeTests.swift */,
+				1A0000010000000000000048 /* WorkspaceEntrySearchTests.swift */,
 			);
 			path = LocusTests;
 			sourceTree = "<group>";
@@ -127,6 +132,7 @@
 			isa = PBXGroup;
 			children = (
 				1A0000010000000000000013 /* HomeView.swift */,
+				1A0000010000000000000046 /* WorkspaceEntrySearch.swift */,
 			);
 			path = Home;
 			sourceTree = "<group>";
@@ -257,6 +263,7 @@
 				1A0000010000000000000002 /* CoreBridge.swift in Sources */,
 				1A0000010000000000000042 /* FinderService.swift in Sources */,
 				1A0000010000000000000003 /* HomeView.swift in Sources */,
+				1A0000010000000000000045 /* WorkspaceEntrySearch.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -265,6 +272,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1A0000010000000000000004 /* CoreBridgeTests.swift in Sources */,
+				1A0000010000000000000047 /* WorkspaceEntrySearchTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
