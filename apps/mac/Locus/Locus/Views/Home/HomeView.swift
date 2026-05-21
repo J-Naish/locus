@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -319,6 +320,7 @@ private struct WorkspaceBrowserView: View {
     let reveal: (WorkspaceEntry) -> Void
     let openExternally: (WorkspaceEntry) -> Void
     @State private var searchQuery = ""
+    @FocusState private var isSearchFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -327,6 +329,7 @@ private struct WorkspaceBrowserView: View {
                 snapshot: snapshot,
                 loadedAt: loadedAt,
                 searchQuery: $searchQuery,
+                isSearchFocused: $isSearchFocused,
                 refresh: refresh
             )
 
@@ -366,6 +369,7 @@ private struct WorkspaceBrowserView: View {
         .onChange(of: folderURL) {
             searchQuery = ""
         }
+        .background(searchShortcut)
     }
 
     private var visibleEntries: [WorkspaceEntry] {
@@ -377,6 +381,24 @@ private struct WorkspaceBrowserView: View {
             selectedEntryID = nil
         }
     }
+
+    private var searchShortcut: some View {
+        // Keep Command-F local to the mounted browser until Locus has a
+        // broader menu command surface.
+        Button("Focus Search Field") {
+            focusSearchField()
+        }
+        .keyboardShortcut("f", modifiers: [.command])
+        .hidden()
+        .accessibilityHidden(true)
+    }
+
+    private func focusSearchField() {
+        isSearchFocused = true
+        DispatchQueue.main.async {
+            NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+        }
+    }
 }
 
 private struct WorkspaceToolbarView: View {
@@ -384,6 +406,7 @@ private struct WorkspaceToolbarView: View {
     let snapshot: WorkspaceSnapshot
     let loadedAt: Date
     @Binding var searchQuery: String
+    let isSearchFocused: FocusState<Bool>.Binding
     let refresh: () -> Void
 
     var body: some View {
@@ -412,6 +435,7 @@ private struct WorkspaceToolbarView: View {
 
             TextField("Search", text: $searchQuery)
                 .textFieldStyle(.roundedBorder)
+                .focused(isSearchFocused)
                 .frame(width: 180)
                 .accessibilityLabel("Search files and folders")
 
