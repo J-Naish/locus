@@ -8,6 +8,14 @@ It is designed for people who regularly work with folders full of Markdown files
 
 The product should feel closer to Finder, Preview, Apple Notes, and a focused Markdown editor than to VS Code, Cursor, Notion, Office, or Acrobat.
 
+## Core Concept
+
+AI agents such as Codex and Claude Code are becoming general-purpose tools. They are no longer only for engineers. Business users increasingly use agents to draft, transform, inspect, and organize local files.
+
+That creates a gap. Agent desktop apps are useful for orchestration, but they are not strong at everyday local file work: quick previews, lightweight edits, Markdown review, file comparison, and moving between generated artifacts. Developer tools such as VS Code and Cursor can do many of these things, but they are too technical, too dense, and too broad for non-engineers.
+
+Locus is the companion workspace for that environment. It should make agent-produced and agent-edited files easy to inspect, organize, preview, and lightly revise without turning into an AI chat app or an IDE.
+
 ## Target Users
 
 Primary users:

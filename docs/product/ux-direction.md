@@ -65,6 +65,8 @@ The default shortcut should be `Command-K`.
 
 Markdown should feel like document editing, not source code editing.
 
+YAML, JSON, TOML, and similar configuration files should also receive a rich editing experience. These files are often used to configure AI agents and local automation tools, so Locus should make them readable, safe, and comfortable to edit without turning the app into an IDE.
+
 PDFs should focus on reading, searching, highlighting, comments, and lightweight review. Locus should not attempt full PDF content editing.
 
 Office files should focus on recognition, preview, search metadata, and external app handoff rather than full editing.

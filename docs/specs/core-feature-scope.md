@@ -55,6 +55,33 @@ Should support:
 - external change detection
 - diff view
 
+## Structured Text Configuration Files
+
+YAML, JSON, TOML, and similar configuration files should be treated as first-class editable documents, especially because they are common in AI agent, automation, and local tool configuration workflows.
+
+Must support:
+
+- open `.yaml`, `.yml`, `.json`, and `.toml` files
+- edit these files with the same level of care as Markdown
+- preserve valid plain-text file formats on save
+- provide readable structure-aware presentation without hiding the underlying file format
+- support comfortable keyboard editing and Japanese text input where values include natural language
+
+Should support:
+
+- syntax highlighting
+- indentation assistance
+- bracket and quote pairing
+- lightweight validation with clear inline errors
+- schema-aware hints when a schema is available locally or embedded in the file
+- diff view for external changes
+
+Not a goal:
+
+- turning configuration editing into a developer IDE
+- requiring users to understand AI agent internals
+- automatically sending configuration content to external services for validation
+
 ## PDF
 
 Must support:
