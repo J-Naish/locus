@@ -1,0 +1,452 @@
+use std::cmp::Ordering;
+use std::fmt;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use crate::file_type::{classify_path, FileType};
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkspaceListOptions {
+    pub include_ignored: bool,
+}
+
+impl WorkspaceListOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn include_ignored(mut self, value: bool) -> Self {
+        self.include_ignored = value;
+        self
+    }
+}
+
+#[derive(Debug)]
+pub struct WorkspaceSnapshot {
+    pub entries: Vec<WorkspaceEntry>,
+    pub partial_errors: Vec<WorkspaceError>,
+}
+
+impl WorkspaceSnapshot {
+    pub fn has_partial_errors(&self) -> bool {
+        !self.partial_errors.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceEntry {
+    pub path: PathBuf,
+    /// Display-oriented file name. `path` remains the source of truth.
+    pub name: String,
+    pub kind: WorkspaceEntryKind,
+    pub size_bytes: Option<u64>,
+    pub modified: Option<SystemTime>,
+    pub readonly: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceEntryKind {
+    Directory,
+    File(FileType),
+    Symlink,
+    Other,
+}
+
+impl WorkspaceEntryKind {
+    pub fn is_directory(self) -> bool {
+        matches!(self, Self::Directory)
+    }
+}
+
+#[derive(Debug)]
+pub enum WorkspaceError {
+    NotFound(PathBuf),
+    NotDirectory(PathBuf),
+    ReadDirectory { path: PathBuf, source: io::Error },
+    ReadEntry { source: io::Error },
+    ReadMetadata { path: PathBuf, source: io::Error },
+}
+
+impl fmt::Display for WorkspaceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound(path) => {
+                write!(
+                    formatter,
+                    "workspace path does not exist: {}",
+                    path.display()
+                )
+            }
+            Self::NotDirectory(path) => {
+                write!(
+                    formatter,
+                    "workspace path is not a folder: {}",
+                    path.display()
+                )
+            }
+            Self::ReadDirectory { path, source } => {
+                write!(
+                    formatter,
+                    "failed to read folder {}: {source}",
+                    path.display()
+                )
+            }
+            Self::ReadEntry { source } => {
+                write!(formatter, "failed to read folder entry: {source}")
+            }
+            Self::ReadMetadata { path, source } => {
+                write!(
+                    formatter,
+                    "failed to read metadata for {}: {source}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for WorkspaceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NotFound(_) | Self::NotDirectory(_) => None,
+            Self::ReadDirectory { source, .. }
+            | Self::ReadEntry { source }
+            | Self::ReadMetadata { source, .. } => Some(source),
+        }
+    }
+}
+
+pub fn list_directory(path: impl AsRef<Path>) -> Result<WorkspaceSnapshot, WorkspaceError> {
+    list_directory_with_options(path, WorkspaceListOptions::default())
+}
+
+pub fn list_directory_with_options(
+    path: impl AsRef<Path>,
+    options: WorkspaceListOptions,
+) -> Result<WorkspaceSnapshot, WorkspaceError> {
+    let path = path.as_ref();
+    let entries = fs::read_dir(path).map_err(|source| read_directory_error(path, source))?;
+
+    let mut snapshot = Vec::new();
+    let mut partial_errors = Vec::new();
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(source) => {
+                partial_errors.push(WorkspaceError::ReadEntry { source });
+                continue;
+            }
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+
+        if !options.include_ignored && is_ignored_name(&name) {
+            continue;
+        }
+
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(source) => {
+                partial_errors.push(WorkspaceError::ReadMetadata {
+                    path: path.clone(),
+                    source,
+                });
+                continue;
+            }
+        };
+
+        snapshot.push(entry_from_metadata(path, name, metadata));
+    }
+
+    snapshot.sort_by(compare_entries);
+    Ok(WorkspaceSnapshot {
+        entries: snapshot,
+        partial_errors,
+    })
+}
+
+fn read_directory_error(path: &Path, source: io::Error) -> WorkspaceError {
+    match source.kind() {
+        io::ErrorKind::NotFound => WorkspaceError::NotFound(path.to_path_buf()),
+        io::ErrorKind::NotADirectory => WorkspaceError::NotDirectory(path.to_path_buf()),
+        _ => WorkspaceError::ReadDirectory {
+            path: path.to_path_buf(),
+            source,
+        },
+    }
+}
+
+fn entry_from_metadata(path: PathBuf, name: String, metadata: fs::Metadata) -> WorkspaceEntry {
+    let file_type = metadata.file_type();
+    let kind = if file_type.is_dir() {
+        WorkspaceEntryKind::Directory
+    } else if file_type.is_file() {
+        WorkspaceEntryKind::File(classify_path(&path))
+    } else if file_type.is_symlink() {
+        WorkspaceEntryKind::Symlink
+    } else {
+        WorkspaceEntryKind::Other
+    };
+
+    let size_bytes = matches!(kind, WorkspaceEntryKind::File(_)).then_some(metadata.len());
+    let modified = metadata.modified().ok();
+    let readonly = metadata.permissions().readonly();
+
+    WorkspaceEntry {
+        path,
+        name,
+        kind,
+        size_bytes,
+        modified,
+        readonly,
+    }
+}
+
+fn compare_entries(left: &WorkspaceEntry, right: &WorkspaceEntry) -> Ordering {
+    let left_name = left.name.to_lowercase();
+    let right_name = right.name.to_lowercase();
+
+    entry_sort_group(left)
+        .cmp(&entry_sort_group(right))
+        .then_with(|| left_name.cmp(&right_name))
+        .then_with(|| left.name.cmp(&right.name))
+}
+
+fn entry_sort_group(entry: &WorkspaceEntry) -> u8 {
+    if entry.kind.is_directory() {
+        0
+    } else {
+        1
+    }
+}
+
+const IGNORED_NAMES: &[&str] = &[
+    ".git",
+    ".DS_Store",
+    ".DocumentRevisions-V100",
+    ".Spotlight-V100",
+    ".TemporaryItems",
+    ".Trashes",
+    ".fseventsd",
+    ".VolumeIcon.icns",
+    "$RECYCLE.BIN",
+    "System Volume Information",
+    "Thumbs.db",
+    "desktop.ini",
+];
+
+fn is_ignored_name(name: &str) -> bool {
+    // Hidden project files such as .env and .agents are intentionally not ignored.
+    name.starts_with("._") || name.starts_with("~$") || IGNORED_NAMES.contains(&name)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{
+        list_directory, list_directory_with_options, WorkspaceEntryKind, WorkspaceError,
+        WorkspaceListOptions,
+    };
+    use crate::file_type::FileType;
+
+    #[test]
+    fn list_directory_sorts_folders_before_files_then_by_name() {
+        let workspace = TestWorkspace::new();
+        workspace.create_dir("zeta");
+        workspace.create_dir("Alpha");
+        workspace.create_file("beta.md");
+        workspace.create_file("gamma.txt");
+
+        let names = entry_names(list_directory(workspace.path()).unwrap());
+
+        assert_eq!(names, ["Alpha", "zeta", "beta.md", "gamma.txt"]);
+    }
+
+    #[test]
+    fn list_directory_keeps_agent_and_environment_dotfiles_by_default() {
+        let workspace = TestWorkspace::new();
+        workspace.create_dir(".agents");
+        workspace.create_dir(".claude");
+        workspace.create_file(".env");
+        workspace.create_file(".gitignore");
+        workspace.create_file("project-brief.md");
+
+        let names = entry_names(list_directory(workspace.path()).unwrap());
+
+        assert_eq!(
+            names,
+            [
+                ".agents",
+                ".claude",
+                ".env",
+                ".gitignore",
+                "project-brief.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn list_directory_ignores_source_control_and_os_noise_by_default() {
+        let workspace = TestWorkspace::new();
+        workspace.create_dir(".git");
+        workspace.create_dir(".Spotlight-V100");
+        workspace.create_dir("$RECYCLE.BIN");
+        workspace.create_dir("System Volume Information");
+        workspace.create_file(".DS_Store");
+        workspace.create_file("._project-brief.md");
+        workspace.create_file("Thumbs.db");
+        workspace.create_file("desktop.ini");
+        workspace.create_file("~$budget.xlsx");
+        workspace.create_file("project-brief.md");
+
+        let names = entry_names(list_directory(workspace.path()).unwrap());
+
+        assert_eq!(names, ["project-brief.md"]);
+    }
+
+    #[test]
+    fn list_directory_can_include_ignored_entries() {
+        let workspace = TestWorkspace::new();
+        workspace.create_dir(".git");
+        workspace.create_file(".DS_Store");
+        workspace.create_file("project-brief.md");
+
+        let names = entry_names(
+            list_directory_with_options(
+                workspace.path(),
+                WorkspaceListOptions::new().include_ignored(true),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(names, [".git", ".DS_Store", "project-brief.md"]);
+    }
+
+    #[test]
+    fn list_directory_classifies_file_types() {
+        let workspace = TestWorkspace::new();
+        workspace.create_file("notes.md");
+
+        let entries = list_directory(workspace.path()).unwrap().entries;
+
+        assert_eq!(
+            entries[0].kind,
+            WorkspaceEntryKind::File(FileType::Markdown)
+        );
+    }
+
+    #[test]
+    fn list_directory_records_file_metadata_without_loading_contents() {
+        let workspace = TestWorkspace::new();
+        workspace.create_file_with_contents("notes.md", "hello");
+
+        let entries = list_directory(workspace.path()).unwrap().entries;
+
+        assert_eq!(entries[0].size_bytes, Some(5));
+    }
+
+    #[test]
+    fn list_directory_returns_error_for_file_path() {
+        let workspace = TestWorkspace::new();
+        let file_path = workspace.create_file("notes.md");
+
+        let error = list_directory(file_path).unwrap_err();
+
+        assert!(matches!(error, WorkspaceError::NotDirectory(_)));
+    }
+
+    #[test]
+    fn list_directory_returns_error_for_missing_path() {
+        let workspace = TestWorkspace::new();
+        let missing_path = workspace.path().join("missing");
+
+        let error = list_directory(missing_path).unwrap_err();
+
+        assert!(matches!(error, WorkspaceError::NotFound(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_directory_reports_symlink_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = TestWorkspace::new();
+        let target = workspace.create_dir("target");
+        symlink(target, workspace.path().join("linked-target")).unwrap();
+
+        let entries = list_directory(workspace.path()).unwrap().entries;
+        let link_entry = entries
+            .iter()
+            .find(|entry| entry.name == "linked-target")
+            .unwrap();
+
+        assert_eq!(link_entry.kind, WorkspaceEntryKind::Symlink);
+    }
+
+    fn entry_names(snapshot: super::WorkspaceSnapshot) -> Vec<String> {
+        assert!(!snapshot.has_partial_errors());
+        snapshot
+            .entries
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect()
+    }
+
+    struct TestWorkspace {
+        path: PathBuf,
+    }
+
+    static NEXT_TEST_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
+
+    impl TestWorkspace {
+        fn new() -> Self {
+            let mut path = std::env::temp_dir();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let id = NEXT_TEST_WORKSPACE_ID.fetch_add(1, Ordering::Relaxed);
+            path.push(format!(
+                "locus-workspace-test-{}-{nanos}-{id}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).unwrap();
+
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn create_dir(&self, name: &str) -> PathBuf {
+            let path = self.path.join(name);
+            fs::create_dir(&path).unwrap();
+            path
+        }
+
+        fn create_file(&self, name: &str) -> PathBuf {
+            self.create_file_with_contents(name, "")
+        }
+
+        fn create_file_with_contents(&self, name: &str, contents: &str) -> PathBuf {
+            let path = self.path.join(name);
+            fs::write(&path, contents).unwrap();
+            path
+        }
+    }
+
+    impl Drop for TestWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}

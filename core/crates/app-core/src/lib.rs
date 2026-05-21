@@ -1,3 +1,6 @@
+pub mod file_type;
+pub mod workspace;
+
 pub const APP_NAME: &str = "Locus";
 
 pub fn core_version() -> &'static str {
