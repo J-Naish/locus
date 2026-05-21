@@ -17,11 +17,16 @@ Default budgets:
 - release Rust FFI static library: <= 25,000,000 bytes
 - release macOS app bundle: <= 10,240 KiB
 
+The default workspace is generated under `target/perf-fixtures/listing-1000`
+by `scripts/generate-performance-fixtures.sh`. Set
+`LOCUS_PERF_ENTRY_COUNT` to scale the generated top-level file count or
+`LOCUS_PERF_WORKSPACE` to measure a specific existing folder.
+
 ## Baseline
 
 Local baseline captured on 2026-05-22:
 
-- generated workspace: 1,006 visible entries, average 4.255 ms, max 5.688 ms
+- generated workspace: 1,010 visible entries, average 4.255 ms, max 5.688 ms
 - `core/target/release/libapp_ffi.a`: 17,687,384 bytes
 - `.build/xcode-derived/Build/Products/Release/Locus.app`: 648 KiB
 

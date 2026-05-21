@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CORE_DIR="$ROOT_DIR/core"
 DERIVED_DATA_PATH="${LOCUS_DERIVED_DATA_PATH:-$ROOT_DIR/.build/xcode-derived}"
 WORKSPACE_DIR="${LOCUS_PERF_WORKSPACE:-}"
+PERF_FIXTURE_ROOT="${LOCUS_PERF_FIXTURE_ROOT:-$ROOT_DIR/target/perf-fixtures}"
 
 ENTRY_COUNT="${LOCUS_PERF_ENTRY_COUNT:-1000}"
 ITERATIONS="${LOCUS_PERF_ITERATIONS:-5}"
@@ -15,51 +16,18 @@ APP_BUDGET_KB="${LOCUS_PERF_APP_BUDGET_KB:-10240}"
 SKIP_MAC_BUILD="${LOCUS_PERF_SKIP_MAC_BUILD:-0}"
 
 # Local baseline on 2026-05-22:
-# - generated workspace: 1,006 visible entries, avg 4.255 ms, max 5.688 ms
+# - generated workspace: 1,010 visible entries, avg 4.255 ms, max 5.688 ms
 # - core/target/release/libapp_ffi.a: 17,687,384 bytes
 # - .build/xcode-derived/Build/Products/Release/Locus.app: 648 KiB
 # Defaults intentionally leave CI headroom while still catching obvious regressions.
 
-cleanup() {
-    if [ -n "${TEMP_WORKSPACE:-}" ] && [ -d "$TEMP_WORKSPACE" ]; then
-        rm -rf "$TEMP_WORKSPACE"
-    fi
-}
-
-trap cleanup EXIT
-
 if [ -z "$WORKSPACE_DIR" ]; then
-    TEMP_WORKSPACE="$(mktemp -d "${TMPDIR:-/tmp}/locus-perf-workspace.XXXXXX")"
-    WORKSPACE_DIR="$TEMP_WORKSPACE"
-    mkdir -p \
-        "$WORKSPACE_DIR/Client Notes" \
-        "$WORKSPACE_DIR/Exports" \
-        "$WORKSPACE_DIR/Images" \
-        "$WORKSPACE_DIR/.agents" \
-        "$WORKSPACE_DIR/.claude"
-
-    printf 'API_TOKEN=local-test\n' > "$WORKSPACE_DIR/.env"
-    printf 'ignored\n' > "$WORKSPACE_DIR/.DS_Store"
-    printf 'ignored\n' > "$WORKSPACE_DIR/Thumbs.db"
-    printf 'ignored\n' > "$WORKSPACE_DIR/~\$budget.xlsx"
-
-    i=1
-    while [ "$i" -le "$ENTRY_COUNT" ]; do
-        case $((i % 10)) in
-            0) file="$WORKSPACE_DIR/report-$i.md" ;;
-            1) file="$WORKSPACE_DIR/brief-$i.pdf" ;;
-            2) file="$WORKSPACE_DIR/proposal-$i.docx" ;;
-            3) file="$WORKSPACE_DIR/screenshot-$i.png" ;;
-            4) file="$WORKSPACE_DIR/config-$i.json" ;;
-            5) file="$WORKSPACE_DIR/settings-$i.toml" ;;
-            6) file="$WORKSPACE_DIR/table-$i.csv" ;;
-            7) file="$WORKSPACE_DIR/deck-$i.pptx" ;;
-            8) file="$WORKSPACE_DIR/budget-$i.xlsx" ;;
-            *) file="$WORKSPACE_DIR/notes-$i.txt" ;;
-        esac
-        printf 'Locus performance fixture %04d\n' "$i" > "$file"
-        i=$((i + 1))
-    done
+    echo "== Generate performance fixture =="
+    LOCUS_PERF_FIXTURE_ROOT="$PERF_FIXTURE_ROOT" \
+        LOCUS_PERF_ENTRY_COUNT="$ENTRY_COUNT" \
+        "$ROOT_DIR/scripts/generate-performance-fixtures.sh"
+    WORKSPACE_DIR="$PERF_FIXTURE_ROOT/listing-$ENTRY_COUNT"
+    echo
 fi
 
 echo "== Rust release build =="
