@@ -154,4 +154,17 @@ Do not move it under `apps/` unless it becomes an actual product web app.
 - Do not reformat unrelated files.
 - Do not delete or rewrite user changes unless explicitly asked.
 - Do not commit unless the user asks.
-- If committing, use a clear imperative commit message.
+
+## Commit Rules
+
+Commits should be small, intentional records of working changes.
+
+- Commit only when the user asks for a commit.
+- Before committing, inspect `git status` and the staged diff so unrelated or user-owned changes are not included by accident.
+- Stage files explicitly; do not use broad staging commands unless the user clearly wants every current change included.
+- Keep each commit focused on one coherent product, documentation, or infrastructure change.
+- Use a clear imperative commit message such as `Add macOS workspace plan` or `Fix file list sorting`.
+- Do not mention agents, AI tools, or implementation process in commit messages unless that is the actual product/documentation change.
+- Do not amend, squash, rebase, force-push, or rewrite history unless the user explicitly asks.
+- If the working tree contains unrelated changes, leave them alone and mention what was intentionally included.
+- After committing, report the commit hash and confirm whether the working tree is clean.
