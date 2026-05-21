@@ -1,0 +1,6 @@
+Meeting notes
+=============
+
+- Confirm workspace loading behavior.
+- Keep previews lightweight.
+- Avoid startup indexing.

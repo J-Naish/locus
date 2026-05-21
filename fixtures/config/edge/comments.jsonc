@@ -1,0 +1,4 @@
+{
+  // JSONC-style comments are intentionally parser-dependent.
+  "name": "jsonc edge"
+}

@@ -1,0 +1,5 @@
+title: Broken YAML
+items:
+  - valid
+    badIndent: true
+ - invalid

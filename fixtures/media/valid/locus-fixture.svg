@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48" viewBox="0 0 96 48">
+  <rect width="96" height="48" rx="6" fill="#f8fafc"/>
+  <path d="M18 12h28v24H18z" fill="#2563eb"/>
+  <circle cx="64" cy="24" r="12" fill="#16a34a"/>
+  <text x="8" y="43" font-family="Helvetica" font-size="8" fill="#111827">Locus fixture</text>
+</svg>

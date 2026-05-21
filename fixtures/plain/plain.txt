@@ -1,0 +1,3 @@
+Plain text fixture.
+
+Use this for preview, search, and file type tests.

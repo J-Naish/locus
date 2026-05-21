@@ -1,0 +1,7 @@
+[workspace]
+name = "Locus"
+recent_limit = 10
+
+[features]
+preview = true
+editing = true
