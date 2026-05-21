@@ -159,6 +159,7 @@ Do not move it under `apps/` unless it becomes an actual product web app.
 - Keep docs concise and split by stable topic.
 - Document important implementation and application knowledge by default: architecture decisions, feature behavior, platform constraints, performance budgets, persistence formats, FFI contracts, build/release flows, and non-obvious tradeoffs should leave a written record.
 - Leave concise code comments where they materially improve maintainability for humans or AI agents: explain non-obvious constraints, invariants, ownership/lifetime rules, platform quirks, performance tradeoffs, and why a surprising implementation is intentional.
+- When implementation reflects a clear product or architecture decision, leave a short comment near the relevant code unless the intent is already obvious from naming and structure.
 - Avoid comments that merely restate obvious code behavior.
 - Update docs when scope, architecture, or product principles change.
 - Add ADRs in `docs/adr/` for important architectural decisions.
