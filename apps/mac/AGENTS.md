@@ -46,6 +46,7 @@ scripts/perf-smoke.sh
 - Markdown editing should feel document-like, not code-like.
 - Early UI implementation should prioritize coherent product flows over polishing every visual detail in isolation.
 - Explain the intended user flow before starting a substantial new UI surface, but avoid blocking implementation on micro-level visual decisions unless the choice would be hard to reverse.
+- Do not add fine-grained UI conveniences such as secondary keyboard shortcuts, menu command polish, focus-management niceties, or small toolbar affordances by default during early feature slices. Implement them when the user asks, when they are required for the flow to make sense, or during a deliberate polish pass after the surrounding product surface exists.
 - Once meaningful UI functionality is in place, shift into a deliberate polish pass with the user on the actual Mac.
 - When UI changes are made or a new UI slice is complete, explain what changed, how to run it, and what should be checked.
 - Automated tests and local builds catch functional regressions, but user review on the actual Mac is the acceptance path for visual quality, interaction feel, responsiveness, and native polish.

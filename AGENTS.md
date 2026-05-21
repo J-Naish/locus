@@ -98,7 +98,8 @@ Performance, lightweight behavior, and refined UX/UI are top-priority product qu
 - Treat slow startup, unnecessary memory growth, avoidable disk churn, and dependency bloat as product bugs.
 - Measure before adding broad caching, background indexing, or complex abstractions.
 - Preserve a quiet, native, document-oriented interface; visual polish should make common work feel clearer and calmer, not more decorative.
-- Refine empty states, loading states, error states, keyboard behavior, and file handoff flows as part of implementation, not as cleanup.
+- Refine empty states, loading states, error states, and file handoff flows as part of implementation, not as cleanup.
+- Defer fine-grained UI affordances such as secondary keyboard shortcuts, menu polish, and convenience focus behavior until the main product flows they support are in place, unless the user explicitly asks for them or the feature would be awkward without them.
 - Do not accept technically correct UI that feels dense, developer-centric, sluggish, surprising, or unfinished.
 
 ## Coding Style
