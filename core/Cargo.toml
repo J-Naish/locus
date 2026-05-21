@@ -10,6 +10,7 @@ resolver = "2"
 edition = "2021"
 license = "UNLICENSED"
 repository = "https://github.com/nash/locus"
+rust-version = "1.83"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

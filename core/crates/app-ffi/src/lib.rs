@@ -323,8 +323,10 @@ fn ffi_partial_error(
 fn push_string(strings: &mut Vec<CString>, value: impl AsRef<str>) -> *const c_char {
     // CString owns its buffer on the heap, so these pointers stay valid even if
     // the Vec itself reallocates while building the snapshot.
-    strings.push(sanitized_cstring(value.as_ref()));
-    strings.last().expect("just pushed string").as_ptr()
+    let string = sanitized_cstring(value.as_ref());
+    let ptr = string.as_ptr();
+    strings.push(string);
+    ptr
 }
 
 fn sanitized_cstring(value: &str) -> CString {
@@ -581,6 +583,66 @@ mod tests {
             );
             assert!(super::locus_workspace_snapshot_partial_errors(std::ptr::null()).is_null());
             super::locus_workspace_snapshot_free(std::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn sanitized_cstring_replaces_embedded_nul_bytes() {
+        let string = super::sanitized_cstring("alpha\0beta");
+
+        assert_eq!(string.to_str().unwrap(), "alpha\u{FFFD}beta");
+    }
+
+    #[test]
+    fn system_time_to_unix_seconds_handles_pre_epoch_values() {
+        let time = UNIX_EPOCH - std::time::Duration::from_secs(42);
+
+        assert_eq!(super::system_time_to_unix_seconds(time), -42);
+    }
+
+    #[test]
+    fn system_time_to_unix_seconds_handles_future_values() {
+        let time = UNIX_EPOCH + std::time::Duration::from_secs(9_000_000_000);
+
+        assert_eq!(super::system_time_to_unix_seconds(time), 9_000_000_000);
+    }
+
+    #[test]
+    fn core_snapshot_exposes_multiple_partial_errors_through_ffi_snapshot() {
+        let core_snapshot = app_core::workspace::WorkspaceSnapshot {
+            entries: Vec::new(),
+            partial_errors: vec![
+                app_core::workspace::WorkspaceError::ReadEntry {
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "entry blocked for test",
+                    ),
+                },
+                app_core::workspace::WorkspaceError::ReadMetadata {
+                    path: PathBuf::from("blocked.md"),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "metadata blocked for test",
+                    ),
+                },
+            ],
+        };
+        let snapshot = super::LocusWorkspaceSnapshot::from_core_snapshot(core_snapshot);
+
+        // SAFETY: snapshot lives on the test stack and is borrowed by the FFI
+        // accessors only for the duration of each call below.
+        unsafe {
+            assert_eq!(
+                super::locus_workspace_snapshot_partial_error_count(&snapshot),
+                2
+            );
+
+            let partial_errors = std::slice::from_raw_parts(
+                super::locus_workspace_snapshot_partial_errors(&snapshot),
+                super::locus_workspace_snapshot_partial_error_count(&snapshot),
+            );
+            assert_eq!(partial_errors[0].status, super::LOCUS_STATUS_READ_ENTRY);
+            assert_eq!(partial_errors[1].status, super::LOCUS_STATUS_READ_METADATA);
         }
     }
 

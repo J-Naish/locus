@@ -20,8 +20,19 @@ final class CoreBridgeTests: XCTestCase {
     func testWorkspaceFFILayoutMatchesABIv1() {
         XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.size, 64)
         XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.stride, 64)
+        XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.offset(of: \.path), 0)
+        XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.offset(of: \.name), 8)
+        XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.offset(of: \.kind), 16)
+        XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.offset(of: \.file_type), 20)
+        XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.offset(of: \.has_size_bytes), 24)
+        XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.offset(of: \.size_bytes), 32)
+        XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.offset(of: \.has_modified_unix_seconds), 40)
+        XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.offset(of: \.modified_unix_seconds), 48)
+        XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.offset(of: \.readonly), 56)
         XCTAssertEqual(MemoryLayout<LocusWorkspacePartialError>.size, 16)
         XCTAssertEqual(MemoryLayout<LocusWorkspacePartialError>.stride, 16)
+        XCTAssertEqual(MemoryLayout<LocusWorkspacePartialError>.offset(of: \.status), 0)
+        XCTAssertEqual(MemoryLayout<LocusWorkspacePartialError>.offset(of: \.message), 8)
     }
 
     func testHeaderStatusConstantsMatchRustResponses() {

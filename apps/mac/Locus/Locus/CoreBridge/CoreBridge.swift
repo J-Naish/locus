@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 struct CoreRuntimeSummary: Equatable, Sendable {
     let abiVersion: UInt32
@@ -70,13 +71,15 @@ enum WorkspaceErrorKind: Equatable, Sendable {
     }
 }
 
-struct WorkspacePartialError: Equatable, Sendable {
+struct WorkspacePartialError: Equatable, Identifiable, Sendable {
+    let id: String
     let kind: WorkspaceErrorKind
     let message: String
 }
 
 struct CoreBridge: Sendable {
     static let expectedABIVersion: UInt32 = 1
+    private static let logger = Logger(subsystem: "Locus", category: "CoreBridge")
 
     func runtimeSummary() async throws -> CoreRuntimeSummary {
         try await Task.detached(priority: .userInitiated) {
@@ -178,7 +181,7 @@ struct CoreBridge: Sendable {
                 modified: entry.has_modified_unix_seconds
                     ? Date(timeIntervalSince1970: TimeInterval(entry.modified_unix_seconds))
                     : nil,
-                isReadOnly: entry.readonly
+                isReadOnly: isReadOnlyFile(at: path, fallback: entry.readonly)
             )
         }
     }
@@ -191,10 +194,14 @@ struct CoreBridge: Sendable {
             return []
         }
 
-        return UnsafeBufferPointer(start: partialErrors, count: count).map { partialError in
-            WorkspacePartialError(
-                kind: workspaceErrorKind(partialError.status),
-                message: String(cString: partialError.message)
+        return UnsafeBufferPointer(start: partialErrors, count: count).enumerated().map { index, partialError in
+            let kind = workspaceErrorKind(partialError.status)
+            let message = String(cString: partialError.message)
+
+            return WorkspacePartialError(
+                id: "\(index):\(partialError.status):\(message)",
+                kind: kind,
+                message: message
             )
         }
     }
@@ -210,6 +217,7 @@ struct CoreBridge: Sendable {
         case LOCUS_WORKSPACE_ENTRY_OTHER:
             return .other
         default:
+            logger.error("Unknown workspace entry kind from Rust core: \(value)")
             assertionFailure("Unknown workspace entry kind: \(value)")
             return .other
         }
@@ -238,6 +246,7 @@ struct CoreBridge: Sendable {
         case LOCUS_FILE_TYPE_UNKNOWN:
             return .unknown
         default:
+            logger.error("Unknown workspace file type from Rust core: \(value)")
             assertionFailure("Unknown workspace file type: \(value)")
             return .unknown
         }
@@ -258,6 +267,7 @@ struct CoreBridge: Sendable {
         case LOCUS_STATUS_READ_METADATA:
             return .readMetadata
         default:
+            logger.error("Unknown workspace error status from Rust core: \(value)")
             assertionFailure("Unknown workspace error status: \(value)")
             return .unknown(value)
         }
@@ -270,6 +280,21 @@ struct CoreBridge: Sendable {
 
         let text = String(cString: message)
         return text.isEmpty ? "Rust core error details are unavailable." : text
+    }
+
+    private static func isReadOnlyFile(at path: String, fallback: Bool) -> Bool {
+        let url = URL(filePath: path)
+        guard let resourceValues = try? url.resourceValues(
+            forKeys: [.isWritableKey, .isUserImmutableKey, .isSystemImmutableKey]
+        ) else {
+            return fallback
+        }
+
+        if resourceValues.isUserImmutable == true || resourceValues.isSystemImmutable == true {
+            return true
+        }
+
+        return resourceValues.isWritable.map { !$0 } ?? fallback
     }
 }
 

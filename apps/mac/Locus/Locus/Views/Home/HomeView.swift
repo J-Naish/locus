@@ -141,6 +141,7 @@ struct HomeView: View {
             return
         }
 
+        let previousSelectedEntryID = selectedEntryIDForReload(of: folderURL)
         workspaceState = .loading(folderURL: folderURL)
         // This covers the immediate directory read. Recents and Favorites will
         // store security-scoped bookmarks once sandboxing is enabled.
@@ -156,7 +157,9 @@ struct HomeView: View {
             guard generation == workspaceLoadGeneration else {
                 return
             }
-            selectedEntryID = nil
+            selectedEntryID = snapshot.entries.contains { $0.id == previousSelectedEntryID }
+                ? previousSelectedEntryID
+                : nil
             workspaceState = .ready(folderURL: folderURL, snapshot: snapshot, loadedAt: Date())
         } catch {
             guard generation == workspaceLoadGeneration else {
@@ -176,6 +179,16 @@ struct HomeView: View {
 
     private func openExternally(_ entry: WorkspaceEntry) {
         finderService.openExternally(entry.url)
+    }
+
+    @MainActor
+    private func selectedEntryIDForReload(of folderURL: URL) -> WorkspaceEntry.ID? {
+        guard case let .ready(currentFolderURL, _, _) = workspaceState,
+              currentFolderURL == folderURL else {
+            return nil
+        }
+
+        return selectedEntryID
     }
 }
 
@@ -446,7 +459,7 @@ private struct PartialErrorsView: View {
             } else {
                 DisclosureGroup("Show details") {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(errors.enumerated()), id: \.offset) { _, error in
+                        ForEach(errors) { error in
                             Text(error.message)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -556,6 +569,8 @@ private enum WorkspaceState: Equatable, Sendable {
 }
 
 private extension WorkspaceEntry {
+    static let modifiedDateFormatStyle = Date.FormatStyle(date: .abbreviated, time: .shortened)
+
     var symbolName: String {
         switch kind {
         case .directory:
@@ -600,7 +615,7 @@ private extension WorkspaceEntry {
             return "-"
         }
 
-        return ByteCountFormatter.string(fromByteCount: Int64(sizeBytes), countStyle: .file)
+        return Int64(sizeBytes).formatted(.byteCount(style: .file))
     }
 
     var modifiedLabel: String {
@@ -608,7 +623,7 @@ private extension WorkspaceEntry {
             return "-"
         }
 
-        return modified.formatted(date: .abbreviated, time: .shortened)
+        return modified.formatted(Self.modifiedDateFormatStyle)
     }
 }
 

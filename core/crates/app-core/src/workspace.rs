@@ -173,7 +173,7 @@ fn list_directory_inner(
         snapshot.push(entry_from_metadata(path, name, metadata));
     }
 
-    snapshot.sort_by_cached_key(entry_sort_key);
+    snapshot.sort_by(compare_entries);
     Ok(WorkspaceSnapshot {
         entries: snapshot,
         partial_errors,
@@ -217,12 +217,10 @@ fn entry_from_metadata(path: PathBuf, name: String, metadata: fs::Metadata) -> W
     }
 }
 
-fn entry_sort_key(entry: &WorkspaceEntry) -> (u8, String, String) {
-    (
-        entry_sort_group(entry),
-        entry.name.to_lowercase(),
-        entry.name.clone(),
-    )
+fn compare_entries(left: &WorkspaceEntry, right: &WorkspaceEntry) -> std::cmp::Ordering {
+    entry_sort_group(left)
+        .cmp(&entry_sort_group(right))
+        .then_with(|| compare_names_naturally(&left.name, &right.name))
 }
 
 fn entry_sort_group(entry: &WorkspaceEntry) -> u8 {
@@ -231,6 +229,79 @@ fn entry_sort_group(entry: &WorkspaceEntry) -> u8 {
     } else {
         1
     }
+}
+
+fn compare_names_naturally(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let mut left_chars = left.char_indices().peekable();
+    let mut right_chars = right.char_indices().peekable();
+
+    loop {
+        match (left_chars.peek().copied(), right_chars.peek().copied()) {
+            (None, None) => return left.cmp(right),
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some((_, left_char)), Some((_, right_char)))
+                if left_char.is_ascii_digit() && right_char.is_ascii_digit() =>
+            {
+                let left_number = take_ascii_digit_run(left, &mut left_chars);
+                let right_number = take_ascii_digit_run(right, &mut right_chars);
+                let ordering = compare_ascii_numbers(left_number, right_number);
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+            (Some((_, left_char)), Some((_, right_char))) => {
+                left_chars.next();
+                right_chars.next();
+                let ordering = left_char
+                    .to_lowercase()
+                    .cmp(right_char.to_lowercase())
+                    .then_with(|| left_char.cmp(&right_char));
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+        }
+    }
+}
+
+fn take_ascii_digit_run<'a>(
+    value: &'a str,
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'a>>,
+) -> &'a str {
+    let start = chars.peek().map(|(index, _)| *index).unwrap_or(value.len());
+    let mut end = start;
+    while let Some((index, character)) = chars.peek().copied() {
+        if !character.is_ascii_digit() {
+            break;
+        }
+        chars.next();
+        end = index + character.len_utf8();
+    }
+    &value[start..end]
+}
+
+fn compare_ascii_numbers(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_trimmed = left.trim_start_matches('0');
+    let right_trimmed = right.trim_start_matches('0');
+    let left_digits = if left_trimmed.is_empty() {
+        "0"
+    } else {
+        left_trimmed
+    };
+    let right_digits = if right_trimmed.is_empty() {
+        "0"
+    } else {
+        right_trimmed
+    };
+
+    left_digits
+        .len()
+        .cmp(&right_digits.len())
+        .then_with(|| left_digits.cmp(right_digits))
+        .then_with(|| left.len().cmp(&right.len()))
 }
 
 const IGNORED_NAMES: &[&str] = &[
@@ -277,6 +348,18 @@ mod tests {
         let names = entry_names(list_directory(workspace.path()).unwrap());
 
         assert_eq!(names, ["Alpha", "zeta", "beta.md", "gamma.txt"]);
+    }
+
+    #[test]
+    fn list_directory_sorts_names_numerically() {
+        let workspace = TestWorkspace::new();
+        workspace.create_file("file10.md");
+        workspace.create_file("file2.md");
+        workspace.create_file("file1.md");
+
+        let names = entry_names(list_directory(workspace.path()).unwrap());
+
+        assert_eq!(names, ["file1.md", "file2.md", "file10.md"]);
     }
 
     #[test]
