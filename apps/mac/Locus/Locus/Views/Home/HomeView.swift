@@ -81,17 +81,20 @@ struct HomeView: View {
         switch result {
         case let .success(urls):
             guard let folderURL = urls.first else {
-                invalidateWorkspaceLoads()
-                selectedEntryID = nil
-                workspaceState = .failed(
-                    folderURL: nil,
-                    message: "No folder was selected."
-                )
+                // .fileImporter reports user cancellation as .success([]) on
+                // some macOS versions; leave the current workspace state alone.
                 return
             }
 
             startWorkspaceLoad(folderURL)
         case let .failure(error):
+            // SwiftUI's .fileImporter delivers user cancellation as a Cocoa
+            // user-cancelled error or as Swift's CancellationError. Treat both
+            // as no-ops so the current state survives a dismissed dialog.
+            if Self.isUserCancellationError(error) {
+                return
+            }
+
             invalidateWorkspaceLoads()
             selectedEntryID = nil
             workspaceState = .failed(
@@ -99,6 +102,22 @@ struct HomeView: View {
                 message: error.localizedDescription
             )
         }
+    }
+
+    private static func isUserCancellationError(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain && nsError.code == NSUserCancelledError {
+            return true
+        }
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            return true
+        }
+
+        return false
     }
 
     @MainActor

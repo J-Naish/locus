@@ -229,24 +229,18 @@
 /* Begin PBXShellScriptBuildPhase section */
 		1A0000010000000000000027 /* Build Rust FFI */ = {
 			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			inputFileListPaths = (
 			);
 			inputPaths = (
-				"$(SRCROOT)/../../../scripts/build-rust-ffi.sh",
-				"$(SRCROOT)/../../../core/Cargo.toml",
-				"$(SRCROOT)/../../../core/Cargo.lock",
-				"$(SRCROOT)/../../../core/crates/app-core/src/lib.rs",
-				"$(SRCROOT)/../../../core/crates/app-ffi/Cargo.toml",
-				"$(SRCROOT)/../../../core/crates/app-ffi/src/lib.rs",
 			);
 			name = "Build Rust FFI";
 			outputFileListPaths = (
 			);
 			outputPaths = (
-				"$(SRCROOT)/../../../core/target/$(LOCUS_RUST_PROFILE_DIR)/libapp_ffi.a",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;

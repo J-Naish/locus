@@ -9,7 +9,6 @@ DerivedData/
 
 # Rust
 target/
-Cargo.lock
 
 # .NET / Windows
 bin/

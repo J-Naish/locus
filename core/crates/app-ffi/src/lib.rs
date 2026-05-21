@@ -89,8 +89,15 @@ pub extern "C" fn locus_last_error_message() -> *const c_char {
     LAST_ERROR_MESSAGE.with_borrow(|message| message.as_ptr())
 }
 
+/// # Safety
+///
+/// `path` must be NULL or a valid NUL-terminated UTF-8 C string that remains
+/// valid for the duration of the call. `out_snapshot` must be NULL or point to
+/// caller-owned writable storage for a `*mut LocusWorkspaceSnapshot`. On
+/// success the caller is responsible for releasing the snapshot exactly once
+/// with `locus_workspace_snapshot_free`.
 #[no_mangle]
-pub extern "C" fn locus_core_list_directory(
+pub unsafe extern "C" fn locus_core_list_directory(
     path: *const c_char,
     include_ignored: bool,
     out_snapshot: *mut *mut LocusWorkspaceSnapshot,
@@ -102,12 +109,15 @@ pub extern "C" fn locus_core_list_directory(
         return LOCUS_STATUS_INVALID_ARGUMENT;
     }
 
-    // SAFETY: out_snapshot was checked for null and points to caller-owned
-    // writable storage for the duration of this synchronous FFI call.
+    // SAFETY: out_snapshot was checked for null and the caller guarantees it
+    // points to writable storage for the duration of this synchronous call.
     unsafe {
         *out_snapshot = ptr::null_mut();
     }
 
+    // string_from_c_path itself validates `path` for NULL and only dereferences
+    // it inside its own SAFETY-justified unsafe block; the caller's contract is
+    // documented at the function level above.
     let Some(path) = string_from_c_path(path) else {
         set_last_error_message("path must be non-NULL UTF-8");
         return LOCUS_STATUS_INVALID_ARGUMENT;
@@ -132,21 +142,31 @@ pub extern "C" fn locus_core_list_directory(
     }
 }
 
+/// # Safety
+///
+/// `snapshot` must be NULL or a live handle returned by
+/// `locus_core_list_directory` that has not yet been freed.
 #[no_mangle]
-pub extern "C" fn locus_workspace_snapshot_entry_count(
+pub unsafe extern "C" fn locus_workspace_snapshot_entry_count(
     snapshot: *const LocusWorkspaceSnapshot,
 ) -> usize {
     if snapshot.is_null() {
         return 0;
     }
 
-    // SAFETY: snapshot is non-null and callers may only pass handles returned
-    // by locus_core_list_directory that have not been freed.
+    // SAFETY: snapshot is non-null and the caller guarantees it refers to a
+    // live snapshot that has not been freed.
     unsafe { (*snapshot).entries.len() }
 }
 
+/// # Safety
+///
+/// `snapshot` must be NULL or a live handle returned by
+/// `locus_core_list_directory` that has not yet been freed. The returned
+/// pointer is borrowed from the snapshot and is invalidated by
+/// `locus_workspace_snapshot_free`.
 #[no_mangle]
-pub extern "C" fn locus_workspace_snapshot_entries(
+pub unsafe extern "C" fn locus_workspace_snapshot_entries(
     snapshot: *const LocusWorkspaceSnapshot,
 ) -> *const LocusWorkspaceEntry {
     if snapshot.is_null() {
@@ -154,7 +174,7 @@ pub extern "C" fn locus_workspace_snapshot_entries(
     }
 
     // SAFETY: snapshot is non-null and the returned slice pointer is borrowed
-    // from the live Rust-owned snapshot.
+    // from the live Rust-owned snapshot the caller still owns.
     let entries = unsafe { &(*snapshot).entries };
     if entries.is_empty() {
         ptr::null()
@@ -163,21 +183,31 @@ pub extern "C" fn locus_workspace_snapshot_entries(
     }
 }
 
+/// # Safety
+///
+/// `snapshot` must be NULL or a live handle returned by
+/// `locus_core_list_directory` that has not yet been freed.
 #[no_mangle]
-pub extern "C" fn locus_workspace_snapshot_partial_error_count(
+pub unsafe extern "C" fn locus_workspace_snapshot_partial_error_count(
     snapshot: *const LocusWorkspaceSnapshot,
 ) -> usize {
     if snapshot.is_null() {
         return 0;
     }
 
-    // SAFETY: snapshot is non-null and callers may only pass handles returned
-    // by locus_core_list_directory that have not been freed.
+    // SAFETY: snapshot is non-null and the caller guarantees it refers to a
+    // live snapshot that has not been freed.
     unsafe { (*snapshot).partial_errors.len() }
 }
 
+/// # Safety
+///
+/// `snapshot` must be NULL or a live handle returned by
+/// `locus_core_list_directory` that has not yet been freed. The returned
+/// pointer is borrowed from the snapshot and is invalidated by
+/// `locus_workspace_snapshot_free`.
 #[no_mangle]
-pub extern "C" fn locus_workspace_snapshot_partial_errors(
+pub unsafe extern "C" fn locus_workspace_snapshot_partial_errors(
     snapshot: *const LocusWorkspaceSnapshot,
 ) -> *const LocusWorkspacePartialError {
     if snapshot.is_null() {
@@ -185,7 +215,7 @@ pub extern "C" fn locus_workspace_snapshot_partial_errors(
     }
 
     // SAFETY: snapshot is non-null and the returned slice pointer is borrowed
-    // from the live Rust-owned snapshot.
+    // from the live Rust-owned snapshot the caller still owns.
     let partial_errors = unsafe { &(*snapshot).partial_errors };
     if partial_errors.is_empty() {
         ptr::null()
@@ -194,8 +224,13 @@ pub extern "C" fn locus_workspace_snapshot_partial_errors(
     }
 }
 
+/// # Safety
+///
+/// `snapshot` must be NULL or a live handle returned by
+/// `locus_core_list_directory` that has not yet been freed. After this call
+/// returns, all borrowed pointers obtained from the snapshot become invalid.
 #[no_mangle]
-pub extern "C" fn locus_workspace_snapshot_free(snapshot: *mut LocusWorkspaceSnapshot) {
+pub unsafe extern "C" fn locus_workspace_snapshot_free(snapshot: *mut LocusWorkspaceSnapshot) {
     if snapshot.is_null() {
         return;
     }
@@ -388,38 +423,40 @@ mod tests {
 
         let mut snapshot = std::ptr::null_mut();
         let path = CString::new(workspace.path().to_string_lossy().as_ref()).unwrap();
-        let status = super::locus_core_list_directory(path.as_ptr(), false, &mut snapshot);
+        // SAFETY: every FFI call below sees a live snapshot handle owned by
+        // this test until locus_workspace_snapshot_free runs at the end.
+        unsafe {
+            let status = super::locus_core_list_directory(path.as_ptr(), false, &mut snapshot);
 
-        assert_eq!(status, super::LOCUS_STATUS_OK);
-        assert!(!snapshot.is_null());
-        assert_eq!(super::locus_workspace_snapshot_entry_count(snapshot), 2);
+            assert_eq!(status, super::LOCUS_STATUS_OK);
+            assert!(!snapshot.is_null());
+            assert_eq!(super::locus_workspace_snapshot_entry_count(snapshot), 2);
 
-        let entries = super::locus_workspace_snapshot_entries(snapshot);
-        assert!(!entries.is_null());
+            let entries_ptr = super::locus_workspace_snapshot_entries(snapshot);
+            assert!(!entries_ptr.is_null());
 
-        let entries = unsafe {
-            std::slice::from_raw_parts(
-                entries,
+            let entries = std::slice::from_raw_parts(
+                entries_ptr,
                 super::locus_workspace_snapshot_entry_count(snapshot),
-            )
-        };
-        let names = entries
-            .iter()
-            .map(|entry| unsafe { CStr::from_ptr(entry.name).to_str().unwrap() })
-            .collect::<Vec<_>>();
+            );
+            let names = entries
+                .iter()
+                .map(|entry| CStr::from_ptr(entry.name).to_str().unwrap())
+                .collect::<Vec<_>>();
 
-        assert_eq!(names, ["Drafts", "notes.md"]);
-        assert_eq!(entries[0].kind, super::LOCUS_WORKSPACE_ENTRY_DIRECTORY);
-        assert_eq!(entries[1].kind, super::LOCUS_WORKSPACE_ENTRY_FILE);
-        assert_eq!(entries[1].file_type, super::LOCUS_FILE_TYPE_MARKDOWN);
-        assert!(entries[1].has_size_bytes);
-        assert_eq!(entries[1].size_bytes, 5);
-        assert_eq!(
-            super::locus_workspace_snapshot_partial_error_count(snapshot),
-            0
-        );
+            assert_eq!(names, ["Drafts", "notes.md"]);
+            assert_eq!(entries[0].kind, super::LOCUS_WORKSPACE_ENTRY_DIRECTORY);
+            assert_eq!(entries[1].kind, super::LOCUS_WORKSPACE_ENTRY_FILE);
+            assert_eq!(entries[1].file_type, super::LOCUS_FILE_TYPE_MARKDOWN);
+            assert!(entries[1].has_size_bytes);
+            assert_eq!(entries[1].size_bytes, 5);
+            assert_eq!(
+                super::locus_workspace_snapshot_partial_error_count(snapshot),
+                0
+            );
 
-        super::locus_workspace_snapshot_free(snapshot);
+            super::locus_workspace_snapshot_free(snapshot);
+        }
     }
 
     #[test]
@@ -430,24 +467,25 @@ mod tests {
 
         let mut snapshot = std::ptr::null_mut();
         let path = CString::new(workspace.path().to_string_lossy().as_ref()).unwrap();
-        let status = super::locus_core_list_directory(path.as_ptr(), true, &mut snapshot);
+        // SAFETY: snapshot ownership is held by this test until the free call.
+        unsafe {
+            let status = super::locus_core_list_directory(path.as_ptr(), true, &mut snapshot);
 
-        assert_eq!(status, super::LOCUS_STATUS_OK);
+            assert_eq!(status, super::LOCUS_STATUS_OK);
 
-        let entries = unsafe {
-            std::slice::from_raw_parts(
+            let entries = std::slice::from_raw_parts(
                 super::locus_workspace_snapshot_entries(snapshot),
                 super::locus_workspace_snapshot_entry_count(snapshot),
-            )
-        };
-        let names = entries
-            .iter()
-            .map(|entry| unsafe { CStr::from_ptr(entry.name).to_str().unwrap() })
-            .collect::<Vec<_>>();
+            );
+            let names = entries
+                .iter()
+                .map(|entry| CStr::from_ptr(entry.name).to_str().unwrap())
+                .collect::<Vec<_>>();
 
-        assert_eq!(names, [".git", "notes.md"]);
+            assert_eq!(names, [".git", "notes.md"]);
 
-        super::locus_workspace_snapshot_free(snapshot);
+            super::locus_workspace_snapshot_free(snapshot);
+        }
     }
 
     #[test]
@@ -457,7 +495,10 @@ mod tests {
 
         let mut snapshot = std::ptr::null_mut();
         let path = CString::new(file_path.to_string_lossy().as_ref()).unwrap();
-        let status = super::locus_core_list_directory(path.as_ptr(), false, &mut snapshot);
+        // SAFETY: path/out_snapshot are valid for the call; the FFI sets
+        // snapshot back to NULL on failure so no release is needed.
+        let status =
+            unsafe { super::locus_core_list_directory(path.as_ptr(), false, &mut snapshot) };
 
         assert_eq!(status, super::LOCUS_STATUS_NOT_DIRECTORY);
         assert!(snapshot.is_null());
@@ -481,18 +522,22 @@ mod tests {
         };
         let snapshot = super::LocusWorkspaceSnapshot::from_core_snapshot(core_snapshot);
 
-        assert_eq!(
-            super::locus_workspace_snapshot_partial_error_count(&snapshot),
-            1
-        );
+        // SAFETY: snapshot lives on the test stack and is borrowed by the FFI
+        // accessors only for the duration of each call below.
+        unsafe {
+            assert_eq!(
+                super::locus_workspace_snapshot_partial_error_count(&snapshot),
+                1
+            );
 
-        let partial_errors = super::locus_workspace_snapshot_partial_errors(&snapshot);
-        assert!(!partial_errors.is_null());
+            let partial_errors = super::locus_workspace_snapshot_partial_errors(&snapshot);
+            assert!(!partial_errors.is_null());
 
-        let partial_error = unsafe { &*partial_errors };
-        assert_eq!(partial_error.status, super::LOCUS_STATUS_READ_METADATA);
-        let message = unsafe { CStr::from_ptr(partial_error.message).to_str().unwrap() };
-        assert!(message.contains("blocked.md"));
+            let partial_error = &*partial_errors;
+            assert_eq!(partial_error.status, super::LOCUS_STATUS_READ_METADATA);
+            let message = CStr::from_ptr(partial_error.message).to_str().unwrap();
+            assert!(message.contains("blocked.md"));
+        }
     }
 
     #[test]
@@ -501,36 +546,42 @@ mod tests {
         let path = CString::new(workspace.path().to_string_lossy().as_ref()).unwrap();
         let mut snapshot = std::ptr::null_mut();
 
-        assert_eq!(
-            super::locus_core_list_directory(std::ptr::null(), false, &mut snapshot),
-            super::LOCUS_STATUS_INVALID_ARGUMENT
-        );
-        let message = super::locus_last_error_message();
-        let message = unsafe { CStr::from_ptr(message).to_str().unwrap() };
-        assert_eq!(message, "path must be non-NULL UTF-8");
+        // SAFETY: arguments are either NULL or owned by this test for the call.
+        unsafe {
+            assert_eq!(
+                super::locus_core_list_directory(std::ptr::null(), false, &mut snapshot),
+                super::LOCUS_STATUS_INVALID_ARGUMENT
+            );
+            let message = super::locus_last_error_message();
+            let message = CStr::from_ptr(message).to_str().unwrap();
+            assert_eq!(message, "path must be non-NULL UTF-8");
 
-        assert_eq!(
-            super::locus_core_list_directory(path.as_ptr(), false, std::ptr::null_mut()),
-            super::LOCUS_STATUS_INVALID_ARGUMENT
-        );
-        let message = super::locus_last_error_message();
-        let message = unsafe { CStr::from_ptr(message).to_str().unwrap() };
-        assert_eq!(message, "out_snapshot must not be NULL");
+            assert_eq!(
+                super::locus_core_list_directory(path.as_ptr(), false, std::ptr::null_mut()),
+                super::LOCUS_STATUS_INVALID_ARGUMENT
+            );
+            let message = super::locus_last_error_message();
+            let message = CStr::from_ptr(message).to_str().unwrap();
+            assert_eq!(message, "out_snapshot must not be NULL");
+        }
     }
 
     #[test]
     fn snapshot_accessors_tolerate_null() {
-        assert_eq!(
-            super::locus_workspace_snapshot_entry_count(std::ptr::null()),
-            0
-        );
-        assert!(super::locus_workspace_snapshot_entries(std::ptr::null()).is_null());
-        assert_eq!(
-            super::locus_workspace_snapshot_partial_error_count(std::ptr::null()),
-            0
-        );
-        assert!(super::locus_workspace_snapshot_partial_errors(std::ptr::null()).is_null());
-        super::locus_workspace_snapshot_free(std::ptr::null_mut());
+        // SAFETY: every accessor below documents that NULL is a valid input.
+        unsafe {
+            assert_eq!(
+                super::locus_workspace_snapshot_entry_count(std::ptr::null()),
+                0
+            );
+            assert!(super::locus_workspace_snapshot_entries(std::ptr::null()).is_null());
+            assert_eq!(
+                super::locus_workspace_snapshot_partial_error_count(std::ptr::null()),
+                0
+            );
+            assert!(super::locus_workspace_snapshot_partial_errors(std::ptr::null()).is_null());
+            super::locus_workspace_snapshot_free(std::ptr::null_mut());
+        }
     }
 
     struct TestWorkspace {
