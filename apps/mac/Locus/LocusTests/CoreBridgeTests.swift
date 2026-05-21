@@ -16,4 +16,11 @@ final class CoreBridgeTests: XCTestCase {
     func testRawCompatibilityCheckRejectsUnexpectedABI() {
         XCTAssertFalse(locus_core_is_abi_compatible(CoreBridge.expectedABIVersion + 1))
     }
+
+    func testWorkspaceFFILayoutMatchesABIv1() {
+        XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.size, 64)
+        XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.stride, 64)
+        XCTAssertEqual(MemoryLayout<LocusWorkspacePartialError>.size, 16)
+        XCTAssertEqual(MemoryLayout<LocusWorkspacePartialError>.stride, 16)
+    }
 }

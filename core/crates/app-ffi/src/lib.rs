@@ -1,8 +1,77 @@
-use std::ffi::c_char;
+#![allow(unsafe_code)]
+
+use std::cell::RefCell;
+use std::ffi::{c_char, CStr, CString};
+use std::ptr;
+use std::time::UNIX_EPOCH;
+
+use app_core::file_type::FileType;
+use app_core::workspace::{
+    list_directory_with_options, WorkspaceEntry, WorkspaceEntryKind, WorkspaceError,
+    WorkspaceListOptions,
+};
 
 pub const ABI_VERSION: u32 = 1;
 
 static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
+
+thread_local! {
+    static LAST_ERROR_MESSAGE: RefCell<CString> =
+        RefCell::new(CString::new("").expect("empty strings never contain NUL bytes"));
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocusStatus {
+    Ok = 0,
+    InvalidArgument = 1,
+    NotFound = 2,
+    NotDirectory = 3,
+    ReadDirectory = 4,
+    ReadEntry = 5,
+    ReadMetadata = 6,
+}
+
+pub const LOCUS_WORKSPACE_ENTRY_DIRECTORY: u32 = 1;
+pub const LOCUS_WORKSPACE_ENTRY_FILE: u32 = 2;
+pub const LOCUS_WORKSPACE_ENTRY_SYMLINK: u32 = 3;
+pub const LOCUS_WORKSPACE_ENTRY_OTHER: u32 = 4;
+
+pub const LOCUS_FILE_TYPE_MARKDOWN: u32 = 1;
+pub const LOCUS_FILE_TYPE_STRUCTURED_TEXT: u32 = 2;
+pub const LOCUS_FILE_TYPE_PDF: u32 = 3;
+pub const LOCUS_FILE_TYPE_OFFICE: u32 = 4;
+pub const LOCUS_FILE_TYPE_IMAGE: u32 = 5;
+pub const LOCUS_FILE_TYPE_AUDIO: u32 = 6;
+pub const LOCUS_FILE_TYPE_VIDEO: u32 = 7;
+pub const LOCUS_FILE_TYPE_PLAIN_TEXT: u32 = 8;
+pub const LOCUS_FILE_TYPE_CODE: u32 = 9;
+pub const LOCUS_FILE_TYPE_UNKNOWN: u32 = 10;
+
+#[repr(C)]
+pub struct LocusWorkspaceEntry {
+    pub path: *const c_char,
+    pub name: *const c_char,
+    pub kind: u32,
+    pub file_type: u32,
+    pub has_size_bytes: bool,
+    pub size_bytes: u64,
+    pub has_modified_unix_seconds: bool,
+    pub modified_unix_seconds: i64,
+    pub readonly: bool,
+}
+
+#[repr(C)]
+pub struct LocusWorkspacePartialError {
+    pub status: LocusStatus,
+    pub message: *const c_char,
+}
+
+pub struct LocusWorkspaceSnapshot {
+    entries: Vec<LocusWorkspaceEntry>,
+    partial_errors: Vec<LocusWorkspacePartialError>,
+    _strings: Vec<CString>,
+}
 
 #[no_mangle]
 pub extern "C" fn locus_core_abi_version() -> u32 {
@@ -19,9 +88,247 @@ pub extern "C" fn locus_core_version() -> *const c_char {
     VERSION.as_ptr().cast()
 }
 
+#[no_mangle]
+pub extern "C" fn locus_last_error_message() -> *const c_char {
+    LAST_ERROR_MESSAGE.with_borrow(|message| message.as_ptr())
+}
+
+#[no_mangle]
+pub extern "C" fn locus_core_list_directory(
+    path: *const c_char,
+    include_ignored: bool,
+    out_snapshot: *mut *mut LocusWorkspaceSnapshot,
+) -> LocusStatus {
+    clear_last_error_message();
+
+    if out_snapshot.is_null() {
+        set_last_error_message("out_snapshot must not be NULL");
+        return LocusStatus::InvalidArgument;
+    }
+
+    unsafe {
+        *out_snapshot = ptr::null_mut();
+    }
+
+    let Some(path) = string_from_c_path(path) else {
+        set_last_error_message("path must be non-NULL UTF-8");
+        return LocusStatus::InvalidArgument;
+    };
+
+    let options = WorkspaceListOptions::new().include_ignored(include_ignored);
+    match list_directory_with_options(path, options) {
+        Ok(snapshot) => {
+            let ffi_snapshot = LocusWorkspaceSnapshot::from_core_snapshot(snapshot);
+            unsafe {
+                *out_snapshot = Box::into_raw(Box::new(ffi_snapshot));
+            }
+            LocusStatus::Ok
+        }
+        Err(error) => {
+            set_last_error_message(error.to_string());
+            status_from_workspace_error(&error)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn locus_workspace_snapshot_entry_count(
+    snapshot: *const LocusWorkspaceSnapshot,
+) -> usize {
+    if snapshot.is_null() {
+        return 0;
+    }
+
+    unsafe { (*snapshot).entries.len() }
+}
+
+#[no_mangle]
+pub extern "C" fn locus_workspace_snapshot_entries(
+    snapshot: *const LocusWorkspaceSnapshot,
+) -> *const LocusWorkspaceEntry {
+    if snapshot.is_null() {
+        return ptr::null();
+    }
+
+    let entries = unsafe { &(*snapshot).entries };
+    if entries.is_empty() {
+        ptr::null()
+    } else {
+        entries.as_ptr()
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn locus_workspace_snapshot_partial_error_count(
+    snapshot: *const LocusWorkspaceSnapshot,
+) -> usize {
+    if snapshot.is_null() {
+        return 0;
+    }
+
+    unsafe { (*snapshot).partial_errors.len() }
+}
+
+#[no_mangle]
+pub extern "C" fn locus_workspace_snapshot_partial_errors(
+    snapshot: *const LocusWorkspaceSnapshot,
+) -> *const LocusWorkspacePartialError {
+    if snapshot.is_null() {
+        return ptr::null();
+    }
+
+    let partial_errors = unsafe { &(*snapshot).partial_errors };
+    if partial_errors.is_empty() {
+        ptr::null()
+    } else {
+        partial_errors.as_ptr()
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn locus_workspace_snapshot_free(snapshot: *mut LocusWorkspaceSnapshot) {
+    if snapshot.is_null() {
+        return;
+    }
+
+    unsafe {
+        drop(Box::from_raw(snapshot));
+    }
+}
+
+impl LocusWorkspaceSnapshot {
+    fn from_core_snapshot(snapshot: app_core::workspace::WorkspaceSnapshot) -> Self {
+        let mut strings = Vec::new();
+        let entries = snapshot
+            .entries
+            .into_iter()
+            .map(|entry| ffi_entry(entry, &mut strings))
+            .collect();
+        let partial_errors = snapshot
+            .partial_errors
+            .into_iter()
+            .map(|error| ffi_partial_error(error, &mut strings))
+            .collect();
+
+        Self {
+            entries,
+            partial_errors,
+            _strings: strings,
+        }
+    }
+}
+
+fn string_from_c_path(path: *const c_char) -> Option<String> {
+    if path.is_null() {
+        return None;
+    }
+
+    unsafe { CStr::from_ptr(path).to_str().ok().map(ToOwned::to_owned) }
+}
+
+fn clear_last_error_message() {
+    set_last_error_message("");
+}
+
+fn set_last_error_message(message: impl AsRef<str>) {
+    LAST_ERROR_MESSAGE.with_borrow_mut(|stored| {
+        *stored = sanitized_cstring(message.as_ref());
+    });
+}
+
+fn ffi_entry(entry: WorkspaceEntry, strings: &mut Vec<CString>) -> LocusWorkspaceEntry {
+    let kind = entry_kind_code(entry.kind);
+    let file_type = match entry.kind {
+        WorkspaceEntryKind::File(file_type) => file_type_code(file_type),
+        _ => LOCUS_FILE_TYPE_UNKNOWN,
+    };
+    let path = push_string(strings, entry.path.to_string_lossy());
+    let name = push_string(strings, entry.name);
+    let modified_unix_seconds = entry.modified.map(system_time_to_unix_seconds);
+
+    LocusWorkspaceEntry {
+        path,
+        name,
+        kind,
+        file_type,
+        has_size_bytes: entry.size_bytes.is_some(),
+        size_bytes: entry.size_bytes.unwrap_or(0),
+        has_modified_unix_seconds: modified_unix_seconds.is_some(),
+        modified_unix_seconds: modified_unix_seconds.unwrap_or(0),
+        readonly: entry.readonly,
+    }
+}
+
+fn ffi_partial_error(
+    error: WorkspaceError,
+    strings: &mut Vec<CString>,
+) -> LocusWorkspacePartialError {
+    let status = status_from_workspace_error(&error);
+    let message = push_string(strings, error.to_string());
+
+    LocusWorkspacePartialError { status, message }
+}
+
+fn push_string(strings: &mut Vec<CString>, value: impl AsRef<str>) -> *const c_char {
+    // CString owns its buffer on the heap, so these pointers stay valid even if
+    // the Vec itself reallocates while building the snapshot.
+    strings.push(sanitized_cstring(value.as_ref()));
+    strings.last().expect("just pushed string").as_ptr()
+}
+
+fn sanitized_cstring(value: &str) -> CString {
+    CString::new(value.replace('\0', "\u{FFFD}"))
+        .expect("sanitized strings do not contain NUL bytes")
+}
+
+fn system_time_to_unix_seconds(time: std::time::SystemTime) -> i64 {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs().min(i64::MAX as u64) as i64,
+        Err(error) => -(error.duration().as_secs().min(i64::MAX as u64) as i64),
+    }
+}
+
+fn entry_kind_code(kind: WorkspaceEntryKind) -> u32 {
+    match kind {
+        WorkspaceEntryKind::Directory => LOCUS_WORKSPACE_ENTRY_DIRECTORY,
+        WorkspaceEntryKind::File(_) => LOCUS_WORKSPACE_ENTRY_FILE,
+        WorkspaceEntryKind::Symlink => LOCUS_WORKSPACE_ENTRY_SYMLINK,
+        WorkspaceEntryKind::Other => LOCUS_WORKSPACE_ENTRY_OTHER,
+    }
+}
+
+fn file_type_code(file_type: FileType) -> u32 {
+    match file_type {
+        FileType::Markdown => LOCUS_FILE_TYPE_MARKDOWN,
+        FileType::StructuredText => LOCUS_FILE_TYPE_STRUCTURED_TEXT,
+        FileType::Pdf => LOCUS_FILE_TYPE_PDF,
+        FileType::Office => LOCUS_FILE_TYPE_OFFICE,
+        FileType::Image => LOCUS_FILE_TYPE_IMAGE,
+        FileType::Audio => LOCUS_FILE_TYPE_AUDIO,
+        FileType::Video => LOCUS_FILE_TYPE_VIDEO,
+        FileType::PlainText => LOCUS_FILE_TYPE_PLAIN_TEXT,
+        FileType::Code => LOCUS_FILE_TYPE_CODE,
+        FileType::Unknown => LOCUS_FILE_TYPE_UNKNOWN,
+    }
+}
+
+fn status_from_workspace_error(error: &WorkspaceError) -> LocusStatus {
+    match error {
+        WorkspaceError::NotFound(_) => LocusStatus::NotFound,
+        WorkspaceError::NotDirectory(_) => LocusStatus::NotDirectory,
+        WorkspaceError::ReadDirectory { .. } => LocusStatus::ReadDirectory,
+        WorkspaceError::ReadEntry { .. } => LocusStatus::ReadEntry,
+        WorkspaceError::ReadMetadata { .. } => LocusStatus::ReadMetadata,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::ffi::CStr;
+    use std::ffi::{CStr, CString};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn exposes_expected_abi_version() {
@@ -51,5 +358,180 @@ mod tests {
 
         let version = unsafe { CStr::from_ptr(version) };
         assert_eq!(version.to_str().unwrap(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn lists_directory_entries_in_owned_snapshot() {
+        let workspace = TestWorkspace::new();
+        workspace.create_dir("Drafts");
+        workspace.create_file_with_contents("notes.md", "hello");
+
+        let mut snapshot = std::ptr::null_mut();
+        let path = CString::new(workspace.path().to_string_lossy().as_ref()).unwrap();
+        let status = super::locus_core_list_directory(path.as_ptr(), false, &mut snapshot);
+
+        assert_eq!(status, super::LocusStatus::Ok);
+        assert!(!snapshot.is_null());
+        assert_eq!(super::locus_workspace_snapshot_entry_count(snapshot), 2);
+
+        let entries = super::locus_workspace_snapshot_entries(snapshot);
+        assert!(!entries.is_null());
+
+        let entries = unsafe {
+            std::slice::from_raw_parts(
+                entries,
+                super::locus_workspace_snapshot_entry_count(snapshot),
+            )
+        };
+        let names = entries
+            .iter()
+            .map(|entry| unsafe { CStr::from_ptr(entry.name).to_str().unwrap() })
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, ["Drafts", "notes.md"]);
+        assert_eq!(entries[0].kind, super::LOCUS_WORKSPACE_ENTRY_DIRECTORY);
+        assert_eq!(entries[1].kind, super::LOCUS_WORKSPACE_ENTRY_FILE);
+        assert_eq!(entries[1].file_type, super::LOCUS_FILE_TYPE_MARKDOWN);
+        assert!(entries[1].has_size_bytes);
+        assert_eq!(entries[1].size_bytes, 5);
+        assert_eq!(
+            super::locus_workspace_snapshot_partial_error_count(snapshot),
+            0
+        );
+
+        super::locus_workspace_snapshot_free(snapshot);
+    }
+
+    #[test]
+    fn list_directory_can_include_ignored_entries() {
+        let workspace = TestWorkspace::new();
+        workspace.create_dir(".git");
+        workspace.create_file("notes.md");
+
+        let mut snapshot = std::ptr::null_mut();
+        let path = CString::new(workspace.path().to_string_lossy().as_ref()).unwrap();
+        let status = super::locus_core_list_directory(path.as_ptr(), true, &mut snapshot);
+
+        assert_eq!(status, super::LocusStatus::Ok);
+
+        let entries = unsafe {
+            std::slice::from_raw_parts(
+                super::locus_workspace_snapshot_entries(snapshot),
+                super::locus_workspace_snapshot_entry_count(snapshot),
+            )
+        };
+        let names = entries
+            .iter()
+            .map(|entry| unsafe { CStr::from_ptr(entry.name).to_str().unwrap() })
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, [".git", "notes.md"]);
+
+        super::locus_workspace_snapshot_free(snapshot);
+    }
+
+    #[test]
+    fn list_directory_returns_error_for_file_path_without_snapshot() {
+        let workspace = TestWorkspace::new();
+        let file_path = workspace.create_file("notes.md");
+
+        let mut snapshot = std::ptr::null_mut();
+        let path = CString::new(file_path.to_string_lossy().as_ref()).unwrap();
+        let status = super::locus_core_list_directory(path.as_ptr(), false, &mut snapshot);
+
+        assert_eq!(status, super::LocusStatus::NotDirectory);
+        assert!(snapshot.is_null());
+
+        let message = super::locus_last_error_message();
+        let message = unsafe { CStr::from_ptr(message).to_str().unwrap() };
+        assert!(message.contains("workspace path is not a folder"));
+    }
+
+    #[test]
+    fn list_directory_rejects_null_arguments() {
+        let workspace = TestWorkspace::new();
+        let path = CString::new(workspace.path().to_string_lossy().as_ref()).unwrap();
+        let mut snapshot = std::ptr::null_mut();
+
+        assert_eq!(
+            super::locus_core_list_directory(std::ptr::null(), false, &mut snapshot),
+            super::LocusStatus::InvalidArgument
+        );
+        let message = super::locus_last_error_message();
+        let message = unsafe { CStr::from_ptr(message).to_str().unwrap() };
+        assert_eq!(message, "path must be non-NULL UTF-8");
+
+        assert_eq!(
+            super::locus_core_list_directory(path.as_ptr(), false, std::ptr::null_mut()),
+            super::LocusStatus::InvalidArgument
+        );
+        let message = super::locus_last_error_message();
+        let message = unsafe { CStr::from_ptr(message).to_str().unwrap() };
+        assert_eq!(message, "out_snapshot must not be NULL");
+    }
+
+    #[test]
+    fn snapshot_accessors_tolerate_null() {
+        assert_eq!(
+            super::locus_workspace_snapshot_entry_count(std::ptr::null()),
+            0
+        );
+        assert!(super::locus_workspace_snapshot_entries(std::ptr::null()).is_null());
+        assert_eq!(
+            super::locus_workspace_snapshot_partial_error_count(std::ptr::null()),
+            0
+        );
+        assert!(super::locus_workspace_snapshot_partial_errors(std::ptr::null()).is_null());
+        super::locus_workspace_snapshot_free(std::ptr::null_mut());
+    }
+
+    struct TestWorkspace {
+        path: PathBuf,
+    }
+
+    static NEXT_TEST_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
+
+    impl TestWorkspace {
+        fn new() -> Self {
+            let mut path = std::env::temp_dir();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let id = NEXT_TEST_WORKSPACE_ID.fetch_add(1, Ordering::Relaxed);
+            path.push(format!(
+                "locus-ffi-test-{}-{nanos}-{id}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).unwrap();
+
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn create_dir(&self, name: &str) -> PathBuf {
+            let path = self.path.join(name);
+            fs::create_dir(&path).unwrap();
+            path
+        }
+
+        fn create_file(&self, name: &str) -> PathBuf {
+            self.create_file_with_contents(name, "")
+        }
+
+        fn create_file_with_contents(&self, name: &str, contents: &str) -> PathBuf {
+            let path = self.path.join(name);
+            fs::write(&path, contents).unwrap();
+            path
+        }
+    }
+
+    impl Drop for TestWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 }

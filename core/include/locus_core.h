@@ -3,10 +3,83 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+typedef enum LocusStatus {
+    LOCUS_STATUS_OK = 0,
+    LOCUS_STATUS_INVALID_ARGUMENT = 1,
+    LOCUS_STATUS_NOT_FOUND = 2,
+    LOCUS_STATUS_NOT_DIRECTORY = 3,
+    LOCUS_STATUS_READ_DIRECTORY = 4,
+    LOCUS_STATUS_READ_ENTRY = 5,
+    LOCUS_STATUS_READ_METADATA = 6,
+} LocusStatus;
+
+/*
+ * Status policy:
+ * - LOCUS_STATUS_OK is the only success value.
+ * - Any other known or unknown status value must be treated as a failure.
+ * - Callers should include a default failure branch because future ABI versions
+ *   may add status values.
+ */
+
+typedef enum LocusWorkspaceEntryKind {
+    LOCUS_WORKSPACE_ENTRY_DIRECTORY = 1,
+    LOCUS_WORKSPACE_ENTRY_FILE = 2,
+    LOCUS_WORKSPACE_ENTRY_SYMLINK = 3,
+    LOCUS_WORKSPACE_ENTRY_OTHER = 4,
+} LocusWorkspaceEntryKind;
+
+typedef enum LocusFileType {
+    LOCUS_FILE_TYPE_MARKDOWN = 1,
+    LOCUS_FILE_TYPE_STRUCTURED_TEXT = 2,
+    LOCUS_FILE_TYPE_PDF = 3,
+    LOCUS_FILE_TYPE_OFFICE = 4,
+    LOCUS_FILE_TYPE_IMAGE = 5,
+    LOCUS_FILE_TYPE_AUDIO = 6,
+    LOCUS_FILE_TYPE_VIDEO = 7,
+    LOCUS_FILE_TYPE_PLAIN_TEXT = 8,
+    LOCUS_FILE_TYPE_CODE = 9,
+    LOCUS_FILE_TYPE_UNKNOWN = 10,
+} LocusFileType;
+
+typedef struct LocusWorkspaceEntry {
+    /* Borrowed UTF-8 strings. Valid only while the parent snapshot is alive. */
+    const char *path;
+    const char *name;
+    LocusWorkspaceEntryKind kind;
+    /*
+     * Valid only when kind == LOCUS_WORKSPACE_ENTRY_FILE. Other entry kinds use
+     * LOCUS_FILE_TYPE_UNKNOWN and callers should ignore this field.
+     */
+    LocusFileType file_type;
+    /* size_bytes is valid only when has_size_bytes is true. */
+    bool has_size_bytes;
+    uint64_t size_bytes;
+    /*
+     * modified_unix_seconds is valid only when has_modified_unix_seconds is
+     * true. The value is seconds relative to the Unix epoch.
+     */
+    bool has_modified_unix_seconds;
+    int64_t modified_unix_seconds;
+    bool readonly;
+} LocusWorkspaceEntry;
+
+typedef struct LocusWorkspacePartialError {
+    LocusStatus status;
+    /* Borrowed UTF-8 string. Valid only while the parent snapshot is alive. */
+    const char *message;
+} LocusWorkspacePartialError;
+
+/*
+ * Opaque Rust-owned snapshot handle. Callers must never allocate, free, copy, or
+ * inspect this type directly; use the accessor and free functions below.
+ */
+typedef struct LocusWorkspaceSnapshot LocusWorkspaceSnapshot;
 
 /**
  * Returns the ABI version implemented by this Rust FFI library.
@@ -52,6 +125,101 @@ bool locus_core_is_abi_compatible(uint32_t expected);
  * Thread-safety: safe to call from any thread.
  */
 const char *locus_core_version(void);
+
+/**
+ * Returns details for the last top-level FFI failure on the current thread.
+ *
+ * locus_core_list_directory clears this message before running and updates it
+ * when returning a non-OK status. Partial per-entry errors are reported through
+ * LocusWorkspaceSnapshot instead of this channel.
+ *
+ * Ownership: borrowed thread-local pointer; caller must not free it.
+ * Encoding: UTF-8, NUL-terminated.
+ * Lifetime: valid until the next FFI call on the same thread.
+ * Thread-safety: safe to call from any thread; values are thread-local.
+ */
+const char *locus_last_error_message(void);
+
+/**
+ * Lists the immediate children of a local folder.
+ *
+ * The function performs a shallow directory read only. It does not recursively
+ * scan, parse, index, thumbnail, hash, or preview files.
+ *
+ * On success, returns LOCUS_STATUS_OK and writes a Rust-owned snapshot to
+ * out_snapshot. The caller must release that snapshot with
+ * locus_workspace_snapshot_free().
+ *
+ * If some child entries cannot be read after the folder itself is opened, the
+ * function still returns LOCUS_STATUS_OK. Readable entries are present in the
+ * snapshot and per-entry failures are available through
+ * locus_workspace_snapshot_partial_errors().
+ *
+ * On failure, returns a non-OK status and writes NULL to out_snapshot when
+ * out_snapshot itself is non-NULL.
+ *
+ * Ownership: returned snapshot is owned by Rust and released by Rust.
+ * Encoding: path input and returned strings are UTF-8, NUL-terminated.
+ * Lifetime: returned entry/error pointers remain valid until snapshot release.
+ * Thread-safety: safe to call from any thread; snapshot pointers must not be
+ * used after release.
+ */
+LocusStatus locus_core_list_directory(
+    const char *path,
+    bool include_ignored,
+    LocusWorkspaceSnapshot **out_snapshot
+);
+
+/**
+ * Returns the number of entries in a workspace snapshot.
+ *
+ * Ownership: borrowed snapshot pointer; no release required.
+ * Thread-safety: safe to call from any thread while snapshot is alive.
+ */
+size_t locus_workspace_snapshot_entry_count(const LocusWorkspaceSnapshot *snapshot);
+
+/**
+ * Returns a borrowed pointer to the snapshot entry array, or NULL when empty.
+ *
+ * Ownership: borrowed pointer; caller must not free it.
+ * Lifetime: valid until locus_workspace_snapshot_free(snapshot).
+ * Thread-safety: safe to call from any thread while snapshot is alive.
+ */
+const LocusWorkspaceEntry *locus_workspace_snapshot_entries(
+    const LocusWorkspaceSnapshot *snapshot
+);
+
+/**
+ * Returns the number of partial errors in a workspace snapshot.
+ *
+ * Ownership: borrowed snapshot pointer; no release required.
+ * Thread-safety: safe to call from any thread while snapshot is alive.
+ */
+size_t locus_workspace_snapshot_partial_error_count(
+    const LocusWorkspaceSnapshot *snapshot
+);
+
+/**
+ * Returns a borrowed pointer to the partial error array, or NULL when empty.
+ *
+ * Ownership: borrowed pointer; caller must not free it.
+ * Lifetime: valid until locus_workspace_snapshot_free(snapshot).
+ * Thread-safety: safe to call from any thread while snapshot is alive.
+ */
+const LocusWorkspacePartialError *locus_workspace_snapshot_partial_errors(
+    const LocusWorkspaceSnapshot *snapshot
+);
+
+/**
+ * Releases a Rust-owned workspace snapshot.
+ *
+ * Passing NULL is allowed and has no effect.
+ *
+ * Ownership: consumes snapshot and invalidates all borrowed pointers from it.
+ * Thread-safety: safe to call from any thread when no other thread is using the
+ * snapshot.
+ */
+void locus_workspace_snapshot_free(LocusWorkspaceSnapshot *snapshot);
 
 #ifdef __cplusplus
 }
