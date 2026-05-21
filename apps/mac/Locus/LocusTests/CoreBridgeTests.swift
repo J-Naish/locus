@@ -37,6 +37,10 @@ final class CoreBridgeTests: XCTestCase {
         XCTAssertEqual(snapshot.entries[1].kind, .file)
         XCTAssertEqual(snapshot.entries[1].fileType, .markdown)
         XCTAssertEqual(snapshot.entries[1].sizeBytes, 5)
+        XCTAssertEqual(
+            snapshot.entries[1].id,
+            snapshot.entries[1].url.path(percentEncoded: false)
+        )
     }
 
     func testListDirectoryKeepsUsefulDotfilesAndSkipsNoiseByDefault() async throws {

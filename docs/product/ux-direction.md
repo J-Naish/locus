@@ -61,6 +61,12 @@ Initial commands:
 
 The default shortcut should be `Command-K`.
 
+## Language and Localization
+
+The MVP UI may ship with English strings while the product surface is still changing quickly.
+
+Keep user-facing strings plain, short, and ready for a future String Catalog pass. Avoid embedding developer terms in UI copy. Plan a Japanese localization pass once the main file browsing, preview, and editing flows stabilize enough that wording will not churn every milestone.
+
 ## Editing and Preview Experience
 
 Markdown should feel like document editing, not source code editing.

@@ -10,7 +10,8 @@ struct WorkspaceSnapshot: Equatable, Sendable {
     let partialErrors: [WorkspacePartialError]
 }
 
-struct WorkspaceEntry: Equatable, Sendable {
+struct WorkspaceEntry: Equatable, Identifiable, Sendable {
+    let id: String
     let url: URL
     let name: String
     let kind: WorkspaceEntryKind
@@ -162,6 +163,7 @@ struct CoreBridge: Sendable {
             let path = String(cString: entry.path)
 
             return WorkspaceEntry(
+                id: path,
                 url: URL(
                     filePath: path,
                     directoryHint: kind == .directory ? .isDirectory : .notDirectory

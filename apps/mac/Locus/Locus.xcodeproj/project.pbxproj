@@ -11,6 +11,7 @@
 		1A0000010000000000000002 /* CoreBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000012 /* CoreBridge.swift */; };
 		1A0000010000000000000003 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000013 /* HomeView.swift */; };
 		1A0000010000000000000004 /* CoreBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000014 /* CoreBridgeTests.swift */; };
+		1A0000010000000000000042 /* FinderService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000043 /* FinderService.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -31,6 +32,7 @@
 		1A0000010000000000000013 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		1A0000010000000000000014 /* CoreBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreBridgeTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000015 /* LocusCoreBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LocusCoreBridge.h; sourceTree = "<group>"; };
+		1A0000010000000000000043 /* FinderService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -65,6 +67,7 @@
 			children = (
 				1A0000010000000000000022 /* App */,
 				1A0000010000000000000023 /* CoreBridge */,
+				1A0000010000000000000044 /* Services */,
 				1A0000010000000000000024 /* Views */,
 			);
 			path = Locus;
@@ -110,6 +113,14 @@
 				1A0000010000000000000025 /* Home */,
 			);
 			path = Views;
+			sourceTree = "<group>";
+		};
+		1A0000010000000000000044 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				1A0000010000000000000043 /* FinderService.swift */,
+			);
+			path = Services;
 			sourceTree = "<group>";
 		};
 		1A0000010000000000000025 /* Home */ = {
@@ -250,6 +261,7 @@
 			files = (
 				1A0000010000000000000001 /* LocusApp.swift in Sources */,
 				1A0000010000000000000002 /* CoreBridge.swift in Sources */,
+				1A0000010000000000000042 /* FinderService.swift in Sources */,
 				1A0000010000000000000003 /* HomeView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

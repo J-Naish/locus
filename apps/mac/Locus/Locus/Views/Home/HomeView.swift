@@ -1,25 +1,47 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct HomeView: View {
     @State private var runtimeStatus: RuntimeStatus = .checking
+    @State private var workspaceState: WorkspaceState = .idle
+    @State private var selectedEntryID: WorkspaceEntry.ID?
+    @State private var isFolderImporterPresented = false
 
     private let coreBridge: CoreBridge
+    private let finderService: FinderService
 
-    init(coreBridge: CoreBridge = CoreBridge()) {
+    init(coreBridge: CoreBridge = CoreBridge(), finderService: FinderService = FinderService()) {
         self.coreBridge = coreBridge
+        self.finderService = finderService
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HeaderView()
+        VStack(alignment: .leading, spacing: 16) {
+            HeaderView(openFolder: openFolder)
             RuntimeStatusView(status: runtimeStatus)
-            Spacer()
+            WorkspaceContentView(
+                state: workspaceState,
+                selectedEntryID: $selectedEntryID,
+                openFolder: openFolder,
+                refresh: refreshWorkspace,
+                reveal: revealInFinder,
+                openExternally: openExternally
+            )
         }
         .padding(28)
-        .frame(minWidth: 720, minHeight: 460)
+        .frame(minWidth: 820, minHeight: 520)
         .task {
             await loadRuntimeStatus()
         }
+        .fileImporter(
+            isPresented: $isFolderImporterPresented,
+            allowedContentTypes: [.folder],
+            allowsMultipleSelection: false
+        ) { result in
+            handleFolderImport(result)
+        }
+        .fileDialogMessage("Choose a folder to browse in Locus.")
+        .fileDialogConfirmationLabel("Open Folder")
     }
 
     @MainActor
@@ -30,19 +52,108 @@ struct HomeView: View {
             runtimeStatus = .failed(error.localizedDescription)
         }
     }
+
+    private func openFolder() {
+        isFolderImporterPresented = true
+    }
+
+    private func refreshWorkspace() {
+        let folderURL: URL
+        switch workspaceState {
+        case let .ready(currentFolderURL, _, _):
+            folderURL = currentFolderURL
+        case let .failed(currentFolderURL?, _):
+            folderURL = currentFolderURL
+        default:
+            return
+        }
+
+        Task {
+            await loadWorkspace(folderURL)
+        }
+    }
+
+    private func handleFolderImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case let .success(urls):
+            guard let folderURL = urls.first else {
+                selectedEntryID = nil
+                workspaceState = .failed(
+                    folderURL: nil,
+                    message: "No folder was selected."
+                )
+                return
+            }
+
+            Task {
+                await loadWorkspace(folderURL)
+            }
+        case let .failure(error):
+            selectedEntryID = nil
+            workspaceState = .failed(
+                folderURL: nil,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    @MainActor
+    private func loadWorkspace(_ folderURL: URL) async {
+        workspaceState = .loading(folderURL: folderURL)
+        // This covers the immediate directory read. Recents and Favorites will
+        // store security-scoped bookmarks once sandboxing is enabled.
+        let didStartAccess = folderURL.startAccessingSecurityScopedResource()
+        defer {
+            if didStartAccess {
+                folderURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            let snapshot = try await coreBridge.listDirectory(at: folderURL)
+            selectedEntryID = nil
+            workspaceState = .ready(folderURL: folderURL, snapshot: snapshot, loadedAt: Date())
+        } catch {
+            selectedEntryID = nil
+            workspaceState = .failed(
+                folderURL: folderURL,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func revealInFinder(_ entry: WorkspaceEntry) {
+        finderService.reveal(entry.url)
+    }
+
+    private func openExternally(_ entry: WorkspaceEntry) {
+        finderService.openExternally(entry.url)
+    }
 }
 
 private struct HeaderView: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Locus")
-                .font(.title)
-                .fontWeight(.semibold)
-                .accessibilityAddTraits(.isHeader)
+    let openFolder: () -> Void
 
-            Text("Local document workspace")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Locus")
+                    .font(.title)
+                    .fontWeight(.semibold)
+                    .accessibilityAddTraits(.isHeader)
+
+                Text("Local document workspace")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button(action: openFolder) {
+                Label("Open Folder", systemImage: "folder")
+            }
+            .keyboardShortcut("o", modifiers: [.command])
+            .controlSize(.large)
         }
     }
 }
@@ -66,6 +177,286 @@ private struct RuntimeStatusView: View {
         .padding(.vertical, 8)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(status.message)
+    }
+}
+
+private struct WorkspaceContentView: View {
+    let state: WorkspaceState
+    @Binding var selectedEntryID: WorkspaceEntry.ID?
+    let openFolder: () -> Void
+    let refresh: () -> Void
+    let reveal: (WorkspaceEntry) -> Void
+    let openExternally: (WorkspaceEntry) -> Void
+
+    var body: some View {
+        Group {
+            switch state {
+            case .idle:
+                EmptyWorkspaceView(openFolder: openFolder)
+            case let .loading(folderURL):
+                LoadingWorkspaceView(folderURL: folderURL)
+            case let .ready(folderURL, snapshot, loadedAt):
+                WorkspaceBrowserView(
+                    folderURL: folderURL,
+                    snapshot: snapshot,
+                    loadedAt: loadedAt,
+                    selectedEntryID: $selectedEntryID,
+                    refresh: refresh,
+                    reveal: reveal,
+                    openExternally: openExternally
+                )
+            case let .failed(folderURL, message):
+                WorkspaceErrorView(
+                    folderURL: folderURL,
+                    message: message,
+                    openFolder: openFolder,
+                    retry: refresh
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct EmptyWorkspaceView: View {
+    let openFolder: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("No Folder Open", systemImage: "folder")
+        } description: {
+            Text("Choose a folder to browse its immediate contents.")
+        } actions: {
+            Button(action: openFolder) {
+                Label("Open Folder", systemImage: "folder")
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct LoadingWorkspaceView: View {
+    let folderURL: URL
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("Loading \(folderURL.lastPathComponent)")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct WorkspaceBrowserView: View {
+    let folderURL: URL
+    let snapshot: WorkspaceSnapshot
+    let loadedAt: Date
+    @Binding var selectedEntryID: WorkspaceEntry.ID?
+    let refresh: () -> Void
+    let reveal: (WorkspaceEntry) -> Void
+    let openExternally: (WorkspaceEntry) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            WorkspaceToolbarView(
+                folderURL: folderURL,
+                snapshot: snapshot,
+                loadedAt: loadedAt,
+                refresh: refresh
+            )
+
+            if !snapshot.partialErrors.isEmpty {
+                PartialErrorsView(errors: snapshot.partialErrors)
+            }
+
+            if snapshot.entries.isEmpty {
+                ContentUnavailableView(
+                    "This Folder Is Empty",
+                    systemImage: "folder",
+                    description: Text("Files and folders will appear here.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                WorkspaceEntriesTable(
+                    entries: snapshot.entries,
+                    selectedEntryID: $selectedEntryID,
+                    reveal: reveal,
+                    openExternally: openExternally
+                )
+            }
+        }
+    }
+}
+
+private struct WorkspaceToolbarView: View {
+    let folderURL: URL
+    let snapshot: WorkspaceSnapshot
+    let loadedAt: Date
+    let refresh: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(folderURL.lastPathComponent)
+                    .font(.headline)
+                    .lineLimit(1)
+
+                Text(folderURL.path(percentEncoded: false))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer()
+
+            Text("\(snapshot.entries.count) items")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            Text(loadedAt, style: .time)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            Button(action: refresh) {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
+            .labelStyle(.iconOnly)
+            .help("Refresh")
+        }
+    }
+}
+
+private struct WorkspaceEntriesTable: View {
+    let entries: [WorkspaceEntry]
+    @Binding var selectedEntryID: WorkspaceEntry.ID?
+    let reveal: (WorkspaceEntry) -> Void
+    let openExternally: (WorkspaceEntry) -> Void
+
+    var body: some View {
+        Table(entries, selection: $selectedEntryID) {
+            TableColumn("Name") { entry in
+                Label {
+                    Text(entry.name)
+                        .lineLimit(1)
+                } icon: {
+                    Image(systemName: entry.symbolName)
+                        .foregroundStyle(entry.symbolColor)
+                }
+            }
+
+            TableColumn("Type") { entry in
+                Text(entry.typeLabel)
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 110, ideal: 140)
+
+            TableColumn("Size") { entry in
+                Text(entry.sizeLabel)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            .width(min: 80, ideal: 100)
+
+            TableColumn("Modified") { entry in
+                Text(entry.modifiedLabel)
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 130, ideal: 160)
+        }
+        .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
+            let selectedEntries = entries.filter { selection.contains($0.id) }
+
+            Button("Open") {
+                selectedEntries.forEach(openExternally)
+            }
+            .disabled(selectedEntries.isEmpty)
+
+            Button("Reveal in Finder") {
+                selectedEntries.forEach(reveal)
+            }
+            .disabled(selectedEntries.isEmpty)
+        }
+    }
+}
+
+private struct PartialErrorsView: View {
+    let errors: [WorkspacePartialError]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            summary
+
+            if errors.count == 1, let message = errors.first?.message {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            } else {
+                DisclosureGroup("Show details") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(errors.enumerated()), id: \.offset) { _, error in
+                            Text(error.message)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+                .font(.caption)
+            }
+        }
+        .padding(10)
+        .background(.orange.opacity(0.08), in: .rect(cornerRadius: 8))
+    }
+
+    private var summary: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+
+            Text(summaryTitle)
+                .font(.callout)
+                .fontWeight(.medium)
+
+            Spacer()
+        }
+    }
+
+    private var summaryTitle: String {
+        if errors.count == 1 {
+            return "1 item could not be read"
+        }
+
+        return "\(errors.count) items could not be read"
+    }
+}
+
+private struct WorkspaceErrorView: View {
+    let folderURL: URL?
+    let message: String
+    let openFolder: () -> Void
+    let retry: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Folder Could Not Be Opened", systemImage: "exclamationmark.triangle")
+        } description: {
+            Text(message)
+        } actions: {
+            HStack {
+                if folderURL != nil {
+                    Button("Try Again", action: retry)
+                }
+
+                Button("Choose Folder", action: openFolder)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -104,6 +495,118 @@ private enum RuntimeStatus: Equatable, Sendable {
             return "Rust core \(summary.coreVersion), ABI \(summary.abiVersion)"
         case let .failed(message):
             return message
+        }
+    }
+}
+
+private enum WorkspaceState: Equatable, Sendable {
+    case idle
+    case loading(folderURL: URL)
+    case ready(folderURL: URL, snapshot: WorkspaceSnapshot, loadedAt: Date)
+    case failed(folderURL: URL?, message: String)
+}
+
+private extension WorkspaceEntry {
+    var symbolName: String {
+        switch kind {
+        case .directory:
+            return "folder"
+        case .file:
+            return fileType.symbolName
+        case .symlink:
+            return "arrowshape.turn.up.right"
+        case .other:
+            return "doc"
+        }
+    }
+
+    var symbolColor: Color {
+        switch kind {
+        case .directory:
+            return .blue
+        case .file:
+            return .secondary
+        case .symlink:
+            return .purple
+        case .other:
+            return .secondary
+        }
+    }
+
+    var typeLabel: String {
+        switch kind {
+        case .directory:
+            return "Folder"
+        case .file:
+            return fileType.label
+        case .symlink:
+            return "Alias"
+        case .other:
+            return "Other"
+        }
+    }
+
+    var sizeLabel: String {
+        guard let sizeBytes else {
+            return "-"
+        }
+
+        return ByteCountFormatter.string(fromByteCount: Int64(sizeBytes), countStyle: .file)
+    }
+
+    var modifiedLabel: String {
+        guard let modified else {
+            return "-"
+        }
+
+        return modified.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
+private extension WorkspaceFileType {
+    var label: String {
+        switch self {
+        case .markdown:
+            return "Markdown"
+        case .structuredText:
+            return "Structured Text"
+        case .pdf:
+            return "PDF"
+        case .office:
+            return "Office"
+        case .image:
+            return "Image"
+        case .audio:
+            return "Audio"
+        case .video:
+            return "Video"
+        case .plainText:
+            return "Text"
+        case .code:
+            return "Code"
+        case .unknown:
+            return "File"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .markdown, .structuredText, .plainText:
+            return "doc.text"
+        case .pdf:
+            return "doc.richtext"
+        case .office:
+            return "doc"
+        case .image:
+            return "photo"
+        case .audio:
+            return "waveform"
+        case .video:
+            return "film"
+        case .code:
+            return "chevron.left.forwardslash.chevron.right"
+        case .unknown:
+            return "doc"
         }
     }
 }
