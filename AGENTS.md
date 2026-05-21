@@ -1,6 +1,12 @@
 # AGENTS.md
 
-This file gives coding agents the working rules for this repository.
+This file gives coding agents the shared working rules for the whole Locus repository.
+
+Directory-specific rules live closer to the code they govern:
+
+- `core/AGENTS.md` for Rust core, FFI, Cargo, and core test rules.
+- `apps/mac/AGENTS.md` for Swift, SwiftUI, macOS UI, CoreBridge, and Xcode rules.
+- `docs/AGENTS.md` for requirements, product docs, architecture docs, and ADRs.
 
 ## Product Intent
 
@@ -25,7 +31,7 @@ Do not turn Locus into:
 - an agent runtime
 - an Office suite
 - an Acrobat replacement
-- a plugin platform
+- a plugin or extension platform
 
 ## Read First
 
@@ -57,53 +63,10 @@ Before making product or architecture decisions, read the relevant docs:
 - Build native UI shells per platform.
 - Put shared, testable behavior in Rust core.
 - Keep UI-specific behavior out of Rust unless it is truly cross-platform domain logic.
-- Expose Rust through a C ABI and thin platform-specific bridges.
-- Do not call raw C APIs throughout app UI code.
-- Keep FFI calls coarse enough to avoid chatty boundaries.
-- Keep memory ownership explicit; Rust-allocated memory must be released by Rust.
+- Use thin platform-specific bridges around the core; do not spread low-level integration details through UI code.
 - Use SQLite for boring, inspectable local persistence unless there is a clear reason not to.
-
-## Performance, Weight, and Polish Rules
-
-Performance, lightweight behavior, and refined UX/UI are top-priority product qualities. Treat them as core requirements, not later polish.
-
 - Prefer simple native OS capabilities over bundled runtimes, heavy dependencies, or custom infrastructure.
-- Keep startup work minimal; do not eagerly scan, parse, index, thumbnail, hash, or preview large folders.
-- Load file lists, previews, metadata, thumbnails, and indexes lazily and incrementally.
-- Keep UI interactions responsive while background work is running.
-- Treat slow startup, unnecessary memory growth, avoidable disk churn, and dependency bloat as product bugs.
-- Measure before adding broad caching, background indexing, or complex abstractions.
 - Choose boring, inspectable implementations unless extra complexity clearly improves responsiveness, reliability, or user clarity.
-- Preserve a quiet, native, document-oriented interface; visual polish should make common work feel clearer and calmer, not more decorative.
-- Refine empty states, loading states, error states, keyboard behavior, and file handoff flows as part of implementation, not as cleanup.
-- Do not accept technically correct UI that feels dense, developer-centric, sluggish, surprising, or unfinished.
-
-## Testing Rules
-
-Tests are part of the implementation, not cleanup.
-
-- Add unit tests for core logic by default.
-- Prefer small deterministic module-level tests.
-- Write tests before implementation when behavior is subtle, risky, or unclear.
-- Add integration tests for scanning, indexing, search, cache, diff, persistence, and FFI flows.
-- Use `fixtures/` for explicit reusable sample files and workspaces.
-- Treat regressions as missing tests first and implementation bugs second.
-- Do not rely on manual app testing for behavior that can be automated.
-
-Run the narrowest relevant tests while working, then broader checks before handoff.
-
-Useful commands:
-
-```sh
-cargo test --manifest-path core/Cargo.toml
-cargo check --manifest-path core/Cargo.toml
-```
-
-Before handoff for changes that can affect speed, size, startup, file listing, FFI, or the macOS app bundle, run:
-
-```sh
-scripts/perf-smoke.sh
-```
 
 ## Product Scope Rules
 
@@ -125,31 +88,79 @@ Avoid adding:
 - Git, LSP, debugger, or other IDE-oriented features
 - heavy parsing or thumbnail generation on startup
 
-## UX Rules
+## Performance, Weight, and Polish Rules
 
-- Favor Finder-like and Preview-like behavior over developer-tool behavior.
-- Use plain user-facing language: folders, locations, recent items, favorites.
-- Keep advanced concepts internal unless users genuinely need them.
-- Prefer native controls and OS facilities.
-- Make file changes explicit and predictable.
-- Do not hide file formats behind abstractions that make users unsure what will be saved.
-- Early UI implementation should prioritize getting coherent product flows working end-to-end over polishing every visual detail in isolation.
-- For early feature slices, use a simple native UI shape that fits the product direction and keep moving; do not force frequent fine-grained UI review before enough functionality exists to judge the experience.
-- Explain the intended user flow before starting a substantial new UI surface, but avoid blocking implementation on micro-level visual decisions unless the choice would be hard to reverse.
-- Once a meaningful set of UI functionality is in place, shift into a deliberate polish pass with the user: review the actual app on a Mac, refine layout, hierarchy, empty/loading/error states, keyboard behavior, and overall interaction feel together.
-- When UI changes are made or a new UI slice is complete, explain what changed, how to run it, and what should be checked. Treat user review on the actual Mac as the acceptance path for visual quality and interaction feel, especially during polish passes.
-- Use automated tests and local builds to catch functional regressions, but do not treat them as a substitute for user review of visual quality, interaction feel, responsiveness, and native polish.
+Performance, lightweight behavior, and refined UX/UI are top-priority product qualities. Treat them as core requirements, not later polish.
 
-## Documentation Rules
+- Keep startup work minimal; do not eagerly scan, parse, index, thumbnail, hash, or preview large folders.
+- Load file lists, previews, metadata, thumbnails, and indexes lazily and incrementally.
+- Keep UI interactions responsive while background work is running.
+- Treat slow startup, unnecessary memory growth, avoidable disk churn, and dependency bloat as product bugs.
+- Measure before adding broad caching, background indexing, or complex abstractions.
+- Preserve a quiet, native, document-oriented interface; visual polish should make common work feel clearer and calmer, not more decorative.
+- Refine empty states, loading states, error states, keyboard behavior, and file handoff flows as part of implementation, not as cleanup.
+- Do not accept technically correct UI that feels dense, developer-centric, sluggish, surprising, or unfinished.
 
-- Keep docs concise and split by stable topic.
-- Document important implementation and application knowledge by default: architecture decisions, feature behavior, platform constraints, performance budgets, persistence formats, FFI contracts, build/release flows, and non-obvious tradeoffs should leave a written record.
-- Leave concise code comments where they materially improve maintainability for humans or AI agents: explain non-obvious constraints, invariants, ownership/lifetime rules, platform quirks, performance tradeoffs, and why a surprising implementation is intentional.
-- When implementation reflects a clear product or architecture decision, leave a short comment near the relevant code unless the intent is already obvious from naming and structure.
-- Avoid comments that merely restate obvious code behavior.
-- Update docs when scope, architecture, or product principles change.
-- Add ADRs in `docs/adr/` for important architectural decisions.
-- Avoid duplicating the same requirement across many files; link to the source document instead.
+## Coding Style
+
+- Prefer immutable data and explicit replacement over hidden shared mutation.
+- Local, explicit mutation is allowed for accumulators, builders, buffers, UI state, Rust ownership patterns, and performance-sensitive code.
+- Prefer the simplest solution that actually works.
+- Avoid speculative abstractions and features.
+- Extract repeated logic only when repetition is real, not hypothetical.
+- Keep files focused, but do not split cohesive native UI views or Rust modules just to satisfy a line count.
+- Prefer early returns over deeply nested control flow.
+- Use named constants for meaningful thresholds, delays, budgets, and limits.
+- Follow language-specific naming rules in the directory-specific `AGENTS.md`.
+- Avoid abbreviations unless they are standard in the domain.
+
+## Security Rules
+
+- Never hardcode secrets, API keys, passwords, tokens, or credentials.
+- Validate inputs at system boundaries.
+- Treat user-selected files, file contents, metadata, drag/drop data, pasteboard data, tool output, and external data as untrusted.
+- Handle file paths deliberately; do not accidentally traverse, persist, or reveal sensitive paths.
+- Use parameterized SQLite queries when persistence code exists.
+- Keep FFI boundaries explicit about nullability, encoding, ownership, and lifetimes.
+- Use security-scoped file access where sandboxed persistent folder access is involved.
+- Keep user-facing errors clear and safe; preserve diagnostic detail only where appropriate.
+- If a critical security issue is found, stop feature work, fix it first, and review related entry points for the same class of issue.
+
+## Testing Rules
+
+Tests are part of the implementation, not cleanup.
+
+- Target at least 80% coverage for meaningful business logic.
+- Use test-driven development for new features, bug fixes, and refactors:
+  1. Write a failing test first.
+  2. Run it and verify it fails for the right reason.
+  3. Implement the smallest passing change.
+  4. Verify the test passes.
+  5. Refactor while tests stay green.
+- Add unit tests for individual functions, models, utilities, and view-independent helpers.
+- Add integration tests for Rust core, FFI, file listing, persistence, fixtures, and platform bridge behavior.
+- Add E2E or UI-flow tests for critical macOS user flows and file handoff flows where automation is practical.
+- Use `fixtures/` for explicit reusable sample files and workspaces.
+- Treat regressions as missing tests first and implementation bugs second.
+- Do not rely on manual app testing for behavior that can be automated.
+- Fix implementation, not tests, unless the tests are wrong.
+- Prefer Arrange-Act-Assert structure and descriptive test names that state the behavior under test.
+
+Run the narrowest relevant tests while working, then broader checks before handoff. Before handoff for changes that can affect speed, size, startup, file listing, FFI, or the macOS app bundle, run:
+
+```sh
+scripts/perf-smoke.sh
+```
+
+## Common Patterns
+
+- Study Apple, Rust, SQLite, and existing project examples before inventing new structure.
+- Prefer adapting the current architecture over importing external structure.
+- Do not clone or vendor external project structure unless explicitly approved.
+- Introduce a local persistence boundary only when SQLite or durable local persistence appears.
+- Keep SQL and schema details out of UI views.
+- Keep Rust/native integration coarse and explicit.
+- Keep ABI structs versioned and layout-tested.
 
 ## Git and Change Hygiene
 
@@ -157,13 +168,6 @@ Avoid adding:
 - Do not reformat unrelated files.
 - Do not delete or rewrite user changes unless explicitly asked.
 - Do not commit unless the user asks.
-
-## Commit Rules
-
-Commits should be small, intentional records of working changes.
-
-- Commit only when the user asks for a commit.
-- Before committing, inspect `git status` and the staged diff so unrelated or user-owned changes are not included by accident.
 - Stage files explicitly; do not use broad staging commands unless the user clearly wants every current change included.
 - Keep each commit focused on one coherent product, documentation, or infrastructure change.
 - Use a clear imperative commit message such as `Add macOS workspace plan` or `Fix file list sorting`.
