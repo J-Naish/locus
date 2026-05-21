@@ -1,4 +1,4 @@
-#![allow(unsafe_code)]
+#![allow(unsafe_code)] // app-ffi is the only crate that owns raw C ABI boundaries.
 
 use std::cell::RefCell;
 use std::ffi::{c_char, CStr, CString};
@@ -102,6 +102,8 @@ pub extern "C" fn locus_core_list_directory(
         return LOCUS_STATUS_INVALID_ARGUMENT;
     }
 
+    // SAFETY: out_snapshot was checked for null and points to caller-owned
+    // writable storage for the duration of this synchronous FFI call.
     unsafe {
         *out_snapshot = ptr::null_mut();
     }
@@ -115,6 +117,9 @@ pub extern "C" fn locus_core_list_directory(
     match list_directory_with_options(path, options) {
         Ok(snapshot) => {
             let ffi_snapshot = LocusWorkspaceSnapshot::from_core_snapshot(snapshot);
+            // SAFETY: out_snapshot was checked for null above. Ownership of the
+            // Box is intentionally transferred to the caller and later reclaimed
+            // by locus_workspace_snapshot_free().
             unsafe {
                 *out_snapshot = Box::into_raw(Box::new(ffi_snapshot));
             }
@@ -135,6 +140,8 @@ pub extern "C" fn locus_workspace_snapshot_entry_count(
         return 0;
     }
 
+    // SAFETY: snapshot is non-null and callers may only pass handles returned
+    // by locus_core_list_directory that have not been freed.
     unsafe { (*snapshot).entries.len() }
 }
 
@@ -146,6 +153,8 @@ pub extern "C" fn locus_workspace_snapshot_entries(
         return ptr::null();
     }
 
+    // SAFETY: snapshot is non-null and the returned slice pointer is borrowed
+    // from the live Rust-owned snapshot.
     let entries = unsafe { &(*snapshot).entries };
     if entries.is_empty() {
         ptr::null()
@@ -162,6 +171,8 @@ pub extern "C" fn locus_workspace_snapshot_partial_error_count(
         return 0;
     }
 
+    // SAFETY: snapshot is non-null and callers may only pass handles returned
+    // by locus_core_list_directory that have not been freed.
     unsafe { (*snapshot).partial_errors.len() }
 }
 
@@ -173,6 +184,8 @@ pub extern "C" fn locus_workspace_snapshot_partial_errors(
         return ptr::null();
     }
 
+    // SAFETY: snapshot is non-null and the returned slice pointer is borrowed
+    // from the live Rust-owned snapshot.
     let partial_errors = unsafe { &(*snapshot).partial_errors };
     if partial_errors.is_empty() {
         ptr::null()
@@ -187,6 +200,8 @@ pub extern "C" fn locus_workspace_snapshot_free(snapshot: *mut LocusWorkspaceSna
         return;
     }
 
+    // SAFETY: snapshot was created by Box::into_raw in locus_core_list_directory.
+    // Rebuilding the Box here gives Rust ownership back exactly once.
     unsafe {
         drop(Box::from_raw(snapshot));
     }
@@ -219,6 +234,8 @@ fn string_from_c_path(path: *const c_char) -> Option<String> {
         return None;
     }
 
+    // SAFETY: path is non-null and must point to a NUL-terminated C string for
+    // the duration of this call. Invalid UTF-8 is rejected.
     unsafe { CStr::from_ptr(path).to_str().ok().map(ToOwned::to_owned) }
 }
 

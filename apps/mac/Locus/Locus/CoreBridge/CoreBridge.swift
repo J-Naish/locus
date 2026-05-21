@@ -127,6 +127,9 @@ struct CoreBridge: Sendable {
             locus_workspace_snapshot_free(rawSnapshot)
         }
 
+        // The C strings and arrays are borrowed from rawSnapshot, so every
+        // value crossing this boundary must be copied into Swift types before
+        // the defer above releases the Rust-owned snapshot.
         return WorkspaceSnapshot(
             entries: workspaceEntries(from: rawSnapshot),
             partialErrors: workspacePartialErrors(from: rawSnapshot)

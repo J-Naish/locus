@@ -134,6 +134,8 @@ pub fn list_directory_with_options(
     let mut partial_errors = Vec::new();
 
     for entry in entries {
+        // Keep listing useful even when one child cannot be read; the UI can
+        // show readable entries plus a partial warning instead of failing empty.
         let entry = match entry {
             Ok(entry) => entry,
             Err(source) => {
@@ -148,6 +150,8 @@ pub fn list_directory_with_options(
         }
 
         let path = entry.path();
+        // Do not follow symlinks during listing. The browser should show links
+        // as links and avoid surprising traversal or permission side effects.
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(source) => {
