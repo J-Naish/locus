@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -128,6 +127,14 @@ pub fn list_directory_with_options(
     options: WorkspaceListOptions,
 ) -> Result<WorkspaceSnapshot, WorkspaceError> {
     let path = path.as_ref();
+    list_directory_inner(path, options, |entry_path| fs::symlink_metadata(entry_path))
+}
+
+fn list_directory_inner(
+    path: &Path,
+    options: WorkspaceListOptions,
+    metadata_for: impl Fn(&Path) -> io::Result<fs::Metadata>,
+) -> Result<WorkspaceSnapshot, WorkspaceError> {
     let entries = fs::read_dir(path).map_err(|source| read_directory_error(path, source))?;
 
     let mut snapshot = Vec::new();
@@ -152,7 +159,7 @@ pub fn list_directory_with_options(
         let path = entry.path();
         // Do not follow symlinks during listing. The browser should show links
         // as links and avoid surprising traversal or permission side effects.
-        let metadata = match fs::symlink_metadata(&path) {
+        let metadata = match metadata_for(&path) {
             Ok(metadata) => metadata,
             Err(source) => {
                 partial_errors.push(WorkspaceError::ReadMetadata {
@@ -166,7 +173,7 @@ pub fn list_directory_with_options(
         snapshot.push(entry_from_metadata(path, name, metadata));
     }
 
-    snapshot.sort_by(compare_entries);
+    snapshot.sort_by_cached_key(entry_sort_key);
     Ok(WorkspaceSnapshot {
         entries: snapshot,
         partial_errors,
@@ -210,14 +217,12 @@ fn entry_from_metadata(path: PathBuf, name: String, metadata: fs::Metadata) -> W
     }
 }
 
-fn compare_entries(left: &WorkspaceEntry, right: &WorkspaceEntry) -> Ordering {
-    let left_name = left.name.to_lowercase();
-    let right_name = right.name.to_lowercase();
-
-    entry_sort_group(left)
-        .cmp(&entry_sort_group(right))
-        .then_with(|| left_name.cmp(&right_name))
-        .then_with(|| left.name.cmp(&right.name))
+fn entry_sort_key(entry: &WorkspaceEntry) -> (u8, String, String) {
+    (
+        entry_sort_group(entry),
+        entry.name.to_lowercase(),
+        entry.name.clone(),
+    )
 }
 
 fn entry_sort_group(entry: &WorkspaceEntry) -> u8 {
@@ -355,6 +360,48 @@ mod tests {
         let entries = list_directory(workspace.path()).unwrap().entries;
 
         assert_eq!(entries[0].size_bytes, Some(5));
+    }
+
+    #[test]
+    fn list_directory_keeps_readable_entries_when_child_metadata_fails() {
+        let workspace = TestWorkspace::new();
+        workspace.create_file("readable.md");
+        workspace.create_file("unreadable.md");
+
+        let snapshot =
+            super::list_directory_inner(workspace.path(), WorkspaceListOptions::new(), |path| {
+                if path
+                    .file_name()
+                    .is_some_and(|name| name == std::ffi::OsStr::new("unreadable.md"))
+                {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "metadata blocked for test",
+                    ))
+                } else {
+                    fs::symlink_metadata(path)
+                }
+            })
+            .unwrap();
+
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].name, "readable.md");
+        assert_eq!(snapshot.partial_errors.len(), 1);
+        assert!(matches!(
+            snapshot.partial_errors[0],
+            WorkspaceError::ReadMetadata { .. }
+        ));
+    }
+
+    #[test]
+    fn list_directory_preserves_non_ascii_file_names() {
+        let workspace = TestWorkspace::new();
+        workspace.create_file("alpha.md");
+        workspace.create_file("資料.md");
+
+        let names = entry_names(list_directory(workspace.path()).unwrap());
+
+        assert_eq!(names, ["alpha.md", "資料.md"]);
     }
 
     #[test]

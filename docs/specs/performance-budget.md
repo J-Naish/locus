@@ -19,11 +19,11 @@ Default budgets:
 
 ## Baseline
 
-Local baseline captured on 2026-05-21:
+Local baseline captured on 2026-05-22:
 
-- generated workspace: 1,006 visible entries, average 4.497 ms, max 5.004 ms
-- `core/target/release/libapp_ffi.a`: 17,680,200 bytes
-- `.build/xcode-derived/Build/Products/Release/Locus.app`: 644 KiB
+- generated workspace: 1,006 visible entries, average 4.255 ms, max 5.688 ms
+- `core/target/release/libapp_ffi.a`: 17,687,384 bytes
+- `.build/xcode-derived/Build/Products/Release/Locus.app`: 648 KiB
 
 The defaults leave headroom for CI variance and near-term features while still catching obvious dependency, bundle, and folder-listing regressions.
 

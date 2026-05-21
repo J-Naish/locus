@@ -209,14 +209,17 @@ pub extern "C" fn locus_workspace_snapshot_free(snapshot: *mut LocusWorkspaceSna
 
 impl LocusWorkspaceSnapshot {
     fn from_core_snapshot(snapshot: app_core::workspace::WorkspaceSnapshot) -> Self {
-        let mut strings = Vec::new();
-        let entries = snapshot
-            .entries
+        let app_core::workspace::WorkspaceSnapshot {
+            entries,
+            partial_errors,
+        } = snapshot;
+
+        let mut strings = Vec::with_capacity(entries.len() * 2 + partial_errors.len());
+        let entries = entries
             .into_iter()
             .map(|entry| ffi_entry(entry, &mut strings))
             .collect();
-        let partial_errors = snapshot
-            .partial_errors
+        let partial_errors = partial_errors
             .into_iter()
             .map(|error| ffi_partial_error(error, &mut strings))
             .collect();
@@ -290,8 +293,12 @@ fn push_string(strings: &mut Vec<CString>, value: impl AsRef<str>) -> *const c_c
 }
 
 fn sanitized_cstring(value: &str) -> CString {
-    CString::new(value.replace('\0', "\u{FFFD}"))
-        .expect("sanitized strings do not contain NUL bytes")
+    if value.contains('\0') {
+        CString::new(value.replace('\0', "\u{FFFD}"))
+            .expect("sanitized strings do not contain NUL bytes")
+    } else {
+        CString::new(value).expect("strings without NUL bytes are valid C strings")
+    }
 }
 
 fn system_time_to_unix_seconds(time: std::time::SystemTime) -> i64 {
@@ -458,6 +465,34 @@ mod tests {
         let message = super::locus_last_error_message();
         let message = unsafe { CStr::from_ptr(message).to_str().unwrap() };
         assert!(message.contains("workspace path is not a folder"));
+    }
+
+    #[test]
+    fn core_snapshot_partial_errors_are_exposed_through_ffi_snapshot() {
+        let core_snapshot = app_core::workspace::WorkspaceSnapshot {
+            entries: Vec::new(),
+            partial_errors: vec![app_core::workspace::WorkspaceError::ReadMetadata {
+                path: PathBuf::from("blocked.md"),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "metadata blocked for test",
+                ),
+            }],
+        };
+        let snapshot = super::LocusWorkspaceSnapshot::from_core_snapshot(core_snapshot);
+
+        assert_eq!(
+            super::locus_workspace_snapshot_partial_error_count(&snapshot),
+            1
+        );
+
+        let partial_errors = super::locus_workspace_snapshot_partial_errors(&snapshot);
+        assert!(!partial_errors.is_null());
+
+        let partial_error = unsafe { &*partial_errors };
+        assert_eq!(partial_error.status, super::LOCUS_STATUS_READ_METADATA);
+        let message = unsafe { CStr::from_ptr(partial_error.message).to_str().unwrap() };
+        assert!(message.contains("blocked.md"));
     }
 
     #[test]

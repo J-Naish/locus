@@ -24,6 +24,15 @@ final class CoreBridgeTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<LocusWorkspacePartialError>.stride, 16)
     }
 
+    func testHeaderStatusConstantsMatchRustResponses() {
+        var rawSnapshot: OpaquePointer?
+
+        let status = locus_core_list_directory(nil, false, &rawSnapshot)
+
+        XCTAssertEqual(status, LOCUS_STATUS_INVALID_ARGUMENT)
+        XCTAssertNil(rawSnapshot)
+    }
+
     func testListDirectoryReturnsSwiftWorkspaceSnapshot() async throws {
         let workspace = try TestWorkspace()
         try workspace.createDirectory(named: "Drafts")

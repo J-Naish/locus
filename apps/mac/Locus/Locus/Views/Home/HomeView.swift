@@ -6,6 +6,9 @@ struct HomeView: View {
     @State private var workspaceState: WorkspaceState = .idle
     @State private var selectedEntryID: WorkspaceEntry.ID?
     @State private var isFolderImporterPresented = false
+    // Folder loads can overlap when users refresh or choose another folder
+    // quickly; only the latest generation is allowed to update visible state.
+    @State private var workspaceLoadGeneration: UInt64 = 0
 
     private let coreBridge: CoreBridge
     private let finderService: FinderService
@@ -53,10 +56,12 @@ struct HomeView: View {
         }
     }
 
+    @MainActor
     private func openFolder() {
         isFolderImporterPresented = true
     }
 
+    @MainActor
     private func refreshWorkspace() {
         let folderURL: URL
         switch workspaceState {
@@ -68,15 +73,15 @@ struct HomeView: View {
             return
         }
 
-        Task {
-            await loadWorkspace(folderURL)
-        }
+        startWorkspaceLoad(folderURL)
     }
 
+    @MainActor
     private func handleFolderImport(_ result: Result<[URL], Error>) {
         switch result {
         case let .success(urls):
             guard let folderURL = urls.first else {
+                invalidateWorkspaceLoads()
                 selectedEntryID = nil
                 workspaceState = .failed(
                     folderURL: nil,
@@ -85,10 +90,9 @@ struct HomeView: View {
                 return
             }
 
-            Task {
-                await loadWorkspace(folderURL)
-            }
+            startWorkspaceLoad(folderURL)
         case let .failure(error):
+            invalidateWorkspaceLoads()
             selectedEntryID = nil
             workspaceState = .failed(
                 folderURL: nil,
@@ -98,7 +102,26 @@ struct HomeView: View {
     }
 
     @MainActor
-    private func loadWorkspace(_ folderURL: URL) async {
+    private func startWorkspaceLoad(_ folderURL: URL) {
+        workspaceLoadGeneration &+= 1
+        let generation = workspaceLoadGeneration
+
+        Task {
+            await loadWorkspace(folderURL, generation: generation)
+        }
+    }
+
+    @MainActor
+    private func invalidateWorkspaceLoads() {
+        workspaceLoadGeneration &+= 1
+    }
+
+    @MainActor
+    private func loadWorkspace(_ folderURL: URL, generation: UInt64) async {
+        guard generation == workspaceLoadGeneration else {
+            return
+        }
+
         workspaceState = .loading(folderURL: folderURL)
         // This covers the immediate directory read. Recents and Favorites will
         // store security-scoped bookmarks once sandboxing is enabled.
@@ -111,9 +134,15 @@ struct HomeView: View {
 
         do {
             let snapshot = try await coreBridge.listDirectory(at: folderURL)
+            guard generation == workspaceLoadGeneration else {
+                return
+            }
             selectedEntryID = nil
             workspaceState = .ready(folderURL: folderURL, snapshot: snapshot, loadedAt: Date())
         } catch {
+            guard generation == workspaceLoadGeneration else {
+                return
+            }
             selectedEntryID = nil
             workspaceState = .failed(
                 folderURL: folderURL,
@@ -324,6 +353,7 @@ private struct WorkspaceToolbarView: View {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
             .labelStyle(.iconOnly)
+            .keyboardShortcut("r", modifiers: [.command])
             .help("Refresh")
         }
     }
