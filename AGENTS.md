@@ -134,8 +134,11 @@ Avoid adding:
 - Prefer native controls and OS facilities.
 - Make file changes explicit and predictable.
 - Do not hide file formats behind abstractions that make users unsure what will be saved.
-- Before implementing a meaningful UI change, explain what user flow or surface you intend to build, what UI shape you think it should take, and ask the user to confirm or adjust the direction.
-- When UI changes are made or a new UI slice is complete, explain what changed, how to run it, and what should be checked, then ask the user to verify it on their actual Mac before treating the experience as accepted.
+- Early UI implementation should prioritize getting coherent product flows working end-to-end over polishing every visual detail in isolation.
+- For early feature slices, use a simple native UI shape that fits the product direction and keep moving; do not force frequent fine-grained UI review before enough functionality exists to judge the experience.
+- Explain the intended user flow before starting a substantial new UI surface, but avoid blocking implementation on micro-level visual decisions unless the choice would be hard to reverse.
+- Once a meaningful set of UI functionality is in place, shift into a deliberate polish pass with the user: review the actual app on a Mac, refine layout, hierarchy, empty/loading/error states, keyboard behavior, and overall interaction feel together.
+- When UI changes are made or a new UI slice is complete, explain what changed, how to run it, and what should be checked. Treat user review on the actual Mac as the acceptance path for visual quality and interaction feel, especially during polish passes.
 - Use automated tests and local builds to catch functional regressions, but do not treat them as a substitute for user review of visual quality, interaction feel, responsiveness, and native polish.
 
 ## Site Rules
