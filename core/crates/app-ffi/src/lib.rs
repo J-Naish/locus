@@ -20,17 +20,13 @@ thread_local! {
         RefCell::new(CString::new("").expect("empty strings never contain NUL bytes"));
 }
 
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocusStatus {
-    Ok = 0,
-    InvalidArgument = 1,
-    NotFound = 2,
-    NotDirectory = 3,
-    ReadDirectory = 4,
-    ReadEntry = 5,
-    ReadMetadata = 6,
-}
+pub const LOCUS_STATUS_OK: u32 = 0;
+pub const LOCUS_STATUS_INVALID_ARGUMENT: u32 = 1;
+pub const LOCUS_STATUS_NOT_FOUND: u32 = 2;
+pub const LOCUS_STATUS_NOT_DIRECTORY: u32 = 3;
+pub const LOCUS_STATUS_READ_DIRECTORY: u32 = 4;
+pub const LOCUS_STATUS_READ_ENTRY: u32 = 5;
+pub const LOCUS_STATUS_READ_METADATA: u32 = 6;
 
 pub const LOCUS_WORKSPACE_ENTRY_DIRECTORY: u32 = 1;
 pub const LOCUS_WORKSPACE_ENTRY_FILE: u32 = 2;
@@ -63,7 +59,7 @@ pub struct LocusWorkspaceEntry {
 
 #[repr(C)]
 pub struct LocusWorkspacePartialError {
-    pub status: LocusStatus,
+    pub status: u32,
     pub message: *const c_char,
 }
 
@@ -98,12 +94,12 @@ pub extern "C" fn locus_core_list_directory(
     path: *const c_char,
     include_ignored: bool,
     out_snapshot: *mut *mut LocusWorkspaceSnapshot,
-) -> LocusStatus {
+) -> u32 {
     clear_last_error_message();
 
     if out_snapshot.is_null() {
         set_last_error_message("out_snapshot must not be NULL");
-        return LocusStatus::InvalidArgument;
+        return LOCUS_STATUS_INVALID_ARGUMENT;
     }
 
     unsafe {
@@ -112,7 +108,7 @@ pub extern "C" fn locus_core_list_directory(
 
     let Some(path) = string_from_c_path(path) else {
         set_last_error_message("path must be non-NULL UTF-8");
-        return LocusStatus::InvalidArgument;
+        return LOCUS_STATUS_INVALID_ARGUMENT;
     };
 
     let options = WorkspaceListOptions::new().include_ignored(include_ignored);
@@ -122,7 +118,7 @@ pub extern "C" fn locus_core_list_directory(
             unsafe {
                 *out_snapshot = Box::into_raw(Box::new(ffi_snapshot));
             }
-            LocusStatus::Ok
+            LOCUS_STATUS_OK
         }
         Err(error) => {
             set_last_error_message(error.to_string());
@@ -312,13 +308,13 @@ fn file_type_code(file_type: FileType) -> u32 {
     }
 }
 
-fn status_from_workspace_error(error: &WorkspaceError) -> LocusStatus {
+fn status_from_workspace_error(error: &WorkspaceError) -> u32 {
     match error {
-        WorkspaceError::NotFound(_) => LocusStatus::NotFound,
-        WorkspaceError::NotDirectory(_) => LocusStatus::NotDirectory,
-        WorkspaceError::ReadDirectory { .. } => LocusStatus::ReadDirectory,
-        WorkspaceError::ReadEntry { .. } => LocusStatus::ReadEntry,
-        WorkspaceError::ReadMetadata { .. } => LocusStatus::ReadMetadata,
+        WorkspaceError::NotFound(_) => LOCUS_STATUS_NOT_FOUND,
+        WorkspaceError::NotDirectory(_) => LOCUS_STATUS_NOT_DIRECTORY,
+        WorkspaceError::ReadDirectory { .. } => LOCUS_STATUS_READ_DIRECTORY,
+        WorkspaceError::ReadEntry { .. } => LOCUS_STATUS_READ_ENTRY,
+        WorkspaceError::ReadMetadata { .. } => LOCUS_STATUS_READ_METADATA,
     }
 }
 
@@ -370,7 +366,7 @@ mod tests {
         let path = CString::new(workspace.path().to_string_lossy().as_ref()).unwrap();
         let status = super::locus_core_list_directory(path.as_ptr(), false, &mut snapshot);
 
-        assert_eq!(status, super::LocusStatus::Ok);
+        assert_eq!(status, super::LOCUS_STATUS_OK);
         assert!(!snapshot.is_null());
         assert_eq!(super::locus_workspace_snapshot_entry_count(snapshot), 2);
 
@@ -412,7 +408,7 @@ mod tests {
         let path = CString::new(workspace.path().to_string_lossy().as_ref()).unwrap();
         let status = super::locus_core_list_directory(path.as_ptr(), true, &mut snapshot);
 
-        assert_eq!(status, super::LocusStatus::Ok);
+        assert_eq!(status, super::LOCUS_STATUS_OK);
 
         let entries = unsafe {
             std::slice::from_raw_parts(
@@ -439,7 +435,7 @@ mod tests {
         let path = CString::new(file_path.to_string_lossy().as_ref()).unwrap();
         let status = super::locus_core_list_directory(path.as_ptr(), false, &mut snapshot);
 
-        assert_eq!(status, super::LocusStatus::NotDirectory);
+        assert_eq!(status, super::LOCUS_STATUS_NOT_DIRECTORY);
         assert!(snapshot.is_null());
 
         let message = super::locus_last_error_message();
@@ -455,7 +451,7 @@ mod tests {
 
         assert_eq!(
             super::locus_core_list_directory(std::ptr::null(), false, &mut snapshot),
-            super::LocusStatus::InvalidArgument
+            super::LOCUS_STATUS_INVALID_ARGUMENT
         );
         let message = super::locus_last_error_message();
         let message = unsafe { CStr::from_ptr(message).to_str().unwrap() };
@@ -463,7 +459,7 @@ mod tests {
 
         assert_eq!(
             super::locus_core_list_directory(path.as_ptr(), false, std::ptr::null_mut()),
-            super::LocusStatus::InvalidArgument
+            super::LOCUS_STATUS_INVALID_ARGUMENT
         );
         let message = super::locus_last_error_message();
         let message = unsafe { CStr::from_ptr(message).to_str().unwrap() };

@@ -9,15 +9,15 @@
 extern "C" {
 #endif
 
-typedef enum LocusStatus {
-    LOCUS_STATUS_OK = 0,
-    LOCUS_STATUS_INVALID_ARGUMENT = 1,
-    LOCUS_STATUS_NOT_FOUND = 2,
-    LOCUS_STATUS_NOT_DIRECTORY = 3,
-    LOCUS_STATUS_READ_DIRECTORY = 4,
-    LOCUS_STATUS_READ_ENTRY = 5,
-    LOCUS_STATUS_READ_METADATA = 6,
-} LocusStatus;
+typedef uint32_t LocusStatus;
+
+#define LOCUS_STATUS_OK ((LocusStatus)0u)
+#define LOCUS_STATUS_INVALID_ARGUMENT ((LocusStatus)1u)
+#define LOCUS_STATUS_NOT_FOUND ((LocusStatus)2u)
+#define LOCUS_STATUS_NOT_DIRECTORY ((LocusStatus)3u)
+#define LOCUS_STATUS_READ_DIRECTORY ((LocusStatus)4u)
+#define LOCUS_STATUS_READ_ENTRY ((LocusStatus)5u)
+#define LOCUS_STATUS_READ_METADATA ((LocusStatus)6u)
 
 /*
  * Status policy:
@@ -27,25 +27,25 @@ typedef enum LocusStatus {
  *   may add status values.
  */
 
-typedef enum LocusWorkspaceEntryKind {
-    LOCUS_WORKSPACE_ENTRY_DIRECTORY = 1,
-    LOCUS_WORKSPACE_ENTRY_FILE = 2,
-    LOCUS_WORKSPACE_ENTRY_SYMLINK = 3,
-    LOCUS_WORKSPACE_ENTRY_OTHER = 4,
-} LocusWorkspaceEntryKind;
+typedef uint32_t LocusWorkspaceEntryKind;
 
-typedef enum LocusFileType {
-    LOCUS_FILE_TYPE_MARKDOWN = 1,
-    LOCUS_FILE_TYPE_STRUCTURED_TEXT = 2,
-    LOCUS_FILE_TYPE_PDF = 3,
-    LOCUS_FILE_TYPE_OFFICE = 4,
-    LOCUS_FILE_TYPE_IMAGE = 5,
-    LOCUS_FILE_TYPE_AUDIO = 6,
-    LOCUS_FILE_TYPE_VIDEO = 7,
-    LOCUS_FILE_TYPE_PLAIN_TEXT = 8,
-    LOCUS_FILE_TYPE_CODE = 9,
-    LOCUS_FILE_TYPE_UNKNOWN = 10,
-} LocusFileType;
+#define LOCUS_WORKSPACE_ENTRY_DIRECTORY ((LocusWorkspaceEntryKind)1u)
+#define LOCUS_WORKSPACE_ENTRY_FILE ((LocusWorkspaceEntryKind)2u)
+#define LOCUS_WORKSPACE_ENTRY_SYMLINK ((LocusWorkspaceEntryKind)3u)
+#define LOCUS_WORKSPACE_ENTRY_OTHER ((LocusWorkspaceEntryKind)4u)
+
+typedef uint32_t LocusFileType;
+
+#define LOCUS_FILE_TYPE_MARKDOWN ((LocusFileType)1u)
+#define LOCUS_FILE_TYPE_STRUCTURED_TEXT ((LocusFileType)2u)
+#define LOCUS_FILE_TYPE_PDF ((LocusFileType)3u)
+#define LOCUS_FILE_TYPE_OFFICE ((LocusFileType)4u)
+#define LOCUS_FILE_TYPE_IMAGE ((LocusFileType)5u)
+#define LOCUS_FILE_TYPE_AUDIO ((LocusFileType)6u)
+#define LOCUS_FILE_TYPE_VIDEO ((LocusFileType)7u)
+#define LOCUS_FILE_TYPE_PLAIN_TEXT ((LocusFileType)8u)
+#define LOCUS_FILE_TYPE_CODE ((LocusFileType)9u)
+#define LOCUS_FILE_TYPE_UNKNOWN ((LocusFileType)10u)
 
 typedef struct LocusWorkspaceEntry {
     /* Borrowed UTF-8 strings. Valid only while the parent snapshot is alive. */
