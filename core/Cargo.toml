@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "crates/app-core",
+    "crates/app-ffi",
+    "crates/app-cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "UNLICENSED"
+repository = "https://github.com/nash/locus"
+
+[workspace.lints.rust]
+unsafe_code = "warn"

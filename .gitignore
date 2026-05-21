@@ -1,0 +1,32 @@
+.DS_Store
+
+# Xcode / Swift
+DerivedData/
+.build/
+*.xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Rust
+target/
+Cargo.lock
+
+# .NET / Windows
+bin/
+obj/
+.vs/
+
+# Site tooling
+node_modules/
+dist/
+.astro/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Generated artifacts
+artifacts/
+coverage/
+tmp/
