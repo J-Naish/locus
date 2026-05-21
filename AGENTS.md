@@ -37,6 +37,7 @@ Before making product or architecture decisions, read the relevant docs:
 - `docs/product/mvp-roadmap.md` for scope and sequencing
 - `docs/architecture/technical-direction.md` for platform and testing direction
 - `docs/specs/core-feature-scope.md` for feature expectations
+- `docs/specs/performance-budget.md` for speed and size smoke budgets
 
 ## Repository Map
 
@@ -97,6 +98,12 @@ Useful commands:
 ```sh
 cargo test --manifest-path core/Cargo.toml
 cargo check --manifest-path core/Cargo.toml
+```
+
+Before handoff for changes that can affect speed, size, startup, file listing, FFI, or the macOS app bundle, run:
+
+```sh
+scripts/perf-smoke.sh
 ```
 
 For the site:
