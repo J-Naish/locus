@@ -63,6 +63,21 @@ Before making product or architecture decisions, read the relevant docs:
 - Keep memory ownership explicit; Rust-allocated memory must be released by Rust.
 - Use SQLite for boring, inspectable local persistence unless there is a clear reason not to.
 
+## Performance, Weight, and Polish Rules
+
+Performance, lightweight behavior, and refined UX/UI are top-priority product qualities. Treat them as core requirements, not later polish.
+
+- Prefer simple native OS capabilities over bundled runtimes, heavy dependencies, or custom infrastructure.
+- Keep startup work minimal; do not eagerly scan, parse, index, thumbnail, hash, or preview large folders.
+- Load file lists, previews, metadata, thumbnails, and indexes lazily and incrementally.
+- Keep UI interactions responsive while background work is running.
+- Treat slow startup, unnecessary memory growth, avoidable disk churn, and dependency bloat as product bugs.
+- Measure before adding broad caching, background indexing, or complex abstractions.
+- Choose boring, inspectable implementations unless extra complexity clearly improves responsiveness, reliability, or user clarity.
+- Preserve a quiet, native, document-oriented interface; visual polish should make common work feel clearer and calmer, not more decorative.
+- Refine empty states, loading states, error states, keyboard behavior, and file handoff flows as part of implementation, not as cleanup.
+- Do not accept technically correct UI that feels dense, developer-centric, sluggish, surprising, or unfinished.
+
 ## Testing Rules
 
 Tests are part of the implementation, not cleanup.
