@@ -74,6 +74,11 @@ scripts/perf-smoke.sh
 
 - New tests should use the repository's active test framework unless deliberately migrating.
 - Use Swift Testing (`import Testing`) for new test surfaces only when the project has adopted it for that area; otherwise follow the existing XCTest pattern.
+- Add automated tests alongside UI-facing feature work; when the expected behavior is subtle or regression-prone, write the test first or in the same change as the implementation.
+- Use XCUITest for user-visible macOS flows that cannot be covered by view-independent XCTest, especially keyboard shortcuts, focus behavior, accessibility identifiers, empty/error states, and file-list interactions.
+- Prefer deterministic fixture workspaces and test-only launch arguments over automating system file dialogs in UI tests.
+- Give UI elements stable accessibility labels or identifiers before relying on them from XCUITest.
+- If a local macOS runner cannot expose app windows to XCUITest because Accessibility permission is missing, skip with an explicit `XCTSkip` message; do not skip product behavior assertions once the window is available.
 - Each test must be isolated and avoid shared mutable state.
 - Add tests before implementation for subtle, risky, or unclear behavior.
 - Cover edge cases:

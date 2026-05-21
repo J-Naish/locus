@@ -14,10 +14,18 @@
 		1A0000010000000000000042 /* FinderService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000043 /* FinderService.swift */; };
 		1A0000010000000000000045 /* WorkspaceEntrySearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000046 /* WorkspaceEntrySearch.swift */; };
 		1A0000010000000000000047 /* WorkspaceEntrySearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000048 /* WorkspaceEntrySearchTests.swift */; };
+		1A0000010000000000000051 /* WorkspaceSearchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000053 /* WorkspaceSearchUITests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
 		1A0000010000000000000005 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1A0000010000000000000006 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1A0000010000000000000007;
+			remoteInfo = Locus;
+		};
+		1A0000010000000000000060 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 1A0000010000000000000006 /* Project object */;
 			proxyType = 1;
@@ -29,6 +37,7 @@
 /* Begin PBXFileReference section */
 		1A0000010000000000000008 /* Locus.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Locus.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A0000010000000000000009 /* LocusTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LocusTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1A0000010000000000000052 /* LocusUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LocusUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A0000010000000000000011 /* LocusApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocusApp.swift; sourceTree = "<group>"; };
 		1A0000010000000000000012 /* CoreBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreBridge.swift; sourceTree = "<group>"; };
 		1A0000010000000000000013 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
@@ -37,6 +46,7 @@
 		1A0000010000000000000043 /* FinderService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderService.swift; sourceTree = "<group>"; };
 		1A0000010000000000000046 /* WorkspaceEntrySearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntrySearch.swift; sourceTree = "<group>"; };
 		1A0000010000000000000048 /* WorkspaceEntrySearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntrySearchTests.swift; sourceTree = "<group>"; };
+		1A0000010000000000000053 /* WorkspaceSearchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSearchUITests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -54,6 +64,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		1A0000010000000000000054 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -62,6 +79,7 @@
 			children = (
 				1A0000010000000000000019 /* Locus */,
 				1A0000010000000000000020 /* LocusTests */,
+				1A0000010000000000000055 /* LocusUITests */,
 				1A0000010000000000000021 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -91,8 +109,17 @@
 			children = (
 				1A0000010000000000000008 /* Locus.app */,
 				1A0000010000000000000009 /* LocusTests.xctest */,
+				1A0000010000000000000052 /* LocusUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		1A0000010000000000000055 /* LocusUITests */ = {
+			isa = PBXGroup;
+			children = (
+				1A0000010000000000000053 /* WorkspaceSearchUITests.swift */,
+			);
+			path = LocusUITests;
 			sourceTree = "<group>";
 		};
 		1A0000010000000000000022 /* App */ = {
@@ -176,6 +203,24 @@
 			productReference = 1A0000010000000000000009 /* LocusTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		1A0000010000000000000056 /* LocusUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1A0000010000000000000063 /* Build configuration list for PBXNativeTarget "LocusUITests" */;
+			buildPhases = (
+				1A0000010000000000000058 /* Sources */,
+				1A0000010000000000000054 /* Frameworks */,
+				1A0000010000000000000057 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				1A0000010000000000000059 /* PBXTargetDependency */,
+			);
+			name = LocusUITests;
+			productName = LocusUITests;
+			productReference = 1A0000010000000000000052 /* LocusUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -190,6 +235,10 @@
 						CreatedOnToolsVersion = 26.4;
 					};
 					1A0000010000000000000030 = {
+						CreatedOnToolsVersion = 26.4;
+						TestTargetID = 1A0000010000000000000007;
+					};
+					1A0000010000000000000056 = {
 						CreatedOnToolsVersion = 26.4;
 						TestTargetID = 1A0000010000000000000007;
 					};
@@ -211,6 +260,7 @@
 			targets = (
 				1A0000010000000000000007 /* Locus */,
 				1A0000010000000000000030 /* LocusTests */,
+				1A0000010000000000000056 /* LocusUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -224,6 +274,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		1A0000010000000000000033 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1A0000010000000000000057 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -276,6 +333,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		1A0000010000000000000058 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A0000010000000000000051 /* WorkspaceSearchUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -283,6 +348,11 @@
 			isa = PBXTargetDependency;
 			target = 1A0000010000000000000007 /* Locus */;
 			targetProxy = 1A0000010000000000000005 /* PBXContainerItemProxy */;
+		};
+		1A0000010000000000000059 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1A0000010000000000000007 /* Locus */;
+			targetProxy = 1A0000010000000000000060 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -436,6 +506,44 @@
 			};
 			name = Release;
 		};
+		1A0000010000000000000061 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.nash.locus.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+				TEST_TARGET_NAME = Locus;
+			};
+			name = Debug;
+		};
+		1A0000010000000000000062 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.nash.locus.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+				TEST_TARGET_NAME = Locus;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -462,6 +570,15 @@
 			buildConfigurations = (
 				1A0000010000000000000040 /* Debug */,
 				1A0000010000000000000041 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1A0000010000000000000063 /* Build configuration list for PBXNativeTarget "LocusUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A0000010000000000000061 /* Debug */,
+				1A0000010000000000000062 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

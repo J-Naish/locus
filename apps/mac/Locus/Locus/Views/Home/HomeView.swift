@@ -7,16 +7,23 @@ struct HomeView: View {
     @State private var workspaceState: WorkspaceState = .idle
     @State private var selectedEntryID: WorkspaceEntry.ID?
     @State private var isFolderImporterPresented = false
+    @State private var didStartInitialFolderLoad = false
     // Folder loads can overlap when users refresh or choose another folder
     // quickly; only the latest generation is allowed to update visible state.
     @State private var workspaceLoadGeneration: UInt64 = 0
 
     private let coreBridge: CoreBridge
     private let finderService: FinderService
+    private let initialFolderURL: URL?
 
-    init(coreBridge: CoreBridge = CoreBridge(), finderService: FinderService = FinderService()) {
+    init(
+        coreBridge: CoreBridge = CoreBridge(),
+        finderService: FinderService = FinderService(),
+        initialFolderURL: URL? = nil
+    ) {
         self.coreBridge = coreBridge
         self.finderService = finderService
+        self.initialFolderURL = initialFolderURL
     }
 
     var body: some View {
@@ -36,6 +43,7 @@ struct HomeView: View {
         .frame(minWidth: 820, minHeight: 520)
         .task {
             await loadRuntimeStatus()
+            loadInitialFolderIfNeeded()
         }
         .fileImporter(
             isPresented: $isFolderImporterPresented,
@@ -55,6 +63,16 @@ struct HomeView: View {
         } catch {
             runtimeStatus = .failed(error.localizedDescription)
         }
+    }
+
+    @MainActor
+    private func loadInitialFolderIfNeeded() {
+        guard !didStartInitialFolderLoad, let initialFolderURL else {
+            return
+        }
+
+        didStartInitialFolderLoad = true
+        startWorkspaceLoad(initialFolderURL)
     }
 
     @MainActor
@@ -438,6 +456,7 @@ private struct WorkspaceToolbarView: View {
                 .focused(isSearchFocused)
                 .frame(width: 180)
                 .accessibilityLabel("Search files and folders")
+                .accessibilityIdentifier("workspace-search-field")
 
             Button(action: refresh) {
                 Label("Refresh", systemImage: "arrow.clockwise")
