@@ -84,6 +84,22 @@ Important constraints:
 - run heavy work in the background
 - keep the UI responsive during indexing and search
 
+## Testing Direction
+
+Development speed depends on having careful tests around each module. Tests are not optional supporting work; they are part of how the app should be designed and implemented.
+
+Default expectations:
+
+- write unit tests for core logic by default
+- prefer small, deterministic module-level tests before broad integration tests
+- use test-first development when behavior is unclear or failure modes matter
+- add integration tests for cross-module flows such as scanning, indexing, search, cache, diff, and FFI behavior
+- keep fixtures explicit, minimal, and reusable
+- avoid relying on manual app testing for behavior that can be verified automatically
+- treat regressions as missing tests first, then as implementation bugs
+
+Unit tests are especially important for the Rust core because it owns shared behavior that both macOS and future Windows shells depend on.
+
 ## Storage and Search
 
 SQLite is the default persistence layer.
