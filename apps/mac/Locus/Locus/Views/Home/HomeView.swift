@@ -36,7 +36,7 @@ struct HomeView: View {
                 openFolder: openFolder,
                 refresh: refreshWorkspace,
                 reveal: revealInFinder,
-                openExternally: openExternally
+                performOpenAction: performOpenAction
             )
         }
         .padding(28)
@@ -196,8 +196,14 @@ struct HomeView: View {
         finderService.reveal(entry.url)
     }
 
-    private func openExternally(_ entry: WorkspaceEntry) {
-        finderService.openExternally(entry.url)
+    @MainActor
+    private func performOpenAction(_ action: WorkspaceEntryOpenAction) {
+        switch action {
+        case let .browseFolder(url):
+            startWorkspaceLoad(url)
+        case let .openExternally(url):
+            finderService.openExternally(url)
+        }
     }
 
     @MainActor
@@ -266,7 +272,7 @@ private struct WorkspaceContentView: View {
     let openFolder: () -> Void
     let refresh: () -> Void
     let reveal: (WorkspaceEntry) -> Void
-    let openExternally: (WorkspaceEntry) -> Void
+    let performOpenAction: (WorkspaceEntryOpenAction) -> Void
 
     var body: some View {
         Group {
@@ -283,7 +289,7 @@ private struct WorkspaceContentView: View {
                     selectedEntryID: $selectedEntryID,
                     refresh: refresh,
                     reveal: reveal,
-                    openExternally: openExternally
+                    performOpenAction: performOpenAction
                 )
             case let .failed(folderURL, message):
                 WorkspaceErrorView(
@@ -336,7 +342,7 @@ private struct WorkspaceBrowserView: View {
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let refresh: () -> Void
     let reveal: (WorkspaceEntry) -> Void
-    let openExternally: (WorkspaceEntry) -> Void
+    let performOpenAction: (WorkspaceEntryOpenAction) -> Void
     @State private var searchQuery = ""
     @FocusState private var isSearchFocused: Bool
 
@@ -374,7 +380,7 @@ private struct WorkspaceBrowserView: View {
                     entries: visibleEntries,
                     selectedEntryID: $selectedEntryID,
                     reveal: reveal,
-                    openExternally: openExternally
+                    performOpenAction: performOpenAction
                 )
             }
         }
@@ -472,7 +478,7 @@ private struct WorkspaceEntriesTable: View {
     let entries: [WorkspaceEntry]
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let reveal: (WorkspaceEntry) -> Void
-    let openExternally: (WorkspaceEntry) -> Void
+    let performOpenAction: (WorkspaceEntryOpenAction) -> Void
 
     var body: some View {
         Table(entries, selection: $selectedEntryID) {
@@ -507,11 +513,14 @@ private struct WorkspaceEntriesTable: View {
         }
         .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
             let selectedEntries = entries.filter { selection.contains($0.id) }
+            let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
 
             Button("Open") {
-                selectedEntries.forEach(openExternally)
+                if let openAction {
+                    performOpenAction(openAction)
+                }
             }
-            .disabled(selectedEntries.isEmpty)
+            .disabled(openAction == nil)
 
             Button("Reveal in Finder") {
                 selectedEntries.forEach(reveal)
