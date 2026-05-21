@@ -134,6 +134,9 @@ Avoid adding:
 - Prefer native controls and OS facilities.
 - Make file changes explicit and predictable.
 - Do not hide file formats behind abstractions that make users unsure what will be saved.
+- Before implementing a meaningful UI change, explain what user flow or surface you intend to build, what UI shape you think it should take, and ask the user to confirm or adjust the direction.
+- When UI changes are made or a new UI slice is complete, explain what changed, how to run it, and what should be checked, then ask the user to verify it on their actual Mac before treating the experience as accepted.
+- Use automated tests and local builds to catch functional regressions, but do not treat them as a substitute for user review of visual quality, interaction feel, responsiveness, and native polish.
 
 ## Site Rules
 
