@@ -15,11 +15,6 @@ bin/
 obj/
 .vs/
 
-# Site tooling
-node_modules/
-dist/
-.astro/
-
 # Local environment
 .env
 .env.*

@@ -27,7 +27,6 @@ MVP scope:
 - command palette
 - file change detection
 - external change review
-- static official site
 
 ## Phase 2: macOS Quality
 

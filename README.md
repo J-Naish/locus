@@ -20,7 +20,6 @@ docs/
   adr/          architecture decision records
 fixtures/       sample files and workspaces for tests
 scripts/        development and release automation
-site/           static marketing and download site
 ```
 
 ## Current Status

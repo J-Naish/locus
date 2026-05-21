@@ -48,7 +48,6 @@ Before making product or architecture decisions, read the relevant docs:
 - `core/crates/app-ffi/`: C ABI layer for native app integration
 - `core/crates/app-cli/`: debugging and benchmark CLI
 - `core/include/`: exported or generated C headers
-- `site/`: official static site, not the product app
 - `docs/`: product, architecture, specs, and ADRs
 - `fixtures/`: reusable test fixtures
 - `scripts/`: development, build, release, and platform scripts
@@ -106,13 +105,6 @@ Before handoff for changes that can affect speed, size, startup, file listing, F
 scripts/perf-smoke.sh
 ```
 
-For the site:
-
-```sh
-cd site
-pnpm build
-```
-
 ## Product Scope Rules
 
 Core file experiences should be strong:
@@ -147,12 +139,6 @@ Avoid adding:
 - Once a meaningful set of UI functionality is in place, shift into a deliberate polish pass with the user: review the actual app on a Mac, refine layout, hierarchy, empty/loading/error states, keyboard behavior, and overall interaction feel together.
 - When UI changes are made or a new UI slice is complete, explain what changed, how to run it, and what should be checked. Treat user review on the actual Mac as the acceptance path for visual quality and interaction feel, especially during polish passes.
 - Use automated tests and local builds to catch functional regressions, but do not treat them as a substitute for user review of visual quality, interaction feel, responsiveness, and native polish.
-
-## Site Rules
-
-`site/` is the marketing and download site. Keep its JavaScript tooling scoped there.
-
-Do not move it under `apps/` unless it becomes an actual product web app.
 
 ## Documentation Rules
 
