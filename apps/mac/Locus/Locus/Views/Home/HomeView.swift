@@ -18,6 +18,7 @@ struct HomeView: View {
 
     private let coreBridge: CoreBridge
     private let finderService: FinderService
+    private let quickLookPreviewService: any QuickLookPreviewing
     private let clipboardService: ClipboardService
     private let favoriteFolderStore: FavoriteFolderStore
     private let recentFileStore: RecentFileStore
@@ -27,6 +28,7 @@ struct HomeView: View {
     init(
         coreBridge: CoreBridge = CoreBridge(),
         finderService: FinderService = FinderService(),
+        quickLookPreviewService: any QuickLookPreviewing = QuickLookPreviewService(),
         clipboardService: ClipboardService = ClipboardService(),
         favoriteFolderStore: FavoriteFolderStore = FavoriteFolderStore(),
         recentFileStore: RecentFileStore = RecentFileStore(),
@@ -35,6 +37,7 @@ struct HomeView: View {
     ) {
         self.coreBridge = coreBridge
         self.finderService = finderService
+        self.quickLookPreviewService = quickLookPreviewService
         self.clipboardService = clipboardService
         self.favoriteFolderStore = favoriteFolderStore
         self.recentFileStore = recentFileStore
@@ -67,6 +70,7 @@ struct HomeView: View {
                     refresh: refreshWorkspace,
                     openParentFolder: openParentFolder,
                     toggleFavoriteFolder: toggleFavoriteFolder,
+                    preview: previewURLs,
                     reveal: revealInFinder,
                     copyPaths: copyPaths,
                     performOpenAction: performOpenAction
@@ -231,6 +235,11 @@ struct HomeView: View {
 
     private func revealInFinder(_ entry: WorkspaceEntry) {
         finderService.reveal(entry.url)
+    }
+
+    @MainActor
+    private func previewURLs(_ urls: [URL]) {
+        quickLookPreviewService.preview(urls)
     }
 
     @MainActor
@@ -452,6 +461,7 @@ private struct WorkspaceActions {
     let refresh: () -> Void
     let openParentFolder: () -> Void
     let toggleFavoriteFolder: () -> Void
+    let preview: ([URL]) -> Void
     let reveal: (WorkspaceEntry) -> Void
     let copyPaths: ([WorkspaceEntry]) -> Void
     let performOpenAction: (WorkspaceEntryOpenAction) -> Void
@@ -519,6 +529,7 @@ private struct WorkspaceBrowserView: View {
                 WorkspaceEntriesTable(
                     entries: visibleEntries,
                     selectedEntryID: $selectedEntryID,
+                    isSearchFocused: isSearchFocused,
                     actions: actions
                 )
             }
@@ -654,6 +665,7 @@ private struct WorkspaceToolbarView: View {
 private struct WorkspaceEntriesTable: View {
     let entries: [WorkspaceEntry]
     @Binding var selectedEntryID: WorkspaceEntry.ID?
+    let isSearchFocused: Bool
     let actions: WorkspaceActions
 
     var body: some View {
@@ -690,6 +702,7 @@ private struct WorkspaceEntriesTable: View {
         .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
             let selectedEntries = entries(for: selection)
             let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
+            let previewURLs = WorkspaceEntryPreviewActionResolver.previewURLs(for: selectedEntries)
 
             Button("Open") {
                 if let openAction {
@@ -697,6 +710,13 @@ private struct WorkspaceEntriesTable: View {
                 }
             }
             .disabled(openAction == nil)
+
+            Button("Preview") {
+                if let previewURLs {
+                    actions.preview(previewURLs)
+                }
+            }
+            .disabled(previewURLs == nil)
 
             Button("Reveal in Finder") {
                 selectedEntries.forEach(actions.reveal)
@@ -710,6 +730,7 @@ private struct WorkspaceEntriesTable: View {
         } primaryAction: { selection in
             performPrimaryAction(for: selection)
         }
+        .background(previewKeyMonitor)
     }
 
     private func performPrimaryAction(for selection: Set<WorkspaceEntry.ID>) {
@@ -722,6 +743,77 @@ private struct WorkspaceEntriesTable: View {
 
     private func entries(for selection: Set<WorkspaceEntry.ID>) -> [WorkspaceEntry] {
         entries.filter { selection.contains($0.id) }
+    }
+
+    private var previewKeyMonitor: some View {
+        LocalSpaceKeyMonitor(isEnabled: !isSearchFocused && selectedPreviewURLs != nil) {
+            guard let selectedPreviewURLs else {
+                return false
+            }
+
+            actions.preview(selectedPreviewURLs)
+            return true
+        }
+        .frame(width: 0, height: 0)
+    }
+
+    private var selectedEntries: [WorkspaceEntry] {
+        guard let selectedEntryID else {
+            return []
+        }
+
+        return entries(for: Set([selectedEntryID]))
+    }
+
+    private var selectedPreviewURLs: [URL]? {
+        WorkspaceEntryPreviewActionResolver.previewURLs(for: selectedEntries)
+    }
+}
+
+private struct LocalSpaceKeyMonitor: NSViewRepresentable {
+    let isEnabled: Bool
+    let onSpace: () -> Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isEnabled: isEnabled, onSpace: onSpace)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.isEnabled = isEnabled
+        context.coordinator.onSpace = onSpace
+    }
+
+    final class Coordinator {
+        private static let spaceKeyCode: UInt16 = 49
+        private var monitor: Any?
+
+        var isEnabled: Bool
+        var onSpace: () -> Bool
+
+        init(isEnabled: Bool, onSpace: @escaping () -> Bool) {
+            self.isEnabled = isEnabled
+            self.onSpace = onSpace
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self,
+                      self.isEnabled,
+                      event.keyCode == Self.spaceKeyCode,
+                      event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty else {
+                    return event
+                }
+
+                return self.onSpace() ? nil : event
+            }
+        }
+
+        deinit {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+        }
     }
 }
 

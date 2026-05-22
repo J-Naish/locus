@@ -5,6 +5,7 @@ struct LocusApp: App {
     var body: some Scene {
         WindowGroup {
             HomeView(
+                quickLookPreviewService: Self.quickLookPreviewService,
                 favoriteFolderStore: Self.favoriteFolderStore,
                 recentFileStore: Self.recentFileStore,
                 recentFolderStore: Self.recentFolderStore,
@@ -13,6 +14,21 @@ struct LocusApp: App {
         }
         .windowResizability(.contentMinSize)
     }
+
+    private static let quickLookPreviewService: any QuickLookPreviewing = {
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1" else {
+            return QuickLookPreviewService()
+        }
+
+        return UITestQuickLookPreviewService(
+            key: uiTestPreviewInvocationsKey,
+            fileURL: uiTestPreviewInvocationsFileURL
+        )
+        #else
+        return QuickLookPreviewService()
+        #endif
+    }()
 
     private static let favoriteFolderStore: FavoriteFolderStore = {
         #if DEBUG
@@ -118,6 +134,20 @@ struct LocusApp: App {
     private static var uiTestRecentFilesKey: String {
         argumentValue(named: "--ui-test-recent-files-key", in: ProcessInfo.processInfo.arguments)
             ?? "recentFiles.uiTests"
+    }
+
+    private static var uiTestPreviewInvocationsKey: String {
+        argumentValue(named: "--ui-test-preview-invocations-key", in: ProcessInfo.processInfo.arguments)
+            ?? "previewInvocations.uiTests"
+    }
+
+    private static var uiTestPreviewInvocationsFileURL: URL? {
+        guard let path = argumentValue(named: "--ui-test-preview-invocations-file", in: ProcessInfo.processInfo.arguments),
+              !path.isEmpty else {
+            return nil
+        }
+
+        return URL(filePath: path, directoryHint: .notDirectory)
     }
 
     private static func uiTestWorkspacePath(in arguments: [String]) -> String? {
