@@ -7,6 +7,30 @@ final class WorkspaceSearchUITests: XCTestCase {
 
     @MainActor
     func testCommandFFocusesWorkspaceSearchField() throws {
+        let app = try launchAppWithBasicWorkspace()
+
+        let searchField = app.textFields["workspace-search-field"]
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
+
+        app.typeKey("f", modifierFlags: [.command])
+
+        XCTAssertTrue(searchField.waitForKeyboardFocus(timeout: 2))
+    }
+
+    @MainActor
+    func testDoubleClickDirectoryRowNavigatesIntoFolder() throws {
+        let app = try launchAppWithBasicWorkspace()
+
+        let reportsRowText = app.staticTexts["Reports"]
+        XCTAssertTrue(reportsRowText.waitForExistence(timeout: 5), app.debugDescription)
+
+        reportsRowText.doubleClick()
+
+        XCTAssertTrue(app.staticTexts["report-2026-01.md"].waitForExistence(timeout: 5), app.debugDescription)
+    }
+
+    @MainActor
+    private func launchAppWithBasicWorkspace() throws -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["LOCUS_UI_TESTING"] = "1"
         app.launchArguments = [
@@ -23,12 +47,7 @@ final class WorkspaceSearchUITests: XCTestCase {
             )
         }
 
-        let searchField = app.textFields["workspace-search-field"]
-        XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-
-        app.typeKey("f", modifierFlags: [.command])
-
-        XCTAssertTrue(searchField.waitForKeyboardFocus(timeout: 2))
+        return app
     }
 
     private func fixtureWorkspacePath(_ name: String, filePath: String = #filePath) throws -> String {

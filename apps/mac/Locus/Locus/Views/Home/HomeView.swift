@@ -559,7 +559,7 @@ private struct WorkspaceEntriesTable: View {
             .width(min: 130, ideal: 160)
         }
         .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
-            let selectedEntries = entries.filter { selection.contains($0.id) }
+            let selectedEntries = entries(for: selection)
             let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
 
             Button("Open") {
@@ -573,7 +573,21 @@ private struct WorkspaceEntriesTable: View {
                 selectedEntries.forEach(reveal)
             }
             .disabled(selectedEntries.isEmpty)
+        } primaryAction: { selection in
+            performPrimaryAction(for: selection)
         }
+    }
+
+    private func performPrimaryAction(for selection: Set<WorkspaceEntry.ID>) {
+        guard let openAction = WorkspaceEntryOpenActionResolver.action(for: entries(for: selection)) else {
+            return
+        }
+
+        performOpenAction(openAction)
+    }
+
+    private func entries(for selection: Set<WorkspaceEntry.ID>) -> [WorkspaceEntry] {
+        entries.filter { selection.contains($0.id) }
     }
 }
 
