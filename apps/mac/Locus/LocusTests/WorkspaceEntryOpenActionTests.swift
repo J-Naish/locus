@@ -11,8 +11,17 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
         )
     }
 
-    func testSingleFilePreviewsInLocus() {
-        let entry = makeWorkspaceEntry(name: "notes.md", kind: .file)
+    func testSingleTextFileEditsInLocus() {
+        let entry = makeWorkspaceEntry(name: "notes.md", kind: .file, fileType: .markdown)
+
+        XCTAssertEqual(
+            WorkspaceEntryOpenActionResolver.action(for: [entry]),
+            .openTextDocumentInPlace(entry.url)
+        )
+    }
+
+    func testSingleNonTextFilePreviewsInLocus() {
+        let entry = makeWorkspaceEntry(name: "brief.pdf", kind: .file, fileType: .pdf)
 
         XCTAssertEqual(
             WorkspaceEntryOpenActionResolver.action(for: [entry]),
@@ -20,8 +29,17 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
         )
     }
 
-    func testSingleSymlinkPreviewsInLocus() {
-        let entry = makeWorkspaceEntry(name: "latest", kind: .symlink)
+    func testSingleTextSymlinkEditsInLocus() {
+        let entry = makeWorkspaceEntry(name: "latest", kind: .symlink, fileType: .plainText)
+
+        XCTAssertEqual(
+            WorkspaceEntryOpenActionResolver.action(for: [entry]),
+            .openTextDocumentInPlace(entry.url)
+        )
+    }
+
+    func testSingleNonTextSymlinkPreviewsInLocus() {
+        let entry = makeWorkspaceEntry(name: "latest", kind: .symlink, fileType: .unknown)
 
         XCTAssertEqual(
             WorkspaceEntryOpenActionResolver.action(for: [entry]),
@@ -46,7 +64,8 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
 
 private func makeWorkspaceEntry(
     name: String,
-    kind: WorkspaceEntryKind
+    kind: WorkspaceEntryKind,
+    fileType: WorkspaceFileType = .unknown
 ) -> WorkspaceEntry {
     let url = URL(
         filePath: "/tmp/locus-test/\(name)",
@@ -57,7 +76,7 @@ private func makeWorkspaceEntry(
         url: url,
         name: name,
         kind: kind,
-        fileType: .unknown,
+        fileType: fileType,
         sizeBytes: nil,
         modified: nil,
         isReadOnly: false

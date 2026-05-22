@@ -150,9 +150,11 @@ final class WorkspaceSearchUITests: XCTestCase {
             previewInvocationsFilePath: previewInvocationsFilePath
         )
 
-        let projectBriefRowText = app.staticTexts["Project Brief.md"]
-        XCTAssertTrue(projectBriefRowText.waitForExistence(timeout: 5), app.debugDescription)
-        projectBriefRowText.click()
+        let projectBriefRow = app.outlines.firstMatch.cells
+            .containing(NSPredicate(format: "value == %@", "Project Brief.md"))
+            .firstMatch
+        XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
+        projectBriefRow.click()
 
         app.typeKey(.space, modifierFlags: [])
 
@@ -167,7 +169,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
-    func testDoubleClickFilePreviewsInLocus() throws {
+    func testDoubleClickTextFileOpensDocumentEditorInLocus() throws {
         let workspacePath = try fixtureWorkspacePath("basic")
         let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
         let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
@@ -181,14 +183,79 @@ final class WorkspaceSearchUITests: XCTestCase {
         XCTAssertTrue(projectBriefRowText.waitForExistence(timeout: 5), app.debugDescription)
         projectBriefRowText.doubleClick()
 
-        XCTAssertTrue(
-            waitForPreviewInvocation(
-                "\(workspacePath)/Project Brief.md",
-                key: previewInvocationsKey,
-                filePath: previewInvocationsFilePath
-            ),
-            app.debugDescription
-        )
+        XCTAssertTrue(app.textViews["document-text-editor"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
+    }
+
+    @MainActor
+    func testMarkdownFileCanBeEditedAndSavedInLocus() throws {
+        let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
+        let projectBriefURL = workspaceURL.appending(path: "Project Brief.md")
+        let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+        let projectBriefRow = app.outlines.firstMatch.cells
+            .containing(NSPredicate(format: "value == %@", "Project Brief.md"))
+            .firstMatch
+        XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
+        projectBriefRow.click()
+
+        let editor = app.textViews["document-text-editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+        editor.click()
+
+        let updatedText = "# Updated Brief\n\nLocus edits Markdown in app.\n"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(updatedText, forType: .string)
+        app.typeKey("a", modifierFlags: [.command])
+        app.typeKey("v", modifierFlags: [.command])
+
+        XCTAssertTrue(app.staticTexts["Unsaved"].waitForExistence(timeout: 2), app.debugDescription)
+
+        let saveButton = app.buttons["document-save-button"]
+        XCTAssertTrue(saveButton.waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertTrue(saveButton.isEnabled, app.debugDescription)
+        saveButton.click()
+
+        XCTAssertTrue(waitForFileContents(updatedText, at: projectBriefURL), app.debugDescription)
+    }
+
+    @MainActor
+    func testUnsavedMarkdownDraftSurvivesRowSelectionChanges() throws {
+        let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
+        let projectBriefURL = workspaceURL.appending(path: "Project Brief.md")
+        let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+        let projectBriefRow = app.outlines.firstMatch.cells
+            .containing(NSPredicate(format: "value == %@", "Project Brief.md"))
+            .firstMatch
+        XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
+        projectBriefRow.click()
+
+        let editor = app.textViews["document-text-editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+        editor.click()
+
+        let updatedText = "# Draft Survives\n\nThis edit is not saved yet.\n"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(updatedText, forType: .string)
+        app.typeKey("a", modifierFlags: [.command])
+        app.typeKey("v", modifierFlags: [.command])
+
+        XCTAssertTrue(app.staticTexts["Unsaved"].waitForExistence(timeout: 2), app.debugDescription)
+
+        let notesRow = app.outlines.firstMatch.cells
+            .containing(NSPredicate(format: "value == %@", "Notes.txt"))
+            .firstMatch
+        XCTAssertTrue(notesRow.waitForExistence(timeout: 5), app.debugDescription)
+        notesRow.click()
+
+        XCTAssertFalse(waitForFileContents(updatedText, at: projectBriefURL, timeout: 0.5))
+
+        projectBriefRow.click()
+        XCTAssertTrue(app.staticTexts["Unsaved"].waitForExistence(timeout: 2), app.debugDescription)
+        app.buttons["document-save-button"].click()
+
+        XCTAssertTrue(waitForFileContents(updatedText, at: projectBriefURL), app.debugDescription)
     }
 
     @MainActor
@@ -664,6 +731,7 @@ final class WorkspaceSearchUITests: XCTestCase {
         keys.forEach { userDefaultsKeysToRemove.insert($0) }
     }
 
+    @MainActor
     private func assertTableRow(
         named name: String,
         isSelectedIn app: XCUIApplication,
@@ -686,6 +754,23 @@ final class WorkspaceSearchUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if previewInvocations(forKey: key, filePath: filePath).contains(path) {
+                return true
+            }
+
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+
+        return false
+    }
+
+    private func waitForFileContents(
+        _ expectedContents: String,
+        at url: URL,
+        timeout: TimeInterval = 2
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if (try? String(contentsOf: url, encoding: .utf8)) == expectedContents {
                 return true
             }
 

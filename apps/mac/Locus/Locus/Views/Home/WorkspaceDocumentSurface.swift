@@ -1,0 +1,304 @@
+import SwiftUI
+
+struct WorkspaceDocumentSurface: View {
+    let entry: WorkspaceEntry?
+    let textDocumentStore: any TextDocumentStoring
+    let preview: ([URL]) -> Void
+    let onEditorFocusChange: (Bool) -> Void
+
+    @State private var loadState: TextDocumentLoadState = .empty
+    @State private var text = ""
+    @State private var savedText = ""
+    @State private var encoding: String.Encoding = .utf8
+    @State private var activeDocumentID: WorkspaceEntry.ID?
+    @State private var drafts: [WorkspaceEntry.ID: TextDocumentDraft] = [:]
+    @State private var saveErrorMessage: String?
+    @FocusState private var isEditorFocused: Bool
+
+    var body: some View {
+        Group {
+            if let entry {
+                if WorkspaceTextDocumentSupport.canEdit(entry) {
+                    editableDocumentSurface(for: entry)
+                } else if entry.kind == .directory {
+                    FolderDocumentSurface(entry: entry)
+                } else {
+                    UnsupportedDocumentSurface(entry: entry, preview: preview)
+                }
+            } else {
+                EmptyDocumentSurface()
+            }
+        }
+        .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+        .background(.background)
+        .task(id: entry?.id) {
+            await loadSelectedDocumentIfNeeded()
+        }
+        .onChange(of: entry?.id) {
+            isEditorFocused = false
+            onEditorFocusChange(false)
+        }
+        .onChange(of: isEditorFocused) {
+            onEditorFocusChange(isEditorFocused)
+        }
+        .onDisappear {
+            onEditorFocusChange(false)
+        }
+    }
+
+    private func editableDocumentSurface(for entry: WorkspaceEntry) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            DocumentHeaderView(
+                entry: entry,
+                isDirty: text != savedText,
+                isReadOnly: entry.isReadOnly,
+                isSaveDisabled: isSaveDisabled,
+                save: saveSelectedDocument
+            )
+
+            if let saveErrorMessage {
+                Label(saveErrorMessage, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("document-save-error")
+            }
+
+            switch loadState {
+            case .empty, .loading:
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("document-loading-indicator")
+            case let .failed(message):
+                ContentUnavailableView {
+                    Label("Document Could Not Be Opened", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(message)
+                } actions: {
+                    Button("Try Again") {
+                        Task {
+                            await loadSelectedDocumentIfNeeded()
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .loaded:
+                TextEditor(text: $text)
+                    .font(.system(size: 14))
+                    .scrollContentBackground(.hidden)
+                    .focused($isEditorFocused)
+                    .disabled(entry.isReadOnly)
+                    .padding(8)
+                    .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
+                    .accessibilityLabel("\(entry.name) text")
+                    .accessibilityIdentifier("document-text-editor")
+            }
+        }
+        .padding(12)
+    }
+
+    private var isSaveDisabled: Bool {
+        guard case .loaded = loadState,
+              let entry,
+              !entry.isReadOnly else {
+            return true
+        }
+
+        return text == savedText
+    }
+
+    @MainActor
+    private func loadSelectedDocumentIfNeeded() async {
+        persistActiveDraftIfNeeded()
+        saveErrorMessage = nil
+
+        guard let entry, WorkspaceTextDocumentSupport.canEdit(entry) else {
+            activeDocumentID = nil
+            loadState = .empty
+            text = ""
+            savedText = ""
+            encoding = .utf8
+            saveErrorMessage = nil
+            return
+        }
+
+        activeDocumentID = entry.id
+        if let draft = drafts[entry.id] {
+            text = draft.text
+            savedText = draft.savedText
+            encoding = draft.encoding
+            loadState = .loaded
+            return
+        }
+
+        loadState = .loading
+        text = ""
+        savedText = ""
+        encoding = .utf8
+
+        do {
+            let document = try await textDocumentStore.loadText(at: entry.url)
+            guard self.entry?.id == entry.id else {
+                return
+            }
+
+            text = document.text
+            savedText = document.text
+            encoding = document.encoding
+            loadState = .loaded
+        } catch {
+            guard self.entry?.id == entry.id else {
+                return
+            }
+
+            loadState = .failed(error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func saveSelectedDocument() {
+        guard let entry,
+              !isSaveDisabled else {
+            return
+        }
+
+        let textToSave = text
+        let encodingToSave = encoding
+        Task {
+            do {
+                try await textDocumentStore.saveText(textToSave, to: entry.url, encoding: encodingToSave)
+                guard self.entry?.id == entry.id else {
+                    return
+                }
+
+                savedText = textToSave
+                drafts.removeValue(forKey: entry.id)
+                saveErrorMessage = nil
+                loadState = .loaded
+            } catch {
+                guard self.entry?.id == entry.id else {
+                    return
+                }
+
+                saveErrorMessage = error.localizedDescription
+                loadState = .loaded
+            }
+        }
+    }
+
+    @MainActor
+    private func persistActiveDraftIfNeeded() {
+        guard let activeDocumentID else {
+            return
+        }
+
+        if text == savedText {
+            drafts.removeValue(forKey: activeDocumentID)
+        } else {
+            drafts[activeDocumentID] = TextDocumentDraft(
+                text: text,
+                savedText: savedText,
+                encoding: encoding
+            )
+        }
+    }
+}
+
+private enum TextDocumentLoadState: Equatable {
+    case empty
+    case loading
+    case loaded
+    case failed(String)
+}
+
+private struct TextDocumentDraft: Equatable {
+    let text: String
+    let savedText: String
+    let encoding: String.Encoding
+}
+
+private struct DocumentHeaderView: View {
+    let entry: WorkspaceEntry
+    let isDirty: Bool
+    let isReadOnly: Bool
+    let isSaveDisabled: Bool
+    let save: () -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(entry.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("document-title")
+
+                Text(WorkspaceTextDocumentSupport.displayLabel(for: entry))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            if isReadOnly {
+                Text("Read-only")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if isDirty {
+                Text("Unsaved")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("document-unsaved-indicator")
+            }
+
+            Button("Save", action: save)
+                .disabled(isSaveDisabled)
+                .keyboardShortcut("s", modifiers: [.command])
+                .accessibilityIdentifier("document-save-button")
+        }
+    }
+}
+
+private struct EmptyDocumentSurface: View {
+    var body: some View {
+        ContentUnavailableView {
+            Label("Select a File", systemImage: "doc.text.magnifyingglass")
+        } description: {
+            Text("Supported text documents can be read and edited here.")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("document-empty-surface")
+    }
+}
+
+private struct FolderDocumentSurface: View {
+    let entry: WorkspaceEntry
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Folder Selected", systemImage: "folder")
+        } description: {
+            Text("\(entry.name) is open in the file list.")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("document-folder-surface")
+    }
+}
+
+private struct UnsupportedDocumentSurface: View {
+    let entry: WorkspaceEntry
+    let preview: ([URL]) -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("No Built-In Preview", systemImage: "doc")
+        } description: {
+            Text("Use Preview to inspect this \(WorkspaceTextDocumentSupport.displayLabel(for: entry).lowercased()).")
+        } actions: {
+            Button("Preview") {
+                preview([entry.url])
+            }
+            .disabled(entry.kind != .file && entry.kind != .symlink)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("document-unsupported-surface")
+    }
+}

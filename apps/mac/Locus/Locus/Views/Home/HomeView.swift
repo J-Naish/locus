@@ -22,6 +22,7 @@ struct HomeView: View {
 
     private let coreBridge: CoreBridge
     private let quickLookPreviewService: any QuickLookPreviewing
+    private let textDocumentStore: any TextDocumentStoring
     private let clipboardService: ClipboardService
     private let workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring
     private let favoriteFolderStore: FavoriteFolderStore
@@ -32,6 +33,7 @@ struct HomeView: View {
     init(
         coreBridge: CoreBridge = CoreBridge(),
         quickLookPreviewService: any QuickLookPreviewing = QuickLookPreviewService(),
+        textDocumentStore: any TextDocumentStoring = TextDocumentStore(),
         clipboardService: ClipboardService = ClipboardService(),
         workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring = WorkspaceDirectoryMonitor(),
         favoriteFolderStore: FavoriteFolderStore = FavoriteFolderStore(),
@@ -41,6 +43,7 @@ struct HomeView: View {
     ) {
         self.coreBridge = coreBridge
         self.quickLookPreviewService = quickLookPreviewService
+        self.textDocumentStore = textDocumentStore
         self.clipboardService = clipboardService
         self.workspaceDirectoryMonitor = workspaceDirectoryMonitor
         self.favoriteFolderStore = favoriteFolderStore
@@ -71,6 +74,7 @@ struct HomeView: View {
                 favoriteFolders: favoriteFolders,
                 recentFiles: recentFiles,
                 recentFolders: recentFolders,
+                textDocumentStore: textDocumentStore,
                 selectedEntryID: $selectedEntryID,
                 emptyActions: EmptyWorkspaceActions(
                     openFolder: openFolder,
@@ -405,6 +409,8 @@ struct HomeView: View {
         switch action {
         case let .browseFolder(url):
             startWorkspaceLoad(url, recordRecent: true)
+        case let .openTextDocumentInPlace(url):
+            showURLInLocus(url)
         case let .preview(url):
             previewFile(url)
         }
@@ -537,6 +543,7 @@ private struct WorkspaceContentView: View {
     let favoriteFolders: [FavoriteFolder]
     let recentFiles: [RecentFile]
     let recentFolders: [RecentFolder]
+    let textDocumentStore: any TextDocumentStoring
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let emptyActions: EmptyWorkspaceActions
     let shortcutActions: FileLocationShortcutActions
@@ -563,6 +570,7 @@ private struct WorkspaceContentView: View {
                     favoriteFolders: favoriteFolders,
                     recentFiles: recentFiles,
                     recentFolders: recentFolders,
+                    textDocumentStore: textDocumentStore,
                     isFavorite: favoriteFolders.contains { $0.path == folderURL.locusStandardizedPath },
                     selectedEntryID: $selectedEntryID,
                     shortcutActions: shortcutActions,
@@ -613,12 +621,14 @@ private struct WorkspaceBrowserView: View {
     let favoriteFolders: [FavoriteFolder]
     let recentFiles: [RecentFile]
     let recentFolders: [RecentFolder]
+    let textDocumentStore: any TextDocumentStoring
     let isFavorite: Bool
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let shortcutActions: FileLocationShortcutActions
     let actions: WorkspaceActions
     @State private var searchQuery = ""
     @State private var searchResults: WorkspaceBrowserSearchResults
+    @State private var isDocumentEditorFocused = false
     @FocusState private var isSearchFocused: Bool
 
     init(
@@ -629,6 +639,7 @@ private struct WorkspaceBrowserView: View {
         favoriteFolders: [FavoriteFolder],
         recentFiles: [RecentFile],
         recentFolders: [RecentFolder],
+        textDocumentStore: any TextDocumentStoring,
         isFavorite: Bool,
         selectedEntryID: Binding<WorkspaceEntry.ID?>,
         shortcutActions: FileLocationShortcutActions,
@@ -641,6 +652,7 @@ private struct WorkspaceBrowserView: View {
         self.favoriteFolders = favoriteFolders
         self.recentFiles = recentFiles
         self.recentFolders = recentFolders
+        self.textDocumentStore = textDocumentStore
         self.isFavorite = isFavorite
         self._selectedEntryID = selectedEntryID
         self.shortcutActions = shortcutActions
@@ -699,12 +711,25 @@ private struct WorkspaceBrowserView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: searchResults.hasShortcutResults ? 160 : .infinity)
             } else {
-                WorkspaceEntriesTable(
-                    entries: searchResults.visibleEntries,
-                    selectedEntryID: $selectedEntryID,
-                    isSearchFocused: isSearchFocused,
-                    actions: actions
-                )
+                HSplitView {
+                    WorkspaceEntriesTable(
+                        entries: searchResults.visibleEntries,
+                        selectedEntryID: $selectedEntryID,
+                        isPreviewShortcutEnabled: !isSearchFocused && !isDocumentEditorFocused,
+                        actions: actions
+                    )
+                    .frame(minWidth: 420, idealWidth: 560, maxWidth: .infinity)
+
+                    WorkspaceDocumentSurface(
+                        entry: selectedEntry,
+                        textDocumentStore: textDocumentStore,
+                        preview: actions.preview,
+                        onEditorFocusChange: { isFocused in
+                            isDocumentEditorFocused = isFocused
+                        }
+                    )
+                    .frame(minWidth: 340, idealWidth: 460)
+                }
             }
         }
         .onChange(of: searchQuery) {
@@ -724,6 +749,7 @@ private struct WorkspaceBrowserView: View {
         }
         .onChange(of: folderURL) {
             searchQuery = ""
+            isDocumentEditorFocused = false
             refreshSearchResults()
         }
         .background(searchShortcut)
@@ -760,6 +786,14 @@ private struct WorkspaceBrowserView: View {
         DispatchQueue.main.async {
             NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
         }
+    }
+
+    private var selectedEntry: WorkspaceEntry? {
+        guard let selectedEntryID else {
+            return nil
+        }
+
+        return searchResults.visibleEntries.first { $0.id == selectedEntryID }
     }
 }
 
@@ -955,7 +989,7 @@ private struct WorkspaceToolbarView: View {
 private struct WorkspaceEntriesTable: View {
     let entries: [WorkspaceEntry]
     @Binding var selectedEntryID: WorkspaceEntry.ID?
-    let isSearchFocused: Bool
+    let isPreviewShortcutEnabled: Bool
     let actions: WorkspaceActions
 
     var body: some View {
@@ -1039,7 +1073,7 @@ private struct WorkspaceEntriesTable: View {
     }
 
     private var previewKeyMonitor: some View {
-        LocalSpaceKeyMonitor(isEnabled: !isSearchFocused && selectedPreviewURLs != nil) {
+        LocalSpaceKeyMonitor(isEnabled: isPreviewShortcutEnabled && selectedPreviewURLs != nil) {
             guard let selectedPreviewURLs else {
                 return false
             }
