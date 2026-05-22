@@ -188,6 +188,64 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
+    func testDoubleClickImageFileViewsImageInLocus() throws {
+        let workspacePath = try fixtureWorkspacePath("file-types")
+        let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
+        let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
+        let app = try launchApp(
+            workspacePath: workspacePath,
+            previewInvocationsKey: previewInvocationsKey,
+            previewInvocationsFilePath: previewInvocationsFilePath
+        )
+
+        let sampleRowText = app.staticTexts["sample.png"]
+        XCTAssertTrue(sampleRowText.waitForExistence(timeout: 5), app.debugDescription)
+        sampleRowText.doubleClick()
+
+        XCTAssertTrue(app.images["document-image-view"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["sample.png"].waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertEqual(previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
+    }
+
+    @MainActor
+    func testUndecodableImageOffersQuickLookPreviewFallback() throws {
+        let workspaceURL = FileManager.default.temporaryDirectory
+            .appending(path: "locus-invalid-image-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
+        filesToRemove.insert(workspaceURL.path(percentEncoded: false))
+
+        let brokenImageURL = workspaceURL.appending(path: "broken.png")
+        try Data("not an image".utf8).write(to: brokenImageURL)
+
+        let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
+        let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
+        let app = try launchApp(
+            workspacePath: workspaceURL.path(percentEncoded: false),
+            previewInvocationsKey: previewInvocationsKey,
+            previewInvocationsFilePath: previewInvocationsFilePath
+        )
+
+        let brokenImageRowText = app.staticTexts["broken.png"]
+        XCTAssertTrue(brokenImageRowText.waitForExistence(timeout: 5), app.debugDescription)
+        brokenImageRowText.doubleClick()
+
+        XCTAssertTrue(app.descendants(matching: .any)["document-image-error-surface"].waitForExistence(timeout: 5), app.debugDescription)
+
+        let previewButton = app.buttons["Preview"]
+        XCTAssertTrue(previewButton.waitForExistence(timeout: 2), app.debugDescription)
+        previewButton.click()
+
+        XCTAssertTrue(
+            waitForPreviewInvocation(
+                brokenImageURL.path(percentEncoded: false),
+                key: previewInvocationsKey,
+                filePath: previewInvocationsFilePath
+            ),
+            app.debugDescription
+        )
+    }
+
+    @MainActor
     func testMarkdownFileCanBeEditedAndSavedInLocus() throws {
         let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
         let projectBriefURL = workspaceURL.appending(path: "Project Brief.md")

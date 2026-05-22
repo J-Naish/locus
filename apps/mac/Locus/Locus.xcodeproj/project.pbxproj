@@ -20,6 +20,8 @@
 		1A000001000000000000006C /* ClipboardService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000006D /* ClipboardService.swift */; };
 		1A0000010000000000000076 /* FileURLDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000077 /* FileURLDisplay.swift */; };
 		1A0000010000000000000084 /* QuickLookPreviewService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000085 /* QuickLookPreviewService.swift */; };
+		1A00000100000000000000A0 /* ImageDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000A1 /* ImageDocumentStore.swift */; };
+		1A00000100000000000000A2 /* ImageDocumentStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000A3 /* ImageDocumentStoreTests.swift */; };
 		1A0000010000000000000096 /* TextDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000097 /* TextDocumentStore.swift */; };
 		1A000001000000000000009C /* TextDocumentStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000009D /* TextDocumentStoreTests.swift */; };
 		1A0000010000000000000080 /* RecentFileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000081 /* RecentFileStore.swift */; };
@@ -41,6 +43,8 @@
 		1A0000010000000000000088 /* WorkspaceEntryPreviewActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000089 /* WorkspaceEntryPreviewActionTests.swift */; };
 		1A0000010000000000000068 /* WorkspaceNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000069 /* WorkspaceNavigation.swift */; };
 		1A000001000000000000006A /* WorkspaceNavigationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000006B /* WorkspaceNavigationTests.swift */; };
+		1A00000100000000000000A4 /* WorkspaceDocumentSurfaceSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000A5 /* WorkspaceDocumentSurfaceSupport.swift */; };
+		1A00000100000000000000A6 /* WorkspaceDocumentSurfaceSupportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000A7 /* WorkspaceDocumentSurfaceSupportTests.swift */; };
 		1A000001000000000000009A /* WorkspaceTextDocumentSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000009B /* WorkspaceTextDocumentSupport.swift */; };
 		1A000001000000000000009E /* WorkspaceTextDocumentSupportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000009F /* WorkspaceTextDocumentSupportTests.swift */; };
 /* End PBXBuildFile section */
@@ -80,6 +84,8 @@
 		1A000001000000000000006D /* ClipboardService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardService.swift; sourceTree = "<group>"; };
 		1A0000010000000000000077 /* FileURLDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileURLDisplay.swift; sourceTree = "<group>"; };
 		1A0000010000000000000085 /* QuickLookPreviewService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookPreviewService.swift; sourceTree = "<group>"; };
+		1A00000100000000000000A1 /* ImageDocumentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDocumentStore.swift; sourceTree = "<group>"; };
+		1A00000100000000000000A3 /* ImageDocumentStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDocumentStoreTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000097 /* TextDocumentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentStore.swift; sourceTree = "<group>"; };
 		1A000001000000000000009D /* TextDocumentStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentStoreTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000081 /* RecentFileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentFileStore.swift; sourceTree = "<group>"; };
@@ -101,6 +107,8 @@
 		1A0000010000000000000089 /* WorkspaceEntryPreviewActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryPreviewActionTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000069 /* WorkspaceNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceNavigation.swift; sourceTree = "<group>"; };
 		1A000001000000000000006B /* WorkspaceNavigationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceNavigationTests.swift; sourceTree = "<group>"; };
+		1A00000100000000000000A5 /* WorkspaceDocumentSurfaceSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDocumentSurfaceSupport.swift; sourceTree = "<group>"; };
+		1A00000100000000000000A7 /* WorkspaceDocumentSurfaceSupportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDocumentSurfaceSupportTests.swift; sourceTree = "<group>"; };
 		1A000001000000000000009B /* WorkspaceTextDocumentSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTextDocumentSupport.swift; sourceTree = "<group>"; };
 		1A000001000000000000009F /* WorkspaceTextDocumentSupportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTextDocumentSupportTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -156,6 +164,7 @@
 			children = (
 				1A0000010000000000000014 /* CoreBridgeTests.swift */,
 				1A000001000000000000007D /* FavoriteFolderStoreTests.swift */,
+				1A00000100000000000000A3 /* ImageDocumentStoreTests.swift */,
 				1A0000010000000000000083 /* RecentFileStoreTests.swift */,
 				1A0000010000000000000075 /* RecentFolderStoreTests.swift */,
 				1A000001000000000000009D /* TextDocumentStoreTests.swift */,
@@ -163,6 +172,7 @@
 				1A0000010000000000000067 /* WorkspaceEntryOpenActionTests.swift */,
 				1A0000010000000000000071 /* WorkspaceEntryPathCopyTests.swift */,
 				1A0000010000000000000089 /* WorkspaceEntryPreviewActionTests.swift */,
+				1A00000100000000000000A7 /* WorkspaceDocumentSurfaceSupportTests.swift */,
 				1A000001000000000000006B /* WorkspaceNavigationTests.swift */,
 				1A000001000000000000009F /* WorkspaceTextDocumentSupportTests.swift */,
 				1A0000010000000000000048 /* WorkspaceEntrySearchTests.swift */,
@@ -220,6 +230,7 @@
 				1A000001000000000000007B /* FavoriteFolderStore.swift */,
 				1A0000010000000000000077 /* FileURLDisplay.swift */,
 				1A000001000000000000007F /* FileLocationBookmarkStore.swift */,
+				1A00000100000000000000A1 /* ImageDocumentStore.swift */,
 				1A0000010000000000000085 /* QuickLookPreviewService.swift */,
 				1A0000010000000000000081 /* RecentFileStore.swift */,
 				1A0000010000000000000073 /* RecentFolderStore.swift */,
@@ -240,6 +251,7 @@
 				1A0000010000000000000065 /* WorkspaceEntryOpenAction.swift */,
 				1A000001000000000000006F /* WorkspaceEntryPathCopy.swift */,
 				1A0000010000000000000087 /* WorkspaceEntryPreviewAction.swift */,
+				1A00000100000000000000A5 /* WorkspaceDocumentSurfaceSupport.swift */,
 				1A0000010000000000000069 /* WorkspaceNavigation.swift */,
 				1A0000010000000000000046 /* WorkspaceEntrySearch.swift */,
 				1A0000010000000000000095 /* WorkspaceSearchRanker.swift */,
@@ -410,6 +422,7 @@
 				1A000001000000000000007E /* FileLocationBookmarkStore.swift in Sources */,
 				1A0000010000000000000092 /* FuzzyMatching.swift in Sources */,
 				1A0000010000000000000003 /* HomeView.swift in Sources */,
+				1A00000100000000000000A0 /* ImageDocumentStore.swift in Sources */,
 				1A0000010000000000000084 /* QuickLookPreviewService.swift in Sources */,
 				1A0000010000000000000080 /* RecentFileStore.swift in Sources */,
 				1A0000010000000000000072 /* RecentFolderStore.swift in Sources */,
@@ -419,6 +432,7 @@
 				1A0000010000000000000064 /* WorkspaceEntryOpenAction.swift in Sources */,
 				1A000001000000000000006E /* WorkspaceEntryPathCopy.swift in Sources */,
 				1A0000010000000000000086 /* WorkspaceEntryPreviewAction.swift in Sources */,
+				1A00000100000000000000A4 /* WorkspaceDocumentSurfaceSupport.swift in Sources */,
 				1A0000010000000000000068 /* WorkspaceNavigation.swift in Sources */,
 				1A0000010000000000000045 /* WorkspaceEntrySearch.swift in Sources */,
 				1A0000010000000000000094 /* WorkspaceSearchRanker.swift in Sources */,
@@ -432,6 +446,7 @@
 			files = (
 				1A0000010000000000000004 /* CoreBridgeTests.swift in Sources */,
 				1A000001000000000000007C /* FavoriteFolderStoreTests.swift in Sources */,
+				1A00000100000000000000A2 /* ImageDocumentStoreTests.swift in Sources */,
 				1A0000010000000000000082 /* RecentFileStoreTests.swift in Sources */,
 				1A0000010000000000000074 /* RecentFolderStoreTests.swift in Sources */,
 				1A000001000000000000009C /* TextDocumentStoreTests.swift in Sources */,
@@ -439,6 +454,7 @@
 				1A0000010000000000000066 /* WorkspaceEntryOpenActionTests.swift in Sources */,
 				1A0000010000000000000070 /* WorkspaceEntryPathCopyTests.swift in Sources */,
 				1A0000010000000000000088 /* WorkspaceEntryPreviewActionTests.swift in Sources */,
+				1A00000100000000000000A6 /* WorkspaceDocumentSurfaceSupportTests.swift in Sources */,
 				1A000001000000000000006A /* WorkspaceNavigationTests.swift in Sources */,
 				1A0000010000000000000047 /* WorkspaceEntrySearchTests.swift in Sources */,
 				1A000001000000000000009E /* WorkspaceTextDocumentSupportTests.swift in Sources */,

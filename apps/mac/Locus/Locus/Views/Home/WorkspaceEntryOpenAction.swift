@@ -2,7 +2,7 @@ import Foundation
 
 enum WorkspaceEntryOpenAction: Equatable, Sendable {
     case browseFolder(URL)
-    case openTextDocumentInPlace(URL)
+    case openInPlace(URL)
     case preview(URL)
 }
 
@@ -16,11 +16,14 @@ enum WorkspaceEntryOpenActionResolver {
         case .directory:
             return .browseFolder(entry.url)
         case .file, .symlink:
-            if WorkspaceTextDocumentSupport.canEdit(entry) {
-                return .openTextDocumentInPlace(entry.url)
+            switch WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry) {
+            case .editableText, .image:
+                return .openInPlace(entry.url)
+            case .unsupported:
+                return .preview(entry.url)
+            case .folder:
+                return nil
             }
-
-            return .preview(entry.url)
         case .other:
             return nil
         }

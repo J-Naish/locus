@@ -1,8 +1,10 @@
+import AppKit
 import SwiftUI
 
 struct WorkspaceDocumentSurface: View {
     let entry: WorkspaceEntry?
     let textDocumentStore: any TextDocumentStoring
+    let imageDocumentStore: any ImageDocumentStoring
     let preview: ([URL]) -> Void
     let onEditorFocusChange: (Bool) -> Void
 
@@ -18,11 +20,18 @@ struct WorkspaceDocumentSurface: View {
     var body: some View {
         Group {
             if let entry {
-                if WorkspaceTextDocumentSupport.canEdit(entry) {
+                switch WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry) {
+                case .editableText:
                     editableDocumentSurface(for: entry)
-                } else if entry.kind == .directory {
+                case .image:
+                    ImageDocumentSurface(
+                        entry: entry,
+                        imageDocumentStore: imageDocumentStore,
+                        preview: preview
+                    )
+                case .folder:
                     FolderDocumentSurface(entry: entry)
-                } else {
+                case .unsupported:
                     UnsupportedDocumentSurface(entry: entry, preview: preview)
                 }
             } else {
@@ -257,16 +266,115 @@ private struct DocumentHeaderView: View {
     }
 }
 
+private struct DocumentPreviewHeaderView: View {
+    let entry: WorkspaceEntry
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(entry.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("document-title")
+
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+    }
+}
+
 private struct EmptyDocumentSurface: View {
     var body: some View {
         ContentUnavailableView {
             Label("Select a File", systemImage: "doc.text.magnifyingglass")
         } description: {
-            Text("Supported text documents can be read and edited here.")
+            Text("Supported documents can be read, viewed, or edited here.")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityIdentifier("document-empty-surface")
     }
+}
+
+private struct ImageDocumentSurface: View {
+    let entry: WorkspaceEntry
+    let imageDocumentStore: any ImageDocumentStoring
+    let preview: ([URL]) -> Void
+
+    @State private var loadState: ImageDocumentLoadState = .loading
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            DocumentPreviewHeaderView(entry: entry, detail: "Image")
+
+            switch loadState {
+            case .loading:
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("document-image-loading-indicator")
+            case let .loaded(image):
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 8))
+                    .accessibilityLabel("\(entry.name) image")
+                    .accessibilityIdentifier("document-image-view")
+            case let .failed(message):
+                ContentUnavailableView {
+                    Label("Image Could Not Be Opened", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(message)
+                } actions: {
+                    Button("Try Again") {
+                        Task {
+                            await loadImage()
+                        }
+                    }
+
+                    Button("Preview") {
+                        preview([entry.url])
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityIdentifier("document-image-error-surface")
+            }
+        }
+        .padding(12)
+        .task(id: entry.id) {
+            await loadImage()
+        }
+    }
+
+    @MainActor
+    private func loadImage() async {
+        loadState = .loading
+
+        do {
+            let document = try await imageDocumentStore.loadImage(at: entry.url)
+            guard !Task.isCancelled else {
+                return
+            }
+
+            loadState = .loaded(document.image)
+        } catch {
+            guard !Task.isCancelled else {
+                return
+            }
+
+            loadState = .failed(error.localizedDescription)
+        }
+    }
+}
+
+private enum ImageDocumentLoadState {
+    case loading
+    case loaded(NSImage)
+    case failed(String)
 }
 
 private struct FolderDocumentSurface: View {

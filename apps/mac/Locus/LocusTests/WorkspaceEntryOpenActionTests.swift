@@ -16,7 +16,25 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
 
         XCTAssertEqual(
             WorkspaceEntryOpenActionResolver.action(for: [entry]),
-            .openTextDocumentInPlace(entry.url)
+            .openInPlace(entry.url)
+        )
+    }
+
+    func testSingleImageFileViewsInLocus() {
+        let entry = makeWorkspaceEntry(name: "photo.png", kind: .file, fileType: .image)
+
+        XCTAssertEqual(
+            WorkspaceEntryOpenActionResolver.action(for: [entry]),
+            .openInPlace(entry.url)
+        )
+    }
+
+    func testSingleVectorImagePreviewsWithQuickLook() {
+        let entry = makeWorkspaceEntry(name: "diagram.svg", kind: .file, fileType: .image)
+
+        XCTAssertEqual(
+            WorkspaceEntryOpenActionResolver.action(for: [entry]),
+            .preview(entry.url)
         )
     }
 
@@ -34,7 +52,16 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
 
         XCTAssertEqual(
             WorkspaceEntryOpenActionResolver.action(for: [entry]),
-            .openTextDocumentInPlace(entry.url)
+            .openInPlace(entry.url)
+        )
+    }
+
+    func testSingleImageSymlinkViewsInLocus() {
+        let entry = makeWorkspaceEntry(name: "latest.png", kind: .symlink, fileType: .image)
+
+        XCTAssertEqual(
+            WorkspaceEntryOpenActionResolver.action(for: [entry]),
+            .openInPlace(entry.url)
         )
     }
 

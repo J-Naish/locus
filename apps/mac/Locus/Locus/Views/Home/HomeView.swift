@@ -23,6 +23,7 @@ struct HomeView: View {
     private let coreBridge: CoreBridge
     private let quickLookPreviewService: any QuickLookPreviewing
     private let textDocumentStore: any TextDocumentStoring
+    private let imageDocumentStore: any ImageDocumentStoring
     private let clipboardService: ClipboardService
     private let workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring
     private let favoriteFolderStore: FavoriteFolderStore
@@ -34,6 +35,7 @@ struct HomeView: View {
         coreBridge: CoreBridge = CoreBridge(),
         quickLookPreviewService: any QuickLookPreviewing = QuickLookPreviewService(),
         textDocumentStore: any TextDocumentStoring = TextDocumentStore(),
+        imageDocumentStore: any ImageDocumentStoring = ImageDocumentStore(),
         clipboardService: ClipboardService = ClipboardService(),
         workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring = WorkspaceDirectoryMonitor(),
         favoriteFolderStore: FavoriteFolderStore = FavoriteFolderStore(),
@@ -44,6 +46,7 @@ struct HomeView: View {
         self.coreBridge = coreBridge
         self.quickLookPreviewService = quickLookPreviewService
         self.textDocumentStore = textDocumentStore
+        self.imageDocumentStore = imageDocumentStore
         self.clipboardService = clipboardService
         self.workspaceDirectoryMonitor = workspaceDirectoryMonitor
         self.favoriteFolderStore = favoriteFolderStore
@@ -75,6 +78,7 @@ struct HomeView: View {
                 recentFiles: recentFiles,
                 recentFolders: recentFolders,
                 textDocumentStore: textDocumentStore,
+                imageDocumentStore: imageDocumentStore,
                 selectedEntryID: $selectedEntryID,
                 emptyActions: EmptyWorkspaceActions(
                     openFolder: openFolder,
@@ -409,7 +413,7 @@ struct HomeView: View {
         switch action {
         case let .browseFolder(url):
             startWorkspaceLoad(url, recordRecent: true)
-        case let .openTextDocumentInPlace(url):
+        case let .openInPlace(url):
             showURLInLocus(url)
         case let .preview(url):
             previewFile(url)
@@ -544,6 +548,7 @@ private struct WorkspaceContentView: View {
     let recentFiles: [RecentFile]
     let recentFolders: [RecentFolder]
     let textDocumentStore: any TextDocumentStoring
+    let imageDocumentStore: any ImageDocumentStoring
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let emptyActions: EmptyWorkspaceActions
     let shortcutActions: FileLocationShortcutActions
@@ -571,6 +576,7 @@ private struct WorkspaceContentView: View {
                     recentFiles: recentFiles,
                     recentFolders: recentFolders,
                     textDocumentStore: textDocumentStore,
+                    imageDocumentStore: imageDocumentStore,
                     isFavorite: favoriteFolders.contains { $0.path == folderURL.locusStandardizedPath },
                     selectedEntryID: $selectedEntryID,
                     shortcutActions: shortcutActions,
@@ -622,6 +628,7 @@ private struct WorkspaceBrowserView: View {
     let recentFiles: [RecentFile]
     let recentFolders: [RecentFolder]
     let textDocumentStore: any TextDocumentStoring
+    let imageDocumentStore: any ImageDocumentStoring
     let isFavorite: Bool
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let shortcutActions: FileLocationShortcutActions
@@ -640,6 +647,7 @@ private struct WorkspaceBrowserView: View {
         recentFiles: [RecentFile],
         recentFolders: [RecentFolder],
         textDocumentStore: any TextDocumentStoring,
+        imageDocumentStore: any ImageDocumentStoring,
         isFavorite: Bool,
         selectedEntryID: Binding<WorkspaceEntry.ID?>,
         shortcutActions: FileLocationShortcutActions,
@@ -653,6 +661,7 @@ private struct WorkspaceBrowserView: View {
         self.recentFiles = recentFiles
         self.recentFolders = recentFolders
         self.textDocumentStore = textDocumentStore
+        self.imageDocumentStore = imageDocumentStore
         self.isFavorite = isFavorite
         self._selectedEntryID = selectedEntryID
         self.shortcutActions = shortcutActions
@@ -723,6 +732,7 @@ private struct WorkspaceBrowserView: View {
                     WorkspaceDocumentSurface(
                         entry: selectedEntry,
                         textDocumentStore: textDocumentStore,
+                        imageDocumentStore: imageDocumentStore,
                         preview: actions.preview,
                         onEditorFocusChange: { isFocused in
                             isDocumentEditorFocused = isFocused
