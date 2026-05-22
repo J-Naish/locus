@@ -8,10 +8,12 @@
 
 /* Begin PBXBuildFile section */
 		1A0000010000000000000001 /* LocusApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000011 /* LocusApp.swift */; };
+		1A00000100000000000000A8 /* InitialFolderURLResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000A9 /* InitialFolderURLResolver.swift */; };
 		1A0000010000000000000002 /* CoreBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000012 /* CoreBridge.swift */; };
 		1A0000010000000000000078 /* EmptyWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000079 /* EmptyWorkspaceView.swift */; };
 		1A0000010000000000000003 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000013 /* HomeView.swift */; };
 		1A0000010000000000000004 /* CoreBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000014 /* CoreBridgeTests.swift */; };
+		1A00000100000000000000AA /* InitialFolderURLResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */; };
 		1A000001000000000000007A /* FavoriteFolderStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000007B /* FavoriteFolderStore.swift */; };
 		1A000001000000000000007C /* FavoriteFolderStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000007D /* FavoriteFolderStoreTests.swift */; };
 		1A0000010000000000000090 /* FileLocationShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000091 /* FileLocationShortcut.swift */; };
@@ -71,10 +73,12 @@
 		1A0000010000000000000009 /* LocusTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LocusTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A0000010000000000000052 /* LocusUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LocusUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A0000010000000000000011 /* LocusApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocusApp.swift; sourceTree = "<group>"; };
+		1A00000100000000000000A9 /* InitialFolderURLResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InitialFolderURLResolver.swift; sourceTree = "<group>"; };
 		1A0000010000000000000012 /* CoreBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreBridge.swift; sourceTree = "<group>"; };
 		1A0000010000000000000079 /* EmptyWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyWorkspaceView.swift; sourceTree = "<group>"; };
 		1A0000010000000000000013 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		1A0000010000000000000014 /* CoreBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreBridgeTests.swift; sourceTree = "<group>"; };
+		1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InitialFolderURLResolverTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000015 /* LocusCoreBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LocusCoreBridge.h; sourceTree = "<group>"; };
 		1A000001000000000000007B /* FavoriteFolderStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoriteFolderStore.swift; sourceTree = "<group>"; };
 		1A000001000000000000007D /* FavoriteFolderStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoriteFolderStoreTests.swift; sourceTree = "<group>"; };
@@ -165,6 +169,7 @@
 				1A0000010000000000000014 /* CoreBridgeTests.swift */,
 				1A000001000000000000007D /* FavoriteFolderStoreTests.swift */,
 				1A00000100000000000000A3 /* ImageDocumentStoreTests.swift */,
+				1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */,
 				1A0000010000000000000083 /* RecentFileStoreTests.swift */,
 				1A0000010000000000000075 /* RecentFolderStoreTests.swift */,
 				1A000001000000000000009D /* TextDocumentStoreTests.swift */,
@@ -201,6 +206,7 @@
 		1A0000010000000000000022 /* App */ = {
 			isa = PBXGroup;
 			children = (
+				1A00000100000000000000A9 /* InitialFolderURLResolver.swift */,
 				1A0000010000000000000011 /* LocusApp.swift */,
 			);
 			path = App;
@@ -412,6 +418,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1A00000100000000000000A8 /* InitialFolderURLResolver.swift in Sources */,
 				1A0000010000000000000001 /* LocusApp.swift in Sources */,
 				1A0000010000000000000002 /* CoreBridge.swift in Sources */,
 				1A000001000000000000006C /* ClipboardService.swift in Sources */,
@@ -447,6 +454,7 @@
 				1A0000010000000000000004 /* CoreBridgeTests.swift in Sources */,
 				1A000001000000000000007C /* FavoriteFolderStoreTests.swift in Sources */,
 				1A00000100000000000000A2 /* ImageDocumentStoreTests.swift in Sources */,
+				1A00000100000000000000AA /* InitialFolderURLResolverTests.swift in Sources */,
 				1A0000010000000000000082 /* RecentFileStoreTests.swift in Sources */,
 				1A0000010000000000000074 /* RecentFolderStoreTests.swift in Sources */,
 				1A000001000000000000009C /* TextDocumentStoreTests.swift in Sources */,

@@ -28,7 +28,7 @@ struct HomeView: View {
     private let favoriteFolderStore: FavoriteFolderStore
     private let recentFileStore: RecentFileStore
     private let recentFolderStore: RecentFolderStore
-    private let initialFolderURL: URL?
+    private let initialFolderResolution: InitialFolderResolution
 
     init(
         coreBridge: CoreBridge = CoreBridge(),
@@ -40,7 +40,7 @@ struct HomeView: View {
         favoriteFolderStore: FavoriteFolderStore = FavoriteFolderStore(),
         recentFileStore: RecentFileStore = RecentFileStore(),
         recentFolderStore: RecentFolderStore = RecentFolderStore(),
-        initialFolderURL: URL? = nil
+        initialFolderResolution: InitialFolderResolution = .empty
     ) {
         self.coreBridge = coreBridge
         self.quickLookPreviewService = quickLookPreviewService
@@ -51,7 +51,7 @@ struct HomeView: View {
         self.favoriteFolderStore = favoriteFolderStore
         self.recentFileStore = recentFileStore
         self.recentFolderStore = recentFolderStore
-        self.initialFolderURL = initialFolderURL
+        self.initialFolderResolution = initialFolderResolution
     }
 
     var body: some View {
@@ -107,16 +107,31 @@ struct HomeView: View {
             handleFolderImport(result)
         }
         .fileDialogMessage("Choose a folder to browse in Locus.")
-        .fileDialogConfirmationLabel("Open Folder")
+        .fileDialogConfirmationLabel("Choose Folder")
     }
 
     @MainActor
     private func loadInitialFolderIfNeeded() {
-        guard !didStartInitialFolderLoad, let initialFolderURL else {
+        guard !didStartInitialFolderLoad else {
             return
         }
 
         didStartInitialFolderLoad = true
+
+        guard case let .folder(initialFolderURL) = initialFolderResolution else {
+            if initialFolderResolution == .unavailable {
+                workspaceState = .failed(
+                    folderURL: nil,
+                    message: "Locus couldn't open the home folder. Choose another folder to browse in Locus."
+                )
+            }
+            return
+        }
+
+        // Normal launch starts in the home folder, but this path must stay a
+        // non-recursive immediate-children listing. Do not add startup scans.
+        // Auto-opened home is also not a recent item; only explicit user
+        // folder choices should be recorded in Recents.
         startWorkspaceLoad(initialFolderURL, rootChange: .set(initialFolderURL))
     }
 

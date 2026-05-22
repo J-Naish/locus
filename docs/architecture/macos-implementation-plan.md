@@ -145,13 +145,14 @@ Deliverables:
 - Add Rust file-type classification and folder-listing APIs.
 - Add deterministic Rust unit tests using temporary directories and `fixtures/` where useful.
 - Add Swift folder picker and current location state.
+- Start normal unsandboxed launches in the user's home folder, listing only immediate children.
 - Show a Finder-like file list with names, type labels, size, and modified date.
 - Add in-app "show containing folder and select item" behavior for files reached from recents, favorites, and search results.
 - Keep file location actions inside Locus: open, preview, show containing folder, select item, and copy path.
 
 Acceptance:
 
-- A user can choose a local folder and browse its immediate contents.
+- A user can launch into their home folder, choose another local folder, and browse immediate contents without recursive startup scanning.
 - File list loading does not block the main thread.
 - Rust tests cover sorting, hidden files policy, symlink policy, and basic metadata.
 
@@ -247,7 +248,7 @@ Start with these tasks in order:
 2. Add a Swift `CoreBridge` that calls the existing `locus_core_version`.
 3. Add Rust `file_type` and `workspace` modules with unit tests.
 4. Extend the FFI with one coarse folder-list snapshot API and explicit free functions.
-5. Build a minimal UI: Home, "Open Folder", current location title, and file list.
+5. Build a minimal UI: default home-folder location, folder chooser, current location title, and file list.
 6. Add in-app containing-folder navigation and row selection for file-list, recent, favorite, and search result rows.
 7. Keep context-menu actions scoped to in-app navigation, preview, and path copying.
 8. Run:

@@ -4,6 +4,7 @@
 
 Must support:
 
+- start in the user's home folder by default on unsandboxed local builds
 - open a local folder as a working location
 - browse files and folders
 - open files
@@ -172,6 +173,8 @@ Must preserve:
 
 - local-first behavior
 - no hidden upload of user files
+- no recursive home-directory scanning on launch
+- no automatic Recent entry for the home folder opened at launch
 - no built-in AI chat or agent
 - no bundled AI model
 - no plugin execution

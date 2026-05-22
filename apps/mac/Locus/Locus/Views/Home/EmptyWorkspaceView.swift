@@ -25,12 +25,12 @@ struct EmptyWorkspaceView: View {
         ScrollView {
             VStack(spacing: 24) {
                 ContentUnavailableView {
-                    Label("No Folder Open", systemImage: "folder")
+                    Label("Home Folder Unavailable", systemImage: "folder")
                 } description: {
-                    Text("Choose a folder to browse its immediate contents.")
+                    Text("Choose another folder to browse in Locus.")
                 } actions: {
                     Button(action: actions.openFolder) {
-                        Label("Open Folder", systemImage: "folder")
+                        Label("Choose Folder", systemImage: "folder")
                     }
                 }
 

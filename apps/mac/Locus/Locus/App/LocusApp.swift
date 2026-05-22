@@ -9,7 +9,7 @@ struct LocusApp: App {
                 favoriteFolderStore: Self.favoriteFolderStore,
                 recentFileStore: Self.recentFileStore,
                 recentFolderStore: Self.recentFolderStore,
-                initialFolderURL: Self.initialFolderURL
+                initialFolderResolution: Self.initialFolderResolution
             )
         }
         .windowResizability(.contentMinSize)
@@ -99,26 +99,8 @@ struct LocusApp: App {
         #endif
     }()
 
-    private static var initialFolderURL: URL? {
-        #if DEBUG
-        guard ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1" else {
-            return nil
-        }
-
-        let arguments = ProcessInfo.processInfo.arguments
-        guard let path = uiTestWorkspacePath(in: arguments), !path.isEmpty else {
-            return nil
-        }
-
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            return nil
-        }
-
-        return URL(filePath: path, directoryHint: .isDirectory)
-        #else
-        return nil
-        #endif
+    private static var initialFolderResolution: InitialFolderResolution {
+        InitialFolderURLResolver.resolution()
     }
 
     private static var uiTestFavoriteFoldersKey: String {
@@ -148,10 +130,6 @@ struct LocusApp: App {
         }
 
         return URL(filePath: path, directoryHint: .notDirectory)
-    }
-
-    private static func uiTestWorkspacePath(in arguments: [String]) -> String? {
-        argumentValue(named: "--ui-test-workspace", in: arguments)
     }
 
     private static func argumentValue(named name: String, in arguments: [String]) -> String? {

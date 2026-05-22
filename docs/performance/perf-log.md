@@ -35,3 +35,15 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
 - Rust FFI static library: `17682728 bytes`
 - macOS app bundle: `1348 KiB`
 - notes: Workspace search now surfaces matching favorite and recent items alongside current folder results; debug XCTest 10k-entry plus 3k-shortcut resolver guard ran in 0.108s.
+
+## 2026-05-22T18:56:29Z home-default-launch
+
+- commit: `adc0af4`
+- branch: `main`
+- dirty tree: `true`
+- status: `0`
+- generated folder listing: entries `1010`, avg `2.796 ms`, max `3.142 ms`
+- local home folder listing: entries `141`, avg `0.265 ms`, max `0.288 ms`
+- Rust FFI static library: `17682728 bytes`
+- macOS app bundle: `1776 KiB`
+- notes: Normal unsandboxed launch now starts at the home folder. Startup still uses a single non-recursive immediate-children listing; current-folder monitoring uses debounced directory events and does not watch recursively.

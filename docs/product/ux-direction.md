@@ -31,6 +31,8 @@ The app should center on local places and recent work.
 The primary model is:
 
 - one window usually represents one current working location
+- a normal launch starts at the user's home folder as the first working location
+- the launch-time home location is not treated as a user-chosen recent folder
 - switching locations should be fast
 - the current location should always be clear
 - users should be able to jump to an item's containing folder inside Locus and keep the item selected
