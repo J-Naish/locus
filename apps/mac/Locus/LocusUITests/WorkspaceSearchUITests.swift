@@ -50,6 +50,41 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
+    func testWorkspaceRefreshesWhenFolderContentsChange() throws {
+        let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
+        let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+        XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
+
+        try "Detected by Locus\n".write(
+            to: workspaceURL.appending(path: "Added Later.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "Also detected\n".write(
+            to: workspaceURL.appending(path: "Added Second.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(app.staticTexts["Added Later.md"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Added Second.md"].waitForExistence(timeout: 5), app.debugDescription)
+    }
+
+    @MainActor
+    func testWorkspaceShowsErrorWhenCurrentFolderIsDeleted() throws {
+        let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
+        let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+        XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
+
+        try FileManager.default.removeItem(at: workspaceURL)
+        filesToRemove.remove(workspaceURL.path(percentEncoded: false))
+
+        XCTAssertTrue(app.staticTexts["Folder Could Not Be Opened"].waitForExistence(timeout: 5), app.debugDescription)
+    }
+
+    @MainActor
     func testContextMenuCopiesSelectedEntryPath() throws {
         let workspacePath = try fixtureWorkspacePath("basic")
         let app = try launchApp(workspacePath: workspacePath)
@@ -415,6 +450,15 @@ final class WorkspaceSearchUITests: XCTestCase {
             .path(percentEncoded: false)
         filesToRemove.insert(path)
         return path
+    }
+
+    private func temporaryWorkspaceCopy(ofFixtureNamed name: String) throws -> URL {
+        let source = URL(filePath: try fixtureWorkspacePath(name), directoryHint: .isDirectory)
+        let destination = FileManager.default.temporaryDirectory
+            .appending(path: "locus-ui-workspace-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.copyItem(at: source, to: destination)
+        filesToRemove.insert(destination.path(percentEncoded: false))
+        return destination
     }
 
     private func fixtureWorkspacePath(_ name: String, filePath: String = #filePath) throws -> String {

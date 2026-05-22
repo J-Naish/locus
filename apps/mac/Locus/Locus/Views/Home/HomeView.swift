@@ -20,6 +20,7 @@ struct HomeView: View {
     private let finderService: FinderService
     private let quickLookPreviewService: any QuickLookPreviewing
     private let clipboardService: ClipboardService
+    private let workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring
     private let favoriteFolderStore: FavoriteFolderStore
     private let recentFileStore: RecentFileStore
     private let recentFolderStore: RecentFolderStore
@@ -30,6 +31,7 @@ struct HomeView: View {
         finderService: FinderService = FinderService(),
         quickLookPreviewService: any QuickLookPreviewing = QuickLookPreviewService(),
         clipboardService: ClipboardService = ClipboardService(),
+        workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring = WorkspaceDirectoryMonitor(),
         favoriteFolderStore: FavoriteFolderStore = FavoriteFolderStore(),
         recentFileStore: RecentFileStore = RecentFileStore(),
         recentFolderStore: RecentFolderStore = RecentFolderStore(),
@@ -39,6 +41,7 @@ struct HomeView: View {
         self.finderService = finderService
         self.quickLookPreviewService = quickLookPreviewService
         self.clipboardService = clipboardService
+        self.workspaceDirectoryMonitor = workspaceDirectoryMonitor
         self.favoriteFolderStore = favoriteFolderStore
         self.recentFileStore = recentFileStore
         self.recentFolderStore = recentFolderStore
@@ -173,32 +176,53 @@ struct HomeView: View {
     }
 
     @MainActor
-    private func startWorkspaceLoad(_ folderURL: URL, rootURL: URL? = nil, recordRecent: Bool = false) {
+    private func startWorkspaceLoad(
+        _ folderURL: URL,
+        rootURL: URL? = nil,
+        recordRecent: Bool = false,
+        showsLoading: Bool = true
+    ) {
         if let rootURL {
             workspaceRootURL = rootURL
         }
 
+        if showsLoading {
+            workspaceDirectoryMonitor.stopMonitoring()
+        }
         workspaceLoadGeneration &+= 1
         let generation = workspaceLoadGeneration
 
         Task {
-            await loadWorkspace(folderURL, generation: generation, recordRecent: recordRecent)
+            await loadWorkspace(
+                folderURL,
+                generation: generation,
+                recordRecent: recordRecent,
+                showsLoading: showsLoading
+            )
         }
     }
 
     @MainActor
     private func invalidateWorkspaceLoads() {
+        workspaceDirectoryMonitor.stopMonitoring()
         workspaceLoadGeneration &+= 1
     }
 
     @MainActor
-    private func loadWorkspace(_ folderURL: URL, generation: UInt64, recordRecent: Bool) async {
+    private func loadWorkspace(
+        _ folderURL: URL,
+        generation: UInt64,
+        recordRecent: Bool,
+        showsLoading: Bool
+    ) async {
         guard generation == workspaceLoadGeneration else {
             return
         }
 
         let previousSelectedEntryID = selectedEntryIDForReload(of: folderURL)
-        workspaceState = .loading(folderURL: folderURL)
+        if showsLoading {
+            workspaceState = .loading(folderURL: folderURL)
+        }
         // This covers the immediate directory read. Recents and Favorites will
         // store security-scoped bookmarks once sandboxing is enabled.
         let didStartAccess = folderURL.startAccessingSecurityScopedResource()
@@ -217,6 +241,7 @@ struct HomeView: View {
                 ? previousSelectedEntryID
                 : nil
             workspaceState = .ready(folderURL: folderURL, snapshot: snapshot, loadedAt: Date())
+            startWorkspaceChangeMonitoring(for: folderURL)
             if recordRecent {
                 recentFolderStore.record(folderURL)
                 refreshRecentFolders()
@@ -225,6 +250,7 @@ struct HomeView: View {
             guard generation == workspaceLoadGeneration else {
                 return
             }
+            workspaceDirectoryMonitor.stopMonitoring()
             selectedEntryID = nil
             workspaceState = .failed(
                 folderURL: folderURL,
@@ -350,6 +376,22 @@ struct HomeView: View {
             recentFileStore.record(url)
         }
         refreshRecentFiles()
+    }
+
+    @MainActor
+    private func startWorkspaceChangeMonitoring(for folderURL: URL) {
+        workspaceDirectoryMonitor.startMonitoring(folderURL) {
+            refreshWorkspaceIfStillCurrent(folderURL)
+        }
+    }
+
+    @MainActor
+    private func refreshWorkspaceIfStillCurrent(_ folderURL: URL) {
+        guard workspaceState.folderURL?.locusStandardizedPath == folderURL.locusStandardizedPath else {
+            return
+        }
+
+        startWorkspaceLoad(folderURL, showsLoading: false)
     }
 
     @MainActor

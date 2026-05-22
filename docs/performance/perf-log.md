@@ -3,3 +3,13 @@
 Use this file for curated performance notes that explain meaningful changes.
 Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
 
+## 2026-05-22T13:21:25Z workspace-directory-monitor
+
+- commit: `1cb1fb6`
+- branch: `main`
+- dirty tree: `true`
+- status: `0`
+- folder listing: entries `1010`, avg `4.338 ms`, max `4.787 ms`
+- Rust FFI static library: `17682728 bytes`
+- macOS app bundle: `1244 KiB`
+- notes: Added DispatchSource-based current-folder change monitoring and auto-refresh.
