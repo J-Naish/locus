@@ -32,6 +32,21 @@ Local baseline captured on 2026-05-22:
 
 The defaults leave headroom for CI variance and near-term features while still catching obvious dependency, bundle, and folder-listing regressions.
 
+## Recording Implementation Impact
+
+Use `scripts/perf-record.sh` when a change should leave an auditable
+performance trail. It runs the same smoke check, writes raw JSONL and complete
+command output under `target/perf-runs/`, and can append a compact note to
+`docs/performance/perf-log.md`:
+
+```sh
+scripts/perf-record.sh --label feature-name --notes "What changed"
+scripts/perf-record.sh --label feature-name --append-summary
+```
+
+Keep raw run files out of git. Commit only curated notes that explain meaningful
+changes, regressions, or baseline updates.
+
 ## Exit Codes
 
 - `0`: all budgets passed

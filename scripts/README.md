@@ -29,3 +29,20 @@ LOCUS_PERF_LIST_BUDGET_MS=200 scripts/perf-smoke.sh
 LOCUS_PERF_LIST_MAX_BUDGET_MS=500 scripts/perf-smoke.sh
 LOCUS_PERF_SKIP_MAC_BUILD=1 scripts/perf-smoke.sh
 ```
+
+## Performance Records
+
+Use `perf-record.sh` when you want to keep a local history for a specific
+implementation change:
+
+```sh
+scripts/perf-record.sh --label home-search --notes "After adding shortcut search"
+```
+
+The record script forwards all `LOCUS_PERF_*` overrides accepted by
+`perf-smoke.sh`, stores raw JSONL and full command output in `target/perf-runs/`,
+and can append a curated note to `docs/performance/perf-log.md`:
+
+```sh
+scripts/perf-record.sh --label home-search --append-summary
+```
