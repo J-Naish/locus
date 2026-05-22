@@ -1,11 +1,5 @@
 import SwiftUI
 
-protocol FileLocationShortcut: Identifiable {
-    var url: URL { get }
-    var displayName: String { get }
-    var path: String { get }
-}
-
 extension FavoriteFolder: FileLocationShortcut {}
 extension RecentFile: FileLocationShortcut {}
 extension RecentFolder: FileLocationShortcut {}
@@ -15,53 +9,91 @@ struct EmptyWorkspaceView: View {
     let recentFiles: [RecentFile]
     let recentFolders: [RecentFolder]
     let actions: EmptyWorkspaceActions
+    @State private var searchQuery = ""
 
     var body: some View {
-        VStack(spacing: 24) {
-            ContentUnavailableView {
-                Label("No Folder Open", systemImage: "folder")
-            } description: {
-                Text("Choose a folder to browse its immediate contents.")
-            } actions: {
-                Button(action: actions.openFolder) {
-                    Label("Open Folder", systemImage: "folder")
+        let filteredFavoriteFolders = WorkspaceEntrySearch.filteredShortcuts(favoriteFolders, query: searchQuery)
+        let filteredRecentFiles = WorkspaceEntrySearch.filteredShortcuts(recentFiles, query: searchQuery)
+        let filteredRecentFolders = WorkspaceEntrySearch.filteredShortcuts(recentFolders, query: searchQuery)
+        let hasAnyShortcuts = !favoriteFolders.isEmpty || !recentFiles.isEmpty || !recentFolders.isEmpty
+        let hasActiveSearch = WorkspaceEntrySearch.hasSearchTerms(in: searchQuery)
+        let hasNoSearchResults = hasActiveSearch
+            && filteredFavoriteFolders.isEmpty
+            && filteredRecentFiles.isEmpty
+            && filteredRecentFolders.isEmpty
+
+        ScrollView {
+            VStack(spacing: 24) {
+                ContentUnavailableView {
+                    Label("No Folder Open", systemImage: "folder")
+                } description: {
+                    Text("Choose a folder to browse its immediate contents.")
+                } actions: {
+                    Button(action: actions.openFolder) {
+                        Label("Open Folder", systemImage: "folder")
+                    }
+                }
+
+                if hasAnyShortcuts {
+                    TextField("Search favorites and recent items", text: $searchQuery)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 520)
+                        .accessibilityLabel("Search favorites and recent items")
+                        .accessibilityIdentifier("home-shortcut-search-field")
+                }
+
+                if !filteredFavoriteFolders.isEmpty {
+                    FolderShortcutListView(
+                        title: "Favorite Folders",
+                        rowAccessibilityIdentifier: "favorite-folder-row",
+                        folders: filteredFavoriteFolders,
+                        open: actions.openFavoriteFolder,
+                        remove: actions.removeFavoriteFolder,
+                        copyPath: actions.copyPath
+                    )
+                }
+
+                if !filteredRecentFiles.isEmpty {
+                    FileShortcutListView(
+                        title: "Recent Files",
+                        rowAccessibilityIdentifier: "recent-file-row",
+                        files: filteredRecentFiles,
+                        open: actions.openRecentFile,
+                        remove: actions.removeRecentFile,
+                        copyPath: actions.copyPath
+                    )
+                }
+
+                if !filteredRecentFolders.isEmpty {
+                    FolderShortcutListView(
+                        title: "Recent Folders",
+                        rowAccessibilityIdentifier: "recent-folder-row",
+                        folders: filteredRecentFolders,
+                        open: actions.openRecentFolder,
+                        remove: actions.removeRecentFolder,
+                        copyPath: actions.copyPath
+                    )
+                }
+
+                if hasAnyShortcuts, hasNoSearchResults {
+                    ContentUnavailableView(
+                        "No Matching Items",
+                        systemImage: "magnifyingglass",
+                        description: Text(verbatim: "No favorites or recent items match \"\(searchQuery)\".")
+                    )
+                    .frame(maxWidth: 520)
+                    .accessibilityIdentifier("home-shortcut-search-empty-state")
                 }
             }
-
-            if !favoriteFolders.isEmpty {
-                FolderShortcutListView(
-                    title: "Favorite Folders",
-                    rowAccessibilityIdentifier: "favorite-folder-row",
-                    folders: favoriteFolders,
-                    open: actions.openFavoriteFolder,
-                    remove: actions.removeFavoriteFolder,
-                    copyPath: actions.copyPath
-                )
-            }
-
-            if !recentFiles.isEmpty {
-                FileShortcutListView(
-                    title: "Recent Files",
-                    rowAccessibilityIdentifier: "recent-file-row",
-                    files: recentFiles,
-                    open: actions.openRecentFile,
-                    remove: actions.removeRecentFile,
-                    copyPath: actions.copyPath
-                )
-            }
-
-            if !recentFolders.isEmpty {
-                FolderShortcutListView(
-                    title: "Recent Folders",
-                    rowAccessibilityIdentifier: "recent-folder-row",
-                    folders: recentFolders,
-                    open: actions.openRecentFolder,
-                    remove: actions.removeRecentFolder,
-                    copyPath: actions.copyPath
-                )
-            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onChange(of: hasAnyShortcuts) { _, hasAnyShortcuts in
+            if !hasAnyShortcuts {
+                searchQuery = ""
+            }
+        }
     }
 }
 

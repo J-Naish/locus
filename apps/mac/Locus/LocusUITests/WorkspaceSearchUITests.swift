@@ -197,6 +197,39 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
+    func testHomeSearchFiltersSavedShortcuts() throws {
+        let workspacePath = try fixtureWorkspacePath("basic")
+        let recentFilePath = "\(workspacePath)/Project Brief.md"
+        let app = try launchApp(favoriteFolders: [workspacePath], recentFiles: [recentFilePath])
+
+        XCTAssertTrue(app.staticTexts["Favorite Folders"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Recent Files"].waitForExistence(timeout: 5), app.debugDescription)
+
+        let searchField = app.textFields["home-shortcut-search-field"]
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
+        searchField.click()
+        app.typeText("brief")
+
+        XCTAssertTrue(app.staticTexts["Recent Files"].waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertTrue(app.buttons["Open Project Brief.md"].waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertFalse(app.staticTexts["Favorite Folders"].waitForExistence(timeout: 2), app.debugDescription)
+    }
+
+    @MainActor
+    func testHomeSearchShowsEmptyStateWhenNoSavedShortcutsMatch() throws {
+        let workspacePath = try fixtureWorkspacePath("basic")
+        let app = try launchApp(favoriteFolders: [workspacePath])
+
+        let searchField = app.textFields["home-shortcut-search-field"]
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
+        searchField.click()
+        app.typeText("definitely-no-match")
+
+        let emptyState = app.descendants(matching: .any)["home-shortcut-search-empty-state"]
+        XCTAssertTrue(emptyState.waitForExistence(timeout: 2), app.debugDescription)
+    }
+
+    @MainActor
     func testCurrentFolderCanBePinnedAndReopenedFromHome() throws {
         let favoriteFoldersKey = "favoriteFolders.uiTests.\(UUID().uuidString)"
         let workspacePath = try fixtureWorkspacePath("basic")
@@ -230,7 +263,10 @@ final class WorkspaceSearchUITests: XCTestCase {
         recentFilesKey: String = "recentFiles.uiTests.\(UUID().uuidString)",
         recentFoldersKey: String = "recentFolders.uiTests.\(UUID().uuidString)",
         previewInvocationsKey: String = "previewInvocations.uiTests.\(UUID().uuidString)",
-        previewInvocationsFilePath: String? = nil
+        previewInvocationsFilePath: String? = nil,
+        favoriteFolders: [String] = [],
+        recentFiles: [String] = [],
+        recentFolders: [String] = []
     ) throws -> XCUIApplication {
         let previewInvocationsFilePath = previewInvocationsFilePath ?? temporaryPreviewInvocationsPath()
         trackUserDefaultsKeys(favoriteFoldersKey, recentFilesKey, recentFoldersKey, previewInvocationsKey)
@@ -249,6 +285,15 @@ final class WorkspaceSearchUITests: XCTestCase {
             "--ui-test-preview-invocations-file",
             previewInvocationsFilePath
         ]
+        favoriteFolders.forEach {
+            app.launchArguments += ["--ui-test-favorite-folder", $0]
+        }
+        recentFiles.forEach {
+            app.launchArguments += ["--ui-test-recent-file", $0]
+        }
+        recentFolders.forEach {
+            app.launchArguments += ["--ui-test-recent-folder", $0]
+        }
         if let workspacePath {
             app.launchArguments += [
                 "--ui-test-workspace",
