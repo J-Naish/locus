@@ -31,6 +31,157 @@ final class WorkspaceEntrySearchTests: XCTestCase {
         )
     }
 
+    func testMatchesFileNamesWithOneCharacterTypo() {
+        let entries = [
+            makeWorkspaceEntry(name: "Breif.md"),
+            makeWorkspaceEntry(name: "Budget.xlsx"),
+            makeWorkspaceEntry(name: "meeting-notes.md")
+        ]
+
+        XCTAssertEqual(
+            WorkspaceEntrySearch.filteredEntries(entries, query: "brief").map(\.name),
+            ["Breif.md"]
+        )
+        XCTAssertEqual(
+            WorkspaceEntrySearch.filteredEntries(entries, query: "budegt").map(\.name),
+            ["Budget.xlsx"]
+        )
+    }
+
+    func testRanksStrongerFileNameMatchesBeforeWeakerMatches() {
+        let entries = [
+            makeWorkspaceEntry(name: "Project Brief.md"),
+            makeWorkspaceEntry(name: "Breif.md"),
+            makeWorkspaceEntry(name: "brief-notes.md"),
+            makeWorkspaceEntry(name: "brief.md"),
+            makeWorkspaceEntry(name: "brief")
+        ]
+
+        XCTAssertEqual(
+            WorkspaceEntrySearch.filteredEntries(entries, query: "brief").map(\.name),
+            [
+                "brief",
+                "brief.md",
+                "brief-notes.md",
+                "Project Brief.md",
+                "Breif.md"
+            ]
+        )
+    }
+
+    func testKeepsOriginalOrderWhenSearchRankIsTied() {
+        let entries = [
+            makeWorkspaceEntry(name: "Project Brief.md"),
+            makeWorkspaceEntry(name: "Client Brief.md"),
+            makeWorkspaceEntry(name: "Sales Brief.md")
+        ]
+
+        XCTAssertEqual(
+            WorkspaceEntrySearch.filteredEntries(entries, query: "brief").map(\.name),
+            [
+                "Project Brief.md",
+                "Client Brief.md",
+                "Sales Brief.md"
+            ]
+        )
+    }
+
+    func testDoesNotFuzzyMatchVeryShortTerms() {
+        let entries = [
+            makeWorkspaceEntry(name: "AI.md"),
+            makeWorkspaceEntry(name: "UI.md"),
+            makeWorkspaceEntry(name: "ACB.md")
+        ]
+
+        XCTAssertEqual(
+            WorkspaceEntrySearch.filteredEntries(entries, query: "ai").map(\.name),
+            ["AI.md"]
+        )
+        XCTAssertEqual(
+            WorkspaceEntrySearch.filteredEntries(entries, query: "abc").map(\.name),
+            []
+        )
+    }
+
+    func testFuzzyMatchStartsAtFourCharacters() {
+        let entries = [
+            makeWorkspaceEntry(name: "ABDC.md"),
+            makeWorkspaceEntry(name: "AXD.md")
+        ]
+
+        XCTAssertEqual(
+            WorkspaceEntrySearch.filteredEntries(entries, query: "abcd").map(\.name),
+            ["ABDC.md"]
+        )
+        XCTAssertEqual(
+            WorkspaceEntrySearch.filteredEntries(entries, query: "adx").map(\.name),
+            []
+        )
+    }
+
+    func testRejectsNonAdjacentOrMultiCharacterTypos() {
+        let entries = [
+            makeWorkspaceEntry(name: "bxyef.md"),
+            makeWorkspaceEntry(name: "bxxief.md")
+        ]
+
+        XCTAssertEqual(
+            WorkspaceEntrySearch.filteredEntries(entries, query: "brief").map(\.name),
+            []
+        )
+        XCTAssertFalse(FuzzyMatching.isSingleTypoMatch(Array("brief"), Array("brief")))
+        XCTAssertFalse(FuzzyMatching.isSingleTypoMatch(Array("brief"), Array("bxyef")))
+        XCTAssertFalse(FuzzyMatching.isSingleTypoMatch(Array("brief"), Array("bxxief")))
+    }
+
+    func testRanksDotfilesWithoutEmptyStemMatch() {
+        XCTAssertEqual(WorkspaceSearchRanker.matchKind(for: ".gitignore", in: ".gitignore"), .exactName)
+        XCTAssertEqual(WorkspaceSearchRanker.matchKind(for: "gitignore", in: ".gitignore"), .contains)
+    }
+
+    func testRanksNormalizedNamesCaseDiacriticAndWidthInsensitively() {
+        XCTAssertEqual(WorkspaceSearchRanker.matchKind(for: "budget", in: "Ｂｕｄｇｅｔ.md"), .stem)
+        XCTAssertEqual(WorkspaceSearchRanker.matchKind(for: "Cafe", in: "Café.md"), .stem)
+        XCTAssertEqual(WorkspaceSearchRanker.matchKind(for: "REPORT", in: "report.md"), .stem)
+    }
+
+    func testJapaneseNamesUseContainsMatchingWithoutFuzzyTokenMatching() {
+        let entries = [
+            makeWorkspaceEntry(name: "プロジェクト概要.md"),
+            makeWorkspaceEntry(name: "プロジェクト概用.md")
+        ]
+
+        XCTAssertEqual(
+            WorkspaceEntrySearch.filteredEntries(entries, query: "概要").map(\.name),
+            ["プロジェクト概要.md"]
+        )
+        XCTAssertEqual(
+            WorkspaceEntrySearch.filteredEntries(entries, query: "概用").map(\.name),
+            ["プロジェクト概用.md"]
+        )
+    }
+
+    func testRanksTenThousandEntriesWithinInteractiveBudget() {
+        let entries = (0..<10_000).map { index in
+            switch index {
+            case 7:
+                return makeWorkspaceEntry(name: "Project Brief.md")
+            case 5_000:
+                return makeWorkspaceEntry(name: "Breif.md")
+            default:
+                return makeWorkspaceEntry(name: "Document-\(index).md")
+            }
+        }
+        var result: [WorkspaceEntry] = []
+
+        let elapsed = ContinuousClock().measure {
+            result = WorkspaceEntrySearch.filteredEntries(entries, query: "brief")
+        }
+
+        XCTAssertEqual(result.map(\.name), ["Project Brief.md", "Breif.md"])
+        XCTAssertLessThan(elapsed.milliseconds, 500)
+    }
+
     func testRequiresEveryWhitespaceSeparatedTerm() {
         let entries = [
             makeWorkspaceEntry(name: "Project Brief.md"),
@@ -95,6 +246,18 @@ final class WorkspaceEntrySearchTests: XCTestCase {
         )
     }
 
+    func testMatchesShortcutNamesWithOneCharacterTypo() {
+        let shortcuts = [
+            makeFavoriteFolder(displayName: "Project Breifs", path: "/tmp/briefs"),
+            makeFavoriteFolder(displayName: "Meeting Notes", path: "/tmp/notes")
+        ]
+
+        XCTAssertEqual(
+            WorkspaceEntrySearch.filteredShortcuts(shortcuts, query: "briefs").map(\.displayName),
+            ["Project Breifs"]
+        )
+    }
+
     func testReturnsOriginalShortcutOrderForBlankQuery() {
         let shortcuts = [
             makeFavoriteFolder(displayName: "First", path: "/tmp/first"),
@@ -156,4 +319,12 @@ private func makeFavoriteFolder(displayName: String, path: String) -> FavoriteFo
         path: path,
         addedAt: Date(timeIntervalSince1970: 0)
     )
+}
+
+private extension Duration {
+    var milliseconds: Double {
+        let components = components
+        return Double(components.seconds) * 1_000
+            + Double(components.attoseconds) / 1_000_000_000_000_000
+    }
 }

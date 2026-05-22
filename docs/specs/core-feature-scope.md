@@ -32,6 +32,9 @@ Must support:
 - fast first results
 - result actions for open, preview, reveal in Finder, open externally, and copy path
 - result presentation that keeps local file and folder locations understandable
+- consistent name-search behavior in the current location, favorites, recent folders, and recent files
+- relevance ordering that prefers exact names, extension-stripped name matches, prefix matches, substring matches, then conservative typo matches
+- typo matching only for four-or-more-character terms; Japanese and other CJK names should rely on exact, prefix, and substring matching until a dedicated tokenizer exists
 
 Should support:
 

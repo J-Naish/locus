@@ -15,7 +15,9 @@
 		1A000001000000000000007A /* FavoriteFolderStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000007B /* FavoriteFolderStore.swift */; };
 		1A000001000000000000007C /* FavoriteFolderStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000007D /* FavoriteFolderStoreTests.swift */; };
 		1A0000010000000000000042 /* FinderService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000043 /* FinderService.swift */; };
+		1A0000010000000000000090 /* FileLocationShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000091 /* FileLocationShortcut.swift */; };
 		1A000001000000000000007E /* FileLocationBookmarkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000007F /* FileLocationBookmarkStore.swift */; };
+		1A0000010000000000000092 /* FuzzyMatching.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000093 /* FuzzyMatching.swift */; };
 		1A000001000000000000006C /* ClipboardService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000006D /* ClipboardService.swift */; };
 		1A0000010000000000000076 /* FileURLDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000077 /* FileURLDisplay.swift */; };
 		1A0000010000000000000084 /* QuickLookPreviewService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000085 /* QuickLookPreviewService.swift */; };
@@ -27,6 +29,7 @@
 		1A000001000000000000008C /* WorkspaceDirectoryMonitorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000008D /* WorkspaceDirectoryMonitorTests.swift */; };
 		1A0000010000000000000045 /* WorkspaceEntrySearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000046 /* WorkspaceEntrySearch.swift */; };
 		1A0000010000000000000047 /* WorkspaceEntrySearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000048 /* WorkspaceEntrySearchTests.swift */; };
+		1A0000010000000000000094 /* WorkspaceSearchRanker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000095 /* WorkspaceSearchRanker.swift */; };
 		1A0000010000000000000051 /* WorkspaceSearchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000053 /* WorkspaceSearchUITests.swift */; };
 		1A0000010000000000000064 /* WorkspaceEntryOpenAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000065 /* WorkspaceEntryOpenAction.swift */; };
 		1A0000010000000000000066 /* WorkspaceEntryOpenActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000067 /* WorkspaceEntryOpenActionTests.swift */; };
@@ -68,7 +71,9 @@
 		1A000001000000000000007B /* FavoriteFolderStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoriteFolderStore.swift; sourceTree = "<group>"; };
 		1A000001000000000000007D /* FavoriteFolderStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoriteFolderStoreTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000043 /* FinderService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderService.swift; sourceTree = "<group>"; };
+		1A0000010000000000000091 /* FileLocationShortcut.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileLocationShortcut.swift; sourceTree = "<group>"; };
 		1A000001000000000000007F /* FileLocationBookmarkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileLocationBookmarkStore.swift; sourceTree = "<group>"; };
+		1A0000010000000000000093 /* FuzzyMatching.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FuzzyMatching.swift; sourceTree = "<group>"; };
 		1A000001000000000000006D /* ClipboardService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardService.swift; sourceTree = "<group>"; };
 		1A0000010000000000000077 /* FileURLDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileURLDisplay.swift; sourceTree = "<group>"; };
 		1A0000010000000000000085 /* QuickLookPreviewService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookPreviewService.swift; sourceTree = "<group>"; };
@@ -80,6 +85,7 @@
 		1A000001000000000000008D /* WorkspaceDirectoryMonitorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDirectoryMonitorTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000046 /* WorkspaceEntrySearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntrySearch.swift; sourceTree = "<group>"; };
 		1A0000010000000000000048 /* WorkspaceEntrySearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntrySearchTests.swift; sourceTree = "<group>"; };
+		1A0000010000000000000095 /* WorkspaceSearchRanker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSearchRanker.swift; sourceTree = "<group>"; };
 		1A0000010000000000000053 /* WorkspaceSearchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSearchUITests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000065 /* WorkspaceEntryOpenAction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryOpenAction.swift; sourceTree = "<group>"; };
 		1A0000010000000000000067 /* WorkspaceEntryOpenActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryOpenActionTests.swift; sourceTree = "<group>"; };
@@ -217,12 +223,15 @@
 			isa = PBXGroup;
 			children = (
 				1A0000010000000000000079 /* EmptyWorkspaceView.swift */,
+				1A0000010000000000000091 /* FileLocationShortcut.swift */,
+				1A0000010000000000000093 /* FuzzyMatching.swift */,
 				1A0000010000000000000013 /* HomeView.swift */,
 				1A0000010000000000000065 /* WorkspaceEntryOpenAction.swift */,
 				1A000001000000000000006F /* WorkspaceEntryPathCopy.swift */,
 				1A0000010000000000000087 /* WorkspaceEntryPreviewAction.swift */,
 				1A0000010000000000000069 /* WorkspaceNavigation.swift */,
 				1A0000010000000000000046 /* WorkspaceEntrySearch.swift */,
+				1A0000010000000000000095 /* WorkspaceSearchRanker.swift */,
 			);
 			path = Home;
 			sourceTree = "<group>";
@@ -385,8 +394,10 @@
 				1A0000010000000000000078 /* EmptyWorkspaceView.swift in Sources */,
 				1A000001000000000000007A /* FavoriteFolderStore.swift in Sources */,
 				1A0000010000000000000076 /* FileURLDisplay.swift in Sources */,
+				1A0000010000000000000090 /* FileLocationShortcut.swift in Sources */,
 				1A0000010000000000000042 /* FinderService.swift in Sources */,
 				1A000001000000000000007E /* FileLocationBookmarkStore.swift in Sources */,
+				1A0000010000000000000092 /* FuzzyMatching.swift in Sources */,
 				1A0000010000000000000003 /* HomeView.swift in Sources */,
 				1A0000010000000000000084 /* QuickLookPreviewService.swift in Sources */,
 				1A0000010000000000000080 /* RecentFileStore.swift in Sources */,
@@ -397,6 +408,7 @@
 				1A0000010000000000000086 /* WorkspaceEntryPreviewAction.swift in Sources */,
 				1A0000010000000000000068 /* WorkspaceNavigation.swift in Sources */,
 				1A0000010000000000000045 /* WorkspaceEntrySearch.swift in Sources */,
+				1A0000010000000000000094 /* WorkspaceSearchRanker.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

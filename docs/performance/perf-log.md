@@ -13,3 +13,14 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
 - Rust FFI static library: `17682728 bytes`
 - macOS app bundle: `1244 KiB`
 - notes: Added DispatchSource-based current-folder change monitoring and auto-refresh.
+
+## 2026-05-22T14:13:43Z search-ranking
+
+- commit: `87724f4`
+- branch: `main`
+- dirty tree: `true`
+- status: `0`
+- folder listing: entries `1010`, avg `4.419 ms`, max `5.734 ms`
+- Rust FFI static library: `17682728 bytes`
+- macOS app bundle: `1320 KiB`
+- notes: Added relevance-ranked name search with conservative typo matching; debug XCTest 10k-entry search guard ran in 0.091s during full test.
