@@ -9,6 +9,7 @@ struct HomeView: View {
     @State private var isFolderImporterPresented = false
     @State private var didStartInitialFolderLoad = false
     @State private var workspaceRootURL: URL?
+    @State private var recentFolders: [RecentFolder] = []
     // Folder loads can overlap when users refresh or choose another folder
     // quickly; only the latest generation is allowed to update visible state.
     @State private var workspaceLoadGeneration: UInt64 = 0
@@ -16,17 +17,20 @@ struct HomeView: View {
     private let coreBridge: CoreBridge
     private let finderService: FinderService
     private let clipboardService: ClipboardService
+    private let recentFolderStore: RecentFolderStore
     private let initialFolderURL: URL?
 
     init(
         coreBridge: CoreBridge = CoreBridge(),
         finderService: FinderService = FinderService(),
         clipboardService: ClipboardService = ClipboardService(),
+        recentFolderStore: RecentFolderStore = RecentFolderStore(),
         initialFolderURL: URL? = nil
     ) {
         self.coreBridge = coreBridge
         self.finderService = finderService
         self.clipboardService = clipboardService
+        self.recentFolderStore = recentFolderStore
         self.initialFolderURL = initialFolderURL
     }
 
@@ -37,8 +41,10 @@ struct HomeView: View {
             WorkspaceContentView(
                 state: workspaceState,
                 rootURL: workspaceRootURL,
+                recentFolders: recentFolders,
                 selectedEntryID: $selectedEntryID,
                 openFolder: openFolder,
+                openRecentFolder: openRecentFolder,
                 actions: WorkspaceActions(
                     refresh: refreshWorkspace,
                     openParentFolder: openParentFolder,
@@ -51,6 +57,7 @@ struct HomeView: View {
         .padding(28)
         .frame(minWidth: 820, minHeight: 520)
         .task {
+            refreshRecentFolders()
             await loadRuntimeStatus()
             loadInitialFolderIfNeeded()
         }
@@ -108,7 +115,7 @@ struct HomeView: View {
                 return
             }
 
-            startWorkspaceLoad(folderURL, rootURL: folderURL)
+            startWorkspaceLoad(folderURL, rootURL: folderURL, recordRecent: true)
         case let .failure(error):
             // SwiftUI's .fileImporter delivers user cancellation as a Cocoa
             // user-cancelled error or as Swift's CancellationError. Treat both
@@ -143,7 +150,7 @@ struct HomeView: View {
     }
 
     @MainActor
-    private func startWorkspaceLoad(_ folderURL: URL, rootURL: URL? = nil) {
+    private func startWorkspaceLoad(_ folderURL: URL, rootURL: URL? = nil, recordRecent: Bool = false) {
         if let rootURL {
             workspaceRootURL = rootURL
         }
@@ -152,7 +159,7 @@ struct HomeView: View {
         let generation = workspaceLoadGeneration
 
         Task {
-            await loadWorkspace(folderURL, generation: generation)
+            await loadWorkspace(folderURL, generation: generation, recordRecent: recordRecent)
         }
     }
 
@@ -162,7 +169,7 @@ struct HomeView: View {
     }
 
     @MainActor
-    private func loadWorkspace(_ folderURL: URL, generation: UInt64) async {
+    private func loadWorkspace(_ folderURL: URL, generation: UInt64, recordRecent: Bool) async {
         guard generation == workspaceLoadGeneration else {
             return
         }
@@ -187,6 +194,10 @@ struct HomeView: View {
                 ? previousSelectedEntryID
                 : nil
             workspaceState = .ready(folderURL: folderURL, snapshot: snapshot, loadedAt: Date())
+            if recordRecent {
+                recentFolderStore.record(folderURL)
+                refreshRecentFolders()
+            }
         } catch {
             guard generation == workspaceLoadGeneration else {
                 return
@@ -201,6 +212,16 @@ struct HomeView: View {
 
     private func revealInFinder(_ entry: WorkspaceEntry) {
         finderService.reveal(entry.url)
+    }
+
+    @MainActor
+    private func openRecentFolder(_ folder: RecentFolder) {
+        startWorkspaceLoad(folder.url, rootURL: folder.url, recordRecent: true)
+    }
+
+    @MainActor
+    private func refreshRecentFolders() {
+        recentFolders = recentFolderStore.recentFolders()
     }
 
     @MainActor
@@ -294,15 +315,21 @@ private struct RuntimeStatusView: View {
 private struct WorkspaceContentView: View {
     let state: WorkspaceState
     let rootURL: URL?
+    let recentFolders: [RecentFolder]
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let openFolder: () -> Void
+    let openRecentFolder: (RecentFolder) -> Void
     let actions: WorkspaceActions
 
     var body: some View {
         Group {
             switch state {
             case .idle:
-                EmptyWorkspaceView(openFolder: openFolder)
+                EmptyWorkspaceView(
+                    recentFolders: recentFolders,
+                    openFolder: openFolder,
+                    openRecentFolder: openRecentFolder
+                )
             case let .loading(folderURL):
                 LoadingWorkspaceView(folderURL: folderURL)
             case let .ready(folderURL, snapshot, loadedAt):
@@ -333,23 +360,6 @@ private struct WorkspaceActions {
     let reveal: (WorkspaceEntry) -> Void
     let copyPaths: ([WorkspaceEntry]) -> Void
     let performOpenAction: (WorkspaceEntryOpenAction) -> Void
-}
-
-private struct EmptyWorkspaceView: View {
-    let openFolder: () -> Void
-
-    var body: some View {
-        ContentUnavailableView {
-            Label("No Folder Open", systemImage: "folder")
-        } description: {
-            Text("Choose a folder to browse its immediate contents.")
-        } actions: {
-            Button(action: openFolder) {
-                Label("Open Folder", systemImage: "folder")
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
 }
 
 private struct LoadingWorkspaceView: View {

@@ -58,6 +58,20 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
+    func testRecentFolderOpensFromHome() throws {
+        let workspacePath = try fixtureWorkspacePath("basic")
+        let app = try launchAppWithRecentFolder(workspacePath: workspacePath)
+
+        XCTAssertTrue(app.staticTexts["Recent Folders"].waitForExistence(timeout: 5), app.debugDescription)
+
+        let recentFolder = app.buttons["Open basic"]
+        XCTAssertTrue(recentFolder.waitForExistence(timeout: 5), app.debugDescription)
+        recentFolder.click()
+
+        XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
+    }
+
+    @MainActor
     private func launchAppWithBasicWorkspace() throws -> XCUIApplication {
         try launchApp(workspacePath: fixtureWorkspacePath("basic"))
     }
@@ -70,6 +84,26 @@ final class WorkspaceSearchUITests: XCTestCase {
             "--ui-test-workspace",
             workspacePath
         ]
+        try launchAndWaitForWindow(app)
+        return app
+    }
+
+    @MainActor
+    private func launchAppWithRecentFolder(workspacePath: String) throws -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["LOCUS_UI_TESTING"] = "1"
+        app.launchArguments = [
+            "--ui-test-recent-folders-key",
+            "recentFolders.uiTests.\(UUID().uuidString)",
+            "--ui-test-recent-folder",
+            workspacePath
+        ]
+        try launchAndWaitForWindow(app)
+        return app
+    }
+
+    @MainActor
+    private func launchAndWaitForWindow(_ app: XCUIApplication) throws {
         app.launch()
 
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5), app.debugDescription)
@@ -79,8 +113,6 @@ final class WorkspaceSearchUITests: XCTestCase {
                 "Locus launched but its window is not visible to XCUITest. Grant Accessibility access to the UI test runner and rerun this test."
             )
         }
-
-        return app
     }
 
     private func fixtureWorkspacePath(_ name: String, filePath: String = #filePath) throws -> String {

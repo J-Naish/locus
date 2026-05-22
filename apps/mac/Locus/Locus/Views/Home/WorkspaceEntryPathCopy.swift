@@ -16,10 +16,6 @@ enum WorkspaceEntryPathCopy {
     }
 
     private static func copyPath(for url: URL) -> String {
-        var path = url.standardizedFileURL.path(percentEncoded: false)
-        while path.count > 1, path.hasSuffix("/") {
-            path.removeLast()
-        }
-        return path
+        url.locusStandardizedPath
     }
 }
