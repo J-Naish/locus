@@ -7,7 +7,6 @@ struct HomeView: View {
         case set(URL?)
     }
 
-    @State private var runtimeStatus: RuntimeStatus = .checking
     @State private var workspaceState: WorkspaceState = .idle
     @State private var selectedEntryID: WorkspaceEntry.ID?
     @State private var isFolderImporterPresented = false
@@ -69,8 +68,6 @@ struct HomeView: View {
         )
 
         VStack(alignment: .leading, spacing: 16) {
-            HeaderView(openFolder: openFolder)
-            RuntimeStatusView(status: runtimeStatus)
             WorkspaceContentView(
                 state: workspaceState,
                 rootURL: workspaceRootURL,
@@ -100,7 +97,6 @@ struct HomeView: View {
         .frame(minWidth: 820, minHeight: 520)
         .task {
             refreshFileLocationShortcuts()
-            await loadRuntimeStatus()
             loadInitialFolderIfNeeded()
         }
         .fileImporter(
@@ -112,15 +108,6 @@ struct HomeView: View {
         }
         .fileDialogMessage("Choose a folder to browse in Locus.")
         .fileDialogConfirmationLabel("Open Folder")
-    }
-
-    @MainActor
-    private func loadRuntimeStatus() async {
-        do {
-            runtimeStatus = .ready(try await coreBridge.runtimeSummary())
-        } catch {
-            runtimeStatus = .failed(error.localizedDescription)
-        }
     }
 
     @MainActor
@@ -489,55 +476,6 @@ struct HomeView: View {
 
         recentFileStore.remove(selectedURL)
         refreshRecentFiles()
-    }
-}
-
-private struct HeaderView: View {
-    let openFolder: () -> Void
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Locus")
-                    .font(.title)
-                    .fontWeight(.semibold)
-                    .accessibilityAddTraits(.isHeader)
-
-                Text("Local document workspace")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            Button(action: openFolder) {
-                Label("Open Folder", systemImage: "folder")
-            }
-            .keyboardShortcut("o", modifiers: [.command])
-            .controlSize(.large)
-        }
-    }
-}
-
-private struct RuntimeStatusView: View {
-    let status: RuntimeStatus
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: status.symbolName)
-                .foregroundStyle(status.symbolColor)
-                .frame(width: 18)
-                .accessibilityHidden(true)
-
-            Text(status.message)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            Spacer()
-        }
-        .padding(.vertical, 8)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(status.message)
     }
 }
 
@@ -1229,45 +1167,6 @@ private struct WorkspaceErrorView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-private enum RuntimeStatus: Equatable, Sendable {
-    case checking
-    case ready(CoreRuntimeSummary)
-    case failed(String)
-
-    var symbolName: String {
-        switch self {
-        case .checking:
-            return "circle.dotted"
-        case .ready:
-            return "checkmark.circle"
-        case .failed:
-            return "exclamationmark.triangle"
-        }
-    }
-
-    var symbolColor: Color {
-        switch self {
-        case .checking:
-            return .secondary
-        case .ready:
-            return .green
-        case .failed:
-            return .orange
-        }
-    }
-
-    var message: String {
-        switch self {
-        case .checking:
-            return "Checking Rust core"
-        case let .ready(summary):
-            return "Rust core \(summary.coreVersion), ABI \(summary.abiVersion)"
-        case let .failed(message):
-            return message
-        }
     }
 }
 
