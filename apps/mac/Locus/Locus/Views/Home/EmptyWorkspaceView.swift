@@ -1,19 +1,20 @@
 import SwiftUI
 
-protocol FolderShortcut: Identifiable {
+protocol FileLocationShortcut: Identifiable {
+    var url: URL { get }
     var displayName: String { get }
     var path: String { get }
 }
 
-extension FavoriteFolder: FolderShortcut {}
-extension RecentFolder: FolderShortcut {}
+extension FavoriteFolder: FileLocationShortcut {}
+extension RecentFile: FileLocationShortcut {}
+extension RecentFolder: FileLocationShortcut {}
 
 struct EmptyWorkspaceView: View {
     let favoriteFolders: [FavoriteFolder]
+    let recentFiles: [RecentFile]
     let recentFolders: [RecentFolder]
-    let openFolder: () -> Void
-    let openFavoriteFolder: (FavoriteFolder) -> Void
-    let openRecentFolder: (RecentFolder) -> Void
+    let actions: EmptyWorkspaceActions
 
     var body: some View {
         VStack(spacing: 24) {
@@ -22,7 +23,7 @@ struct EmptyWorkspaceView: View {
             } description: {
                 Text("Choose a folder to browse its immediate contents.")
             } actions: {
-                Button(action: openFolder) {
+                Button(action: actions.openFolder) {
                     Label("Open Folder", systemImage: "folder")
                 }
             }
@@ -32,7 +33,20 @@ struct EmptyWorkspaceView: View {
                     title: "Favorite Folders",
                     rowAccessibilityIdentifier: "favorite-folder-row",
                     folders: favoriteFolders,
-                    open: openFavoriteFolder
+                    open: actions.openFavoriteFolder,
+                    remove: actions.removeFavoriteFolder,
+                    copyPath: actions.copyPath
+                )
+            }
+
+            if !recentFiles.isEmpty {
+                FileShortcutListView(
+                    title: "Recent Files",
+                    rowAccessibilityIdentifier: "recent-file-row",
+                    files: recentFiles,
+                    open: actions.openRecentFile,
+                    remove: actions.removeRecentFile,
+                    copyPath: actions.copyPath
                 )
             }
 
@@ -41,7 +55,9 @@ struct EmptyWorkspaceView: View {
                     title: "Recent Folders",
                     rowAccessibilityIdentifier: "recent-folder-row",
                     folders: recentFolders,
-                    open: openRecentFolder
+                    open: actions.openRecentFolder,
+                    remove: actions.removeRecentFolder,
+                    copyPath: actions.copyPath
                 )
             }
         }
@@ -49,11 +65,70 @@ struct EmptyWorkspaceView: View {
     }
 }
 
-private struct FolderShortcutListView<Folder: FolderShortcut>: View {
+struct EmptyWorkspaceActions {
+    let openFolder: () -> Void
+    let openFavoriteFolder: (FavoriteFolder) -> Void
+    let openRecentFile: (RecentFile) -> Void
+    let openRecentFolder: (RecentFolder) -> Void
+    let removeFavoriteFolder: (FavoriteFolder) -> Void
+    let removeRecentFile: (RecentFile) -> Void
+    let removeRecentFolder: (RecentFolder) -> Void
+    let copyPath: (URL) -> Void
+}
+
+private struct FileShortcutListView<File: FileLocationShortcut>: View {
+    let title: String
+    let rowAccessibilityIdentifier: String
+    let files: [File]
+    let open: (File) -> Void
+    let remove: (File) -> Void
+    let copyPath: (URL) -> Void
+
+    var body: some View {
+        ShortcutListView(
+            title: title,
+            rowAccessibilityIdentifier: rowAccessibilityIdentifier,
+            items: files,
+            systemImage: "doc",
+            symbolColor: .secondary,
+            open: open,
+            remove: remove,
+            copyPath: copyPath
+        )
+    }
+}
+
+private struct FolderShortcutListView<Folder: FileLocationShortcut>: View {
     let title: String
     let rowAccessibilityIdentifier: String
     let folders: [Folder]
     let open: (Folder) -> Void
+    let remove: (Folder) -> Void
+    let copyPath: (URL) -> Void
+
+    var body: some View {
+        ShortcutListView(
+            title: title,
+            rowAccessibilityIdentifier: rowAccessibilityIdentifier,
+            items: folders,
+            systemImage: "folder",
+            symbolColor: .blue,
+            open: open,
+            remove: remove,
+            copyPath: copyPath
+        )
+    }
+}
+
+private struct ShortcutListView<Item: FileLocationShortcut>: View {
+    let title: String
+    let rowAccessibilityIdentifier: String
+    let items: [Item]
+    let systemImage: String
+    let symbolColor: Color
+    let open: (Item) -> Void
+    let remove: (Item) -> Void
+    let copyPath: (URL) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -61,21 +136,21 @@ private struct FolderShortcutListView<Folder: FolderShortcut>: View {
                 .font(.headline)
 
             VStack(alignment: .leading, spacing: 6) {
-                ForEach(folders) { folder in
+                ForEach(items) { item in
                     Button {
-                        open(folder)
+                        open(item)
                     } label: {
                         HStack(spacing: 10) {
-                            Image(systemName: "folder")
-                                .foregroundStyle(.blue)
+                            Image(systemName: systemImage)
+                                .foregroundStyle(symbolColor)
                                 .frame(width: 18)
                                 .accessibilityHidden(true)
 
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(folder.displayName)
+                                Text(item.displayName)
                                     .lineLimit(1)
 
-                                Text(folder.path)
+                                Text(item.path)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
@@ -87,7 +162,20 @@ private struct FolderShortcutListView<Folder: FolderShortcut>: View {
                         .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Open \(folder.displayName)")
+                    .contextMenu {
+                        Button("Open") {
+                            open(item)
+                        }
+
+                        Button("Copy Path") {
+                            copyPath(item.url)
+                        }
+
+                        Button("Remove") {
+                            remove(item)
+                        }
+                    }
+                    .accessibilityLabel("Open \(item.displayName)")
                     .accessibilityIdentifier(rowAccessibilityIdentifier)
                 }
             }

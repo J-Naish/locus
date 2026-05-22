@@ -10,6 +10,7 @@ struct HomeView: View {
     @State private var didStartInitialFolderLoad = false
     @State private var workspaceRootURL: URL?
     @State private var favoriteFolders: [FavoriteFolder] = []
+    @State private var recentFiles: [RecentFile] = []
     @State private var recentFolders: [RecentFolder] = []
     // Folder loads can overlap when users refresh or choose another folder
     // quickly; only the latest generation is allowed to update visible state.
@@ -19,6 +20,7 @@ struct HomeView: View {
     private let finderService: FinderService
     private let clipboardService: ClipboardService
     private let favoriteFolderStore: FavoriteFolderStore
+    private let recentFileStore: RecentFileStore
     private let recentFolderStore: RecentFolderStore
     private let initialFolderURL: URL?
 
@@ -27,6 +29,7 @@ struct HomeView: View {
         finderService: FinderService = FinderService(),
         clipboardService: ClipboardService = ClipboardService(),
         favoriteFolderStore: FavoriteFolderStore = FavoriteFolderStore(),
+        recentFileStore: RecentFileStore = RecentFileStore(),
         recentFolderStore: RecentFolderStore = RecentFolderStore(),
         initialFolderURL: URL? = nil
     ) {
@@ -34,6 +37,7 @@ struct HomeView: View {
         self.finderService = finderService
         self.clipboardService = clipboardService
         self.favoriteFolderStore = favoriteFolderStore
+        self.recentFileStore = recentFileStore
         self.recentFolderStore = recentFolderStore
         self.initialFolderURL = initialFolderURL
     }
@@ -46,11 +50,19 @@ struct HomeView: View {
                 state: workspaceState,
                 rootURL: workspaceRootURL,
                 favoriteFolders: favoriteFolders,
+                recentFiles: recentFiles,
                 recentFolders: recentFolders,
                 selectedEntryID: $selectedEntryID,
-                openFolder: openFolder,
-                openFavoriteFolder: openFavoriteFolder,
-                openRecentFolder: openRecentFolder,
+                emptyActions: EmptyWorkspaceActions(
+                    openFolder: openFolder,
+                    openFavoriteFolder: openFavoriteFolder,
+                    openRecentFile: openRecentFile,
+                    openRecentFolder: openRecentFolder,
+                    removeFavoriteFolder: removeFavoriteFolder,
+                    removeRecentFile: removeRecentFile,
+                    removeRecentFolder: removeRecentFolder,
+                    copyPath: copyPath
+                ),
                 actions: WorkspaceActions(
                     refresh: refreshWorkspace,
                     openParentFolder: openParentFolder,
@@ -64,8 +76,7 @@ struct HomeView: View {
         .padding(28)
         .frame(minWidth: 820, minHeight: 520)
         .task {
-            refreshFavoriteFolders()
-            refreshRecentFolders()
+            refreshFileLocationShortcuts()
             await loadRuntimeStatus()
             loadInitialFolderIfNeeded()
         }
@@ -228,6 +239,11 @@ struct HomeView: View {
     }
 
     @MainActor
+    private func openRecentFile(_ file: RecentFile) {
+        openExternalFile(file.url)
+    }
+
+    @MainActor
     private func openRecentFolder(_ folder: RecentFolder) {
         startWorkspaceLoad(folder.url, rootURL: folder.url, recordRecent: true)
     }
@@ -238,8 +254,20 @@ struct HomeView: View {
     }
 
     @MainActor
+    private func refreshRecentFiles() {
+        recentFiles = recentFileStore.recentFiles()
+    }
+
+    @MainActor
     private func refreshRecentFolders() {
         recentFolders = recentFolderStore.recentFolders()
+    }
+
+    @MainActor
+    private func refreshFileLocationShortcuts() {
+        refreshFavoriteFolders()
+        refreshRecentFiles()
+        refreshRecentFolders()
     }
 
     @MainActor
@@ -257,8 +285,31 @@ struct HomeView: View {
     }
 
     @MainActor
+    private func removeFavoriteFolder(_ folder: FavoriteFolder) {
+        favoriteFolderStore.remove(folder.url)
+        refreshFavoriteFolders()
+    }
+
+    @MainActor
+    private func removeRecentFile(_ file: RecentFile) {
+        recentFileStore.remove(file.url)
+        refreshRecentFiles()
+    }
+
+    @MainActor
+    private func removeRecentFolder(_ folder: RecentFolder) {
+        recentFolderStore.remove(folder.url)
+        refreshRecentFolders()
+    }
+
+    @MainActor
     private func copyPaths(_ entries: [WorkspaceEntry]) {
         clipboardService.copyEntryPaths(entries)
+    }
+
+    @MainActor
+    private func copyPath(_ url: URL) {
+        clipboardService.copyPlainText(url.locusStandardizedPath)
     }
 
     @MainActor
@@ -280,8 +331,16 @@ struct HomeView: View {
         case let .browseFolder(url):
             startWorkspaceLoad(url, recordRecent: true)
         case let .openExternally(url):
-            finderService.openExternally(url)
+            openExternalFile(url)
         }
+    }
+
+    @MainActor
+    private func openExternalFile(_ url: URL) {
+        if finderService.openExternally(url) {
+            recentFileStore.record(url)
+        }
+        refreshRecentFiles()
     }
 
     @MainActor
@@ -348,11 +407,10 @@ private struct WorkspaceContentView: View {
     let state: WorkspaceState
     let rootURL: URL?
     let favoriteFolders: [FavoriteFolder]
+    let recentFiles: [RecentFile]
     let recentFolders: [RecentFolder]
     @Binding var selectedEntryID: WorkspaceEntry.ID?
-    let openFolder: () -> Void
-    let openFavoriteFolder: (FavoriteFolder) -> Void
-    let openRecentFolder: (RecentFolder) -> Void
+    let emptyActions: EmptyWorkspaceActions
     let actions: WorkspaceActions
 
     var body: some View {
@@ -361,10 +419,9 @@ private struct WorkspaceContentView: View {
             case .idle:
                 EmptyWorkspaceView(
                     favoriteFolders: favoriteFolders,
+                    recentFiles: recentFiles,
                     recentFolders: recentFolders,
-                    openFolder: openFolder,
-                    openFavoriteFolder: openFavoriteFolder,
-                    openRecentFolder: openRecentFolder
+                    actions: emptyActions
                 )
             case let .loading(folderURL):
                 LoadingWorkspaceView(folderURL: folderURL)
@@ -382,7 +439,7 @@ private struct WorkspaceContentView: View {
                 WorkspaceErrorView(
                     folderURL: folderURL,
                     message: message,
-                    openFolder: openFolder,
+                    openFolder: emptyActions.openFolder,
                     retry: actions.refresh
                 )
             }

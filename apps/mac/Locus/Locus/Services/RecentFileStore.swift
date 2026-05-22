@@ -1,53 +1,53 @@
 import Foundation
 
-struct FavoriteFolder: Identifiable, Equatable, Sendable {
+struct RecentFile: Identifiable, Equatable, Sendable {
     let id: String
     let url: URL
     let displayName: String
     let path: String
-    let addedAt: Date
+    let lastOpenedAt: Date
 }
 
-struct FavoriteFolderStore {
+struct RecentFileStore {
+    static let defaultMaxCount = 10
+
     private let bookmarkStore: FileLocationBookmarkStore
     private let now: () -> Date
 
     init(
         userDefaults: UserDefaults = .standard,
-        key: String = "favoriteFolders.v1",
+        key: String = "recentFiles.v1",
+        maxCount: Int = Self.defaultMaxCount,
         now: @escaping () -> Date = Date.init
     ) {
         self.bookmarkStore = FileLocationBookmarkStore(
             userDefaults: userDefaults,
             key: key,
-            requiredResource: .directory,
-            logCategory: "FavoriteFolderStore"
+            maxCount: maxCount,
+            requiredResource: .regularFile,
+            logCategory: "RecentFileStore"
         )
         self.now = now
     }
 
-    func favoriteFolders() -> [FavoriteFolder] {
+    func recentFiles() -> [RecentFile] {
         bookmarkStore.resolvedLocations().map {
-            FavoriteFolder(
+            RecentFile(
                 id: $0.path,
                 url: $0.url,
                 displayName: $0.displayName,
                 path: $0.path,
-                addedAt: $0.timestamp
+                lastOpenedAt: $0.timestamp
             )
         }
     }
 
-    func contains(_ folderURL: URL) -> Bool {
-        bookmarkStore.contains(folderURL)
-    }
-
     @discardableResult
-    func add(_ folderURL: URL) -> Bool {
-        bookmarkStore.insert(folderURL, timestamp: now(), duplicatePolicy: .keepOriginalPosition)
+    func record(_ fileURL: URL) -> Bool {
+        bookmarkStore.insert(fileURL, timestamp: now(), duplicatePolicy: .moveToFront)
     }
 
-    func remove(_ folderURL: URL) {
-        bookmarkStore.remove(folderURL)
+    func remove(_ fileURL: URL) {
+        bookmarkStore.remove(fileURL)
     }
 }

@@ -81,6 +81,15 @@ final class FavoriteFolderStoreTests: XCTestCase {
         XCTAssertEqual(store.favoriteFolders(), [])
     }
 
+    func testRejectsFileWhenAddingFavoriteFolder() throws {
+        let fileURL = temporaryDirectory.appending(path: "brief.md", directoryHint: .notDirectory)
+        try Data("test".utf8).write(to: fileURL)
+        let store = FavoriteFolderStore(userDefaults: userDefaults)
+
+        XCTAssertFalse(store.add(fileURL))
+        XCTAssertEqual(store.favoriteFolders(), [])
+    }
+
     func testPrunesFavoriteFolderThatNoLongerExists() throws {
         let folderURL = try makeFolder(named: "Reports")
         let key = "favorite-folders-to-prune"
@@ -120,6 +129,6 @@ final class FavoriteFolderStoreTests: XCTestCase {
             return nil
         }
 
-        return try? PropertyListDecoder().decode([StoredFolderBookmark].self, from: data).count
+        return try? PropertyListDecoder().decode([StoredFileLocationBookmark].self, from: data).count
     }
 }

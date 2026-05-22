@@ -5,6 +5,8 @@ import OSLog
 struct FinderService: Sendable {
     private static let logger = Logger(subsystem: "Locus", category: "FinderService")
 
+    /// Returns whether macOS accepted the request to open the URL, not whether
+    /// the receiving app ultimately displayed it successfully.
     @discardableResult
     @MainActor
     func openExternally(_ url: URL) -> Bool {

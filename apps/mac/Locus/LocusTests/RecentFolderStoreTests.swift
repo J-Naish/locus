@@ -81,6 +81,15 @@ final class RecentFolderStoreTests: XCTestCase {
         XCTAssertEqual(store.recentFolders(), [])
     }
 
+    func testRejectsFileWhenRecordingRecentFolder() throws {
+        let fileURL = temporaryDirectory.appending(path: "brief.md", directoryHint: .notDirectory)
+        try Data("test".utf8).write(to: fileURL)
+        let store = RecentFolderStore(userDefaults: userDefaults)
+
+        XCTAssertFalse(store.record(fileURL))
+        XCTAssertEqual(store.recentFolders(), [])
+    }
+
     func testPrunesRecentFolderThatNoLongerExists() throws {
         let folderURL = try makeFolder(named: "Reports")
         let store = RecentFolderStore(userDefaults: userDefaults)

@@ -6,6 +6,7 @@ struct LocusApp: App {
         WindowGroup {
             HomeView(
                 favoriteFolderStore: Self.favoriteFolderStore,
+                recentFileStore: Self.recentFileStore,
                 recentFolderStore: Self.recentFolderStore,
                 initialFolderURL: Self.initialFolderURL
             )
@@ -59,6 +60,29 @@ struct LocusApp: App {
         #endif
     }()
 
+    private static let recentFileStore: RecentFileStore = {
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1" else {
+            return RecentFileStore()
+        }
+
+        let store = RecentFileStore(key: uiTestRecentFilesKey)
+        for path in argumentValues(named: "--ui-test-recent-file", in: ProcessInfo.processInfo.arguments) {
+            guard !path.isEmpty else {
+                continue
+            }
+
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue {
+                store.record(URL(filePath: path, directoryHint: .notDirectory))
+            }
+        }
+        return store
+        #else
+        return RecentFileStore()
+        #endif
+    }()
+
     private static var initialFolderURL: URL? {
         #if DEBUG
         guard ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1" else {
@@ -89,6 +113,11 @@ struct LocusApp: App {
     private static var uiTestRecentFoldersKey: String {
         argumentValue(named: "--ui-test-recent-folders-key", in: ProcessInfo.processInfo.arguments)
             ?? "recentFolders.uiTests"
+    }
+
+    private static var uiTestRecentFilesKey: String {
+        argumentValue(named: "--ui-test-recent-files-key", in: ProcessInfo.processInfo.arguments)
+            ?? "recentFiles.uiTests"
     }
 
     private static func uiTestWorkspacePath(in arguments: [String]) -> String? {

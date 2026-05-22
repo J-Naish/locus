@@ -1,48 +1,56 @@
 import Foundation
 import OSLog
 
-struct StoredFolderBookmark: Codable, Equatable, Sendable {
+struct StoredFileLocationBookmark: Codable, Equatable, Sendable {
     let bookmarkData: Data
     let displayName: String
     let path: String
     let timestamp: Date
 }
 
-struct ResolvedFolderBookmark: Equatable, Sendable {
+struct ResolvedFileLocationBookmark: Equatable, Sendable {
     let url: URL
     let displayName: String
     let path: String
     let timestamp: Date
 }
 
-struct FolderBookmarkStore {
+struct FileLocationBookmarkStore {
     enum DuplicatePolicy {
         case keepOriginalPosition
         case moveToFront
     }
 
+    enum RequiredResource {
+        case directory
+        case regularFile
+    }
+
     private let userDefaults: UserDefaults
     private let key: String
     private let maxCount: Int?
+    private let requiredResource: RequiredResource
     private let logger: Logger
 
     init(
         userDefaults: UserDefaults = .standard,
         key: String,
         maxCount: Int? = nil,
+        requiredResource: RequiredResource,
         logCategory: String
     ) {
         self.userDefaults = userDefaults
         self.key = key
         self.maxCount = maxCount.map { max(1, $0) }
+        self.requiredResource = requiredResource
         self.logger = Logger(subsystem: "Locus", category: logCategory)
     }
 
     // Resolves bookmarks and reconciles persisted state by pruning missing
-    // folders and refreshing stale bookmark data.
-    func resolvedFolders() -> [ResolvedFolderBookmark] {
+    // locations and refreshing stale bookmark data.
+    func resolvedLocations() -> [ResolvedFileLocationBookmark] {
         var shouldSave = false
-        let resolved = records().compactMap { record -> (StoredFolderBookmark, ResolvedFolderBookmark)? in
+        let resolved = records().compactMap { record -> (StoredFileLocationBookmark, ResolvedFileLocationBookmark)? in
             var isStale = false
             guard let url = try? URL(
                 resolvingBookmarkData: record.bookmarkData,
@@ -54,12 +62,12 @@ struct FolderBookmarkStore {
                 return nil
             }
 
-            guard Self.isExistingDirectory(url) else {
+            guard isExistingRequiredResource(url) else {
                 shouldSave = true
                 return nil
             }
 
-            let resolvedRecord: StoredFolderBookmark
+            let resolvedRecord: StoredFileLocationBookmark
             if isStale, let refreshedRecord = makeRecord(for: url, timestamp: record.timestamp) {
                 resolvedRecord = refreshedRecord
                 shouldSave = true
@@ -69,9 +77,9 @@ struct FolderBookmarkStore {
 
             return (
                 resolvedRecord,
-                ResolvedFolderBookmark(
+                ResolvedFileLocationBookmark(
                     url: url,
-                    displayName: resolvedRecord.displayName,
+                    displayName: url.locusDisplayName,
                     path: resolvedRecord.path,
                     timestamp: resolvedRecord.timestamp
                 )
@@ -85,14 +93,18 @@ struct FolderBookmarkStore {
         return resolved.map(\.1)
     }
 
-    func contains(_ folderURL: URL) -> Bool {
-        let path = folderURL.locusStandardizedPath
+    func contains(_ url: URL) -> Bool {
+        let path = url.locusStandardizedPath
         return records().contains { $0.path == path }
     }
 
     @discardableResult
-    func insert(_ folderURL: URL, timestamp: Date, duplicatePolicy: DuplicatePolicy) -> Bool {
-        let standardizedURL = folderURL.standardizedFileURL
+    func insert(_ url: URL, timestamp: Date, duplicatePolicy: DuplicatePolicy) -> Bool {
+        let standardizedURL = url.standardizedFileURL
+        guard isExistingRequiredResource(standardizedURL) else {
+            return false
+        }
+
         let path = standardizedURL.locusStandardizedPath
         var existingRecords = records()
         let existingIndex = existingRecords.firstIndex { $0.path == path }
@@ -119,34 +131,34 @@ struct FolderBookmarkStore {
         return true
     }
 
-    func remove(_ folderURL: URL) {
-        let path = folderURL.locusStandardizedPath
+    func remove(_ url: URL) {
+        let path = url.locusStandardizedPath
         save(records().filter { $0.path != path })
     }
 
-    private func records() -> [StoredFolderBookmark] {
+    private func records() -> [StoredFileLocationBookmark] {
         guard let data = userDefaults.data(forKey: key) else {
             return []
         }
 
         do {
-            return try PropertyListDecoder().decode([StoredFolderBookmark].self, from: data)
+            return try PropertyListDecoder().decode([StoredFileLocationBookmark].self, from: data)
         } catch {
-            logger.error("Failed to decode folder bookmarks for \(key): \(error.localizedDescription)")
+            logger.error("Failed to decode file location bookmarks for \(key): \(error.localizedDescription)")
             userDefaults.removeObject(forKey: key)
             return []
         }
     }
 
-    private func save(_ records: [StoredFolderBookmark]) {
+    private func save(_ records: [StoredFileLocationBookmark]) {
         do {
             userDefaults.set(try PropertyListEncoder().encode(records), forKey: key)
         } catch {
-            logger.error("Failed to encode folder bookmarks for \(key): \(error.localizedDescription)")
+            logger.error("Failed to encode file location bookmarks for \(key): \(error.localizedDescription)")
         }
     }
 
-    private func makeRecord(for url: URL, timestamp: Date) -> StoredFolderBookmark? {
+    private func makeRecord(for url: URL, timestamp: Date) -> StoredFileLocationBookmark? {
         let standardizedURL = url.standardizedFileURL
         let path = standardizedURL.locusStandardizedPath
 
@@ -154,7 +166,7 @@ struct FolderBookmarkStore {
             // Locus is not sandboxed yet. Store plain bookmarks now and switch
             // to security-scoped bookmarks with entitlements in the sandboxing
             // milestone.
-            return StoredFolderBookmark(
+            return StoredFileLocationBookmark(
                 bookmarkData: try standardizedURL.bookmarkData(
                     options: [],
                     includingResourceValuesForKeys: nil,
@@ -165,14 +177,23 @@ struct FolderBookmarkStore {
                 timestamp: timestamp
             )
         } catch {
-            logger.error("Failed to bookmark folder \(path): \(error.localizedDescription)")
+            logger.error("Failed to bookmark file location \(path): \(error.localizedDescription)")
             return nil
         }
     }
 
-    private static func isExistingDirectory(_ url: URL) -> Bool {
+    private func isExistingRequiredResource(_ url: URL) -> Bool {
         var isDirectory: ObjCBool = false
-        return FileManager.default.fileExists(atPath: url.path(percentEncoded: false), isDirectory: &isDirectory)
-            && isDirectory.boolValue
+        let exists = FileManager.default.fileExists(atPath: url.path(percentEncoded: false), isDirectory: &isDirectory)
+        guard exists else {
+            return false
+        }
+
+        switch requiredResource {
+        case .directory:
+            return isDirectory.boolValue
+        case .regularFile:
+            return !isDirectory.boolValue
+        }
     }
 }

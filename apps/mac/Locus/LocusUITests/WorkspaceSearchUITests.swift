@@ -80,6 +80,37 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
+    func testRecentFileAppearsFromHome() throws {
+        let workspacePath = try fixtureWorkspacePath("basic")
+        let recentFilePath = "\(workspacePath)/Project Brief.md"
+        let app = try launchAppWithRecentFile(filePath: recentFilePath)
+
+        XCTAssertTrue(app.staticTexts["Recent Files"].waitForExistence(timeout: 5), app.debugDescription)
+
+        let recentFile = app.buttons.matching(identifier: "recent-file-row").firstMatch
+        XCTAssertTrue(recentFile.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.buttons["Open Project Brief.md"].waitForExistence(timeout: 5), app.debugDescription)
+    }
+
+    @MainActor
+    func testRecentFileCanBeRemovedFromHome() throws {
+        let workspacePath = try fixtureWorkspacePath("basic")
+        let recentFilePath = "\(workspacePath)/Project Brief.md"
+        let app = try launchAppWithRecentFile(filePath: recentFilePath)
+
+        let recentFile = app.buttons.matching(identifier: "recent-file-row").firstMatch
+        XCTAssertTrue(recentFile.waitForExistence(timeout: 5), app.debugDescription)
+
+        recentFile.rightClick()
+
+        let removeMenuItem = app.menuItems["Remove"]
+        XCTAssertTrue(removeMenuItem.waitForExistence(timeout: 2), app.debugDescription)
+        removeMenuItem.click()
+
+        XCTAssertFalse(recentFile.waitForExistence(timeout: 2), app.debugDescription)
+    }
+
+    @MainActor
     func testCurrentFolderCanBePinnedAndReopenedFromHome() throws {
         let favoriteFoldersKey = "favoriteFolders.uiTests.\(UUID().uuidString)"
         let workspacePath = try fixtureWorkspacePath("basic")
@@ -110,15 +141,18 @@ final class WorkspaceSearchUITests: XCTestCase {
     private func launchApp(
         workspacePath: String? = nil,
         favoriteFoldersKey: String = "favoriteFolders.uiTests.\(UUID().uuidString)",
+        recentFilesKey: String = "recentFiles.uiTests.\(UUID().uuidString)",
         recentFoldersKey: String = "recentFolders.uiTests.\(UUID().uuidString)"
     ) throws -> XCUIApplication {
-        trackUserDefaultsKeys(favoriteFoldersKey, recentFoldersKey)
+        trackUserDefaultsKeys(favoriteFoldersKey, recentFilesKey, recentFoldersKey)
 
         let app = XCUIApplication()
         app.launchEnvironment["LOCUS_UI_TESTING"] = "1"
         app.launchArguments = [
             "--ui-test-favorite-folders-key",
             favoriteFoldersKey,
+            "--ui-test-recent-files-key",
+            recentFilesKey,
             "--ui-test-recent-folders-key",
             recentFoldersKey
         ]
@@ -135,18 +169,44 @@ final class WorkspaceSearchUITests: XCTestCase {
     @MainActor
     private func launchAppWithRecentFolder(workspacePath: String) throws -> XCUIApplication {
         let favoriteFoldersKey = "favoriteFolders.uiTests.\(UUID().uuidString)"
+        let recentFilesKey = "recentFiles.uiTests.\(UUID().uuidString)"
         let recentFoldersKey = "recentFolders.uiTests.\(UUID().uuidString)"
-        trackUserDefaultsKeys(favoriteFoldersKey, recentFoldersKey)
+        trackUserDefaultsKeys(favoriteFoldersKey, recentFilesKey, recentFoldersKey)
 
         let app = XCUIApplication()
         app.launchEnvironment["LOCUS_UI_TESTING"] = "1"
         app.launchArguments = [
             "--ui-test-favorite-folders-key",
             favoriteFoldersKey,
+            "--ui-test-recent-files-key",
+            recentFilesKey,
             "--ui-test-recent-folders-key",
             recentFoldersKey,
             "--ui-test-recent-folder",
             workspacePath
+        ]
+        try launchAndWaitForWindow(app)
+        return app
+    }
+
+    @MainActor
+    private func launchAppWithRecentFile(filePath: String) throws -> XCUIApplication {
+        let favoriteFoldersKey = "favoriteFolders.uiTests.\(UUID().uuidString)"
+        let recentFilesKey = "recentFiles.uiTests.\(UUID().uuidString)"
+        let recentFoldersKey = "recentFolders.uiTests.\(UUID().uuidString)"
+        trackUserDefaultsKeys(favoriteFoldersKey, recentFilesKey, recentFoldersKey)
+
+        let app = XCUIApplication()
+        app.launchEnvironment["LOCUS_UI_TESTING"] = "1"
+        app.launchArguments = [
+            "--ui-test-favorite-folders-key",
+            favoriteFoldersKey,
+            "--ui-test-recent-files-key",
+            recentFilesKey,
+            "--ui-test-recent-file",
+            filePath,
+            "--ui-test-recent-folders-key",
+            recentFoldersKey
         ]
         try launchAndWaitForWindow(app)
         return app

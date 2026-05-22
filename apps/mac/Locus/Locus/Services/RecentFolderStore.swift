@@ -11,7 +11,7 @@ struct RecentFolder: Identifiable, Equatable, Sendable {
 struct RecentFolderStore {
     static let defaultMaxCount = 10
 
-    private let bookmarkStore: FolderBookmarkStore
+    private let bookmarkStore: FileLocationBookmarkStore
     private let now: () -> Date
 
     init(
@@ -20,17 +20,18 @@ struct RecentFolderStore {
         maxCount: Int = Self.defaultMaxCount,
         now: @escaping () -> Date = Date.init
     ) {
-        self.bookmarkStore = FolderBookmarkStore(
+        self.bookmarkStore = FileLocationBookmarkStore(
             userDefaults: userDefaults,
             key: key,
             maxCount: maxCount,
+            requiredResource: .directory,
             logCategory: "RecentFolderStore"
         )
         self.now = now
     }
 
     func recentFolders() -> [RecentFolder] {
-        bookmarkStore.resolvedFolders().map {
+        bookmarkStore.resolvedLocations().map {
             RecentFolder(
                 id: $0.path,
                 url: $0.url,
@@ -44,5 +45,9 @@ struct RecentFolderStore {
     @discardableResult
     func record(_ folderURL: URL) -> Bool {
         bookmarkStore.insert(folderURL, timestamp: now(), duplicatePolicy: .moveToFront)
+    }
+
+    func remove(_ folderURL: URL) {
+        bookmarkStore.remove(folderURL)
     }
 }
