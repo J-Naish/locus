@@ -47,9 +47,10 @@ struct EmptyWorkspaceView: View {
                         title: "Favorite Folders",
                         rowAccessibilityIdentifier: "favorite-folder-row",
                         folders: filteredFavoriteFolders,
-                        open: actions.openFavoriteFolder,
-                        remove: actions.removeFavoriteFolder,
-                        copyPath: actions.copyPath
+                        open: actions.shortcuts.openFavoriteFolder,
+                        remove: actions.shortcuts.removeFavoriteFolder,
+                        reveal: actions.shortcuts.revealInFinder,
+                        copyPath: actions.shortcuts.copyPath
                     )
                 }
 
@@ -58,9 +59,11 @@ struct EmptyWorkspaceView: View {
                         title: "Recent Files",
                         rowAccessibilityIdentifier: "recent-file-row",
                         files: filteredRecentFiles,
-                        open: actions.openRecentFile,
-                        remove: actions.removeRecentFile,
-                        copyPath: actions.copyPath
+                        open: actions.shortcuts.openRecentFile,
+                        remove: actions.shortcuts.removeRecentFile,
+                        reveal: actions.shortcuts.revealInFinder,
+                        preview: actions.shortcuts.previewFile,
+                        copyPath: actions.shortcuts.copyPath
                     )
                 }
 
@@ -69,9 +72,10 @@ struct EmptyWorkspaceView: View {
                         title: "Recent Folders",
                         rowAccessibilityIdentifier: "recent-folder-row",
                         folders: filteredRecentFolders,
-                        open: actions.openRecentFolder,
-                        remove: actions.removeRecentFolder,
-                        copyPath: actions.copyPath
+                        open: actions.shortcuts.openRecentFolder,
+                        remove: actions.shortcuts.removeRecentFolder,
+                        reveal: actions.shortcuts.revealInFinder,
+                        copyPath: actions.shortcuts.copyPath
                     )
                 }
 
@@ -99,12 +103,18 @@ struct EmptyWorkspaceView: View {
 
 struct EmptyWorkspaceActions {
     let openFolder: () -> Void
+    let shortcuts: FileLocationShortcutActions
+}
+
+struct FileLocationShortcutActions {
     let openFavoriteFolder: (FavoriteFolder) -> Void
     let openRecentFile: (RecentFile) -> Void
     let openRecentFolder: (RecentFolder) -> Void
     let removeFavoriteFolder: (FavoriteFolder) -> Void
     let removeRecentFile: (RecentFile) -> Void
     let removeRecentFolder: (RecentFolder) -> Void
+    let revealInFinder: (URL) -> Void
+    let previewFile: (URL) -> Void
     let copyPath: (URL) -> Void
 }
 
@@ -114,6 +124,8 @@ private struct FileShortcutListView<File: FileLocationShortcut>: View {
     let files: [File]
     let open: (File) -> Void
     let remove: (File) -> Void
+    let reveal: (URL) -> Void
+    let preview: (URL) -> Void
     let copyPath: (URL) -> Void
 
     var body: some View {
@@ -125,6 +137,8 @@ private struct FileShortcutListView<File: FileLocationShortcut>: View {
             symbolColor: .secondary,
             open: open,
             remove: remove,
+            reveal: reveal,
+            preview: preview,
             copyPath: copyPath
         )
     }
@@ -136,6 +150,7 @@ private struct FolderShortcutListView<Folder: FileLocationShortcut>: View {
     let folders: [Folder]
     let open: (Folder) -> Void
     let remove: (Folder) -> Void
+    let reveal: (URL) -> Void
     let copyPath: (URL) -> Void
 
     var body: some View {
@@ -147,6 +162,7 @@ private struct FolderShortcutListView<Folder: FileLocationShortcut>: View {
             symbolColor: .blue,
             open: open,
             remove: remove,
+            reveal: reveal,
             copyPath: copyPath
         )
     }
@@ -161,6 +177,9 @@ struct ShortcutListView<Item: FileLocationShortcut>: View {
     var maxWidth: CGFloat? = 520
     let open: (Item) -> Void
     let remove: (Item) -> Void
+    let reveal: (URL) -> Void
+    // Shortcut preview is file-only for now; folders keep Open and Reveal actions.
+    var preview: ((URL) -> Void)? = nil
     let copyPath: (URL) -> Void
 
     var body: some View {
@@ -198,6 +217,16 @@ struct ShortcutListView<Item: FileLocationShortcut>: View {
                     .contextMenu {
                         Button("Open") {
                             open(item)
+                        }
+
+                        if let preview {
+                            Button("Preview") {
+                                preview(item.url)
+                            }
+                        }
+
+                        Button("Reveal in Finder") {
+                            reveal(item.url)
                         }
 
                         Button("Copy Path") {

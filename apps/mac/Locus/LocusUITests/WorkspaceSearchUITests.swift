@@ -232,6 +232,69 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
+    func testRecentFileShortcutCanBePreviewedFromContextMenu() throws {
+        let workspacePath = try fixtureWorkspacePath("basic")
+        let recentFilePath = "\(workspacePath)/Project Brief.md"
+        let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
+        let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
+        let app = try launchApp(
+            previewInvocationsKey: previewInvocationsKey,
+            previewInvocationsFilePath: previewInvocationsFilePath,
+            recentFiles: [recentFilePath]
+        )
+
+        let recentFile = app.buttons.matching(identifier: "recent-file-row").firstMatch
+        XCTAssertTrue(recentFile.waitForExistence(timeout: 5), app.debugDescription)
+
+        recentFile.rightClick()
+
+        XCTAssertTrue(app.menuItems["Reveal in Finder"].waitForExistence(timeout: 2), app.debugDescription)
+        let previewMenuItem = app.menuItems["Preview"]
+        XCTAssertTrue(previewMenuItem.waitForExistence(timeout: 2), app.debugDescription)
+        previewMenuItem.click()
+
+        XCTAssertTrue(
+            waitForPreviewInvocation(
+                recentFilePath,
+                key: previewInvocationsKey,
+                filePath: previewInvocationsFilePath
+            ),
+            app.debugDescription
+        )
+    }
+
+    @MainActor
+    func testRecentFileShortcutCanBeRevealedFromContextMenu() throws {
+        let workspacePath = try fixtureWorkspacePath("basic")
+        let recentFilePath = "\(workspacePath)/Project Brief.md"
+        let revealInvocationsKey = "revealInvocations.uiTests.\(UUID().uuidString)"
+        let revealInvocationsFilePath = temporaryRevealInvocationsPath()
+        let app = try launchApp(
+            revealInvocationsKey: revealInvocationsKey,
+            revealInvocationsFilePath: revealInvocationsFilePath,
+            recentFiles: [recentFilePath]
+        )
+
+        let recentFile = app.buttons.matching(identifier: "recent-file-row").firstMatch
+        XCTAssertTrue(recentFile.waitForExistence(timeout: 5), app.debugDescription)
+
+        recentFile.rightClick()
+
+        let revealMenuItem = app.menuItems["Reveal in Finder"]
+        XCTAssertTrue(revealMenuItem.waitForExistence(timeout: 2), app.debugDescription)
+        revealMenuItem.click()
+
+        XCTAssertTrue(
+            waitForRevealInvocation(
+                recentFilePath,
+                key: revealInvocationsKey,
+                filePath: revealInvocationsFilePath
+            ),
+            app.debugDescription
+        )
+    }
+
+    @MainActor
     func testHomeSearchFiltersSavedShortcuts() throws {
         let workspacePath = try fixtureWorkspacePath("basic")
         let recentFilePath = "\(workspacePath)/Project Brief.md"
@@ -287,6 +350,47 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
+    func testWorkspaceSearchRecentFileShortcutCanBePreviewedFromContextMenu() throws {
+        let recentFileURL = FileManager.default.temporaryDirectory
+            .appending(path: "Quarterly Forecast \(UUID().uuidString).md")
+        let recentFilePath = recentFileURL.path(percentEncoded: false)
+        try "Forecast notes\n".write(to: recentFileURL, atomically: true, encoding: .utf8)
+        filesToRemove.insert(recentFilePath)
+
+        let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
+        let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
+        let app = try launchApp(
+            workspacePath: fixtureWorkspacePath("basic"),
+            previewInvocationsKey: previewInvocationsKey,
+            previewInvocationsFilePath: previewInvocationsFilePath,
+            recentFiles: [recentFilePath]
+        )
+
+        let searchField = app.textFields["workspace-search-field"]
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
+        searchField.click()
+        app.typeText("forecast")
+
+        let recentFile = app.buttons.matching(identifier: "workspace-search-recent-file-row").firstMatch
+        XCTAssertTrue(recentFile.waitForExistence(timeout: 2), app.debugDescription)
+        recentFile.rightClick()
+
+        XCTAssertTrue(app.menuItems["Reveal in Finder"].waitForExistence(timeout: 2), app.debugDescription)
+        let previewMenuItem = app.menuItems["Preview"]
+        XCTAssertTrue(previewMenuItem.waitForExistence(timeout: 2), app.debugDescription)
+        previewMenuItem.click()
+
+        XCTAssertTrue(
+            waitForPreviewInvocation(
+                recentFilePath,
+                key: previewInvocationsKey,
+                filePath: previewInvocationsFilePath
+            ),
+            app.debugDescription
+        )
+    }
+
+    @MainActor
     func testWorkspaceSearchDoesNotDuplicateCurrentFileInRecentFiles() throws {
         let workspacePath = try fixtureWorkspacePath("basic")
         let app = try launchApp(
@@ -338,12 +442,21 @@ final class WorkspaceSearchUITests: XCTestCase {
         recentFoldersKey: String = "recentFolders.uiTests.\(UUID().uuidString)",
         previewInvocationsKey: String = "previewInvocations.uiTests.\(UUID().uuidString)",
         previewInvocationsFilePath: String? = nil,
+        revealInvocationsKey: String = "revealInvocations.uiTests.\(UUID().uuidString)",
+        revealInvocationsFilePath: String? = nil,
         favoriteFolders: [String] = [],
         recentFiles: [String] = [],
         recentFolders: [String] = []
     ) throws -> XCUIApplication {
         let previewInvocationsFilePath = previewInvocationsFilePath ?? temporaryPreviewInvocationsPath()
-        trackUserDefaultsKeys(favoriteFoldersKey, recentFilesKey, recentFoldersKey, previewInvocationsKey)
+        let revealInvocationsFilePath = revealInvocationsFilePath ?? temporaryRevealInvocationsPath()
+        trackUserDefaultsKeys(
+            favoriteFoldersKey,
+            recentFilesKey,
+            recentFoldersKey,
+            previewInvocationsKey,
+            revealInvocationsKey
+        )
 
         let app = XCUIApplication()
         app.launchEnvironment["LOCUS_UI_TESTING"] = "1"
@@ -357,7 +470,11 @@ final class WorkspaceSearchUITests: XCTestCase {
             "--ui-test-preview-invocations-key",
             previewInvocationsKey,
             "--ui-test-preview-invocations-file",
-            previewInvocationsFilePath
+            previewInvocationsFilePath,
+            "--ui-test-reveal-invocations-key",
+            revealInvocationsKey,
+            "--ui-test-reveal-invocations-file",
+            revealInvocationsFilePath
         ]
         favoriteFolders.forEach {
             app.launchArguments += ["--ui-test-favorite-folder", $0]
@@ -380,60 +497,12 @@ final class WorkspaceSearchUITests: XCTestCase {
 
     @MainActor
     private func launchAppWithRecentFolder(workspacePath: String) throws -> XCUIApplication {
-        let favoriteFoldersKey = "favoriteFolders.uiTests.\(UUID().uuidString)"
-        let recentFilesKey = "recentFiles.uiTests.\(UUID().uuidString)"
-        let recentFoldersKey = "recentFolders.uiTests.\(UUID().uuidString)"
-        let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-        let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-        trackUserDefaultsKeys(favoriteFoldersKey, recentFilesKey, recentFoldersKey, previewInvocationsKey)
-
-        let app = XCUIApplication()
-        app.launchEnvironment["LOCUS_UI_TESTING"] = "1"
-        app.launchArguments = [
-            "--ui-test-favorite-folders-key",
-            favoriteFoldersKey,
-            "--ui-test-recent-files-key",
-            recentFilesKey,
-            "--ui-test-recent-folders-key",
-            recentFoldersKey,
-            "--ui-test-recent-folder",
-            workspacePath,
-            "--ui-test-preview-invocations-key",
-            previewInvocationsKey,
-            "--ui-test-preview-invocations-file",
-            previewInvocationsFilePath
-        ]
-        try launchAndWaitForWindow(app)
-        return app
+        try launchApp(recentFolders: [workspacePath])
     }
 
     @MainActor
     private func launchAppWithRecentFile(filePath: String) throws -> XCUIApplication {
-        let favoriteFoldersKey = "favoriteFolders.uiTests.\(UUID().uuidString)"
-        let recentFilesKey = "recentFiles.uiTests.\(UUID().uuidString)"
-        let recentFoldersKey = "recentFolders.uiTests.\(UUID().uuidString)"
-        let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-        let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-        trackUserDefaultsKeys(favoriteFoldersKey, recentFilesKey, recentFoldersKey, previewInvocationsKey)
-
-        let app = XCUIApplication()
-        app.launchEnvironment["LOCUS_UI_TESTING"] = "1"
-        app.launchArguments = [
-            "--ui-test-favorite-folders-key",
-            favoriteFoldersKey,
-            "--ui-test-recent-files-key",
-            recentFilesKey,
-            "--ui-test-recent-file",
-            filePath,
-            "--ui-test-recent-folders-key",
-            recentFoldersKey,
-            "--ui-test-preview-invocations-key",
-            previewInvocationsKey,
-            "--ui-test-preview-invocations-file",
-            previewInvocationsFilePath
-        ]
-        try launchAndWaitForWindow(app)
-        return app
+        try launchApp(recentFiles: [filePath])
     }
 
     @MainActor
@@ -471,7 +540,37 @@ final class WorkspaceSearchUITests: XCTestCase {
         return false
     }
 
+    private func waitForRevealInvocation(
+        _ path: String,
+        key: String,
+        filePath: String,
+        timeout: TimeInterval = 2
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if revealInvocations(forKey: key, filePath: filePath).contains(path) {
+                return true
+            }
+
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+
+        return false
+    }
+
     private func previewInvocations(forKey key: String, filePath: String) -> [String] {
+        if let fileContents = try? String(contentsOfFile: filePath, encoding: .utf8),
+           !fileContents.isEmpty {
+            return fileContents.components(separatedBy: "\n")
+        }
+
+        let appDefaults = UserDefaults(suiteName: "com.nash.locus")
+        return appDefaults?.stringArray(forKey: key)
+            ?? UserDefaults.standard.stringArray(forKey: key)
+            ?? []
+    }
+
+    private func revealInvocations(forKey key: String, filePath: String) -> [String] {
         if let fileContents = try? String(contentsOfFile: filePath, encoding: .utf8),
            !fileContents.isEmpty {
             return fileContents.components(separatedBy: "\n")
@@ -486,6 +585,14 @@ final class WorkspaceSearchUITests: XCTestCase {
     private func temporaryPreviewInvocationsPath() -> String {
         let path = FileManager.default.temporaryDirectory
             .appending(path: "locus-preview-invocations-\(UUID().uuidString).txt")
+            .path(percentEncoded: false)
+        filesToRemove.insert(path)
+        return path
+    }
+
+    private func temporaryRevealInvocationsPath() -> String {
+        let path = FileManager.default.temporaryDirectory
+            .appending(path: "locus-reveal-invocations-\(UUID().uuidString).txt")
             .path(percentEncoded: false)
         filesToRemove.insert(path)
         return path

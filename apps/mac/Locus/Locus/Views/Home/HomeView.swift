@@ -17,7 +17,7 @@ struct HomeView: View {
     @State private var workspaceLoadGeneration: UInt64 = 0
 
     private let coreBridge: CoreBridge
-    private let finderService: FinderService
+    private let finderService: any FinderServicing
     private let quickLookPreviewService: any QuickLookPreviewing
     private let clipboardService: ClipboardService
     private let workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring
@@ -28,7 +28,7 @@ struct HomeView: View {
 
     init(
         coreBridge: CoreBridge = CoreBridge(),
-        finderService: FinderService = FinderService(),
+        finderService: any FinderServicing = FinderService(),
         quickLookPreviewService: any QuickLookPreviewing = QuickLookPreviewService(),
         clipboardService: ClipboardService = ClipboardService(),
         workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring = WorkspaceDirectoryMonitor(),
@@ -49,6 +49,18 @@ struct HomeView: View {
     }
 
     var body: some View {
+        let shortcutActions = FileLocationShortcutActions(
+            openFavoriteFolder: openFavoriteFolder,
+            openRecentFile: openRecentFile,
+            openRecentFolder: openRecentFolder,
+            removeFavoriteFolder: removeFavoriteFolder,
+            removeRecentFile: removeRecentFile,
+            removeRecentFolder: removeRecentFolder,
+            revealInFinder: revealURLInFinder,
+            previewFile: { previewURLs([$0]) },
+            copyPath: copyPath
+        )
+
         VStack(alignment: .leading, spacing: 16) {
             HeaderView(openFolder: openFolder)
             RuntimeStatusView(status: runtimeStatus)
@@ -61,20 +73,15 @@ struct HomeView: View {
                 selectedEntryID: $selectedEntryID,
                 emptyActions: EmptyWorkspaceActions(
                     openFolder: openFolder,
-                    openFavoriteFolder: openFavoriteFolder,
-                    openRecentFile: openRecentFile,
-                    openRecentFolder: openRecentFolder,
-                    removeFavoriteFolder: removeFavoriteFolder,
-                    removeRecentFile: removeRecentFile,
-                    removeRecentFolder: removeRecentFolder,
-                    copyPath: copyPath
+                    shortcuts: shortcutActions
                 ),
+                shortcutActions: shortcutActions,
                 actions: WorkspaceActions(
                     refresh: refreshWorkspace,
                     openParentFolder: openParentFolder,
                     toggleFavoriteFolder: toggleFavoriteFolder,
                     preview: previewURLs,
-                    reveal: revealInFinder,
+                    reveal: revealEntryInFinder,
                     copyPaths: copyPaths,
                     performOpenAction: performOpenAction
                 )
@@ -259,8 +266,14 @@ struct HomeView: View {
         }
     }
 
-    private func revealInFinder(_ entry: WorkspaceEntry) {
-        finderService.reveal(entry.url)
+    @MainActor
+    private func revealEntryInFinder(_ entry: WorkspaceEntry) {
+        revealURLInFinder(entry.url)
+    }
+
+    @MainActor
+    private func revealURLInFinder(_ url: URL) {
+        finderService.reveal(url)
     }
 
     @MainActor
@@ -462,6 +475,7 @@ private struct WorkspaceContentView: View {
     let recentFolders: [RecentFolder]
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let emptyActions: EmptyWorkspaceActions
+    let shortcutActions: FileLocationShortcutActions
     let actions: WorkspaceActions
 
     var body: some View {
@@ -487,7 +501,7 @@ private struct WorkspaceContentView: View {
                     recentFolders: recentFolders,
                     isFavorite: favoriteFolders.contains { $0.path == folderURL.locusStandardizedPath },
                     selectedEntryID: $selectedEntryID,
-                    shortcutActions: emptyActions,
+                    shortcutActions: shortcutActions,
                     actions: actions
                 )
             case let .failed(folderURL, message):
@@ -537,7 +551,7 @@ private struct WorkspaceBrowserView: View {
     let recentFolders: [RecentFolder]
     let isFavorite: Bool
     @Binding var selectedEntryID: WorkspaceEntry.ID?
-    let shortcutActions: EmptyWorkspaceActions
+    let shortcutActions: FileLocationShortcutActions
     let actions: WorkspaceActions
     @State private var searchQuery = ""
     @State private var searchResults: WorkspaceBrowserSearchResults
@@ -553,7 +567,7 @@ private struct WorkspaceBrowserView: View {
         recentFolders: [RecentFolder],
         isFavorite: Bool,
         selectedEntryID: Binding<WorkspaceEntry.ID?>,
-        shortcutActions: EmptyWorkspaceActions,
+        shortcutActions: FileLocationShortcutActions,
         actions: WorkspaceActions
     ) {
         self.folderURL = folderURL
@@ -731,7 +745,7 @@ private struct WorkspaceShortcutSearchResultsView: View {
     let favoriteFolders: [FavoriteFolder]
     let recentFiles: [RecentFile]
     let recentFolders: [RecentFolder]
-    let actions: EmptyWorkspaceActions
+    let actions: FileLocationShortcutActions
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -745,6 +759,7 @@ private struct WorkspaceShortcutSearchResultsView: View {
                     maxWidth: .infinity,
                     open: actions.openFavoriteFolder,
                     remove: actions.removeFavoriteFolder,
+                    reveal: actions.revealInFinder,
                     copyPath: actions.copyPath
                 )
             }
@@ -759,6 +774,8 @@ private struct WorkspaceShortcutSearchResultsView: View {
                     maxWidth: .infinity,
                     open: actions.openRecentFile,
                     remove: actions.removeRecentFile,
+                    reveal: actions.revealInFinder,
+                    preview: actions.previewFile,
                     copyPath: actions.copyPath
                 )
             }
@@ -773,11 +790,13 @@ private struct WorkspaceShortcutSearchResultsView: View {
                     maxWidth: .infinity,
                     open: actions.openRecentFolder,
                     remove: actions.removeRecentFolder,
+                    reveal: actions.revealInFinder,
                     copyPath: actions.copyPath
                 )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("workspace-shortcut-search-results")
     }
 }
