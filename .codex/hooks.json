@@ -1,18 +1,5 @@
 {
   "hooks": {
-    "PermissionRequest": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)/.codex/hooks/notify.sh\" codex permission",
-            "timeout": 5,
-            "statusMessage": "Sending approval notification"
-          }
-        ]
-      }
-    ],
     "Stop": [
       {
         "hooks": [
