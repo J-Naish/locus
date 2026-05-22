@@ -1,8 +1,12 @@
-import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct HomeView: View {
+    private enum WorkspaceRootChange {
+        case preserve
+        case set(URL?)
+    }
+
     @State private var runtimeStatus: RuntimeStatus = .checking
     @State private var workspaceState: WorkspaceState = .idle
     @State private var selectedEntryID: WorkspaceEntry.ID?
@@ -17,7 +21,6 @@ struct HomeView: View {
     @State private var workspaceLoadGeneration: UInt64 = 0
 
     private let coreBridge: CoreBridge
-    private let finderService: any FinderServicing
     private let quickLookPreviewService: any QuickLookPreviewing
     private let clipboardService: ClipboardService
     private let workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring
@@ -28,7 +31,6 @@ struct HomeView: View {
 
     init(
         coreBridge: CoreBridge = CoreBridge(),
-        finderService: any FinderServicing = FinderService(),
         quickLookPreviewService: any QuickLookPreviewing = QuickLookPreviewService(),
         clipboardService: ClipboardService = ClipboardService(),
         workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring = WorkspaceDirectoryMonitor(),
@@ -38,7 +40,6 @@ struct HomeView: View {
         initialFolderURL: URL? = nil
     ) {
         self.coreBridge = coreBridge
-        self.finderService = finderService
         self.quickLookPreviewService = quickLookPreviewService
         self.clipboardService = clipboardService
         self.workspaceDirectoryMonitor = workspaceDirectoryMonitor
@@ -51,13 +52,13 @@ struct HomeView: View {
     var body: some View {
         let shortcutActions = FileLocationShortcutActions(
             openFavoriteFolder: openFavoriteFolder,
-            openRecentFile: openRecentFile,
+            showRecentFile: showRecentFile,
             openRecentFolder: openRecentFolder,
             removeFavoriteFolder: removeFavoriteFolder,
             removeRecentFile: removeRecentFile,
             removeRecentFolder: removeRecentFolder,
-            revealInFinder: revealURLInFinder,
-            previewFile: { previewURLs([$0]) },
+            previewFile: previewFile,
+            showInLocus: showURLInLocus,
             copyPath: copyPath
         )
 
@@ -81,7 +82,7 @@ struct HomeView: View {
                     openParentFolder: openParentFolder,
                     toggleFavoriteFolder: toggleFavoriteFolder,
                     preview: previewURLs,
-                    reveal: revealEntryInFinder,
+                    showInLocus: showEntryInLocus,
                     copyPaths: copyPaths,
                     performOpenAction: performOpenAction
                 )
@@ -121,7 +122,7 @@ struct HomeView: View {
         }
 
         didStartInitialFolderLoad = true
-        startWorkspaceLoad(initialFolderURL, rootURL: initialFolderURL)
+        startWorkspaceLoad(initialFolderURL, rootChange: .set(initialFolderURL))
     }
 
     @MainActor
@@ -148,7 +149,7 @@ struct HomeView: View {
                 return
             }
 
-            startWorkspaceLoad(folderURL, rootURL: folderURL, recordRecent: true)
+            startWorkspaceLoad(folderURL, rootChange: .set(folderURL), recordRecent: true)
         case let .failure(error):
             // SwiftUI's .fileImporter delivers user cancellation as a Cocoa
             // user-cancelled error or as Swift's CancellationError. Treat both
@@ -182,14 +183,18 @@ struct HomeView: View {
         return false
     }
 
+    /// `selecting` is matched against loaded entries by standardized path. Use
+    /// `rootChange: .set(nil)` for ad hoc locations that should allow normal
+    /// parent navigation beyond the first containing folder.
     @MainActor
     private func startWorkspaceLoad(
         _ folderURL: URL,
-        rootURL: URL? = nil,
+        rootChange: WorkspaceRootChange = .preserve,
         recordRecent: Bool = false,
-        showsLoading: Bool = true
+        showsLoading: Bool = true,
+        selecting selectedURL: URL? = nil
     ) {
-        if let rootURL {
+        if case let .set(rootURL) = rootChange {
             workspaceRootURL = rootURL
         }
 
@@ -204,7 +209,8 @@ struct HomeView: View {
                 folderURL,
                 generation: generation,
                 recordRecent: recordRecent,
-                showsLoading: showsLoading
+                showsLoading: showsLoading,
+                selectedURL: selectedURL
             )
         }
     }
@@ -220,7 +226,8 @@ struct HomeView: View {
         _ folderURL: URL,
         generation: UInt64,
         recordRecent: Bool,
-        showsLoading: Bool
+        showsLoading: Bool,
+        selectedURL: URL?
     ) async {
         guard generation == workspaceLoadGeneration else {
             return
@@ -244,9 +251,13 @@ struct HomeView: View {
             guard generation == workspaceLoadGeneration else {
                 return
             }
-            selectedEntryID = snapshot.entries.contains { $0.id == previousSelectedEntryID }
-                ? previousSelectedEntryID
-                : nil
+            if let selectedEntryID = entryID(in: snapshot.entries, matching: selectedURL) {
+                self.selectedEntryID = selectedEntryID
+            } else if snapshot.entries.contains(where: { $0.id == previousSelectedEntryID }) {
+                selectedEntryID = previousSelectedEntryID
+            } else {
+                selectedEntryID = nil
+            }
             workspaceState = .ready(folderURL: folderURL, snapshot: snapshot, loadedAt: Date())
             startWorkspaceChangeMonitoring(for: folderURL)
             if recordRecent {
@@ -259,6 +270,7 @@ struct HomeView: View {
             }
             workspaceDirectoryMonitor.stopMonitoring()
             selectedEntryID = nil
+            pruneRecentFileIfSelectionLoadFailed(selectedURL)
             workspaceState = .failed(
                 folderURL: folderURL,
                 message: error.localizedDescription
@@ -267,33 +279,48 @@ struct HomeView: View {
     }
 
     @MainActor
-    private func revealEntryInFinder(_ entry: WorkspaceEntry) {
-        revealURLInFinder(entry.url)
-    }
-
-    @MainActor
-    private func revealURLInFinder(_ url: URL) {
-        finderService.reveal(url)
-    }
-
-    @MainActor
     private func previewURLs(_ urls: [URL]) {
         quickLookPreviewService.preview(urls)
     }
 
     @MainActor
-    private func openFavoriteFolder(_ folder: FavoriteFolder) {
-        startWorkspaceLoad(folder.url, rootURL: folder.url, recordRecent: true)
+    private func previewFile(_ url: URL) {
+        previewURLs([url])
     }
 
     @MainActor
-    private func openRecentFile(_ file: RecentFile) {
-        openExternalFile(file.url)
+    private func showURLInLocus(_ url: URL) {
+        let standardizedURL = url.standardizedFileURL
+        let containingFolderURL = standardizedURL.deletingLastPathComponent()
+        if selectURLInCurrentWorkspaceIfPossible(standardizedURL, containingFolderURL: containingFolderURL) {
+            return
+        }
+
+        startWorkspaceLoad(
+            containingFolderURL,
+            rootChange: .set(rootURLForShowingInLocus(containing: standardizedURL)),
+            selecting: standardizedURL
+        )
+    }
+
+    @MainActor
+    private func showEntryInLocus(_ entry: WorkspaceEntry) {
+        showURLInLocus(entry.url)
+    }
+
+    @MainActor
+    private func openFavoriteFolder(_ folder: FavoriteFolder) {
+        startWorkspaceLoad(folder.url, rootChange: .set(folder.url), recordRecent: true)
+    }
+
+    @MainActor
+    private func showRecentFile(_ file: RecentFile) {
+        showURLInLocus(file.url)
     }
 
     @MainActor
     private func openRecentFolder(_ folder: RecentFolder) {
-        startWorkspaceLoad(folder.url, rootURL: folder.url, recordRecent: true)
+        startWorkspaceLoad(folder.url, rootChange: .set(folder.url), recordRecent: true)
     }
 
     @MainActor
@@ -378,17 +405,9 @@ struct HomeView: View {
         switch action {
         case let .browseFolder(url):
             startWorkspaceLoad(url, recordRecent: true)
-        case let .openExternally(url):
-            openExternalFile(url)
+        case let .preview(url):
+            previewFile(url)
         }
-    }
-
-    @MainActor
-    private func openExternalFile(_ url: URL) {
-        if finderService.openExternally(url) {
-            recentFileStore.record(url)
-        }
-        refreshRecentFiles()
     }
 
     @MainActor
@@ -415,6 +434,51 @@ struct HomeView: View {
         }
 
         return selectedEntryID
+    }
+
+    private func entryID(
+        in entries: [WorkspaceEntry],
+        matching selectedURL: URL?
+    ) -> WorkspaceEntry.ID? {
+        guard let selectedPath = selectedURL?.locusStandardizedPath else {
+            return nil
+        }
+
+        return entries.first { $0.url.locusStandardizedPath == selectedPath }?.id
+    }
+
+    private func rootURLForShowingInLocus(containing url: URL) -> URL? {
+        guard let workspaceRootURL,
+              url.locusStandardizedPath.locusHasPathPrefix(workspaceRootURL.locusStandardizedPath) else {
+            return nil
+        }
+
+        return workspaceRootURL
+    }
+
+    @MainActor
+    private func selectURLInCurrentWorkspaceIfPossible(
+        _ url: URL,
+        containingFolderURL: URL
+    ) -> Bool {
+        guard case let .ready(currentFolderURL, snapshot, _) = workspaceState,
+              currentFolderURL.locusStandardizedPath == containingFolderURL.locusStandardizedPath,
+              let entryID = entryID(in: snapshot.entries, matching: url) else {
+            return false
+        }
+
+        selectedEntryID = entryID
+        return true
+    }
+
+    @MainActor
+    private func pruneRecentFileIfSelectionLoadFailed(_ selectedURL: URL?) {
+        guard let selectedURL else {
+            return
+        }
+
+        recentFileStore.remove(selectedURL)
+        refreshRecentFiles()
     }
 }
 
@@ -522,7 +586,7 @@ private struct WorkspaceActions {
     let openParentFolder: () -> Void
     let toggleFavoriteFolder: () -> Void
     let preview: ([URL]) -> Void
-    let reveal: (WorkspaceEntry) -> Void
+    let showInLocus: (WorkspaceEntry) -> Void
     let copyPaths: ([WorkspaceEntry]) -> Void
     let performOpenAction: (WorkspaceEntryOpenAction) -> Void
 }
@@ -759,7 +823,7 @@ private struct WorkspaceShortcutSearchResultsView: View {
                     maxWidth: .infinity,
                     open: actions.openFavoriteFolder,
                     remove: actions.removeFavoriteFolder,
-                    reveal: actions.revealInFinder,
+                    showInLocus: actions.showInLocus,
                     copyPath: actions.copyPath
                 )
             }
@@ -772,10 +836,10 @@ private struct WorkspaceShortcutSearchResultsView: View {
                     systemImage: "doc",
                     symbolColor: .secondary,
                     maxWidth: .infinity,
-                    open: actions.openRecentFile,
+                    open: actions.showRecentFile,
                     remove: actions.removeRecentFile,
-                    reveal: actions.revealInFinder,
                     preview: actions.previewFile,
+                    showInLocus: actions.showInLocus,
                     copyPath: actions.copyPath
                 )
             }
@@ -790,7 +854,7 @@ private struct WorkspaceShortcutSearchResultsView: View {
                     maxWidth: .infinity,
                     open: actions.openRecentFolder,
                     remove: actions.removeRecentFolder,
-                    reveal: actions.revealInFinder,
+                    showInLocus: actions.showInLocus,
                     copyPath: actions.copyPath
                 )
             }
@@ -929,6 +993,7 @@ private struct WorkspaceEntriesTable: View {
             let selectedEntries = entries(for: selection)
             let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
             let previewURLs = WorkspaceEntryPreviewActionResolver.previewURLs(for: selectedEntries)
+            let showInLocusEntry = selectedEntries.count == 1 ? selectedEntries.first : nil
 
             Button("Open") {
                 if let openAction {
@@ -944,10 +1009,12 @@ private struct WorkspaceEntriesTable: View {
             }
             .disabled(previewURLs == nil)
 
-            Button("Reveal in Finder") {
-                selectedEntries.forEach(actions.reveal)
+            Button("Show in Locus") {
+                if let showInLocusEntry {
+                    actions.showInLocus(showInLocusEntry)
+                }
             }
-            .disabled(selectedEntries.isEmpty)
+            .disabled(showInLocusEntry == nil)
 
             Button(WorkspaceEntryPathCopy.menuTitle(for: selectedEntries)) {
                 actions.copyPaths(selectedEntries)

@@ -35,7 +35,7 @@ The macOS app owns:
 - menus
 - keyboard shortcuts
 - drag and drop
-- Finder integration
+- Finder-like file navigation
 - native previews
 - native media playback
 - Markdown editing surface

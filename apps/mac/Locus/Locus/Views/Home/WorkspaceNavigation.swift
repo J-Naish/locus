@@ -17,7 +17,7 @@ enum WorkspaceNavigation {
         }
 
         if let standardizedRootURL,
-           !parentURL.path(percentEncoded: false).hasPathPrefix(standardizedRootURL.path(percentEncoded: false)) {
+           !parentURL.path(percentEncoded: false).locusHasPathPrefix(standardizedRootURL.path(percentEncoded: false)) {
             return nil
         }
 
@@ -25,12 +25,16 @@ enum WorkspaceNavigation {
     }
 }
 
-private extension String {
-    func hasPathPrefix(_ prefix: String) -> Bool {
-        guard prefix != "/" else {
-            return hasPrefix(prefix)
+extension String {
+    func locusHasPathPrefix(_ prefix: String) -> Bool {
+        var normalizedPrefix = prefix
+        while normalizedPrefix.count > 1, normalizedPrefix.hasSuffix("/") {
+            normalizedPrefix.removeLast()
+        }
+        guard normalizedPrefix != "/" else {
+            return hasPrefix(normalizedPrefix)
         }
 
-        return self == prefix || hasPrefix(prefix + "/")
+        return self == normalizedPrefix || hasPrefix(normalizedPrefix + "/")
     }
 }

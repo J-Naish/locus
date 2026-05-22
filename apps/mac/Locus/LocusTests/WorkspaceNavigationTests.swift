@@ -52,4 +52,18 @@ final class WorkspaceNavigationTests: XCTestCase {
 
         XCTAssertNil(WorkspaceNavigation.parentFolderURL(for: siblingPrefixURL, within: rootURL))
     }
+
+    func testPathPrefixMatchesRootAndExactPaths() {
+        XCTAssertTrue("/Users/nash".locusHasPathPrefix("/"))
+        XCTAssertTrue("/Users/nash".locusHasPathPrefix("/Users/nash"))
+    }
+
+    func testPathPrefixMatchesNestedPathsWithOrWithoutTrailingSlash() {
+        XCTAssertTrue("/Users/nash/dev/locus".locusHasPathPrefix("/Users/nash"))
+        XCTAssertTrue("/Users/nash/dev/locus".locusHasPathPrefix("/Users/nash/"))
+    }
+
+    func testPathPrefixDoesNotMatchSiblingNames() {
+        XCTAssertFalse("/Users/nashville/project".locusHasPathPrefix("/Users/nash"))
+    }
 }

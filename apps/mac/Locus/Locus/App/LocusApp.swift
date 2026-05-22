@@ -5,7 +5,6 @@ struct LocusApp: App {
     var body: some Scene {
         WindowGroup {
             HomeView(
-                finderService: Self.finderService,
                 quickLookPreviewService: Self.quickLookPreviewService,
                 favoriteFolderStore: Self.favoriteFolderStore,
                 recentFileStore: Self.recentFileStore,
@@ -15,21 +14,6 @@ struct LocusApp: App {
         }
         .windowResizability(.contentMinSize)
     }
-
-    private static let finderService: any FinderServicing = {
-        #if DEBUG
-        guard ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1" else {
-            return FinderService()
-        }
-
-        return UITestFinderService(
-            revealInvocationsKey: uiTestRevealInvocationsKey,
-            revealInvocationsFileURL: uiTestRevealInvocationsFileURL
-        )
-        #else
-        return FinderService()
-        #endif
-    }()
 
     private static let quickLookPreviewService: any QuickLookPreviewing = {
         #if DEBUG
@@ -159,20 +143,6 @@ struct LocusApp: App {
 
     private static var uiTestPreviewInvocationsFileURL: URL? {
         guard let path = argumentValue(named: "--ui-test-preview-invocations-file", in: ProcessInfo.processInfo.arguments),
-              !path.isEmpty else {
-            return nil
-        }
-
-        return URL(filePath: path, directoryHint: .notDirectory)
-    }
-
-    private static var uiTestRevealInvocationsKey: String {
-        argumentValue(named: "--ui-test-reveal-invocations-key", in: ProcessInfo.processInfo.arguments)
-            ?? "revealInvocations.uiTests"
-    }
-
-    private static var uiTestRevealInvocationsFileURL: URL? {
-        guard let path = argumentValue(named: "--ui-test-reveal-invocations-file", in: ProcessInfo.processInfo.arguments),
               !path.isEmpty else {
             return nil
         }

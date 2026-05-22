@@ -7,7 +7,7 @@ Rules for the native macOS app, Swift, SwiftUI, CoreBridge, and Xcode project wo
 - Build a native macOS UI shell.
 - Keep raw C/FFI calls inside the bridge layer; do not spread them through SwiftUI views.
 - Keep UI-specific behavior in Swift unless it is truly cross-platform domain logic.
-- Use native OS capabilities for preview, file handoff, file dialogs, metadata, and logging where practical.
+- Use native OS capabilities for preview, file dialogs, metadata, and logging where practical.
 
 ## Xcode Commands
 
@@ -61,7 +61,7 @@ scripts/perf-smoke.sh
 - Use security-scoped bookmarks for sandboxed persistent folder access when persistence is introduced.
 - Start and stop security-scoped access in a balanced scope.
 - Treat file metadata, file contents, drag/drop data, file importer results, and pasteboard data as untrusted input.
-- Prefer native file presenters, preview, and handoff APIs where possible.
+- Prefer native file presenters and preview APIs where possible.
 
 ## Swift Patterns
 
@@ -88,5 +88,5 @@ scripts/perf-smoke.sh
   - selected entry preservation
   - CoreBridge status and ABI layout
   - empty/loading/error states where testable
-  - file handoff and open/reveal failure handling where testable
+  - in-app file navigation and preview failure handling where testable
 - Target at least 80% coverage for view-independent logic and bridge behavior.

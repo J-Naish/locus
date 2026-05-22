@@ -11,21 +11,21 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
         )
     }
 
-    func testSingleFileOpensExternally() {
+    func testSingleFilePreviewsInLocus() {
         let entry = makeWorkspaceEntry(name: "notes.md", kind: .file)
 
         XCTAssertEqual(
             WorkspaceEntryOpenActionResolver.action(for: [entry]),
-            .openExternally(entry.url)
+            .preview(entry.url)
         )
     }
 
-    func testSingleSymlinkDelegatesToExternalOpen() {
+    func testSingleSymlinkPreviewsInLocus() {
         let entry = makeWorkspaceEntry(name: "latest", kind: .symlink)
 
         XCTAssertEqual(
             WorkspaceEntryOpenActionResolver.action(for: [entry]),
-            .openExternally(entry.url)
+            .preview(entry.url)
         )
     }
 

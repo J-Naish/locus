@@ -2,7 +2,7 @@
 
 ## Phase 1: macOS MVP
 
-The first release should prove the core product loop: open a local place, move through files and folders with Finder-like clarity, find files faster than Finder, preview or open the right item, and lightly edit common document and AI-adjacent text files.
+The first release should prove the core product loop: open a local place, move through files and folders with Finder-like clarity, find files faster than Finder, preview the right item, and lightly edit common document and AI-adjacent text files.
 
 ### Phase 1A: Native Shell and Folder Navigation
 
@@ -17,8 +17,7 @@ Build the local workspace foundation first.
 - open a local folder as the current working location
 - file list browsing
 - folder navigation, including opening child folders and moving back up
-- reveal in Finder
-- open in external app
+- show an item's containing folder inside Locus and select the item
 - Space-key quick preview
 - file change detection
 
@@ -31,7 +30,7 @@ Search is part of the MVP product identity, not only a later optimization pass. 
 - search results that remain understandable to Finder users
 - clear result grouping by file, folder, favorite, and recent item where useful
 - keyboard and pointer flows that both feel natural
-- predictable open, reveal, preview, and copy-path actions from search results
+- predictable open, show-in-Locus, preview, and copy-path actions from search results
 - basic ranking that favors exact name matches, recent items, favorites, and current location matches
 - no launcher-only UI as the primary search experience
 

@@ -33,8 +33,8 @@ The primary model is:
 - one window usually represents one current working location
 - switching locations should be fast
 - the current location should always be clear
-- users should be able to reveal items in Finder
-- users should be able to open files in external apps
+- users should be able to jump to an item's containing folder inside Locus and keep the item selected
+- users should be able to preview and edit supported files without leaving Locus
 
 Locus should feel familiar to Finder users, but search should be a first-class way to move through files and folders. The goal is not to copy a launcher UI. Users should be able to keep the mental model of folders, locations, recents, and favorites while getting fast, forgiving search across the places they care about.
 
@@ -58,8 +58,8 @@ Initial commands:
 - open a recent folder
 - search files by name
 - create a Markdown document
-- reveal in Finder
-- open in an external app
+- show containing folder in Locus
+- copy path
 
 The default shortcut should be `Command-K`.
 
@@ -81,9 +81,9 @@ Notion-like ease is a useful reference for readability and approachable document
 
 PDFs should focus on reading, searching, highlighting, comments, and lightweight review. Locus should not attempt full PDF content editing.
 
-Office files should focus on recognition, preview, search metadata, and external app handoff rather than full editing.
+Office files should focus on recognition, preview, and search metadata rather than full editing.
 
-Unsupported files should still have useful actions: preview when possible, reveal in Finder, open externally, and copy path.
+Unsupported files should still have useful actions: preview when possible, show in Locus, and copy path. In-app navigation should be the default path when the goal is locating or selecting a file; leaving Locus should not be a primary product flow.
 
 ## UI Anti-Goals
 

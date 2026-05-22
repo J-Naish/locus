@@ -7,8 +7,7 @@ Must support:
 - open a local folder as a working location
 - browse files and folders
 - open files
-- reveal files in Finder
-- open files in external apps
+- navigate to an item's containing folder inside Locus and select the item
 - show recent files and folders
 - pin favorite folders
 - detect file changes
@@ -30,7 +29,7 @@ Must support:
 - search within the current working location
 - search across favorites, recent folders, and recent files
 - fast first results
-- result actions for open, preview, reveal in Finder, open externally, and copy path
+- result actions for open, preview, show in Locus, and copy path
 - result presentation that keeps local file and folder locations understandable
 - consistent name-search behavior in the current location, favorites, recent folders, and recent files
 - relevance ordering that prefers exact names, extension-stripped name matches, prefix matches, substring matches, then conservative typo matches
@@ -129,8 +128,7 @@ Must support:
 
 - recognize `.docx`, `.xlsx`, and `.pptx`
 - preview through native system facilities where possible
-- open in external apps
-- reveal in Finder
+- show in Locus where the containing folder is available
 
 Should support:
 
@@ -153,7 +151,7 @@ Must support:
 - image viewing
 - video playback
 - audio playback
-- external handoff for unsupported files
+- in-app location navigation for unsupported files where the containing folder is available
 
 Should support:
 
@@ -183,7 +181,6 @@ Must preserve:
 Should support:
 
 - clear file permission prompts
-- explicit external app handoff
 - dependency license tracking
 - dependency vulnerability checks
 - signed and verified updates when distribution begins

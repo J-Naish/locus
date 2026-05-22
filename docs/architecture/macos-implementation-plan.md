@@ -60,7 +60,7 @@ Responsibilities:
 - `Views/Browser/`: sidebar, file list, folder navigation, search field.
 - `Views/Preview/`: PDF, Quick Look, image, audio, video, and unsupported-file views.
 - `Views/Editors/`: Markdown and structured plain-text editors.
-- `Services/`: Finder reveal, external app handoff, file dialogs, file watching, recents/favorites storage if still app-owned.
+- `Services/`: in-app location navigation helpers, file dialogs, file watching, recents/favorites storage if still app-owned.
 
 Use SwiftUI for app structure and normal controls, with AppKit bridges where native document behavior matters:
 
@@ -146,7 +146,8 @@ Deliverables:
 - Add deterministic Rust unit tests using temporary directories and `fixtures/` where useful.
 - Add Swift folder picker and current location state.
 - Show a Finder-like file list with names, type labels, size, and modified date.
-- Add reveal in Finder and open in external app actions.
+- Add in-app "show containing folder and select item" behavior for files reached from recents, favorites, and search results.
+- Keep file location actions inside Locus: open, preview, show containing folder, select item, and copy path.
 
 Acceptance:
 
@@ -178,15 +179,15 @@ Deliverables:
 - PDF viewer using PDFKit with page navigation, zoom, text selection, and search.
 - Image preview.
 - Video/audio playback using AVKit.
-- Office preview through Quick Look and external-app handoff.
+- Office preview through native system preview facilities where possible.
 - Unsupported-file fallback with useful actions.
 
 Acceptance:
 
 - Opening a supported file chooses the right native surface.
 - Markdown and structured text save back to disk predictably.
-- Office files are previewable where macOS supports them and can be opened externally.
-- Unsupported files still support reveal in Finder, open externally, and copy path.
+- Office files are previewable where macOS supports them.
+- Unsupported files still support show in Locus and copy path, with richer in-app preview/edit support added by file type.
 
 ### 5. Search and Command Palette
 
@@ -199,13 +200,14 @@ Deliverables:
   - open recent folder
   - search files by name
   - create Markdown document
-  - reveal in Finder
-  - open in external app
+  - show containing folder in Locus
+  - copy path
 
 Acceptance:
 
 - Search returns fast first results without full startup indexing.
 - Command palette is useful but does not become a developer command surface.
+- Search and command flows keep users in Locus by default when the task is finding, selecting, or previewing a local item.
 
 ### 6. File Change Detection and Review
 
@@ -246,8 +248,9 @@ Start with these tasks in order:
 3. Add Rust `file_type` and `workspace` modules with unit tests.
 4. Extend the FFI with one coarse folder-list snapshot API and explicit free functions.
 5. Build a minimal UI: Home, "Open Folder", current location title, and file list.
-6. Add reveal in Finder and open externally for file-list rows.
-7. Run:
+6. Add in-app containing-folder navigation and row selection for file-list, recent, favorite, and search result rows.
+7. Keep context-menu actions scoped to in-app navigation, preview, and path copying.
+8. Run:
    - `cargo test --manifest-path core/Cargo.toml`
    - the narrow macOS app tests available from the Xcode project
 
@@ -294,4 +297,3 @@ Before handoff for app-affecting work, also run the narrowest relevant Xcode/mac
 - UI blocking during file scans: make folder listing asynchronous from the first UI slice.
 - Scope creep into IDE features: keep source files as editable documents, not development projects.
 - Preview framework edge cases: provide reliable fallback actions for every unsupported or failed preview.
-

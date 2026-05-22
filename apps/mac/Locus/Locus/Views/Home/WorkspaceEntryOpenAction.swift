@@ -2,7 +2,7 @@ import Foundation
 
 enum WorkspaceEntryOpenAction: Equatable, Sendable {
     case browseFolder(URL)
-    case openExternally(URL)
+    case preview(URL)
 }
 
 enum WorkspaceEntryOpenActionResolver {
@@ -14,12 +14,8 @@ enum WorkspaceEntryOpenActionResolver {
         switch entry.kind {
         case .directory:
             return .browseFolder(entry.url)
-        case .file:
-            return .openExternally(entry.url)
-        case .symlink:
-            // Let macOS resolve symlink targets for now so aliases to files and
-            // folders behave consistently with the system handoff path.
-            return .openExternally(entry.url)
+        case .file, .symlink:
+            return .preview(entry.url)
         case .other:
             return nil
         }

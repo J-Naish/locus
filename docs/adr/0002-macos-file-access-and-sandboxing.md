@@ -16,7 +16,7 @@ Use two levels of access:
 
 - Immediate folder reads call `startAccessingSecurityScopedResource()` before touching a user-selected URL and stop access with `defer`.
 - Persistent folder access stores security-scoped bookmark data when recents and favorites are implemented.
-- Stored bookmarks are resolved before later folder reads, previews, edits, reveal actions, or external handoff flows that need access after the original picker session.
+- Stored bookmarks are resolved before later folder reads, previews, edits, or in-app location navigation flows that need access after the original picker session.
 - The app should enable App Sandbox and entitlements before relying on recents and favorites as product features.
 
 ## Consequences
