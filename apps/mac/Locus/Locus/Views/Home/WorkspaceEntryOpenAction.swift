@@ -16,12 +16,15 @@ enum WorkspaceEntryOpenActionResolver {
         case .directory:
             return .browseFolder(entry.url)
         case .file, .symlink:
-            switch WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry) {
-            case .editableText, .image:
+            let surfaceKind = WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry)
+            if surfaceKind.supportsInPlaceOpen {
                 return .openInPlace(entry.url)
+            }
+
+            switch surfaceKind {
             case .unsupported:
                 return .preview(entry.url)
-            case .folder:
+            case .folder, .editableText, .image, .pdf:
                 return nil
             }
         case .other:

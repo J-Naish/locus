@@ -38,13 +38,41 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
         )
     }
 
-    func testSingleNonTextFilePreviewsInLocus() {
+    func testSinglePDFFileViewsInLocus() {
         let entry = makeWorkspaceEntry(name: "brief.pdf", kind: .file, fileType: .pdf)
+
+        XCTAssertEqual(
+            WorkspaceEntryOpenActionResolver.action(for: [entry]),
+            .openInPlace(entry.url)
+        )
+    }
+
+    func testSingleUnsupportedFilePreviewsInLocus() {
+        let entry = makeWorkspaceEntry(name: "deck.pptx", kind: .file, fileType: .office)
 
         XCTAssertEqual(
             WorkspaceEntryOpenActionResolver.action(for: [entry]),
             .preview(entry.url)
         )
+    }
+
+    func testUnsupportedFileTypesPreviewInLocus() {
+        let unsupportedFileTypes: [(String, WorkspaceFileType)] = [
+            ("deck.pptx", .office),
+            ("clip.mp4", .video),
+            ("voice.mp3", .audio),
+            ("blob", .unknown)
+        ]
+
+        for (name, fileType) in unsupportedFileTypes {
+            let entry = makeWorkspaceEntry(name: name, kind: .file, fileType: fileType)
+
+            XCTAssertEqual(
+                WorkspaceEntryOpenActionResolver.action(for: [entry]),
+                .preview(entry.url),
+                "Expected \(name) to fall back to Preview"
+            )
+        }
     }
 
     func testSingleTextSymlinkEditsInLocus() {

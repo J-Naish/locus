@@ -1,10 +1,12 @@
 import AppKit
+import PDFKit
 import SwiftUI
 
 struct WorkspaceDocumentSurface: View {
     let entry: WorkspaceEntry?
     let textDocumentStore: any TextDocumentStoring
     let imageDocumentStore: any ImageDocumentStoring
+    let pdfDocumentStore: any PDFDocumentStoring
     let preview: ([URL]) -> Void
     let onEditorFocusChange: (Bool) -> Void
 
@@ -28,6 +30,11 @@ struct WorkspaceDocumentSurface: View {
                         entry: entry,
                         imageDocumentStore: imageDocumentStore,
                         preview: preview
+                    )
+                case .pdf:
+                    PDFDocumentSurface(
+                        entry: entry,
+                        pdfDocumentStore: pdfDocumentStore
                     )
                 case .folder:
                     FolderDocumentSurface(entry: entry)
@@ -375,6 +382,99 @@ private enum ImageDocumentLoadState {
     case loading
     case loaded(NSImage)
     case failed(String)
+}
+
+private struct PDFDocumentSurface: View {
+    let entry: WorkspaceEntry
+    let pdfDocumentStore: any PDFDocumentStoring
+
+    @State private var loadState: PDFDocumentLoadState = .loading
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            DocumentPreviewHeaderView(entry: entry, detail: "PDF")
+
+            switch loadState {
+            case .loading:
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("document-pdf-loading-indicator")
+            case let .loaded(document):
+                PDFDocumentView(document: document)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 8))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("\(entry.name) PDF")
+                    .accessibilityIdentifier("document-pdf-surface")
+            case let .failed(message):
+                ContentUnavailableView {
+                    Label("PDF Could Not Be Opened", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(message)
+                } actions: {
+                    Button("Try Again") {
+                        Task {
+                            await loadPDF()
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityIdentifier("document-pdf-error-surface")
+            }
+        }
+        .padding(12)
+        .task(id: entry.id) {
+            await loadPDF()
+        }
+    }
+
+    @MainActor
+    private func loadPDF() async {
+        loadState = .loading
+
+        do {
+            let document = try await pdfDocumentStore.loadPDF(at: entry.url)
+            guard !Task.isCancelled else {
+                return
+            }
+
+            loadState = .loaded(document.document)
+        } catch {
+            guard !Task.isCancelled else {
+                return
+            }
+
+            loadState = .failed(error.localizedDescription)
+        }
+    }
+}
+
+private enum PDFDocumentLoadState {
+    case loading
+    case loaded(PDFDocument)
+    case failed(String)
+}
+
+private struct PDFDocumentView: NSViewRepresentable {
+    let document: PDFDocument
+
+    func makeNSView(context: Context) -> PDFView {
+        let pdfView = PDFView()
+        pdfView.autoScales = true
+        pdfView.displayMode = .singlePageContinuous
+        pdfView.displayDirection = .vertical
+        pdfView.backgroundColor = .clear
+        pdfView.setAccessibilityIdentifier("document-pdf-view")
+        return pdfView
+    }
+
+    func updateNSView(_ pdfView: PDFView, context: Context) {
+        if pdfView.document !== document {
+            pdfView.document = document
+            // Re-apply fit-to-window scaling after document swaps.
+            pdfView.autoScales = true
+        }
+    }
 }
 
 private struct FolderDocumentSurface: View {

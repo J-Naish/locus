@@ -208,6 +208,46 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
+    func testDoubleClickPDFFileViewsPDFInLocus() throws {
+        let workspacePath = try fixtureWorkspacePath("file-types")
+        let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
+        let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
+        let app = try launchApp(
+            workspacePath: workspacePath,
+            previewInvocationsKey: previewInvocationsKey,
+            previewInvocationsFilePath: previewInvocationsFilePath
+        )
+
+        let sampleRowText = app.staticTexts["sample.pdf"]
+        XCTAssertTrue(sampleRowText.waitForExistence(timeout: 5), app.debugDescription)
+        sampleRowText.doubleClick()
+
+        let pdfSurface = app.descendants(matching: .any)["document-pdf-surface"]
+        XCTAssertTrue(pdfSurface.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["sample.pdf"].waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertEqual(previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
+    }
+
+    @MainActor
+    func testBrokenPDFShowsPDFErrorSurface() throws {
+        let workspaceURL = FileManager.default.temporaryDirectory
+            .appending(path: "locus-invalid-pdf-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
+        filesToRemove.insert(workspaceURL.path(percentEncoded: false))
+
+        try Data("not a pdf".utf8).write(to: workspaceURL.appending(path: "broken.pdf"))
+
+        let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+        let brokenPDFRowText = app.staticTexts["broken.pdf"]
+        XCTAssertTrue(brokenPDFRowText.waitForExistence(timeout: 5), app.debugDescription)
+        brokenPDFRowText.doubleClick()
+
+        XCTAssertTrue(app.descendants(matching: .any)["document-pdf-error-surface"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.buttons["Try Again"].waitForExistence(timeout: 2), app.debugDescription)
+    }
+
+    @MainActor
     func testUndecodableImageOffersQuickLookPreviewFallback() throws {
         let workspaceURL = FileManager.default.temporaryDirectory
             .appending(path: "locus-invalid-image-\(UUID().uuidString)", directoryHint: .isDirectory)

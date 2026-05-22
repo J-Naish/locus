@@ -27,6 +27,13 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
         )
     }
 
+    func testPDFsUsePDFSurface() {
+        XCTAssertEqual(
+            WorkspaceDocumentSurfaceSupport.surfaceKind(for: makeEntry(name: "brief.pdf", fileType: .pdf)),
+            .pdf
+        )
+    }
+
     func testDirectoriesUseFolderSurface() {
         XCTAssertEqual(
             WorkspaceDocumentSurfaceSupport.surfaceKind(

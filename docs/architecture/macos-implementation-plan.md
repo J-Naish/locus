@@ -179,7 +179,7 @@ Deliverables:
 
 - Markdown editor using `NSTextView`/TextKit with normal save behavior.
 - Structured plain-text editor for YAML, JSON, TOML, and common text files.
-- PDF viewer using PDFKit with page navigation, zoom, text selection, and search.
+- PDF viewer using PDFKit. The first vertical slice is a read-only in-app viewer; page navigation, zoom controls, text selection polish, search, highlights, and comments follow as separate PDF review slices.
 - Image preview.
 - Video/audio playback using AVKit.
 - Office preview through native system preview facilities where possible.

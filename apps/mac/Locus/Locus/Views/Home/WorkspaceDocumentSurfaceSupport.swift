@@ -3,8 +3,18 @@ import Foundation
 enum WorkspaceDocumentSurfaceKind: Equatable {
     case editableText
     case image
+    case pdf
     case folder
     case unsupported
+
+    var supportsInPlaceOpen: Bool {
+        switch self {
+        case .editableText, .image, .pdf:
+            return true
+        case .folder, .unsupported:
+            return false
+        }
+    }
 }
 
 enum WorkspaceDocumentSurfaceSupport {
@@ -16,6 +26,9 @@ enum WorkspaceDocumentSurfaceSupport {
             }
             if canRenderImageInPlace(entry) {
                 return .image
+            }
+            if entry.fileType == .pdf {
+                return .pdf
             }
             return .unsupported
         case .directory:
