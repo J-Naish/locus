@@ -12,11 +12,14 @@
 		1A0000010000000000000003 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000013 /* HomeView.swift */; };
 		1A0000010000000000000004 /* CoreBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000014 /* CoreBridgeTests.swift */; };
 		1A0000010000000000000042 /* FinderService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000043 /* FinderService.swift */; };
+		1A000001000000000000006C /* ClipboardService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000006D /* ClipboardService.swift */; };
 		1A0000010000000000000045 /* WorkspaceEntrySearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000046 /* WorkspaceEntrySearch.swift */; };
 		1A0000010000000000000047 /* WorkspaceEntrySearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000048 /* WorkspaceEntrySearchTests.swift */; };
 		1A0000010000000000000051 /* WorkspaceSearchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000053 /* WorkspaceSearchUITests.swift */; };
 		1A0000010000000000000064 /* WorkspaceEntryOpenAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000065 /* WorkspaceEntryOpenAction.swift */; };
 		1A0000010000000000000066 /* WorkspaceEntryOpenActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000067 /* WorkspaceEntryOpenActionTests.swift */; };
+		1A000001000000000000006E /* WorkspaceEntryPathCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000006F /* WorkspaceEntryPathCopy.swift */; };
+		1A0000010000000000000070 /* WorkspaceEntryPathCopyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000071 /* WorkspaceEntryPathCopyTests.swift */; };
 		1A0000010000000000000068 /* WorkspaceNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000069 /* WorkspaceNavigation.swift */; };
 		1A000001000000000000006A /* WorkspaceNavigationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000006B /* WorkspaceNavigationTests.swift */; };
 /* End PBXBuildFile section */
@@ -48,11 +51,14 @@
 		1A0000010000000000000014 /* CoreBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreBridgeTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000015 /* LocusCoreBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LocusCoreBridge.h; sourceTree = "<group>"; };
 		1A0000010000000000000043 /* FinderService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderService.swift; sourceTree = "<group>"; };
+		1A000001000000000000006D /* ClipboardService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardService.swift; sourceTree = "<group>"; };
 		1A0000010000000000000046 /* WorkspaceEntrySearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntrySearch.swift; sourceTree = "<group>"; };
 		1A0000010000000000000048 /* WorkspaceEntrySearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntrySearchTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000053 /* WorkspaceSearchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSearchUITests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000065 /* WorkspaceEntryOpenAction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryOpenAction.swift; sourceTree = "<group>"; };
 		1A0000010000000000000067 /* WorkspaceEntryOpenActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryOpenActionTests.swift; sourceTree = "<group>"; };
+		1A000001000000000000006F /* WorkspaceEntryPathCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryPathCopy.swift; sourceTree = "<group>"; };
+		1A0000010000000000000071 /* WorkspaceEntryPathCopyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryPathCopyTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000069 /* WorkspaceNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceNavigation.swift; sourceTree = "<group>"; };
 		1A000001000000000000006B /* WorkspaceNavigationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceNavigationTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -108,6 +114,7 @@
 			children = (
 				1A0000010000000000000014 /* CoreBridgeTests.swift */,
 				1A0000010000000000000067 /* WorkspaceEntryOpenActionTests.swift */,
+				1A0000010000000000000071 /* WorkspaceEntryPathCopyTests.swift */,
 				1A000001000000000000006B /* WorkspaceNavigationTests.swift */,
 				1A0000010000000000000048 /* WorkspaceEntrySearchTests.swift */,
 			);
@@ -160,6 +167,7 @@
 		1A0000010000000000000044 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				1A000001000000000000006D /* ClipboardService.swift */,
 				1A0000010000000000000043 /* FinderService.swift */,
 			);
 			path = Services;
@@ -170,6 +178,7 @@
 			children = (
 				1A0000010000000000000013 /* HomeView.swift */,
 				1A0000010000000000000065 /* WorkspaceEntryOpenAction.swift */,
+				1A000001000000000000006F /* WorkspaceEntryPathCopy.swift */,
 				1A0000010000000000000069 /* WorkspaceNavigation.swift */,
 				1A0000010000000000000046 /* WorkspaceEntrySearch.swift */,
 			);
@@ -330,9 +339,11 @@
 			files = (
 				1A0000010000000000000001 /* LocusApp.swift in Sources */,
 				1A0000010000000000000002 /* CoreBridge.swift in Sources */,
+				1A000001000000000000006C /* ClipboardService.swift in Sources */,
 				1A0000010000000000000042 /* FinderService.swift in Sources */,
 				1A0000010000000000000003 /* HomeView.swift in Sources */,
 				1A0000010000000000000064 /* WorkspaceEntryOpenAction.swift in Sources */,
+				1A000001000000000000006E /* WorkspaceEntryPathCopy.swift in Sources */,
 				1A0000010000000000000068 /* WorkspaceNavigation.swift in Sources */,
 				1A0000010000000000000045 /* WorkspaceEntrySearch.swift in Sources */,
 			);
@@ -344,6 +355,7 @@
 			files = (
 				1A0000010000000000000004 /* CoreBridgeTests.swift in Sources */,
 				1A0000010000000000000066 /* WorkspaceEntryOpenActionTests.swift in Sources */,
+				1A0000010000000000000070 /* WorkspaceEntryPathCopyTests.swift in Sources */,
 				1A000001000000000000006A /* WorkspaceNavigationTests.swift in Sources */,
 				1A0000010000000000000047 /* WorkspaceEntrySearchTests.swift in Sources */,
 			);

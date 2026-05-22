@@ -1,8 +1,15 @@
+import AppKit
 import XCTest
 
 final class WorkspaceSearchUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
+        NSPasteboard.general.clearContents()
+    }
+
+    override func tearDownWithError() throws {
+        NSPasteboard.general.clearContents()
+        try super.tearDownWithError()
     }
 
     @MainActor
@@ -30,12 +37,38 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
+    func testContextMenuCopiesSelectedEntryPath() throws {
+        let workspacePath = try fixtureWorkspacePath("basic")
+        let app = try launchApp(workspacePath: workspacePath)
+        let pasteboard = NSPasteboard.general
+
+        let reportsRowText = app.staticTexts["Reports"]
+        XCTAssertTrue(reportsRowText.waitForExistence(timeout: 5), app.debugDescription)
+
+        reportsRowText.rightClick()
+
+        let copyPathMenuItem = app.menuItems["Copy Path"]
+        XCTAssertTrue(copyPathMenuItem.waitForExistence(timeout: 2), app.debugDescription)
+        copyPathMenuItem.click()
+
+        XCTAssertEqual(
+            pasteboard.string(forType: .string),
+            "\(workspacePath)/Reports"
+        )
+    }
+
+    @MainActor
     private func launchAppWithBasicWorkspace() throws -> XCUIApplication {
+        try launchApp(workspacePath: fixtureWorkspacePath("basic"))
+    }
+
+    @MainActor
+    private func launchApp(workspacePath: String) throws -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["LOCUS_UI_TESTING"] = "1"
         app.launchArguments = [
             "--ui-test-workspace",
-            try fixtureWorkspacePath("basic")
+            workspacePath
         ]
         app.launch()
 
@@ -59,7 +92,10 @@ final class WorkspaceSearchUITests: XCTestCase {
             var isDirectory: ObjCBool = false
             if fileManager.fileExists(atPath: candidate.path(percentEncoded: false), isDirectory: &isDirectory),
                isDirectory.boolValue {
-                return candidate.path(percentEncoded: false)
+                return directory
+                    .appending(path: "fixtures/workspaces")
+                    .appending(path: name)
+                    .path(percentEncoded: false)
             }
 
             directory.deleteLastPathComponent()

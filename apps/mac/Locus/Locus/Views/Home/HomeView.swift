@@ -15,15 +15,18 @@ struct HomeView: View {
 
     private let coreBridge: CoreBridge
     private let finderService: FinderService
+    private let clipboardService: ClipboardService
     private let initialFolderURL: URL?
 
     init(
         coreBridge: CoreBridge = CoreBridge(),
         finderService: FinderService = FinderService(),
+        clipboardService: ClipboardService = ClipboardService(),
         initialFolderURL: URL? = nil
     ) {
         self.coreBridge = coreBridge
         self.finderService = finderService
+        self.clipboardService = clipboardService
         self.initialFolderURL = initialFolderURL
     }
 
@@ -36,10 +39,13 @@ struct HomeView: View {
                 rootURL: workspaceRootURL,
                 selectedEntryID: $selectedEntryID,
                 openFolder: openFolder,
-                refresh: refreshWorkspace,
-                openParentFolder: openParentFolder,
-                reveal: revealInFinder,
-                performOpenAction: performOpenAction
+                actions: WorkspaceActions(
+                    refresh: refreshWorkspace,
+                    openParentFolder: openParentFolder,
+                    reveal: revealInFinder,
+                    copyPaths: copyPaths,
+                    performOpenAction: performOpenAction
+                )
             )
         }
         .padding(28)
@@ -198,6 +204,11 @@ struct HomeView: View {
     }
 
     @MainActor
+    private func copyPaths(_ entries: [WorkspaceEntry]) {
+        clipboardService.copyEntryPaths(entries)
+    }
+
+    @MainActor
     private func openParentFolder() {
         guard let folderURL = workspaceState.folderURL,
               let parentFolderURL = WorkspaceNavigation.parentFolderURL(
@@ -285,10 +296,7 @@ private struct WorkspaceContentView: View {
     let rootURL: URL?
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let openFolder: () -> Void
-    let refresh: () -> Void
-    let openParentFolder: () -> Void
-    let reveal: (WorkspaceEntry) -> Void
-    let performOpenAction: (WorkspaceEntryOpenAction) -> Void
+    let actions: WorkspaceActions
 
     var body: some View {
         Group {
@@ -304,22 +312,27 @@ private struct WorkspaceContentView: View {
                     loadedAt: loadedAt,
                     rootURL: rootURL,
                     selectedEntryID: $selectedEntryID,
-                    refresh: refresh,
-                    openParentFolder: openParentFolder,
-                    reveal: reveal,
-                    performOpenAction: performOpenAction
+                    actions: actions
                 )
             case let .failed(folderURL, message):
                 WorkspaceErrorView(
                     folderURL: folderURL,
                     message: message,
                     openFolder: openFolder,
-                    retry: refresh
+                    retry: actions.refresh
                 )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+}
+
+private struct WorkspaceActions {
+    let refresh: () -> Void
+    let openParentFolder: () -> Void
+    let reveal: (WorkspaceEntry) -> Void
+    let copyPaths: ([WorkspaceEntry]) -> Void
+    let performOpenAction: (WorkspaceEntryOpenAction) -> Void
 }
 
 private struct EmptyWorkspaceView: View {
@@ -359,10 +372,7 @@ private struct WorkspaceBrowserView: View {
     let loadedAt: Date
     let rootURL: URL?
     @Binding var selectedEntryID: WorkspaceEntry.ID?
-    let refresh: () -> Void
-    let openParentFolder: () -> Void
-    let reveal: (WorkspaceEntry) -> Void
-    let performOpenAction: (WorkspaceEntryOpenAction) -> Void
+    let actions: WorkspaceActions
     @State private var searchQuery = ""
     @FocusState private var isSearchFocused: Bool
 
@@ -375,8 +385,8 @@ private struct WorkspaceBrowserView: View {
                 rootURL: rootURL,
                 searchQuery: $searchQuery,
                 isSearchFocused: $isSearchFocused,
-                openParentFolder: openParentFolder,
-                refresh: refresh
+                openParentFolder: actions.openParentFolder,
+                refresh: actions.refresh
             )
 
             if !snapshot.partialErrors.isEmpty {
@@ -401,8 +411,7 @@ private struct WorkspaceBrowserView: View {
                 WorkspaceEntriesTable(
                     entries: visibleEntries,
                     selectedEntryID: $selectedEntryID,
-                    reveal: reveal,
-                    performOpenAction: performOpenAction
+                    actions: actions
                 )
             }
         }
@@ -524,8 +533,7 @@ private struct WorkspaceToolbarView: View {
 private struct WorkspaceEntriesTable: View {
     let entries: [WorkspaceEntry]
     @Binding var selectedEntryID: WorkspaceEntry.ID?
-    let reveal: (WorkspaceEntry) -> Void
-    let performOpenAction: (WorkspaceEntryOpenAction) -> Void
+    let actions: WorkspaceActions
 
     var body: some View {
         Table(entries, selection: $selectedEntryID) {
@@ -564,13 +572,18 @@ private struct WorkspaceEntriesTable: View {
 
             Button("Open") {
                 if let openAction {
-                    performOpenAction(openAction)
+                    actions.performOpenAction(openAction)
                 }
             }
             .disabled(openAction == nil)
 
             Button("Reveal in Finder") {
-                selectedEntries.forEach(reveal)
+                selectedEntries.forEach(actions.reveal)
+            }
+            .disabled(selectedEntries.isEmpty)
+
+            Button(WorkspaceEntryPathCopy.menuTitle(for: selectedEntries)) {
+                actions.copyPaths(selectedEntries)
             }
             .disabled(selectedEntries.isEmpty)
         } primaryAction: { selection in
@@ -583,7 +596,7 @@ private struct WorkspaceEntriesTable: View {
             return
         }
 
-        performOpenAction(openAction)
+        actions.performOpenAction(openAction)
     }
 
     private func entries(for selection: Set<WorkspaceEntry.ID>) -> [WorkspaceEntry] {
