@@ -25,17 +25,23 @@ Should support:
 Must support:
 
 - file name search
+- folder name search
 - recent item search
 - search within the current working location
+- search across favorites, recent folders, and recent files
 - fast first results
+- result actions for open, preview, reveal in Finder, open externally, and copy path
+- result presentation that keeps local file and folder locations understandable
 
 Should support:
 
+- basic relevance ranking for exact matches, recency, favorites, and current location
 - Markdown text search
 - PDF text search
 - Office extracted text search
 - SQLite FTS5
 - incremental index updates
+- saved or reusable search scopes
 
 ## Markdown
 

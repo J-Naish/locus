@@ -36,6 +36,8 @@ The primary model is:
 - users should be able to reveal items in Finder
 - users should be able to open files in external apps
 
+Locus should feel familiar to Finder users, but search should be a first-class way to move through files and folders. The goal is not to copy a launcher UI. Users should be able to keep the mental model of folders, locations, recents, and favorites while getting fast, forgiving search across the places they care about.
+
 Recommended top-level areas:
 
 - Home
@@ -72,6 +74,10 @@ Keep user-facing strings plain, short, and ready for a future String Catalog pas
 Markdown should feel like document editing, not source code editing.
 
 YAML, JSON, TOML, and similar configuration files should also receive a rich editing experience. These files are often used to configure AI agents and local automation tools, so Locus should make them readable, safe, and comfortable to edit without turning the app into an IDE.
+
+The broad editing layout may borrow from familiar editor patterns, but the user experience should not feel like VS Code or Cursor. It should be easier to scan, more document-oriented, and less technical. AI-adjacent files such as prompts, instructions, Markdown drafts, structured configuration, and generated artifacts should receive richer presentation where it helps comprehension, while the underlying local file remains explicit and portable.
+
+Notion-like ease is a useful reference for readability and approachable document handling, but Locus should not adopt block-database complexity or hide files behind an app-specific content model. Detailed UI controls and secondary affordances can evolve later; the durable direction is a fast local file workspace with unusually strong search, preview, and lightweight editing.
 
 PDFs should focus on reading, searching, highlighting, comments, and lightweight review. Locus should not attempt full PDF content editing.
 
