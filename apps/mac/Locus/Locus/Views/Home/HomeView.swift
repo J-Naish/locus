@@ -482,8 +482,12 @@ private struct WorkspaceContentView: View {
                     snapshot: snapshot,
                     loadedAt: loadedAt,
                     rootURL: rootURL,
+                    favoriteFolders: favoriteFolders,
+                    recentFiles: recentFiles,
+                    recentFolders: recentFolders,
                     isFavorite: favoriteFolders.contains { $0.path == folderURL.locusStandardizedPath },
                     selectedEntryID: $selectedEntryID,
+                    shortcutActions: emptyActions,
                     actions: actions
                 )
             case let .failed(folderURL, message):
@@ -528,11 +532,51 @@ private struct WorkspaceBrowserView: View {
     let snapshot: WorkspaceSnapshot
     let loadedAt: Date
     let rootURL: URL?
+    let favoriteFolders: [FavoriteFolder]
+    let recentFiles: [RecentFile]
+    let recentFolders: [RecentFolder]
     let isFavorite: Bool
     @Binding var selectedEntryID: WorkspaceEntry.ID?
+    let shortcutActions: EmptyWorkspaceActions
     let actions: WorkspaceActions
     @State private var searchQuery = ""
+    @State private var searchResults: WorkspaceBrowserSearchResults
     @FocusState private var isSearchFocused: Bool
+
+    init(
+        folderURL: URL,
+        snapshot: WorkspaceSnapshot,
+        loadedAt: Date,
+        rootURL: URL?,
+        favoriteFolders: [FavoriteFolder],
+        recentFiles: [RecentFile],
+        recentFolders: [RecentFolder],
+        isFavorite: Bool,
+        selectedEntryID: Binding<WorkspaceEntry.ID?>,
+        shortcutActions: EmptyWorkspaceActions,
+        actions: WorkspaceActions
+    ) {
+        self.folderURL = folderURL
+        self.snapshot = snapshot
+        self.loadedAt = loadedAt
+        self.rootURL = rootURL
+        self.favoriteFolders = favoriteFolders
+        self.recentFiles = recentFiles
+        self.recentFolders = recentFolders
+        self.isFavorite = isFavorite
+        self._selectedEntryID = selectedEntryID
+        self.shortcutActions = shortcutActions
+        self.actions = actions
+        self._searchResults = State(
+            initialValue: WorkspaceBrowserSearchResults.resolve(
+                entries: snapshot.entries,
+                favoriteFolders: favoriteFolders,
+                recentFiles: recentFiles,
+                recentFolders: recentFolders,
+                query: ""
+            )
+        )
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -553,23 +597,32 @@ private struct WorkspaceBrowserView: View {
                 PartialErrorsView(errors: snapshot.partialErrors)
             }
 
+            if searchResults.hasShortcutResults {
+                WorkspaceShortcutSearchResultsView(
+                    favoriteFolders: searchResults.favoriteFolders,
+                    recentFiles: searchResults.recentFiles,
+                    recentFolders: searchResults.recentFolders,
+                    actions: shortcutActions
+                )
+            }
+
             if snapshot.entries.isEmpty {
                 ContentUnavailableView(
                     "This Folder Is Empty",
                     systemImage: "folder",
                     description: Text("Files and folders will appear here.")
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if visibleEntries.isEmpty {
+                .frame(maxWidth: .infinity, maxHeight: searchResults.hasShortcutResults ? 160 : .infinity)
+            } else if searchResults.visibleEntries.isEmpty {
                 ContentUnavailableView(
-                    "No Results",
+                    "No Current Folder Results",
                     systemImage: "magnifyingglass",
                     description: Text(verbatim: "No items match \"\(searchQuery)\".")
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: searchResults.hasShortcutResults ? 160 : .infinity)
             } else {
                 WorkspaceEntriesTable(
-                    entries: visibleEntries,
+                    entries: searchResults.visibleEntries,
                     selectedEntryID: $selectedEntryID,
                     isSearchFocused: isSearchFocused,
                     actions: actions
@@ -577,23 +630,38 @@ private struct WorkspaceBrowserView: View {
             }
         }
         .onChange(of: searchQuery) {
-            clearSelectionIfNeeded()
+            refreshSearchResults()
         }
         .onChange(of: snapshot.entries) {
-            clearSelectionIfNeeded()
+            refreshSearchResults()
+        }
+        .onChange(of: favoriteFolders) {
+            refreshSearchResults()
+        }
+        .onChange(of: recentFiles) {
+            refreshSearchResults()
+        }
+        .onChange(of: recentFolders) {
+            refreshSearchResults()
         }
         .onChange(of: folderURL) {
             searchQuery = ""
+            refreshSearchResults()
         }
         .background(searchShortcut)
     }
 
-    private var visibleEntries: [WorkspaceEntry] {
-        WorkspaceEntrySearch.filteredEntries(snapshot.entries, query: searchQuery)
-    }
+    private func refreshSearchResults() {
+        let refreshedResults = WorkspaceBrowserSearchResults.resolve(
+            entries: snapshot.entries,
+            favoriteFolders: favoriteFolders,
+            recentFiles: recentFiles,
+            recentFolders: recentFolders,
+            query: searchQuery
+        )
+        searchResults = refreshedResults
 
-    private func clearSelectionIfNeeded() {
-        if !WorkspaceEntrySearch.shouldKeepSelection(selectedEntryID, in: visibleEntries) {
+        if !WorkspaceEntrySearch.shouldKeepSelection(selectedEntryID, in: refreshedResults.visibleEntries) {
             selectedEntryID = nil
         }
     }
@@ -614,6 +682,103 @@ private struct WorkspaceBrowserView: View {
         DispatchQueue.main.async {
             NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
         }
+    }
+}
+
+struct WorkspaceBrowserSearchResults {
+    let visibleEntries: [WorkspaceEntry]
+    let favoriteFolders: [FavoriteFolder]
+    let recentFiles: [RecentFile]
+    let recentFolders: [RecentFolder]
+
+    var hasShortcutResults: Bool {
+        !favoriteFolders.isEmpty || !recentFiles.isEmpty || !recentFolders.isEmpty
+    }
+
+    static func resolve(
+        entries: [WorkspaceEntry],
+        favoriteFolders: [FavoriteFolder],
+        recentFiles: [RecentFile],
+        recentFolders: [RecentFolder],
+        query: String
+    ) -> WorkspaceBrowserSearchResults {
+        let visibleEntries = WorkspaceEntrySearch.filteredEntries(entries, query: query)
+        guard WorkspaceEntrySearch.hasSearchTerms(in: query) else {
+            return WorkspaceBrowserSearchResults(
+                visibleEntries: visibleEntries,
+                favoriteFolders: [],
+                recentFiles: [],
+                recentFolders: []
+            )
+        }
+
+        let visibleEntryPaths = Set(visibleEntries.map(\.url.locusStandardizedPath))
+        let visibleFavoriteFolders = WorkspaceEntrySearch.filteredShortcuts(favoriteFolders, query: query)
+        let visibleRecentFiles = WorkspaceEntrySearch.filteredShortcuts(recentFiles, query: query)
+            .filter { !visibleEntryPaths.contains($0.path) }
+        let visibleRecentFolders = WorkspaceEntrySearch.filteredShortcuts(recentFolders, query: query)
+
+        return WorkspaceBrowserSearchResults(
+            visibleEntries: visibleEntries,
+            favoriteFolders: visibleFavoriteFolders,
+            recentFiles: visibleRecentFiles,
+            recentFolders: visibleRecentFolders
+        )
+    }
+}
+
+private struct WorkspaceShortcutSearchResultsView: View {
+    let favoriteFolders: [FavoriteFolder]
+    let recentFiles: [RecentFile]
+    let recentFolders: [RecentFolder]
+    let actions: EmptyWorkspaceActions
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !favoriteFolders.isEmpty {
+                ShortcutListView(
+                    title: "Favorite Folders",
+                    rowAccessibilityIdentifier: "workspace-search-favorite-folder-row",
+                    items: favoriteFolders,
+                    systemImage: "folder",
+                    symbolColor: .blue,
+                    maxWidth: .infinity,
+                    open: actions.openFavoriteFolder,
+                    remove: actions.removeFavoriteFolder,
+                    copyPath: actions.copyPath
+                )
+            }
+
+            if !recentFiles.isEmpty {
+                ShortcutListView(
+                    title: "Recent Files",
+                    rowAccessibilityIdentifier: "workspace-search-recent-file-row",
+                    items: recentFiles,
+                    systemImage: "doc",
+                    symbolColor: .secondary,
+                    maxWidth: .infinity,
+                    open: actions.openRecentFile,
+                    remove: actions.removeRecentFile,
+                    copyPath: actions.copyPath
+                )
+            }
+
+            if !recentFolders.isEmpty {
+                ShortcutListView(
+                    title: "Recent Folders",
+                    rowAccessibilityIdentifier: "workspace-search-recent-folder-row",
+                    items: recentFolders,
+                    systemImage: "folder",
+                    symbolColor: .blue,
+                    maxWidth: .infinity,
+                    open: actions.openRecentFolder,
+                    remove: actions.removeRecentFolder,
+                    copyPath: actions.copyPath
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityIdentifier("workspace-shortcut-search-results")
     }
 }
 

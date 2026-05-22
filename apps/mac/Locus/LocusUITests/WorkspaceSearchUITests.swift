@@ -265,6 +265,45 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
+    func testWorkspaceSearchIncludesRecentFiles() throws {
+        let recentFileURL = FileManager.default.temporaryDirectory
+            .appending(path: "Quarterly Forecast \(UUID().uuidString).md")
+        try "Forecast notes\n".write(to: recentFileURL, atomically: true, encoding: .utf8)
+        filesToRemove.insert(recentFileURL.path(percentEncoded: false))
+
+        let app = try launchApp(
+            workspacePath: fixtureWorkspacePath("basic"),
+            recentFiles: [recentFileURL.path(percentEncoded: false)]
+        )
+
+        let searchField = app.textFields["workspace-search-field"]
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
+        searchField.click()
+        app.typeText("forecast")
+
+        XCTAssertTrue(app.staticTexts["Recent Files"].waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertTrue(app.buttons["Open \(recentFileURL.lastPathComponent)"].waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["No Current Folder Results"].waitForExistence(timeout: 2), app.debugDescription)
+    }
+
+    @MainActor
+    func testWorkspaceSearchDoesNotDuplicateCurrentFileInRecentFiles() throws {
+        let workspacePath = try fixtureWorkspacePath("basic")
+        let app = try launchApp(
+            workspacePath: workspacePath,
+            recentFiles: ["\(workspacePath)/Project Brief.md"]
+        )
+
+        let searchField = app.textFields["workspace-search-field"]
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
+        searchField.click()
+        app.typeText("project brief")
+
+        XCTAssertTrue(app.staticTexts["Project Brief.md"].waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertFalse(app.staticTexts["Recent Files"].waitForExistence(timeout: 2), app.debugDescription)
+    }
+
+    @MainActor
     func testCurrentFolderCanBePinnedAndReopenedFromHome() throws {
         let favoriteFoldersKey = "favoriteFolders.uiTests.\(UUID().uuidString)"
         let workspacePath = try fixtureWorkspacePath("basic")

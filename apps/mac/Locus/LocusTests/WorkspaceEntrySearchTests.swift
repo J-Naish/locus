@@ -182,6 +182,52 @@ final class WorkspaceEntrySearchTests: XCTestCase {
         XCTAssertLessThan(elapsed.milliseconds, 500)
     }
 
+    func testResolvesWorkspaceBrowserSearchResultsWithinInteractiveBudget() {
+        let entries = (0..<10_000).map { index in
+            switch index {
+            case 7:
+                return makeWorkspaceEntry(name: "Project Forecast.md")
+            case 800:
+                return makeWorkspaceEntry(name: "Quarterly Forecast.md")
+            default:
+                return makeWorkspaceEntry(name: "Document-\(index).md")
+            }
+        }
+        let favoriteFolders = (0..<1_000).map { index in
+            makeFavoriteFolder(displayName: "Folder \(index)", path: "/tmp/folders/\(index)")
+        }
+        let recentFiles = (0..<1_000).map { index in
+            switch index {
+            case 20:
+                return makeRecentFile(displayName: "Quarterly Forecast.md", path: "/tmp/quarterly-forecast.md")
+            case 21:
+                return makeRecentFile(displayName: "Project Forecast.md", path: "/tmp/locus-test/Project Forecast.md")
+            default:
+                return makeRecentFile(displayName: "Recent File \(index).md", path: "/tmp/files/\(index).md")
+            }
+        }
+        let recentFolders = (0..<1_000).map { index in
+            makeRecentFolder(displayName: "Recent Folder \(index)", path: "/tmp/recent-folders/\(index)")
+        }
+        var result: WorkspaceBrowserSearchResults?
+
+        let elapsed = ContinuousClock().measure {
+            result = WorkspaceBrowserSearchResults.resolve(
+                entries: entries,
+                favoriteFolders: favoriteFolders,
+                recentFiles: recentFiles,
+                recentFolders: recentFolders,
+                query: "forecast"
+            )
+        }
+
+        XCTAssertEqual(result?.visibleEntries.map(\.name), ["Project Forecast.md", "Quarterly Forecast.md"])
+        XCTAssertEqual(result?.recentFiles.map(\.displayName), ["Quarterly Forecast.md"])
+        XCTAssertEqual(result?.favoriteFolders, [])
+        XCTAssertEqual(result?.recentFolders, [])
+        XCTAssertLessThan(elapsed.milliseconds, 500)
+    }
+
     func testRequiresEveryWhitespaceSeparatedTerm() {
         let entries = [
             makeWorkspaceEntry(name: "Project Brief.md"),
@@ -318,6 +364,26 @@ private func makeFavoriteFolder(displayName: String, path: String) -> FavoriteFo
         displayName: displayName,
         path: path,
         addedAt: Date(timeIntervalSince1970: 0)
+    )
+}
+
+private func makeRecentFile(displayName: String, path: String) -> RecentFile {
+    RecentFile(
+        id: path,
+        url: URL(filePath: path, directoryHint: .notDirectory),
+        displayName: displayName,
+        path: path,
+        lastOpenedAt: Date(timeIntervalSince1970: 0)
+    )
+}
+
+private func makeRecentFolder(displayName: String, path: String) -> RecentFolder {
+    RecentFolder(
+        id: path,
+        url: URL(filePath: path, directoryHint: .isDirectory),
+        displayName: displayName,
+        path: path,
+        lastOpenedAt: Date(timeIntervalSince1970: 0)
     )
 }
 

@@ -152,12 +152,13 @@ private struct FolderShortcutListView<Folder: FileLocationShortcut>: View {
     }
 }
 
-private struct ShortcutListView<Item: FileLocationShortcut>: View {
+struct ShortcutListView<Item: FileLocationShortcut>: View {
     let title: String
     let rowAccessibilityIdentifier: String
     let items: [Item]
     let systemImage: String
     let symbolColor: Color
+    var maxWidth: CGFloat? = 520
     let open: (Item) -> Void
     let remove: (Item) -> Void
     let copyPath: (URL) -> Void
@@ -212,6 +213,6 @@ private struct ShortcutListView<Item: FileLocationShortcut>: View {
                 }
             }
         }
-        .frame(maxWidth: 520, alignment: .leading)
+        .frame(maxWidth: maxWidth, alignment: .leading)
     }
 }
