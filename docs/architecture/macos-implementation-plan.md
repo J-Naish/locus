@@ -146,6 +146,7 @@ Deliverables:
 - Add deterministic Rust unit tests using temporary directories and `fixtures/` where useful.
 - Add Swift folder picker and current location state.
 - Start normal unsandboxed launches in the user's home folder, listing only immediate children.
+- Filter hidden files and folders from the home folder presentation, including hidden home shortcuts, without changing project-folder dotfile visibility.
 - Show a Finder-like file list with names, type labels, size, and modified date.
 - Add in-app "show containing folder and select item" behavior for files reached from recents, favorites, and search results.
 - Keep file location actions inside Locus: open, preview, show containing folder, select item, and copy path.
@@ -153,6 +154,7 @@ Deliverables:
 Acceptance:
 
 - A user can launch into their home folder, choose another local folder, and browse immediate contents without recursive startup scanning.
+- Hidden home-directory entries and shortcuts are not shown by default, while useful project dotfiles remain visible when a project folder is opened explicitly.
 - File list loading does not block the main thread.
 - Rust tests cover sorting, hidden files policy, symlink policy, and basic metadata.
 

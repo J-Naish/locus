@@ -47,3 +47,14 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
 - Rust FFI static library: `17682728 bytes`
 - macOS app bundle: `1776 KiB`
 - notes: Normal unsandboxed launch now starts at the home folder. Startup still uses a single non-recursive immediate-children listing; current-folder monitoring uses debounced directory events and does not watch recursively.
+
+## 2026-05-22T19:03:20Z home-hidden-entry-filter
+
+- commit: `1fdd7de`
+- branch: `main`
+- dirty tree: `true`
+- status: `0`
+- generated folder listing: entries `1010`, avg `4.263 ms`, max `4.682 ms`
+- Rust FFI static library: `17682728 bytes`
+- macOS app bundle: `1836 KiB`
+- notes: Added home-folder presentation filtering for hidden files, hidden folders, and matching home shortcuts. The hidden-resource check runs off the main actor after the non-recursive core listing returns.

@@ -33,6 +33,7 @@ The primary model is:
 - one window usually represents one current working location
 - a normal launch starts at the user's home folder as the first working location
 - the launch-time home location is not treated as a user-chosen recent folder
+- the home folder view should stay quiet by hiding hidden files and folders whether it was opened at launch or chosen later; explicit project folders may still show useful dotfiles such as `.env` and `.agents`
 - switching locations should be fast
 - the current location should always be clear
 - users should be able to jump to an item's containing folder inside Locus and keep the item selected

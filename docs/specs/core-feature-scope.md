@@ -5,6 +5,7 @@
 Must support:
 
 - start in the user's home folder by default on unsandboxed local builds
+- hide hidden files and folders whenever the home folder itself is shown, while preserving useful dotfiles in explicit project folders
 - open a local folder as a working location
 - browse files and folders
 - open files

@@ -9,7 +9,8 @@ struct LocusApp: App {
                 favoriteFolderStore: Self.favoriteFolderStore,
                 recentFileStore: Self.recentFileStore,
                 recentFolderStore: Self.recentFolderStore,
-                initialFolderResolution: Self.initialFolderResolution
+                initialFolderResolution: Self.initialFolderResolution,
+                homeDirectoryURL: Self.homeDirectoryURL
             )
         }
         .windowResizability(.contentMinSize)
@@ -100,8 +101,10 @@ struct LocusApp: App {
     }()
 
     private static var initialFolderResolution: InitialFolderResolution {
-        InitialFolderURLResolver.resolution()
+        InitialFolderURLResolver.resolution(homeDirectoryURL: homeDirectoryURL)
     }
+
+    private static let homeDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
 
     private static var uiTestFavoriteFoldersKey: String {
         argumentValue(named: "--ui-test-favorite-folders-key", in: ProcessInfo.processInfo.arguments)

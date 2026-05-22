@@ -47,6 +47,8 @@
 		1A000001000000000000006A /* WorkspaceNavigationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000006B /* WorkspaceNavigationTests.swift */; };
 		1A00000100000000000000A4 /* WorkspaceDocumentSurfaceSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000A5 /* WorkspaceDocumentSurfaceSupport.swift */; };
 		1A00000100000000000000A6 /* WorkspaceDocumentSurfaceSupportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000A7 /* WorkspaceDocumentSurfaceSupportTests.swift */; };
+		1A00000100000000000000AC /* WorkspaceHomeVisibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000AD /* WorkspaceHomeVisibility.swift */; };
+		1A00000100000000000000AE /* WorkspaceHomeVisibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000AF /* WorkspaceHomeVisibilityTests.swift */; };
 		1A000001000000000000009A /* WorkspaceTextDocumentSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000009B /* WorkspaceTextDocumentSupport.swift */; };
 		1A000001000000000000009E /* WorkspaceTextDocumentSupportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000009F /* WorkspaceTextDocumentSupportTests.swift */; };
 /* End PBXBuildFile section */
@@ -113,6 +115,8 @@
 		1A000001000000000000006B /* WorkspaceNavigationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceNavigationTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000A5 /* WorkspaceDocumentSurfaceSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDocumentSurfaceSupport.swift; sourceTree = "<group>"; };
 		1A00000100000000000000A7 /* WorkspaceDocumentSurfaceSupportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDocumentSurfaceSupportTests.swift; sourceTree = "<group>"; };
+		1A00000100000000000000AD /* WorkspaceHomeVisibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceHomeVisibility.swift; sourceTree = "<group>"; };
+		1A00000100000000000000AF /* WorkspaceHomeVisibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceHomeVisibilityTests.swift; sourceTree = "<group>"; };
 		1A000001000000000000009B /* WorkspaceTextDocumentSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTextDocumentSupport.swift; sourceTree = "<group>"; };
 		1A000001000000000000009F /* WorkspaceTextDocumentSupportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTextDocumentSupportTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -178,6 +182,7 @@
 				1A0000010000000000000071 /* WorkspaceEntryPathCopyTests.swift */,
 				1A0000010000000000000089 /* WorkspaceEntryPreviewActionTests.swift */,
 				1A00000100000000000000A7 /* WorkspaceDocumentSurfaceSupportTests.swift */,
+				1A00000100000000000000AF /* WorkspaceHomeVisibilityTests.swift */,
 				1A000001000000000000006B /* WorkspaceNavigationTests.swift */,
 				1A000001000000000000009F /* WorkspaceTextDocumentSupportTests.swift */,
 				1A0000010000000000000048 /* WorkspaceEntrySearchTests.swift */,
@@ -258,6 +263,7 @@
 				1A000001000000000000006F /* WorkspaceEntryPathCopy.swift */,
 				1A0000010000000000000087 /* WorkspaceEntryPreviewAction.swift */,
 				1A00000100000000000000A5 /* WorkspaceDocumentSurfaceSupport.swift */,
+				1A00000100000000000000AD /* WorkspaceHomeVisibility.swift */,
 				1A0000010000000000000069 /* WorkspaceNavigation.swift */,
 				1A0000010000000000000046 /* WorkspaceEntrySearch.swift */,
 				1A0000010000000000000095 /* WorkspaceSearchRanker.swift */,
@@ -440,6 +446,7 @@
 				1A000001000000000000006E /* WorkspaceEntryPathCopy.swift in Sources */,
 				1A0000010000000000000086 /* WorkspaceEntryPreviewAction.swift in Sources */,
 				1A00000100000000000000A4 /* WorkspaceDocumentSurfaceSupport.swift in Sources */,
+				1A00000100000000000000AC /* WorkspaceHomeVisibility.swift in Sources */,
 				1A0000010000000000000068 /* WorkspaceNavigation.swift in Sources */,
 				1A0000010000000000000045 /* WorkspaceEntrySearch.swift in Sources */,
 				1A0000010000000000000094 /* WorkspaceSearchRanker.swift in Sources */,
@@ -463,6 +470,7 @@
 				1A0000010000000000000070 /* WorkspaceEntryPathCopyTests.swift in Sources */,
 				1A0000010000000000000088 /* WorkspaceEntryPreviewActionTests.swift in Sources */,
 				1A00000100000000000000A6 /* WorkspaceDocumentSurfaceSupportTests.swift in Sources */,
+				1A00000100000000000000AE /* WorkspaceHomeVisibilityTests.swift in Sources */,
 				1A000001000000000000006A /* WorkspaceNavigationTests.swift in Sources */,
 				1A0000010000000000000047 /* WorkspaceEntrySearchTests.swift in Sources */,
 				1A000001000000000000009E /* WorkspaceTextDocumentSupportTests.swift in Sources */,

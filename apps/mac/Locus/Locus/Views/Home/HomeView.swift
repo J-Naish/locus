@@ -29,6 +29,7 @@ struct HomeView: View {
     private let recentFileStore: RecentFileStore
     private let recentFolderStore: RecentFolderStore
     private let initialFolderResolution: InitialFolderResolution
+    private let homeDirectoryURL: URL
 
     init(
         coreBridge: CoreBridge = CoreBridge(),
@@ -40,7 +41,8 @@ struct HomeView: View {
         favoriteFolderStore: FavoriteFolderStore = FavoriteFolderStore(),
         recentFileStore: RecentFileStore = RecentFileStore(),
         recentFolderStore: RecentFolderStore = RecentFolderStore(),
-        initialFolderResolution: InitialFolderResolution = .empty
+        initialFolderResolution: InitialFolderResolution = .empty,
+        homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser
     ) {
         self.coreBridge = coreBridge
         self.quickLookPreviewService = quickLookPreviewService
@@ -52,6 +54,7 @@ struct HomeView: View {
         self.recentFileStore = recentFileStore
         self.recentFolderStore = recentFolderStore
         self.initialFolderResolution = initialFolderResolution
+        self.homeDirectoryURL = homeDirectoryURL
     }
 
     var body: some View {
@@ -257,7 +260,12 @@ struct HomeView: View {
         }
 
         do {
-            let snapshot = try await coreBridge.listDirectory(at: folderURL)
+            let rawSnapshot = try await coreBridge.listDirectory(at: folderURL)
+            let snapshot = await WorkspaceHomeVisibility.filteredSnapshotOffMainActor(
+                rawSnapshot,
+                folderURL: folderURL,
+                homeDirectoryURL: homeDirectoryURL
+            )
             guard generation == workspaceLoadGeneration else {
                 return
             }
@@ -335,17 +343,23 @@ struct HomeView: View {
 
     @MainActor
     private func refreshFavoriteFolders() {
-        favoriteFolders = favoriteFolderStore.favoriteFolders()
+        favoriteFolders = favoriteFolderStore.favoriteFolders().filter { folder in
+            !WorkspaceHomeVisibility.isHiddenHomeURL(folder.url, homeDirectoryURL: homeDirectoryURL)
+        }
     }
 
     @MainActor
     private func refreshRecentFiles() {
-        recentFiles = recentFileStore.recentFiles()
+        recentFiles = recentFileStore.recentFiles().filter { file in
+            !WorkspaceHomeVisibility.isHiddenHomeURL(file.url, homeDirectoryURL: homeDirectoryURL)
+        }
     }
 
     @MainActor
     private func refreshRecentFolders() {
-        recentFolders = recentFolderStore.recentFolders()
+        recentFolders = recentFolderStore.recentFolders().filter { folder in
+            !WorkspaceHomeVisibility.isHiddenHomeURL(folder.url, homeDirectoryURL: homeDirectoryURL)
+        }
     }
 
     @MainActor
