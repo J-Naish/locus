@@ -1,48 +1,52 @@
 import Foundation
 
-struct RecentFolder: Identifiable, Equatable, Sendable {
+struct FavoriteFolder: Identifiable, Equatable, Sendable {
     let id: String
     let url: URL
     let displayName: String
     let path: String
-    let lastOpenedAt: Date
+    let addedAt: Date
 }
 
-struct RecentFolderStore {
-    static let defaultMaxCount = 10
-
+struct FavoriteFolderStore {
     private let bookmarkStore: FolderBookmarkStore
     private let now: () -> Date
 
     init(
         userDefaults: UserDefaults = .standard,
-        key: String = "recentFolders.v1",
-        maxCount: Int = Self.defaultMaxCount,
+        key: String = "favoriteFolders.v1",
         now: @escaping () -> Date = Date.init
     ) {
         self.bookmarkStore = FolderBookmarkStore(
             userDefaults: userDefaults,
             key: key,
-            maxCount: maxCount,
-            logCategory: "RecentFolderStore"
+            logCategory: "FavoriteFolderStore"
         )
         self.now = now
     }
 
-    func recentFolders() -> [RecentFolder] {
+    func favoriteFolders() -> [FavoriteFolder] {
         bookmarkStore.resolvedFolders().map {
-            RecentFolder(
+            FavoriteFolder(
                 id: $0.path,
                 url: $0.url,
                 displayName: $0.displayName,
                 path: $0.path,
-                lastOpenedAt: $0.timestamp
+                addedAt: $0.timestamp
             )
         }
     }
 
+    func contains(_ folderURL: URL) -> Bool {
+        bookmarkStore.contains(folderURL)
+    }
+
     @discardableResult
-    func record(_ folderURL: URL) -> Bool {
-        bookmarkStore.insert(folderURL, timestamp: now(), duplicatePolicy: .moveToFront)
+    func add(_ folderURL: URL) -> Bool {
+        bookmarkStore.insert(folderURL, timestamp: now(), duplicatePolicy: .keepOriginalPosition)
+    }
+
+    func remove(_ folderURL: URL) {
+        bookmarkStore.remove(folderURL)
     }
 }

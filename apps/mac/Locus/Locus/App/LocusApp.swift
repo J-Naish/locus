@@ -5,6 +5,7 @@ struct LocusApp: App {
     var body: some Scene {
         WindowGroup {
             HomeView(
+                favoriteFolderStore: Self.favoriteFolderStore,
                 recentFolderStore: Self.recentFolderStore,
                 initialFolderURL: Self.initialFolderURL
             )
@@ -12,7 +13,30 @@ struct LocusApp: App {
         .windowResizability(.contentMinSize)
     }
 
-    private static var recentFolderStore: RecentFolderStore {
+    private static let favoriteFolderStore: FavoriteFolderStore = {
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1" else {
+            return FavoriteFolderStore()
+        }
+
+        let store = FavoriteFolderStore(key: uiTestFavoriteFoldersKey)
+        for path in argumentValues(named: "--ui-test-favorite-folder", in: ProcessInfo.processInfo.arguments) {
+            guard !path.isEmpty else {
+                continue
+            }
+
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue {
+                store.add(URL(filePath: path, directoryHint: .isDirectory))
+            }
+        }
+        return store
+        #else
+        return FavoriteFolderStore()
+        #endif
+    }()
+
+    private static let recentFolderStore: RecentFolderStore = {
         #if DEBUG
         guard ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1" else {
             return RecentFolderStore()
@@ -33,7 +57,7 @@ struct LocusApp: App {
         #else
         return RecentFolderStore()
         #endif
-    }
+    }()
 
     private static var initialFolderURL: URL? {
         #if DEBUG
@@ -55,6 +79,11 @@ struct LocusApp: App {
         #else
         return nil
         #endif
+    }
+
+    private static var uiTestFavoriteFoldersKey: String {
+        argumentValue(named: "--ui-test-favorite-folders-key", in: ProcessInfo.processInfo.arguments)
+            ?? "favoriteFolders.uiTests"
     }
 
     private static var uiTestRecentFoldersKey: String {

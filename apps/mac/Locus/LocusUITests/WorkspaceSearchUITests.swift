@@ -2,6 +2,8 @@ import AppKit
 import XCTest
 
 final class WorkspaceSearchUITests: XCTestCase {
+    private var userDefaultsKeysToRemove: Set<String> = []
+
     override func setUpWithError() throws {
         continueAfterFailure = false
         NSPasteboard.general.clearContents()
@@ -9,6 +11,12 @@ final class WorkspaceSearchUITests: XCTestCase {
 
     override func tearDownWithError() throws {
         NSPasteboard.general.clearContents()
+        let appDefaults = UserDefaults(suiteName: "com.nash.locus")
+        for key in userDefaultsKeysToRemove {
+            UserDefaults.standard.removeObject(forKey: key)
+            appDefaults?.removeObject(forKey: key)
+        }
+        userDefaultsKeysToRemove.removeAll()
         try super.tearDownWithError()
     }
 
@@ -72,29 +80,71 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
+    func testCurrentFolderCanBePinnedAndReopenedFromHome() throws {
+        let favoriteFoldersKey = "favoriteFolders.uiTests.\(UUID().uuidString)"
+        let workspacePath = try fixtureWorkspacePath("basic")
+        var app = try launchApp(workspacePath: workspacePath, favoriteFoldersKey: favoriteFoldersKey)
+
+        let favoriteButton = app.buttons["favorite-current-folder-button"]
+        XCTAssertTrue(favoriteButton.waitForExistence(timeout: 5), app.debugDescription)
+        favoriteButton.click()
+        app.terminate()
+
+        app = try launchApp(favoriteFoldersKey: favoriteFoldersKey)
+
+        XCTAssertTrue(app.staticTexts["Favorite Folders"].waitForExistence(timeout: 5), app.debugDescription)
+
+        let favoriteFolder = app.buttons.matching(identifier: "favorite-folder-row").firstMatch
+        XCTAssertTrue(favoriteFolder.waitForExistence(timeout: 5), app.debugDescription)
+        favoriteFolder.click()
+
+        XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
+    }
+
+    @MainActor
     private func launchAppWithBasicWorkspace() throws -> XCUIApplication {
         try launchApp(workspacePath: fixtureWorkspacePath("basic"))
     }
 
     @MainActor
-    private func launchApp(workspacePath: String) throws -> XCUIApplication {
+    private func launchApp(
+        workspacePath: String? = nil,
+        favoriteFoldersKey: String = "favoriteFolders.uiTests.\(UUID().uuidString)",
+        recentFoldersKey: String = "recentFolders.uiTests.\(UUID().uuidString)"
+    ) throws -> XCUIApplication {
+        trackUserDefaultsKeys(favoriteFoldersKey, recentFoldersKey)
+
         let app = XCUIApplication()
         app.launchEnvironment["LOCUS_UI_TESTING"] = "1"
         app.launchArguments = [
-            "--ui-test-workspace",
-            workspacePath
+            "--ui-test-favorite-folders-key",
+            favoriteFoldersKey,
+            "--ui-test-recent-folders-key",
+            recentFoldersKey
         ]
+        if let workspacePath {
+            app.launchArguments += [
+                "--ui-test-workspace",
+                workspacePath
+            ]
+        }
         try launchAndWaitForWindow(app)
         return app
     }
 
     @MainActor
     private func launchAppWithRecentFolder(workspacePath: String) throws -> XCUIApplication {
+        let favoriteFoldersKey = "favoriteFolders.uiTests.\(UUID().uuidString)"
+        let recentFoldersKey = "recentFolders.uiTests.\(UUID().uuidString)"
+        trackUserDefaultsKeys(favoriteFoldersKey, recentFoldersKey)
+
         let app = XCUIApplication()
         app.launchEnvironment["LOCUS_UI_TESTING"] = "1"
         app.launchArguments = [
+            "--ui-test-favorite-folders-key",
+            favoriteFoldersKey,
             "--ui-test-recent-folders-key",
-            "recentFolders.uiTests.\(UUID().uuidString)",
+            recentFoldersKey,
             "--ui-test-recent-folder",
             workspacePath
         ]
@@ -113,6 +163,10 @@ final class WorkspaceSearchUITests: XCTestCase {
                 "Locus launched but its window is not visible to XCUITest. Grant Accessibility access to the UI test runner and rerun this test."
             )
         }
+    }
+
+    private func trackUserDefaultsKeys(_ keys: String...) {
+        keys.forEach { userDefaultsKeysToRemove.insert($0) }
     }
 
     private func fixtureWorkspacePath(_ name: String, filePath: String = #filePath) throws -> String {

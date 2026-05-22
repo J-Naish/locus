@@ -1,8 +1,18 @@
 import SwiftUI
 
+protocol FolderShortcut: Identifiable {
+    var displayName: String { get }
+    var path: String { get }
+}
+
+extension FavoriteFolder: FolderShortcut {}
+extension RecentFolder: FolderShortcut {}
+
 struct EmptyWorkspaceView: View {
+    let favoriteFolders: [FavoriteFolder]
     let recentFolders: [RecentFolder]
     let openFolder: () -> Void
+    let openFavoriteFolder: (FavoriteFolder) -> Void
     let openRecentFolder: (RecentFolder) -> Void
 
     var body: some View {
@@ -17,21 +27,37 @@ struct EmptyWorkspaceView: View {
                 }
             }
 
+            if !favoriteFolders.isEmpty {
+                FolderShortcutListView(
+                    title: "Favorite Folders",
+                    rowAccessibilityIdentifier: "favorite-folder-row",
+                    folders: favoriteFolders,
+                    open: openFavoriteFolder
+                )
+            }
+
             if !recentFolders.isEmpty {
-                RecentFoldersView(folders: recentFolders, open: openRecentFolder)
+                FolderShortcutListView(
+                    title: "Recent Folders",
+                    rowAccessibilityIdentifier: "recent-folder-row",
+                    folders: recentFolders,
+                    open: openRecentFolder
+                )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
-private struct RecentFoldersView: View {
-    let folders: [RecentFolder]
-    let open: (RecentFolder) -> Void
+private struct FolderShortcutListView<Folder: FolderShortcut>: View {
+    let title: String
+    let rowAccessibilityIdentifier: String
+    let folders: [Folder]
+    let open: (Folder) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Recent Folders")
+            Text(title)
                 .font(.headline)
 
             VStack(alignment: .leading, spacing: 6) {
@@ -62,6 +88,7 @@ private struct RecentFoldersView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Open \(folder.displayName)")
+                    .accessibilityIdentifier(rowAccessibilityIdentifier)
                 }
             }
         }

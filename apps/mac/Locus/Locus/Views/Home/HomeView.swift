@@ -9,6 +9,7 @@ struct HomeView: View {
     @State private var isFolderImporterPresented = false
     @State private var didStartInitialFolderLoad = false
     @State private var workspaceRootURL: URL?
+    @State private var favoriteFolders: [FavoriteFolder] = []
     @State private var recentFolders: [RecentFolder] = []
     // Folder loads can overlap when users refresh or choose another folder
     // quickly; only the latest generation is allowed to update visible state.
@@ -17,6 +18,7 @@ struct HomeView: View {
     private let coreBridge: CoreBridge
     private let finderService: FinderService
     private let clipboardService: ClipboardService
+    private let favoriteFolderStore: FavoriteFolderStore
     private let recentFolderStore: RecentFolderStore
     private let initialFolderURL: URL?
 
@@ -24,12 +26,14 @@ struct HomeView: View {
         coreBridge: CoreBridge = CoreBridge(),
         finderService: FinderService = FinderService(),
         clipboardService: ClipboardService = ClipboardService(),
+        favoriteFolderStore: FavoriteFolderStore = FavoriteFolderStore(),
         recentFolderStore: RecentFolderStore = RecentFolderStore(),
         initialFolderURL: URL? = nil
     ) {
         self.coreBridge = coreBridge
         self.finderService = finderService
         self.clipboardService = clipboardService
+        self.favoriteFolderStore = favoriteFolderStore
         self.recentFolderStore = recentFolderStore
         self.initialFolderURL = initialFolderURL
     }
@@ -41,13 +45,16 @@ struct HomeView: View {
             WorkspaceContentView(
                 state: workspaceState,
                 rootURL: workspaceRootURL,
+                favoriteFolders: favoriteFolders,
                 recentFolders: recentFolders,
                 selectedEntryID: $selectedEntryID,
                 openFolder: openFolder,
+                openFavoriteFolder: openFavoriteFolder,
                 openRecentFolder: openRecentFolder,
                 actions: WorkspaceActions(
                     refresh: refreshWorkspace,
                     openParentFolder: openParentFolder,
+                    toggleFavoriteFolder: toggleFavoriteFolder,
                     reveal: revealInFinder,
                     copyPaths: copyPaths,
                     performOpenAction: performOpenAction
@@ -57,6 +64,7 @@ struct HomeView: View {
         .padding(28)
         .frame(minWidth: 820, minHeight: 520)
         .task {
+            refreshFavoriteFolders()
             refreshRecentFolders()
             await loadRuntimeStatus()
             loadInitialFolderIfNeeded()
@@ -215,13 +223,37 @@ struct HomeView: View {
     }
 
     @MainActor
+    private func openFavoriteFolder(_ folder: FavoriteFolder) {
+        startWorkspaceLoad(folder.url, rootURL: folder.url, recordRecent: true)
+    }
+
+    @MainActor
     private func openRecentFolder(_ folder: RecentFolder) {
         startWorkspaceLoad(folder.url, rootURL: folder.url, recordRecent: true)
     }
 
     @MainActor
+    private func refreshFavoriteFolders() {
+        favoriteFolders = favoriteFolderStore.favoriteFolders()
+    }
+
+    @MainActor
     private func refreshRecentFolders() {
         recentFolders = recentFolderStore.recentFolders()
+    }
+
+    @MainActor
+    private func toggleFavoriteFolder() {
+        guard let folderURL = workspaceState.folderURL else {
+            return
+        }
+
+        if favoriteFolderStore.contains(folderURL) {
+            favoriteFolderStore.remove(folderURL)
+        } else {
+            favoriteFolderStore.add(folderURL)
+        }
+        refreshFavoriteFolders()
     }
 
     @MainActor
@@ -246,7 +278,7 @@ struct HomeView: View {
     private func performOpenAction(_ action: WorkspaceEntryOpenAction) {
         switch action {
         case let .browseFolder(url):
-            startWorkspaceLoad(url)
+            startWorkspaceLoad(url, recordRecent: true)
         case let .openExternally(url):
             finderService.openExternally(url)
         }
@@ -315,9 +347,11 @@ private struct RuntimeStatusView: View {
 private struct WorkspaceContentView: View {
     let state: WorkspaceState
     let rootURL: URL?
+    let favoriteFolders: [FavoriteFolder]
     let recentFolders: [RecentFolder]
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let openFolder: () -> Void
+    let openFavoriteFolder: (FavoriteFolder) -> Void
     let openRecentFolder: (RecentFolder) -> Void
     let actions: WorkspaceActions
 
@@ -326,8 +360,10 @@ private struct WorkspaceContentView: View {
             switch state {
             case .idle:
                 EmptyWorkspaceView(
+                    favoriteFolders: favoriteFolders,
                     recentFolders: recentFolders,
                     openFolder: openFolder,
+                    openFavoriteFolder: openFavoriteFolder,
                     openRecentFolder: openRecentFolder
                 )
             case let .loading(folderURL):
@@ -338,6 +374,7 @@ private struct WorkspaceContentView: View {
                     snapshot: snapshot,
                     loadedAt: loadedAt,
                     rootURL: rootURL,
+                    isFavorite: favoriteFolders.contains { $0.path == folderURL.locusStandardizedPath },
                     selectedEntryID: $selectedEntryID,
                     actions: actions
                 )
@@ -357,6 +394,7 @@ private struct WorkspaceContentView: View {
 private struct WorkspaceActions {
     let refresh: () -> Void
     let openParentFolder: () -> Void
+    let toggleFavoriteFolder: () -> Void
     let reveal: (WorkspaceEntry) -> Void
     let copyPaths: ([WorkspaceEntry]) -> Void
     let performOpenAction: (WorkspaceEntryOpenAction) -> Void
@@ -381,6 +419,7 @@ private struct WorkspaceBrowserView: View {
     let snapshot: WorkspaceSnapshot
     let loadedAt: Date
     let rootURL: URL?
+    let isFavorite: Bool
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let actions: WorkspaceActions
     @State private var searchQuery = ""
@@ -393,9 +432,11 @@ private struct WorkspaceBrowserView: View {
                 snapshot: snapshot,
                 loadedAt: loadedAt,
                 rootURL: rootURL,
+                isFavorite: isFavorite,
                 searchQuery: $searchQuery,
                 isSearchFocused: $isSearchFocused,
                 openParentFolder: actions.openParentFolder,
+                toggleFavoriteFolder: actions.toggleFavoriteFolder,
                 refresh: actions.refresh
             )
 
@@ -471,9 +512,11 @@ private struct WorkspaceToolbarView: View {
     let snapshot: WorkspaceSnapshot
     let loadedAt: Date
     let rootURL: URL?
+    let isFavorite: Bool
     @Binding var searchQuery: String
     let isSearchFocused: FocusState<Bool>.Binding
     let openParentFolder: () -> Void
+    let toggleFavoriteFolder: () -> Void
     let refresh: () -> Void
 
     var body: some View {
@@ -500,6 +543,13 @@ private struct WorkspaceToolbarView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
+            Button(action: toggleFavoriteFolder) {
+                Label(favoriteButtonTitle, systemImage: isFavorite ? "star.fill" : "star")
+            }
+            .labelStyle(.iconOnly)
+            .help(favoriteButtonTitle)
+            .accessibilityIdentifier("favorite-current-folder-button")
+
             Button(action: openParentFolder) {
                 Label("Parent Folder", systemImage: "arrow.up")
             }
@@ -525,6 +575,10 @@ private struct WorkspaceToolbarView: View {
 
     private var parentFolderURL: URL? {
         WorkspaceNavigation.parentFolderURL(for: folderURL, within: rootURL)
+    }
+
+    private var favoriteButtonTitle: String {
+        isFavorite ? "Remove from Favorites" : "Add to Favorites"
     }
 
     private var parentFolderHelp: String {
