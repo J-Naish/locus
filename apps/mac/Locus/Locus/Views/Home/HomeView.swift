@@ -697,7 +697,7 @@ private struct WorkspaceBrowserView: View {
                 .frame(maxWidth: .infinity, maxHeight: searchResults.hasShortcutResults ? 160 : .infinity)
             } else {
                 HSplitView {
-                    WorkspaceEntriesTable(
+                    WorkspaceEntriesList(
                         entries: searchResults.visibleEntries,
                         selectedEntryID: $selectedEntryID,
                         isPreviewShortcutEnabled: !isSearchFocused && !isDocumentEditorFocused,
@@ -973,43 +973,24 @@ private struct WorkspaceToolbarView: View {
     }
 }
 
-private struct WorkspaceEntriesTable: View {
+private struct WorkspaceEntriesList: View {
     let entries: [WorkspaceEntry]
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let isPreviewShortcutEnabled: Bool
     let actions: WorkspaceActions
 
     var body: some View {
-        Table(entries, selection: $selectedEntryID) {
-            TableColumn("Name") { entry in
-                Label {
-                    Text(entry.name)
-                        .lineLimit(1)
-                } icon: {
-                    Image(systemName: entry.symbolName)
-                        .foregroundStyle(entry.symbolColor)
-                }
+        List(entries, selection: $selectedEntryID) { entry in
+            Label {
+                Text(entry.name)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } icon: {
+                Image(systemName: entry.symbolName)
+                    .foregroundStyle(entry.symbolColor)
             }
-
-            TableColumn("Type") { entry in
-                Text(entry.typeLabel)
-                    .foregroundStyle(.secondary)
-            }
-            .width(min: 110, ideal: 140)
-
-            TableColumn("Size") { entry in
-                Text(entry.sizeLabel)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            .width(min: 80, ideal: 100)
-
-            TableColumn("Modified") { entry in
-                Text(entry.modifiedLabel)
-                    .foregroundStyle(.secondary)
-            }
-            .width(min: 130, ideal: 160)
         }
+        .listStyle(.sidebar)
         .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
             let selectedEntries = entries(for: selection)
             let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
@@ -1228,8 +1209,6 @@ private extension WorkspaceState {
 }
 
 private extension WorkspaceEntry {
-    static let modifiedDateFormatStyle = Date.FormatStyle(date: .abbreviated, time: .shortened)
-
     var symbolName: String {
         switch kind {
         case .directory:
@@ -1255,63 +1234,9 @@ private extension WorkspaceEntry {
             return .secondary
         }
     }
-
-    var typeLabel: String {
-        switch kind {
-        case .directory:
-            return "Folder"
-        case .file:
-            return fileType.label
-        case .symlink:
-            return "Alias"
-        case .other:
-            return "Other"
-        }
-    }
-
-    var sizeLabel: String {
-        guard let sizeBytes else {
-            return "-"
-        }
-
-        return Int64(sizeBytes).formatted(.byteCount(style: .file))
-    }
-
-    var modifiedLabel: String {
-        guard let modified else {
-            return "-"
-        }
-
-        return modified.formatted(Self.modifiedDateFormatStyle)
-    }
 }
 
 private extension WorkspaceFileType {
-    var label: String {
-        switch self {
-        case .markdown:
-            return "Markdown"
-        case .structuredText:
-            return "Structured Text"
-        case .pdf:
-            return "PDF"
-        case .office:
-            return "Office"
-        case .image:
-            return "Image"
-        case .audio:
-            return "Audio"
-        case .video:
-            return "Video"
-        case .plainText:
-            return "Text"
-        case .code:
-            return "Code"
-        case .unknown:
-            return "File"
-        }
-    }
-
     var symbolName: String {
         switch self {
         case .markdown, .structuredText, .plainText:

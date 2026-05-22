@@ -50,6 +50,21 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
+    func testWorkspaceFileListDoesNotShowMetadataColumns() throws {
+        let app = try launchAppWithBasicWorkspace()
+
+        XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.staticTexts["Name"].exists)
+        XCTAssertFalse(app.buttons["Name"].exists)
+        XCTAssertFalse(app.staticTexts["Type"].exists)
+        XCTAssertFalse(app.buttons["Type"].exists)
+        XCTAssertFalse(app.staticTexts["Size"].exists)
+        XCTAssertFalse(app.buttons["Size"].exists)
+        XCTAssertFalse(app.staticTexts["Modified"].exists)
+        XCTAssertFalse(app.buttons["Modified"].exists)
+    }
+
+    @MainActor
     func testWorkspaceRefreshesWhenFolderContentsChange() throws {
         let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
         let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))

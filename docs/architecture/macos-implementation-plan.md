@@ -147,7 +147,10 @@ Deliverables:
 - Add Swift folder picker and current location state.
 - Start normal unsandboxed launches in the user's home folder, listing only immediate children.
 - Filter hidden files and folders from the home folder presentation, including hidden home shortcuts, without changing project-folder dotfile visibility.
-- Show a Finder-like file list with names, type labels, size, and modified date.
+- Show a quiet, name-first file list for the current location. The default
+  browser should not expose Type, Size, or Modified columns; keep those
+  metadata values available to the model and future contextual surfaces, but
+  avoid making the primary list feel like a developer or spreadsheet view.
 - Add in-app "show containing folder and select item" behavior for files reached from recents, favorites, and search results.
 - Keep file location actions inside Locus: open, preview, show containing folder, select item, and copy path.
 

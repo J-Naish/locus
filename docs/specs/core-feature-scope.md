@@ -8,6 +8,8 @@ Must support:
 - hide hidden files and folders whenever the home folder itself is shown, while preserving useful dotfiles in explicit project folders
 - open a local folder as a working location
 - browse files and folders
+- show the current location as a name-first file and folder list; Type, Size,
+  and Modified columns are intentionally not part of the default browser
 - open files
 - navigate to an item's containing folder inside Locus and select the item
 - show recent files and folders
@@ -19,7 +21,8 @@ Should support:
 - restore state per location
 - reflect external changes clearly
 - delay expensive loading and thumbnails
-- show basic metadata
+- expose basic metadata contextually when it helps a concrete task, without
+  turning the main file list into a metadata table
 
 ## Search
 
