@@ -66,7 +66,7 @@ Use SwiftUI for app structure and normal controls, with AppKit bridges where nat
 
 - `NSTextView` / TextKit 2 for Markdown and structured text editing.
 - `PDFView` for PDFs.
-- `QLPreviewView` or Quick Look panel/controller for Office and unknown previewable files.
+- `QLPreviewView` for Office previews inside Locus; reserve the Quick Look panel for explicit fallback paths.
 - `AVPlayerView` for video and audio.
 
 ## Rust Core Shape
@@ -187,14 +187,14 @@ Deliverables:
 - Video/audio playback using AVKit. The first vertical slice uses in-app,
   manually started playback with native controls; richer audio metadata and
   artwork presentation can follow once the core document surface is stable.
-- Office preview through native system preview facilities where possible.
+- Office preview through an in-app Quick Look surface where macOS can render the file.
 - Unsupported-file fallback with useful actions.
 
 Acceptance:
 
 - Opening a supported file chooses the right native surface.
 - Markdown and structured text save back to disk predictably.
-- Office files are previewable where macOS supports them.
+- Office files are previewable inside Locus where macOS supports them.
 - Unsupported files still support show in Locus and copy path, with richer in-app preview/edit support added by file type.
 
 ### 5. Search and Command Palette

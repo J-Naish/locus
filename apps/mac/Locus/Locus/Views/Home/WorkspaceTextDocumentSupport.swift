@@ -13,7 +13,9 @@ enum WorkspaceTextDocumentSupport {
             return false
         }
     }
+}
 
+enum WorkspaceFileTypeLabel {
     static func displayLabel(for entry: WorkspaceEntry) -> String {
         switch entry.fileType {
         case .markdown:

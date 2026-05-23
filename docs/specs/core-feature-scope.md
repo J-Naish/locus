@@ -132,7 +132,7 @@ Not a goal:
 Must support:
 
 - recognize `.docx`, `.xlsx`, and `.pptx`
-- preview through native system facilities where possible
+- preview inside Locus through native Quick Look rendering where possible
 - show in Locus where the containing folder is available
 
 Should support:
@@ -148,6 +148,7 @@ Not a goal:
 - full Excel editing
 - full PowerPoint editing
 - building an Office-compatible suite
+- executing macros, embedded scripts, or active Office content
 
 ## Media and Other Files
 
@@ -156,6 +157,7 @@ Must support:
 - image viewing
 - video playback through an in-app native player
 - audio playback through an in-app native player
+- in-app Quick Look preview for Office files where macOS can render them
 - in-app location navigation for unsupported files where the containing folder is available
 
 Should support:

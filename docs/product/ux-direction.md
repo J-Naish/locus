@@ -86,7 +86,7 @@ Notion-like ease is a useful reference for readability and approachable document
 
 PDFs should focus on reading, searching, highlighting, comments, and lightweight review. Locus should not attempt full PDF content editing.
 
-Office files should focus on recognition, preview, and search metadata rather than full editing.
+Office files should focus on recognition, in-app Quick Look preview, and search metadata rather than full editing.
 
 Unsupported files should still have useful actions: preview when possible, show in Locus, and copy path. In-app navigation should be the default path when the goal is locating or selecting a file; leaving Locus should not be a primary product flow.
 

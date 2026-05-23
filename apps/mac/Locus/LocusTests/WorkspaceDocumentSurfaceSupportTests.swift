@@ -48,6 +48,13 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
         )
     }
 
+    func testOfficeFilesUseQuickLookPreviewSurface() {
+        XCTAssertEqual(
+            WorkspaceDocumentSurfaceSupport.surfaceKind(for: makeEntry(name: "deck.pptx", fileType: .office)),
+            .quickLookPreview
+        )
+    }
+
     func testDirectoriesUseFolderSurface() {
         XCTAssertEqual(
             WorkspaceDocumentSurfaceSupport.surfaceKind(

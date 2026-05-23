@@ -24,7 +24,7 @@ enum WorkspaceEntryOpenActionResolver {
             switch surfaceKind {
             case .unsupported:
                 return .preview(entry.url)
-            case .folder, .editableText, .image, .pdf, .video, .audio:
+            case .folder, .editableText, .image, .pdf, .video, .audio, .quickLookPreview:
                 return nil
             }
         case .other:

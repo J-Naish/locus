@@ -244,6 +244,27 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
+    func testDoubleClickOfficeFilePreviewsInLocus() throws {
+        let workspacePath = try fixtureWorkspacePath("file-types")
+        let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
+        let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
+        let app = try launchApp(
+            workspacePath: workspacePath,
+            previewInvocationsKey: previewInvocationsKey,
+            previewInvocationsFilePath: previewInvocationsFilePath
+        )
+
+        let officeRowText = app.staticTexts["valid.docx"]
+        XCTAssertTrue(officeRowText.waitForExistence(timeout: 5), app.debugDescription)
+        officeRowText.doubleClick()
+
+        let quickLookSurface = app.descendants(matching: .any)["document-quicklook-surface"]
+        XCTAssertTrue(quickLookSurface.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["valid.docx"].waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertEqual(previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
+    }
+
+    @MainActor
     func testDoubleClickVideoFilePlaysVideoInLocus() throws {
         let workspacePath = try fixtureWorkspacePath("file-types")
         let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
