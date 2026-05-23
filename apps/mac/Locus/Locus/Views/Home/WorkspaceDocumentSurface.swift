@@ -1,4 +1,5 @@
 import AppKit
+import AVKit
 import PDFKit
 import SwiftUI
 
@@ -7,6 +8,7 @@ struct WorkspaceDocumentSurface: View {
     let textDocumentStore: any TextDocumentStoring
     let imageDocumentStore: any ImageDocumentStoring
     let pdfDocumentStore: any PDFDocumentStoring
+    let mediaDocumentStore: any MediaDocumentStoring
     let preview: ([URL]) -> Void
     let onEditorFocusChange: (Bool) -> Void
 
@@ -35,6 +37,11 @@ struct WorkspaceDocumentSurface: View {
                     PDFDocumentSurface(
                         entry: entry,
                         pdfDocumentStore: pdfDocumentStore
+                    )
+                case .video, .audio:
+                    MediaDocumentSurface(
+                        entry: entry,
+                        mediaDocumentStore: mediaDocumentStore
                     )
                 case .folder:
                     FolderDocumentSurface(entry: entry)
@@ -474,6 +481,125 @@ private struct PDFDocumentView: NSViewRepresentable {
             // Re-apply fit-to-window scaling after document swaps.
             pdfView.autoScales = true
         }
+    }
+}
+
+private struct MediaDocumentSurface: View {
+    let entry: WorkspaceEntry
+    let mediaDocumentStore: any MediaDocumentStoring
+
+    @State private var loadState: MediaDocumentLoadState = .loading
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            DocumentPreviewHeaderView(
+                entry: entry,
+                detail: WorkspaceTextDocumentSupport.displayLabel(for: entry)
+            )
+
+            switch loadState {
+            case .loading:
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("document-media-loading-indicator")
+            case let .loaded(document):
+                MediaPlayerView(player: document.player)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 8))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("\(entry.name) media player")
+                    .accessibilityIdentifier(surfaceAccessibilityIdentifier)
+            case let .failed(message):
+                ContentUnavailableView {
+                    Label("Media Could Not Be Opened", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(message)
+                } actions: {
+                    Button("Try Again") {
+                        Task {
+                            await loadMedia()
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityIdentifier("document-media-error-surface")
+            }
+        }
+        .padding(12)
+        .task(id: entry.id) {
+            await loadMedia()
+        }
+        .onDisappear {
+            pauseLoadedPlayer()
+        }
+    }
+
+    @MainActor
+    private func loadMedia() async {
+        pauseLoadedPlayer()
+        loadState = .loading
+
+        do {
+            let document = try await mediaDocumentStore.loadMedia(at: entry.url)
+            guard !Task.isCancelled else {
+                return
+            }
+
+            loadState = .loaded(document)
+        } catch {
+            guard !Task.isCancelled else {
+                return
+            }
+
+            loadState = .failed(error.localizedDescription)
+        }
+    }
+
+    private func pauseLoadedPlayer() {
+        guard case let .loaded(document) = loadState else {
+            return
+        }
+
+        document.player.pause()
+    }
+
+    private var surfaceAccessibilityIdentifier: String {
+        switch entry.fileType {
+        case .audio:
+            return "document-audio-surface"
+        case .video:
+            return "document-video-surface"
+        case .markdown, .structuredText, .plainText, .code, .pdf, .office, .image, .unknown:
+            return "document-media-surface"
+        }
+    }
+}
+
+private enum MediaDocumentLoadState {
+    case loading
+    case loaded(MediaDocument)
+    case failed(String)
+}
+
+private struct MediaPlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let playerView = AVPlayerView()
+        playerView.controlsStyle = .inline
+        playerView.setAccessibilityIdentifier("document-media-view")
+        return playerView
+    }
+
+    func updateNSView(_ playerView: AVPlayerView, context: Context) {
+        if playerView.player !== player {
+            playerView.player = player
+        }
+    }
+
+    static func dismantleNSView(_ playerView: AVPlayerView, coordinator: ()) {
+        playerView.player?.pause()
+        playerView.player = nil
     }
 }
 

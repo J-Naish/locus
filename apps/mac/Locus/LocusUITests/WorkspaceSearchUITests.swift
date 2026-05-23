@@ -244,6 +244,69 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     @MainActor
+    func testDoubleClickVideoFilePlaysVideoInLocus() throws {
+        let workspacePath = try fixtureWorkspacePath("file-types")
+        let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
+        let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
+        let app = try launchApp(
+            workspacePath: workspacePath,
+            previewInvocationsKey: previewInvocationsKey,
+            previewInvocationsFilePath: previewInvocationsFilePath
+        )
+
+        let videoRowText = app.staticTexts["video-placeholder.mp4"]
+        XCTAssertTrue(videoRowText.waitForExistence(timeout: 5), app.debugDescription)
+        videoRowText.doubleClick()
+
+        let videoSurface = app.descendants(matching: .any)["document-video-surface"]
+        XCTAssertTrue(videoSurface.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["video-placeholder.mp4"].waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertEqual(previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
+    }
+
+    @MainActor
+    func testDoubleClickAudioFilePlaysAudioInLocus() throws {
+        let workspacePath = try fixtureWorkspacePath("file-types")
+        let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
+        let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
+        let app = try launchApp(
+            workspacePath: workspacePath,
+            previewInvocationsKey: previewInvocationsKey,
+            previewInvocationsFilePath: previewInvocationsFilePath
+        )
+
+        let audioRowText = app.staticTexts["audio-placeholder.mp3"]
+        XCTAssertTrue(audioRowText.waitForExistence(timeout: 5), app.debugDescription)
+        audioRowText.doubleClick()
+
+        let audioSurface = app.descendants(matching: .any)["document-audio-surface"]
+        XCTAssertTrue(audioSurface.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["audio-placeholder.mp3"].waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertEqual(previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
+    }
+
+    @MainActor
+    func testBrokenVideoShowsMediaErrorSurface() throws {
+        let workspaceURL = FileManager.default.temporaryDirectory
+            .appending(path: "locus-invalid-video-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
+        filesToRemove.insert(workspaceURL.path(percentEncoded: false))
+
+        try Data("not video".utf8).write(to: workspaceURL.appending(path: "broken.mp4"))
+
+        let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+        let brokenVideoRowText = app.staticTexts["broken.mp4"]
+        XCTAssertTrue(brokenVideoRowText.waitForExistence(timeout: 5), app.debugDescription)
+        brokenVideoRowText.doubleClick()
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["document-media-error-surface"].waitForExistence(timeout: 5),
+            app.debugDescription
+        )
+    }
+
+    @MainActor
     func testBrokenPDFShowsPDFErrorSurface() throws {
         let workspaceURL = FileManager.default.temporaryDirectory
             .appending(path: "locus-invalid-pdf-\(UUID().uuidString)", directoryHint: .isDirectory)

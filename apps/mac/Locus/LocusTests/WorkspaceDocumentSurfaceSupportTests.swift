@@ -34,6 +34,20 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
         )
     }
 
+    func testVideoFilesUseVideoSurface() {
+        XCTAssertEqual(
+            WorkspaceDocumentSurfaceSupport.surfaceKind(for: makeEntry(name: "clip.mp4", fileType: .video)),
+            .video
+        )
+    }
+
+    func testAudioFilesUseAudioSurface() {
+        XCTAssertEqual(
+            WorkspaceDocumentSurfaceSupport.surfaceKind(for: makeEntry(name: "voice.mp3", fileType: .audio)),
+            .audio
+        )
+    }
+
     func testDirectoriesUseFolderSurface() {
         XCTAssertEqual(
             WorkspaceDocumentSurfaceSupport.surfaceKind(

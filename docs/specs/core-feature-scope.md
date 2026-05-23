@@ -154,8 +154,8 @@ Not a goal:
 Must support:
 
 - image viewing
-- video playback
-- audio playback
+- video playback through an in-app native player
+- audio playback through an in-app native player
 - in-app location navigation for unsupported files where the containing folder is available
 
 Should support:
@@ -164,6 +164,7 @@ Should support:
 - Quick Look preview
 - file type icons
 - simple metadata
+- richer audio metadata and artwork presentation
 
 Not a goal:
 

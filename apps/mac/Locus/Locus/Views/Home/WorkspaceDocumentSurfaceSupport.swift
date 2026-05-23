@@ -4,12 +4,14 @@ enum WorkspaceDocumentSurfaceKind: Equatable {
     case editableText
     case image
     case pdf
+    case video
+    case audio
     case folder
     case unsupported
 
     var supportsInPlaceOpen: Bool {
         switch self {
-        case .editableText, .image, .pdf:
+        case .editableText, .image, .pdf, .video, .audio:
             return true
         case .folder, .unsupported:
             return false
@@ -29,6 +31,12 @@ enum WorkspaceDocumentSurfaceSupport {
             }
             if entry.fileType == .pdf {
                 return .pdf
+            }
+            if entry.fileType == .video {
+                return .video
+            }
+            if entry.fileType == .audio {
+                return .audio
             }
             return .unsupported
         case .directory:

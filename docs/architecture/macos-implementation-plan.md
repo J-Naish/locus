@@ -184,7 +184,9 @@ Deliverables:
 - Structured plain-text editor for YAML, JSON, TOML, and common text files.
 - PDF viewer using PDFKit. The first vertical slice is a read-only in-app viewer; page navigation, zoom controls, text selection polish, search, highlights, and comments follow as separate PDF review slices.
 - Image preview.
-- Video/audio playback using AVKit.
+- Video/audio playback using AVKit. The first vertical slice uses in-app,
+  manually started playback with native controls; richer audio metadata and
+  artwork presentation can follow once the core document surface is stable.
 - Office preview through native system preview facilities where possible.
 - Unsupported-file fallback with useful actions.
 

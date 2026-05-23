@@ -47,6 +47,24 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
         )
     }
 
+    func testSingleVideoFilePlaysInLocus() {
+        let entry = makeWorkspaceEntry(name: "clip.mp4", kind: .file, fileType: .video)
+
+        XCTAssertEqual(
+            WorkspaceEntryOpenActionResolver.action(for: [entry]),
+            .openInPlace(entry.url)
+        )
+    }
+
+    func testSingleAudioFilePlaysInLocus() {
+        let entry = makeWorkspaceEntry(name: "voice.mp3", kind: .file, fileType: .audio)
+
+        XCTAssertEqual(
+            WorkspaceEntryOpenActionResolver.action(for: [entry]),
+            .openInPlace(entry.url)
+        )
+    }
+
     func testSingleUnsupportedFilePreviewsInLocus() {
         let entry = makeWorkspaceEntry(name: "deck.pptx", kind: .file, fileType: .office)
 
@@ -59,8 +77,6 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
     func testUnsupportedFileTypesPreviewInLocus() {
         let unsupportedFileTypes: [(String, WorkspaceFileType)] = [
             ("deck.pptx", .office),
-            ("clip.mp4", .video),
-            ("voice.mp3", .audio),
             ("blob", .unknown)
         ]
 

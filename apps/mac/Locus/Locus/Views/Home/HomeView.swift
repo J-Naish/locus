@@ -24,6 +24,7 @@ struct HomeView: View {
     private let textDocumentStore: any TextDocumentStoring
     private let imageDocumentStore: any ImageDocumentStoring
     private let pdfDocumentStore: any PDFDocumentStoring
+    private let mediaDocumentStore: any MediaDocumentStoring
     private let clipboardService: ClipboardService
     private let workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring
     private let favoriteFolderStore: FavoriteFolderStore
@@ -38,6 +39,7 @@ struct HomeView: View {
         textDocumentStore: any TextDocumentStoring = TextDocumentStore(),
         imageDocumentStore: any ImageDocumentStoring = ImageDocumentStore(),
         pdfDocumentStore: any PDFDocumentStoring = PDFDocumentStore(),
+        mediaDocumentStore: any MediaDocumentStoring = MediaDocumentStore(),
         clipboardService: ClipboardService = ClipboardService(),
         workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring = WorkspaceDirectoryMonitor(),
         favoriteFolderStore: FavoriteFolderStore = FavoriteFolderStore(),
@@ -51,6 +53,7 @@ struct HomeView: View {
         self.textDocumentStore = textDocumentStore
         self.imageDocumentStore = imageDocumentStore
         self.pdfDocumentStore = pdfDocumentStore
+        self.mediaDocumentStore = mediaDocumentStore
         self.clipboardService = clipboardService
         self.workspaceDirectoryMonitor = workspaceDirectoryMonitor
         self.favoriteFolderStore = favoriteFolderStore
@@ -83,6 +86,7 @@ struct HomeView: View {
                 textDocumentStore: textDocumentStore,
                 imageDocumentStore: imageDocumentStore,
                 pdfDocumentStore: pdfDocumentStore,
+                mediaDocumentStore: mediaDocumentStore,
                 selectedEntryID: $selectedEntryID,
                 emptyActions: EmptyWorkspaceActions(
                     openFolder: openFolder,
@@ -521,6 +525,7 @@ private struct WorkspaceContentView: View {
     let textDocumentStore: any TextDocumentStoring
     let imageDocumentStore: any ImageDocumentStoring
     let pdfDocumentStore: any PDFDocumentStoring
+    let mediaDocumentStore: any MediaDocumentStoring
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let emptyActions: EmptyWorkspaceActions
     let shortcutActions: FileLocationShortcutActions
@@ -550,6 +555,7 @@ private struct WorkspaceContentView: View {
                     textDocumentStore: textDocumentStore,
                     imageDocumentStore: imageDocumentStore,
                     pdfDocumentStore: pdfDocumentStore,
+                    mediaDocumentStore: mediaDocumentStore,
                     isFavorite: favoriteFolders.contains { $0.path == folderURL.locusStandardizedPath },
                     selectedEntryID: $selectedEntryID,
                     shortcutActions: shortcutActions,
@@ -603,6 +609,7 @@ private struct WorkspaceBrowserView: View {
     let textDocumentStore: any TextDocumentStoring
     let imageDocumentStore: any ImageDocumentStoring
     let pdfDocumentStore: any PDFDocumentStoring
+    let mediaDocumentStore: any MediaDocumentStoring
     let isFavorite: Bool
     @Binding var selectedEntryID: WorkspaceEntry.ID?
     let shortcutActions: FileLocationShortcutActions
@@ -623,6 +630,7 @@ private struct WorkspaceBrowserView: View {
         textDocumentStore: any TextDocumentStoring,
         imageDocumentStore: any ImageDocumentStoring,
         pdfDocumentStore: any PDFDocumentStoring,
+        mediaDocumentStore: any MediaDocumentStoring,
         isFavorite: Bool,
         selectedEntryID: Binding<WorkspaceEntry.ID?>,
         shortcutActions: FileLocationShortcutActions,
@@ -638,6 +646,7 @@ private struct WorkspaceBrowserView: View {
         self.textDocumentStore = textDocumentStore
         self.imageDocumentStore = imageDocumentStore
         self.pdfDocumentStore = pdfDocumentStore
+        self.mediaDocumentStore = mediaDocumentStore
         self.isFavorite = isFavorite
         self._selectedEntryID = selectedEntryID
         self.shortcutActions = shortcutActions
@@ -710,6 +719,7 @@ private struct WorkspaceBrowserView: View {
                         textDocumentStore: textDocumentStore,
                         imageDocumentStore: imageDocumentStore,
                         pdfDocumentStore: pdfDocumentStore,
+                        mediaDocumentStore: mediaDocumentStore,
                         preview: actions.preview,
                         onEditorFocusChange: { isFocused in
                             isDocumentEditorFocused = isFocused
