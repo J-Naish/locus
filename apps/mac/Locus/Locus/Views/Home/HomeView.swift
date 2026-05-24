@@ -875,6 +875,7 @@ private struct WorkspaceBrowserView: View {
 
           WorkspaceDocumentSurface(
             entry: selectedEntry,
+            workspaceRefreshToken: loadedAt,
             textDocumentStore: textDocumentStore,
             imageDocumentStore: imageDocumentStore,
             pdfDocumentStore: pdfDocumentStore,

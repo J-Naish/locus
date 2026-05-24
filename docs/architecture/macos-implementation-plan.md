@@ -234,10 +234,13 @@ Deliverables:
 - Refresh file lists when files are added, removed, renamed, or modified.
 - For editable text files, detect external modification while open.
 - Add a clear review/reload path before overwriting external changes.
+- Use file-system notifications plus lightweight metadata checks before
+  reloading document contents for external-change review.
 
 Acceptance:
 
 - External edits are visible and do not get silently overwritten.
+- Users can reload the disk version or keep their current edits before saving.
 - Conflict messaging is plain and non-technical.
 
 ### 7. MVP Polish and Packaging

@@ -6,6 +6,7 @@ import SwiftUI
 
 struct WorkspaceDocumentSurface: View {
   let entry: WorkspaceEntry?
+  let workspaceRefreshToken: Date
   let textDocumentStore: any TextDocumentStoring
   let imageDocumentStore: any ImageDocumentStoring
   let pdfDocumentStore: any PDFDocumentStoring
@@ -21,7 +22,10 @@ struct WorkspaceDocumentSurface: View {
   @State private var activeDocumentID: WorkspaceEntry.ID?
   @State private var drafts: [WorkspaceEntry.ID: TextDocumentDraft] = [:]
   @State private var saveErrorMessage: String?
+  @State private var externalChange: TextDocumentExternalChange?
+  @State private var knownDocumentFingerprint: TextDocumentFileFingerprint?
   @State private var isEditorFocused = false
+  @StateObject private var textDocumentChangeMonitor = TextDocumentChangeMonitor()
 
   var body: some View {
     Group {
@@ -67,12 +71,19 @@ struct WorkspaceDocumentSurface: View {
     }
     .onChange(of: entry?.id) {
       isEditorFocused = false
+      externalChange = nil
       onTextInputFocusChange(false)
+    }
+    .onChange(of: workspaceRefreshToken) {
+      Task {
+        await checkForExternalDocumentChange()
+      }
     }
     .onChange(of: isEditorFocused) {
       onTextInputFocusChange(isEditorFocused)
     }
     .onDisappear {
+      textDocumentChangeMonitor.stopMonitoring()
       onTextInputFocusChange(false)
     }
   }
@@ -84,8 +95,11 @@ struct WorkspaceDocumentSurface: View {
         isDirty: text != savedText,
         isReadOnly: entry.isReadOnly,
         isSaveDisabled: isSaveDisabled,
+        hasExternalChange: externalChange != nil,
         save: saveSelectedDocument
       )
+
+      externalChangeReviewView
 
       if let saveErrorMessage {
         Label(saveErrorMessage, systemImage: "exclamationmark.triangle")
@@ -136,7 +150,7 @@ struct WorkspaceDocumentSurface: View {
       return true
     }
 
-    return text == savedText
+    return text == savedText || externalChange != nil
   }
 
   @MainActor
@@ -145,39 +159,28 @@ struct WorkspaceDocumentSurface: View {
     saveErrorMessage = nil
 
     guard let entry, WorkspaceTextDocumentSupport.canEdit(entry) else {
-      activeDocumentID = nil
-      loadState = .empty
-      text = ""
-      savedText = ""
-      encoding = .utf8
-      saveErrorMessage = nil
+      resetInactiveTextDocument()
       return
     }
 
     activeDocumentID = entry.id
+    startTextDocumentMonitoring(for: entry)
+
     if let draft = drafts[entry.id] {
-      text = draft.text
-      savedText = draft.savedText
-      encoding = draft.encoding
-      loadState = .loaded
+      restoreDraft(draft, for: entry)
       return
     }
 
-    loadState = .loading
-    text = ""
-    savedText = ""
-    encoding = .utf8
+    prepareTextDocumentLoad()
 
     do {
       let document = try await textDocumentStore.loadText(at: entry.url)
+      let fingerprint = await TextDocumentFileFingerprint.load(at: entry.url)
       guard self.entry?.id == entry.id else {
         return
       }
 
-      text = document.text
-      savedText = document.text
-      encoding = document.encoding
-      loadState = .loaded
+      applyLoadedTextDocument(document, fingerprint: fingerprint)
     } catch {
       guard self.entry?.id == entry.id else {
         return
@@ -185,6 +188,63 @@ struct WorkspaceDocumentSurface: View {
 
       loadState = .failed(error.localizedDescription)
     }
+  }
+
+  @MainActor
+  private func resetInactiveTextDocument() {
+    textDocumentChangeMonitor.stopMonitoring()
+    activeDocumentID = nil
+    loadState = .empty
+    text = ""
+    savedText = ""
+    encoding = .utf8
+    saveErrorMessage = nil
+    externalChange = nil
+    knownDocumentFingerprint = nil
+  }
+
+  @MainActor
+  private func startTextDocumentMonitoring(for entry: WorkspaceEntry) {
+    textDocumentChangeMonitor.startMonitoring(entry.url) {
+      Task {
+        await checkForExternalDocumentChange()
+      }
+    }
+  }
+
+  @MainActor
+  private func restoreDraft(_ draft: TextDocumentDraft, for entry: WorkspaceEntry) {
+    text = draft.text
+    savedText = draft.savedText
+    encoding = draft.encoding
+    loadState = .loaded
+    externalChange = nil
+    knownDocumentFingerprint = nil
+    Task {
+      await checkForExternalDocumentChange()
+    }
+  }
+
+  @MainActor
+  private func prepareTextDocumentLoad() {
+    loadState = .loading
+    text = ""
+    savedText = ""
+    encoding = .utf8
+    externalChange = nil
+    knownDocumentFingerprint = nil
+  }
+
+  @MainActor
+  private func applyLoadedTextDocument(
+    _ document: TextDocument,
+    fingerprint: TextDocumentFileFingerprint?
+  ) {
+    text = document.text
+    savedText = document.text
+    encoding = document.encoding
+    knownDocumentFingerprint = fingerprint
+    loadState = .loaded
   }
 
   @MainActor
@@ -204,9 +264,12 @@ struct WorkspaceDocumentSurface: View {
           return
         }
 
+        let fingerprint = await TextDocumentFileFingerprint.load(at: entry.url)
         savedText = textToSave
+        knownDocumentFingerprint = fingerprint
         drafts.removeValue(forKey: entry.id)
         saveErrorMessage = nil
+        externalChange = nil
         loadState = .loaded
       } catch {
         guard self.entry?.id == entry.id else {
@@ -237,6 +300,94 @@ struct WorkspaceDocumentSurface: View {
   }
 }
 
+private extension WorkspaceDocumentSurface {
+  @ViewBuilder
+  var externalChangeReviewView: some View {
+    if let externalChange {
+      ExternalDocumentChangeView(
+        isDirty: text != savedText,
+        reloadFromDisk: {
+          reloadExternalDocument(externalChange)
+        },
+        keepCurrentText: {
+          keepCurrentDocumentText(over: externalChange)
+        }
+      )
+    }
+  }
+
+  @MainActor
+  func checkForExternalDocumentChange() async {
+    guard let entry,
+      WorkspaceTextDocumentSupport.canEdit(entry),
+      activeDocumentID == entry.id,
+      case .loaded = loadState
+    else {
+      return
+    }
+
+    do {
+      let fingerprint = await TextDocumentFileFingerprint.load(at: entry.url)
+      if let knownDocumentFingerprint, fingerprint == knownDocumentFingerprint {
+        return
+      }
+
+      let document = try await textDocumentStore.loadText(at: entry.url)
+      guard self.entry?.id == entry.id,
+        activeDocumentID == entry.id,
+        case .loaded = loadState
+      else {
+        return
+      }
+
+      if document.text == savedText {
+        externalChange = nil
+        knownDocumentFingerprint = fingerprint
+      } else if document.text == text {
+        // Treat matching disk/editor contents as a clean merge of the external write.
+        savedText = document.text
+        encoding = document.encoding
+        knownDocumentFingerprint = fingerprint
+        externalChange = nil
+        drafts.removeValue(forKey: entry.id)
+      } else {
+        externalChange = TextDocumentExternalChange(
+          text: document.text,
+          encoding: document.encoding,
+          fingerprint: fingerprint
+        )
+      }
+    } catch {
+      // Keep the user's current editor state visible. The next explicit reload
+      // or save will surface any file-system error in the existing UI paths.
+    }
+  }
+
+  @MainActor
+  func reloadExternalDocument(_ change: TextDocumentExternalChange) {
+    guard let activeDocumentID else {
+      return
+    }
+
+    text = change.text
+    savedText = change.text
+    encoding = change.encoding
+    knownDocumentFingerprint = change.fingerprint
+    externalChange = nil
+    saveErrorMessage = nil
+    loadState = .loaded
+    drafts.removeValue(forKey: activeDocumentID)
+  }
+
+  @MainActor
+  func keepCurrentDocumentText(over change: TextDocumentExternalChange) {
+    savedText = change.text
+    encoding = change.encoding
+    knownDocumentFingerprint = change.fingerprint
+    externalChange = nil
+  }
+}
+
 private enum TextDocumentLoadState: Equatable {
   case empty
   case loading
@@ -255,6 +406,7 @@ private struct DocumentHeaderView: View {
   let isDirty: Bool
   let isReadOnly: Bool
   let isSaveDisabled: Bool
+  let hasExternalChange: Bool
   let save: () -> Void
 
   var body: some View {
@@ -276,6 +428,17 @@ private struct DocumentHeaderView: View {
         Text("Read-only")
           .font(.caption)
           .foregroundStyle(.secondary)
+      } else if hasExternalChange {
+        Text("Changed on Disk")
+          .font(.caption)
+          .foregroundStyle(.orange)
+          .accessibilityIdentifier("document-external-change-indicator")
+        if isDirty {
+          Text("Unsaved")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier("document-unsaved-indicator")
+        }
       } else if isDirty {
         Text("Unsaved")
           .font(.caption)

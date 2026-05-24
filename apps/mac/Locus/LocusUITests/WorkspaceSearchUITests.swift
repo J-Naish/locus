@@ -632,6 +632,83 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testOpenTextDocumentShowsExternalChangeReviewBeforeSaving() throws {
+    let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
+    let projectBriefURL = workspaceURL.appending(path: "Project Brief.md")
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    let projectBriefRow = app.outlines.firstMatch.cells
+      .containing(NSPredicate(format: "value == %@", "Project Brief.md"))
+      .firstMatch
+    XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
+    projectBriefRow.click()
+
+    let editor = app.textViews["document-text-editor"]
+    XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+
+    let externalText = "# External Update\n\nChanged outside Locus.\n"
+    try externalText.write(to: projectBriefURL, atomically: true, encoding: .utf8)
+
+    let externalChangeBanner = app.otherElements["document-external-change-banner"]
+    XCTAssertTrue(externalChangeBanner.waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Changed on Disk"].waitForExistence(timeout: 2), app.debugDescription)
+
+    let saveButton = app.buttons["document-save-button"]
+    XCTAssertTrue(saveButton.waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertFalse(saveButton.isEnabled, app.debugDescription)
+
+    let reloadButton = app.buttons["document-reload-external-change-button"]
+    XCTAssertTrue(reloadButton.waitForExistence(timeout: 2), app.debugDescription)
+    reloadButton.click()
+
+    XCTAssertFalse(externalChangeBanner.waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertFalse(app.staticTexts["Unsaved"].exists, app.debugDescription)
+  }
+
+  @MainActor
+  func testOpenTextDocumentCanKeepEditsAfterExternalChange() throws {
+    let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
+    let projectBriefURL = workspaceURL.appending(path: "Project Brief.md")
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    let projectBriefRow = app.outlines.firstMatch.cells
+      .containing(NSPredicate(format: "value == %@", "Project Brief.md"))
+      .firstMatch
+    XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
+    projectBriefRow.click()
+
+    let editor = app.textViews["document-text-editor"]
+    XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+    editor.click()
+
+    let userText = "# User Draft\n\nKeep this Locus edit.\n"
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(userText, forType: .string)
+    app.typeKey("a", modifierFlags: [.command])
+    app.typeKey("v", modifierFlags: [.command])
+
+    let externalText = "# External Update\n\nChanged outside Locus.\n"
+    try externalText.write(to: projectBriefURL, atomically: true, encoding: .utf8)
+
+    let externalChangeBanner = app.otherElements["document-external-change-banner"]
+    XCTAssertTrue(externalChangeBanner.waitForExistence(timeout: 5), app.debugDescription)
+
+    let saveButton = app.buttons["document-save-button"]
+    XCTAssertTrue(saveButton.waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertFalse(saveButton.isEnabled, app.debugDescription)
+
+    let keepEditsButton = app.buttons["document-keep-current-change-button"]
+    XCTAssertTrue(keepEditsButton.waitForExistence(timeout: 2), app.debugDescription)
+    keepEditsButton.click()
+
+    XCTAssertFalse(externalChangeBanner.waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(saveButton.isEnabled, app.debugDescription)
+    saveButton.click()
+
+    XCTAssertTrue(waitForFileContents(userText, at: projectBriefURL), app.debugDescription)
+  }
+
+  @MainActor
   func testSpaceTypesIntoFocusedSearchFieldInsteadOfPreviewing() throws {
     let workspacePath = try fixtureWorkspacePath("basic")
     let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"

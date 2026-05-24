@@ -61,6 +61,7 @@ Must support:
 - open Markdown files
 - edit Markdown files
 - save Markdown as Markdown
+- detect when an open Markdown file changes on disk before saving over it
 - common formatting such as headings, bold, lists, quotes, and code blocks
 - lightweight syntax highlighting for common readability cues such as headings,
   inline code, links, and list markers
@@ -84,6 +85,7 @@ Must support:
 - open common source code and script files as plain text
 - edit these files with the same level of care as Markdown
 - preserve valid plain-text file formats on save
+- detect when an open text document changes on disk before saving over it
 - provide readable structure-aware presentation without hiding the underlying file format
 - support comfortable keyboard editing and Japanese text input where values include natural language
 - provide syntax highlighting for common programming, scripting, markup, and configuration languages
