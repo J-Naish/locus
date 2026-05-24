@@ -15,6 +15,8 @@ enum LocusWindowMetrics {
   static let fileListSidebarMinimumWidth: CGFloat = 170
   static let fileListSidebarIdealWidth: CGFloat = 180
   static let fileListSidebarMaximumWidth: CGFloat = 420
+  static let documentSurfaceMinimumWidth: CGFloat = 340
+  static let documentSurfaceIdealWidth: CGFloat = 460
 }
 
 struct WorkspaceNavigationCommands {

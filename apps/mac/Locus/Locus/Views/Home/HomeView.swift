@@ -808,65 +808,21 @@ private struct WorkspaceBrowserView: View {
   }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
-      if !snapshot.partialErrors.isEmpty {
-        PartialErrorsView(errors: snapshot.partialErrors)
-          .padding(8)
-      }
-
-      if searchResults.hasShortcutResults {
-        WorkspaceShortcutSearchResultsView(
-          recentFiles: searchResults.recentFiles,
-          recentFolders: searchResults.recentFolders,
-          actions: shortcutActions
-        )
-      }
-
-      if snapshot.entries.isEmpty {
-        ContentUnavailableView(
-          "This Folder Is Empty",
-          systemImage: "folder",
-          description: Text("Files and folders will appear here.")
-        )
-        .frame(maxWidth: .infinity, maxHeight: searchResults.hasShortcutResults ? 160 : .infinity)
-      } else if searchResults.visibleEntries.isEmpty {
-        ContentUnavailableView(
-          "No Current Folder Results",
-          systemImage: "magnifyingglass",
-          description: Text(verbatim: "No items match \"\(searchQuery)\".")
-        )
-        .frame(maxWidth: .infinity, maxHeight: searchResults.hasShortcutResults ? 160 : .infinity)
-      } else {
-        HSplitView {
-          WorkspaceEntriesList(
-            folderURL: folderURL,
-            entries: searchResults.visibleEntries,
-            selectedEntryID: $selectedEntryID,
-            isPreviewShortcutEnabled: !isDocumentTextInputFocused,
-            actions: actions
-          )
-          .frame(
-            minWidth: LocusWindowMetrics.fileListSidebarMinimumWidth,
-            idealWidth: LocusWindowMetrics.fileListSidebarIdealWidth,
-            maxWidth: LocusWindowMetrics.fileListSidebarMaximumWidth
-          )
-
-          WorkspaceDocumentSurface(
-            entry: selectedEntry,
-            workspaceRefreshToken: loadedAt,
-            textDocumentStore: textDocumentStore,
-            imageDocumentStore: imageDocumentStore,
-            pdfDocumentStore: pdfDocumentStore,
-            mediaDocumentStore: mediaDocumentStore,
-            quickLookDocumentStore: quickLookDocumentStore,
-            preview: actions.preview,
-            onTextInputFocusChange: { isFocused in
-              isDocumentTextInputFocused = isFocused
-            }
-          )
-          .frame(minWidth: 340, idealWidth: 460)
-        }
-      }
+    NavigationSplitView {
+      WorkspaceEntriesList(
+        folderURL: folderURL,
+        entries: searchResults.visibleEntries,
+        selectedEntryID: $selectedEntryID,
+        isPreviewShortcutEnabled: !isDocumentTextInputFocused,
+        actions: actions
+      )
+      .navigationSplitViewColumnWidth(
+        min: LocusWindowMetrics.fileListSidebarMinimumWidth,
+        ideal: LocusWindowMetrics.fileListSidebarIdealWidth,
+        max: LocusWindowMetrics.fileListSidebarMaximumWidth
+      )
+    } detail: {
+      workspaceDetail
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onChange(of: searchQuery) {
@@ -944,6 +900,44 @@ private struct WorkspaceBrowserView: View {
     return searchResults.visibleEntries.first { $0.id == selectedEntryID }
   }
 
+  private var workspaceDetail: some View {
+    Group {
+      if snapshot.entries.isEmpty {
+        ContentUnavailableView(
+          "This Folder Is Empty",
+          systemImage: "folder",
+          description: Text("Files and folders will appear here.")
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else {
+        WorkspaceDocumentSurface(
+          entry: selectedEntry,
+          workspaceRefreshToken: loadedAt,
+          textDocumentStore: textDocumentStore,
+          imageDocumentStore: imageDocumentStore,
+          pdfDocumentStore: pdfDocumentStore,
+          mediaDocumentStore: mediaDocumentStore,
+          quickLookDocumentStore: quickLookDocumentStore,
+          preview: actions.preview,
+          onTextInputFocusChange: { isFocused in
+            isDocumentTextInputFocused = isFocused
+          }
+        )
+        .navigationSplitViewColumnWidth(
+          min: LocusWindowMetrics.documentSurfaceMinimumWidth,
+          ideal: LocusWindowMetrics.documentSurfaceIdealWidth
+        )
+      }
+    }
+    .safeAreaInset(edge: .top, spacing: 0) {
+      if !snapshot.partialErrors.isEmpty {
+        PartialErrorsView(errors: snapshot.partialErrors)
+          .padding(.horizontal, 12)
+          .padding(.top, 8)
+          .padding(.bottom, 4)
+      }
+    }
+  }
 }
 
 /// Search-backed browser content kept while the prototype hides search chrome.
@@ -1041,66 +1035,63 @@ private struct WorkspaceEntriesList: View {
   let actions: WorkspaceActions
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
-      Text(displayName)
-        .font(.caption)
-        .fontWeight(.semibold)
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
-        .truncationMode(.middle)
-        .padding(.horizontal, 12)
-        .padding(.top, 10)
-        .padding(.bottom, 6)
-        .help(Text(verbatim: displayName))
-
-      List(entries, selection: $selectedEntryID) { entry in
-        Label {
-          Text(entry.name)
-            .lineLimit(1)
-            .truncationMode(.middle)
-        } icon: {
-          Image(systemName: entry.symbolName)
-            .foregroundStyle(entry.symbolColor)
+    List(selection: $selectedEntryID) {
+      Section {
+        ForEach(entries) { entry in
+          Label {
+            Text(entry.name)
+              .lineLimit(1)
+              .truncationMode(.middle)
+          } icon: {
+            Image(systemName: entry.symbolName)
+              .foregroundStyle(entry.symbolColor)
+          }
+          .tag(entry.id)
+          .help(Text(verbatim: entry.name))
         }
-        .help(Text(verbatim: entry.name))
+      } header: {
+        Text(displayName)
+          .lineLimit(1)
+          .truncationMode(.middle)
+          .help(Text(verbatim: displayName))
       }
-      .listStyle(.sidebar)
-      .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
-        let selectedEntries = entries(for: selection)
-        let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
-        let previewURLs = WorkspaceEntryPreviewActionResolver.previewURLs(for: selectedEntries)
-        let showInLocusEntry = selectedEntries.count == 1 ? selectedEntries.first : nil
-
-        Button("Open") {
-          if let openAction {
-            actions.performOpenAction(openAction)
-          }
-        }
-        .disabled(openAction == nil)
-
-        Button("Preview") {
-          if let previewURLs {
-            actions.preview(previewURLs)
-          }
-        }
-        .disabled(previewURLs == nil)
-
-        Button("Show in Locus") {
-          if let showInLocusEntry {
-            actions.showInLocus(showInLocusEntry)
-          }
-        }
-        .disabled(showInLocusEntry == nil)
-
-        Button(WorkspaceEntryPathCopy.menuTitle(for: selectedEntries)) {
-          actions.copyPaths(selectedEntries)
-        }
-        .disabled(selectedEntries.isEmpty)
-      } primaryAction: { selection in
-        performPrimaryAction(for: selection)
-      }
-      .background(previewKeyMonitor)
     }
+    .listStyle(.sidebar)
+    .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
+      let selectedEntries = entries(for: selection)
+      let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
+      let previewURLs = WorkspaceEntryPreviewActionResolver.previewURLs(for: selectedEntries)
+      let showInLocusEntry = selectedEntries.count == 1 ? selectedEntries.first : nil
+
+      Button("Open") {
+        if let openAction {
+          actions.performOpenAction(openAction)
+        }
+      }
+      .disabled(openAction == nil)
+
+      Button("Preview") {
+        if let previewURLs {
+          actions.preview(previewURLs)
+        }
+      }
+      .disabled(previewURLs == nil)
+
+      Button("Show in Locus") {
+        if let showInLocusEntry {
+          actions.showInLocus(showInLocusEntry)
+        }
+      }
+      .disabled(showInLocusEntry == nil)
+
+      Button(WorkspaceEntryPathCopy.menuTitle(for: selectedEntries)) {
+        actions.copyPaths(selectedEntries)
+      }
+      .disabled(selectedEntries.isEmpty)
+    } primaryAction: { selection in
+      performPrimaryAction(for: selection)
+    }
+    .background(previewKeyMonitor)
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 
