@@ -2,7 +2,7 @@ import XCTest
 
 @testable import Locus
 
-final class TextDocumentChangeMonitorTests: XCTestCase {
+final class DocumentChangeMonitorTests: XCTestCase {
   private static let shortDebounce: Duration = .milliseconds(50)
   private static let invertedWaitTimeout: TimeInterval = 0.3
   private var temporaryDirectories: [URL] = []
@@ -23,7 +23,7 @@ final class TextDocumentChangeMonitorTests: XCTestCase {
     try "first".write(to: firstFile, atomically: false, encoding: .utf8)
     try "second".write(to: secondFile, atomically: false, encoding: .utf8)
 
-    let monitor = TextDocumentChangeMonitor(debounceDuration: Self.shortDebounce)
+    let monitor = DocumentChangeMonitor(debounceDuration: Self.shortDebounce)
     let firstFileChange = expectation(description: "first file change should not be detected")
     firstFileChange.isInverted = true
     let secondFileChange = expectation(description: "second file change detected")
@@ -49,7 +49,7 @@ final class TextDocumentChangeMonitorTests: XCTestCase {
     let file = directory.appending(path: "document.md")
     try "initial".write(to: file, atomically: false, encoding: .utf8)
 
-    let monitor = TextDocumentChangeMonitor(debounceDuration: Self.shortDebounce)
+    let monitor = DocumentChangeMonitor(debounceDuration: Self.shortDebounce)
     let firstChange = expectation(description: "delete and recreate detected")
     let secondChange = expectation(description: "recreated file change detected")
 
@@ -69,9 +69,51 @@ final class TextDocumentChangeMonitorTests: XCTestCase {
     monitor.stopMonitoring()
   }
 
+  @MainActor
+  func testDebouncesRapidChangesIntoOneNotification() throws {
+    let directory = try makeTemporaryDirectory()
+    let file = directory.appending(path: "document.md")
+    try "initial".write(to: file, atomically: false, encoding: .utf8)
+
+    let monitor = DocumentChangeMonitor(debounceDuration: Self.shortDebounce)
+    let change = expectation(description: "rapid changes coalesced")
+    change.expectedFulfillmentCount = 1
+    change.assertForOverFulfill = true
+
+    monitor.startMonitoring(file) {
+      change.fulfill()
+    }
+
+    try "first".write(to: file, atomically: false, encoding: .utf8)
+    try "second".write(to: file, atomically: false, encoding: .utf8)
+    try "third".write(to: file, atomically: false, encoding: .utf8)
+
+    wait(for: [change], timeout: 2)
+    monitor.stopMonitoring()
+  }
+
+  @MainActor
+  func testStopMonitoringSuppressesLaterChanges() throws {
+    let directory = try makeTemporaryDirectory()
+    let file = directory.appending(path: "document.md")
+    try "initial".write(to: file, atomically: false, encoding: .utf8)
+
+    let monitor = DocumentChangeMonitor(debounceDuration: Self.shortDebounce)
+    let change = expectation(description: "stopped monitor should not detect changes")
+    change.isInverted = true
+
+    monitor.startMonitoring(file) {
+      change.fulfill()
+    }
+    monitor.stopMonitoring()
+
+    try "changed".write(to: file, atomically: false, encoding: .utf8)
+    wait(for: [change], timeout: Self.invertedWaitTimeout)
+  }
+
   private func makeTemporaryDirectory() throws -> URL {
     let directory = FileManager.default.temporaryDirectory
-      .appending(path: "locus-text-monitor-\(UUID().uuidString)", directoryHint: .isDirectory)
+      .appending(path: "locus-document-monitor-\(UUID().uuidString)", directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     temporaryDirectories.append(directory)
     return directory

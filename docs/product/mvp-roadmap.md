@@ -54,7 +54,7 @@ Once local movement and search are reliable, add the document work surface.
 
 Round out the MVP with the minimum review capabilities needed for local document work.
 
-- external change review
+- external change synchronization
 - Markdown diff view for changed text documents
 - basic PDF highlights and comments
 - workspace state restoration for the current location

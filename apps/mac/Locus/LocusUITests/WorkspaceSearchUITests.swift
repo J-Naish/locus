@@ -632,7 +632,7 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testOpenTextDocumentShowsExternalChangeReviewBeforeSaving() throws {
+  func testOpenTextDocumentSyncsExternalChangeAutomatically() throws {
     let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
     let projectBriefURL = workspaceURL.appending(path: "Project Brief.md")
     let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
@@ -649,24 +649,18 @@ final class WorkspaceSearchUITests: XCTestCase {
     let externalText = "# External Update\n\nChanged outside Locus.\n"
     try externalText.write(to: projectBriefURL, atomically: true, encoding: .utf8)
 
-    let externalChangeBanner = app.otherElements["document-external-change-banner"]
-    XCTAssertTrue(externalChangeBanner.waitForExistence(timeout: 5), app.debugDescription)
-    XCTAssertTrue(app.staticTexts["Changed on Disk"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(
+      waitForEditorContents(externalText, in: app, timeout: 5),
+      app.debugDescription
+    )
 
     let saveButton = app.buttons["document-save-button"]
     XCTAssertTrue(saveButton.waitForExistence(timeout: 2), app.debugDescription)
     XCTAssertFalse(saveButton.isEnabled, app.debugDescription)
-
-    let reloadButton = app.buttons["document-reload-external-change-button"]
-    XCTAssertTrue(reloadButton.waitForExistence(timeout: 2), app.debugDescription)
-    reloadButton.click()
-
-    XCTAssertFalse(externalChangeBanner.waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertFalse(app.staticTexts["Unsaved"].exists, app.debugDescription)
   }
 
   @MainActor
-  func testOpenTextDocumentCanKeepEditsAfterExternalChange() throws {
+  func testExternalTextChangeReplacesUnsavedEditorText() throws {
     let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
     let projectBriefURL = workspaceURL.appending(path: "Project Brief.md")
     let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
@@ -690,22 +684,11 @@ final class WorkspaceSearchUITests: XCTestCase {
     let externalText = "# External Update\n\nChanged outside Locus.\n"
     try externalText.write(to: projectBriefURL, atomically: true, encoding: .utf8)
 
-    let externalChangeBanner = app.otherElements["document-external-change-banner"]
-    XCTAssertTrue(externalChangeBanner.waitForExistence(timeout: 5), app.debugDescription)
-
-    let saveButton = app.buttons["document-save-button"]
-    XCTAssertTrue(saveButton.waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertFalse(saveButton.isEnabled, app.debugDescription)
-
-    let keepEditsButton = app.buttons["document-keep-current-change-button"]
-    XCTAssertTrue(keepEditsButton.waitForExistence(timeout: 2), app.debugDescription)
-    keepEditsButton.click()
-
-    XCTAssertFalse(externalChangeBanner.waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertTrue(saveButton.isEnabled, app.debugDescription)
-    saveButton.click()
-
-    XCTAssertTrue(waitForFileContents(userText, at: projectBriefURL), app.debugDescription)
+    XCTAssertTrue(
+      waitForEditorContents(externalText, in: app, timeout: 5),
+      app.debugDescription
+    )
+    XCTAssertFalse(app.staticTexts["Unsaved"].exists, app.debugDescription)
   }
 
   @MainActor
@@ -1249,6 +1232,29 @@ final class WorkspaceSearchUITests: XCTestCase {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
       if (try? String(contentsOf: url, encoding: .utf8)) == expectedContents {
+        return true
+      }
+
+      RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+
+    return false
+  }
+
+  @MainActor
+  private func waitForEditorContents(
+    _ expectedContents: String,
+    in app: XCUIApplication,
+    timeout: TimeInterval = 2
+  ) -> Bool {
+    let editor = app.textViews["document-text-editor"]
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+      NSPasteboard.general.clearContents()
+      editor.click()
+      app.typeKey("a", modifierFlags: [.command])
+      app.typeKey("c", modifierFlags: [.command])
+      if NSPasteboard.general.string(forType: .string) == expectedContents {
         return true
       }
 

@@ -99,16 +99,18 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
   folder-listing budgets; PDF search latency should be profiled with a large
   fixture during the PDF review polish pass.
 
-## 2026-05-25T01:07:43+09:00 text-external-change-review
+## 2026-05-25T01:07:43+09:00 document-external-change-sync
 
 - commit: pending
 - branch: `main`
 - dirty tree: `true`
 - status: `0`
-- generated folder listing: entries `1010`, avg `3.003 ms`, max `3.864 ms`
+- generated folder listing: entries `1010`, avg `4.735 ms`, max `5.981 ms`
 - Rust FFI static library: `17683360 bytes`
-- macOS app bundle: `2764 KiB`
-- notes: Added open-text-document external change review. Active text files use
-  file-system notifications and compare lightweight size/modified fingerprints
-  before reloading document contents, so folder refreshes and unrelated
-  filesystem events avoid full text reads in the common no-change path.
+- macOS app bundle: `2728 KiB`
+- notes: Added open-document external change synchronization. Displayed
+  in-place files use file-system notifications and compare lightweight
+  size/modified fingerprints before reloading document contents, so folder
+  refreshes and unrelated filesystem events avoid full document reads in the
+  common no-change path. The folder-listing number is unrelated to document
+  sync and appears to be local smoke-run variance; it remains below budget.

@@ -226,22 +226,25 @@ Acceptance:
 - Search flows keep users in Locus by default when the task is finding,
   selecting, or previewing a local item.
 
-### 6. File Change Detection and Review
+### 6. File Change Detection and Sync
 
 Deliverables:
 
 - Watch the current location for external changes.
 - Refresh file lists when files are added, removed, renamed, or modified.
-- For editable text files, detect external modification while open.
-- Add a clear review/reload path before overwriting external changes.
+- For open in-place documents, detect external modification while open.
+- Automatically reload the displayed document from disk when it changes.
 - Use file-system notifications plus lightweight metadata checks before
-  reloading document contents for external-change review.
+  reloading document contents for external-change sync.
 
 Acceptance:
 
-- External edits are visible and do not get silently overwritten.
-- Users can reload the disk version or keep their current edits before saving.
-- Conflict messaging is plain and non-technical.
+- External edits become visible without a manual reload action.
+- Text editor contents follow the latest disk version when another process
+  writes the file.
+- For the prototype, disk changes win even when the editor has unsaved text;
+  conflict review and merge UI are deferred.
+- In-place previews refresh after the displayed file changes on disk.
 
 ### 7. MVP Polish and Packaging
 

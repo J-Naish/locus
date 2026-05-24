@@ -22,10 +22,10 @@ struct WorkspaceDocumentSurface: View {
   @State private var activeDocumentID: WorkspaceEntry.ID?
   @State private var drafts: [WorkspaceEntry.ID: TextDocumentDraft] = [:]
   @State private var saveErrorMessage: String?
-  @State private var externalChange: TextDocumentExternalChange?
-  @State private var knownDocumentFingerprint: TextDocumentFileFingerprint?
+  @State private var knownDocumentFingerprint: DocumentFileFingerprint?
+  @State private var documentReloadGeneration = 0
   @State private var isEditorFocused = false
-  @StateObject private var textDocumentChangeMonitor = TextDocumentChangeMonitor()
+  @StateObject private var documentChangeMonitor = DocumentChangeMonitor()
 
   var body: some View {
     Group {
@@ -37,23 +37,27 @@ struct WorkspaceDocumentSurface: View {
           ImageDocumentSurface(
             entry: entry,
             imageDocumentStore: imageDocumentStore,
+            reloadTrigger: documentReloadTrigger(for: entry),
             preview: preview
           )
         case .pdf:
           PDFDocumentSurface(
             entry: entry,
             pdfDocumentStore: pdfDocumentStore,
+            reloadTrigger: documentReloadTrigger(for: entry),
             onSearchFocusChange: onTextInputFocusChange
           )
         case .video, .audio:
           MediaDocumentSurface(
             entry: entry,
-            mediaDocumentStore: mediaDocumentStore
+            mediaDocumentStore: mediaDocumentStore,
+            reloadTrigger: documentReloadTrigger(for: entry)
           )
         case .quickLookPreview:
           QuickLookDocumentSurface(
             entry: entry,
-            quickLookDocumentStore: quickLookDocumentStore
+            quickLookDocumentStore: quickLookDocumentStore,
+            reloadTrigger: documentReloadTrigger(for: entry)
           )
         case .folder:
           FolderDocumentSurface(entry: entry)
@@ -68,22 +72,26 @@ struct WorkspaceDocumentSurface: View {
     .background(.background)
     .task(id: entry?.id) {
       await loadSelectedDocumentIfNeeded()
+      guard !Task.isCancelled else {
+        return
+      }
+      startDocumentMonitoringIfNeeded(for: entry)
     }
     .onChange(of: entry?.id) {
       isEditorFocused = false
-      externalChange = nil
+      knownDocumentFingerprint = nil
       onTextInputFocusChange(false)
     }
     .onChange(of: workspaceRefreshToken) {
       Task {
-        await checkForExternalDocumentChange()
+        await syncDisplayedDocumentIfChanged()
       }
     }
     .onChange(of: isEditorFocused) {
       onTextInputFocusChange(isEditorFocused)
     }
     .onDisappear {
-      textDocumentChangeMonitor.stopMonitoring()
+      documentChangeMonitor.stopMonitoring()
       onTextInputFocusChange(false)
     }
   }
@@ -95,11 +103,8 @@ struct WorkspaceDocumentSurface: View {
         isDirty: text != savedText,
         isReadOnly: entry.isReadOnly,
         isSaveDisabled: isSaveDisabled,
-        hasExternalChange: externalChange != nil,
         save: saveSelectedDocument
       )
-
-      externalChangeReviewView
 
       if let saveErrorMessage {
         Label(saveErrorMessage, systemImage: "exclamationmark.triangle")
@@ -142,6 +147,10 @@ struct WorkspaceDocumentSurface: View {
     .padding(12)
   }
 
+  private func documentReloadTrigger(for entry: WorkspaceEntry) -> DocumentReloadTrigger {
+    DocumentReloadTrigger(entryID: entry.id, generation: documentReloadGeneration)
+  }
+
   private var isSaveDisabled: Bool {
     guard case .loaded = loadState,
       let entry,
@@ -150,7 +159,7 @@ struct WorkspaceDocumentSurface: View {
       return true
     }
 
-    return text == savedText || externalChange != nil
+    return text == savedText
   }
 
   @MainActor
@@ -164,7 +173,6 @@ struct WorkspaceDocumentSurface: View {
     }
 
     activeDocumentID = entry.id
-    startTextDocumentMonitoring(for: entry)
 
     if let draft = drafts[entry.id] {
       restoreDraft(draft, for: entry)
@@ -175,7 +183,7 @@ struct WorkspaceDocumentSurface: View {
 
     do {
       let document = try await textDocumentStore.loadText(at: entry.url)
-      let fingerprint = await TextDocumentFileFingerprint.load(at: entry.url)
+      let fingerprint = await DocumentFileFingerprint.load(at: entry.url)
       guard self.entry?.id == entry.id else {
         return
       }
@@ -192,22 +200,25 @@ struct WorkspaceDocumentSurface: View {
 
   @MainActor
   private func resetInactiveTextDocument() {
-    textDocumentChangeMonitor.stopMonitoring()
     activeDocumentID = nil
     loadState = .empty
     text = ""
     savedText = ""
     encoding = .utf8
     saveErrorMessage = nil
-    externalChange = nil
     knownDocumentFingerprint = nil
   }
 
   @MainActor
-  private func startTextDocumentMonitoring(for entry: WorkspaceEntry) {
-    textDocumentChangeMonitor.startMonitoring(entry.url) {
+  private func startDocumentMonitoringIfNeeded(for entry: WorkspaceEntry?) {
+    guard let entry, WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry).isAutoSynced else {
+      documentChangeMonitor.stopMonitoring()
+      return
+    }
+
+    documentChangeMonitor.startMonitoring(entry.url) {
       Task {
-        await checkForExternalDocumentChange()
+        await syncDisplayedDocumentIfChanged()
       }
     }
   }
@@ -218,10 +229,9 @@ struct WorkspaceDocumentSurface: View {
     savedText = draft.savedText
     encoding = draft.encoding
     loadState = .loaded
-    externalChange = nil
     knownDocumentFingerprint = nil
     Task {
-      await checkForExternalDocumentChange()
+      await syncDisplayedDocumentIfChanged()
     }
   }
 
@@ -231,14 +241,13 @@ struct WorkspaceDocumentSurface: View {
     text = ""
     savedText = ""
     encoding = .utf8
-    externalChange = nil
     knownDocumentFingerprint = nil
   }
 
   @MainActor
   private func applyLoadedTextDocument(
     _ document: TextDocument,
-    fingerprint: TextDocumentFileFingerprint?
+    fingerprint: DocumentFileFingerprint?
   ) {
     text = document.text
     savedText = document.text
@@ -264,12 +273,11 @@ struct WorkspaceDocumentSurface: View {
           return
         }
 
-        let fingerprint = await TextDocumentFileFingerprint.load(at: entry.url)
+        let fingerprint = await DocumentFileFingerprint.load(at: entry.url)
         savedText = textToSave
         knownDocumentFingerprint = fingerprint
         drafts.removeValue(forKey: entry.id)
         saveErrorMessage = nil
-        externalChange = nil
         loadState = .loaded
       } catch {
         guard self.entry?.id == entry.id else {
@@ -301,90 +309,56 @@ struct WorkspaceDocumentSurface: View {
 }
 
 private extension WorkspaceDocumentSurface {
-  @ViewBuilder
-  var externalChangeReviewView: some View {
-    if let externalChange {
-      ExternalDocumentChangeView(
-        isDirty: text != savedText,
-        reloadFromDisk: {
-          reloadExternalDocument(externalChange)
-        },
-        keepCurrentText: {
-          keepCurrentDocumentText(over: externalChange)
-        }
-      )
-    }
-  }
-
   @MainActor
-  func checkForExternalDocumentChange() async {
+  func syncDisplayedDocumentIfChanged() async {
     guard let entry,
-      WorkspaceTextDocumentSupport.canEdit(entry),
-      activeDocumentID == entry.id,
-      case .loaded = loadState
+      WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry).isAutoSynced
     else {
       return
     }
 
-    do {
-      let fingerprint = await TextDocumentFileFingerprint.load(at: entry.url)
-      if let knownDocumentFingerprint, fingerprint == knownDocumentFingerprint {
-        return
-      }
-
-      let document = try await textDocumentStore.loadText(at: entry.url)
-      guard self.entry?.id == entry.id,
-        activeDocumentID == entry.id,
-        case .loaded = loadState
-      else {
-        return
-      }
-
-      if document.text == savedText {
-        externalChange = nil
-        knownDocumentFingerprint = fingerprint
-      } else if document.text == text {
-        // Treat matching disk/editor contents as a clean merge of the external write.
-        savedText = document.text
-        encoding = document.encoding
-        knownDocumentFingerprint = fingerprint
-        externalChange = nil
-        drafts.removeValue(forKey: entry.id)
-      } else {
-        externalChange = TextDocumentExternalChange(
-          text: document.text,
-          encoding: document.encoding,
-          fingerprint: fingerprint
-        )
-      }
-    } catch {
-      // Keep the user's current editor state visible. The next explicit reload
-      // or save will surface any file-system error in the existing UI paths.
-    }
-  }
-
-  @MainActor
-  func reloadExternalDocument(_ change: TextDocumentExternalChange) {
-    guard let activeDocumentID else {
+    let fingerprint = await DocumentFileFingerprint.load(at: entry.url)
+    guard self.entry?.id == entry.id else {
       return
     }
 
-    text = change.text
-    savedText = change.text
-    encoding = change.encoding
-    knownDocumentFingerprint = change.fingerprint
-    externalChange = nil
-    saveErrorMessage = nil
-    loadState = .loaded
-    drafts.removeValue(forKey: activeDocumentID)
+    if let knownDocumentFingerprint, fingerprint == knownDocumentFingerprint {
+      return
+    }
+
+    if WorkspaceTextDocumentSupport.canEdit(entry) {
+      await syncTextDocumentFromDisk(entry, fingerprint: fingerprint)
+    } else {
+      knownDocumentFingerprint = fingerprint
+      documentReloadGeneration &+= 1
+    }
   }
 
   @MainActor
-  func keepCurrentDocumentText(over change: TextDocumentExternalChange) {
-    savedText = change.text
-    encoding = change.encoding
-    knownDocumentFingerprint = change.fingerprint
-    externalChange = nil
+  func syncTextDocumentFromDisk(
+    _ entry: WorkspaceEntry,
+    fingerprint: DocumentFileFingerprint?
+  ) async {
+    guard activeDocumentID == entry.id else {
+      return
+    }
+
+    do {
+      let document = try await textDocumentStore.loadText(at: entry.url)
+      guard self.entry?.id == entry.id, activeDocumentID == entry.id else {
+        return
+      }
+
+      applyLoadedTextDocument(document, fingerprint: fingerprint)
+      saveErrorMessage = nil
+      drafts.removeValue(forKey: entry.id)
+    } catch {
+      guard self.entry?.id == entry.id, activeDocumentID == entry.id else {
+        return
+      }
+
+      saveErrorMessage = error.localizedDescription
+    }
   }
 }
 
@@ -393,6 +367,11 @@ private enum TextDocumentLoadState: Equatable {
   case loading
   case loaded
   case failed(String)
+}
+
+private struct DocumentReloadTrigger: Equatable {
+  let entryID: String
+  let generation: Int
 }
 
 private struct TextDocumentDraft: Equatable {
@@ -406,7 +385,6 @@ private struct DocumentHeaderView: View {
   let isDirty: Bool
   let isReadOnly: Bool
   let isSaveDisabled: Bool
-  let hasExternalChange: Bool
   let save: () -> Void
 
   var body: some View {
@@ -428,17 +406,6 @@ private struct DocumentHeaderView: View {
         Text("Read-only")
           .font(.caption)
           .foregroundStyle(.secondary)
-      } else if hasExternalChange {
-        Text("Changed on Disk")
-          .font(.caption)
-          .foregroundStyle(.orange)
-          .accessibilityIdentifier("document-external-change-indicator")
-        if isDirty {
-          Text("Unsaved")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .accessibilityIdentifier("document-unsaved-indicator")
-        }
       } else if isDirty {
         Text("Unsaved")
           .font(.caption)
@@ -491,6 +458,7 @@ private struct EmptyDocumentSurface: View {
 private struct ImageDocumentSurface: View {
   let entry: WorkspaceEntry
   let imageDocumentStore: any ImageDocumentStoring
+  let reloadTrigger: DocumentReloadTrigger
   let preview: ([URL]) -> Void
 
   @State private var loadState: ImageDocumentLoadState = .loading
@@ -533,7 +501,7 @@ private struct ImageDocumentSurface: View {
       }
     }
     .padding(12)
-    .task(id: entry.id) {
+    .task(id: reloadTrigger) {
       await loadImage()
     }
   }
@@ -568,6 +536,7 @@ private enum ImageDocumentLoadState {
 private struct PDFDocumentSurface: View {
   let entry: WorkspaceEntry
   let pdfDocumentStore: any PDFDocumentStoring
+  let reloadTrigger: DocumentReloadTrigger
   let onSearchFocusChange: (Bool) -> Void
 
   @State private var loadState: PDFDocumentLoadState = .loading
@@ -616,7 +585,7 @@ private struct PDFDocumentSurface: View {
       }
     }
     .padding(12)
-    .task(id: entry.id) {
+    .task(id: reloadTrigger) {
       await loadPDF()
     }
     .onDisappear {
@@ -626,8 +595,9 @@ private struct PDFDocumentSurface: View {
 
   @MainActor
   private func loadPDF() async {
+    let restoreState = controller.captureRestoreState()
     loadState = .loading
-    controller.reset()
+    controller.reset(preserving: restoreState)
 
     do {
       let document = try await pdfDocumentStore.loadPDF(at: entry.url)
@@ -650,6 +620,13 @@ private enum PDFDocumentLoadState {
   case loading
   case loaded(PDFDocument)
   case failed(String)
+}
+
+private struct PDFDocumentRestoreState {
+  let pageNumber: Int
+  let scaleFactor: CGFloat?
+  let isFitToWindow: Bool
+  let searchQuery: String
 }
 
 private struct PDFDocumentControlsView: View {
@@ -836,6 +813,7 @@ private final class PDFDocumentController: ObservableObject {
   private var searchSelections: [PDFSelection] = []
   private var currentSearchSelectionIndex: Int?
   private var searchTask: Task<Void, Never>?
+  private var pendingRestoreState: PDFDocumentRestoreState?
 
   var pageSummary: String {
     guard pageCount > 0 else {
@@ -869,10 +847,25 @@ private final class PDFDocumentController: ObservableObject {
     return "\(currentSearchMatchNumber) of \(searchMatchCount)"
   }
 
-  func reset() {
+  func captureRestoreState() -> PDFDocumentRestoreState? {
+    let trimmedSearchQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard pageCount > 0 || !trimmedSearchQuery.isEmpty else {
+      return nil
+    }
+
+    return PDFDocumentRestoreState(
+      pageNumber: currentPageNumber,
+      scaleFactor: isFitToWindow ? nil : pdfView?.scaleFactor,
+      isFitToWindow: isFitToWindow,
+      searchQuery: searchQuery
+    )
+  }
+
+  func reset(preserving restoreState: PDFDocumentRestoreState? = nil) {
     searchTask?.cancel()
     searchTask = nil
     pdfView = nil
+    pendingRestoreState = restoreState
     setIfChanged(&currentPageNumber, 0)
     setIfChanged(&pageCount, 0)
     setIfChanged(&zoomPercent, nil)
@@ -880,9 +873,9 @@ private final class PDFDocumentController: ObservableObject {
     setIfChanged(&canGoToNextPage, false)
     setIfChanged(&canZoomIn, false)
     setIfChanged(&canZoomOut, false)
-    setIfChanged(&searchQuery, "")
+    setIfChanged(&searchQuery, restoreState?.searchQuery ?? "")
     clearSearchState()
-    isFitToWindow = true
+    isFitToWindow = restoreState?.isFitToWindow ?? true
   }
 
   func attach(_ pdfView: PDFView) {
@@ -891,6 +884,7 @@ private final class PDFDocumentController: ObservableObject {
 
   func refresh(from pdfView: PDFView) {
     self.pdfView = pdfView
+    restorePendingStateIfNeeded(in: pdfView)
 
     let document = pdfView.document
     let nextPageCount = document?.pageCount ?? 0
@@ -1039,6 +1033,35 @@ private final class PDFDocumentController: ObservableObject {
       } catch {
         return
       }
+    }
+  }
+
+  private func restorePendingStateIfNeeded(in pdfView: PDFView) {
+    guard let restoreState = pendingRestoreState else {
+      return
+    }
+
+    pendingRestoreState = nil
+
+    if let document = pdfView.document, document.pageCount > 0, restoreState.pageNumber > 0 {
+      let pageIndex = min(max(restoreState.pageNumber - 1, 0), document.pageCount - 1)
+      if let page = document.page(at: pageIndex) {
+        pdfView.go(to: page)
+      }
+    }
+
+    if restoreState.isFitToWindow {
+      isFitToWindow = true
+      pdfView.autoScales = true
+    } else if let scaleFactor = restoreState.scaleFactor {
+      isFitToWindow = false
+      pdfView.autoScales = false
+      pdfView.scaleFactor = min(max(scaleFactor, pdfView.minScaleFactor), pdfView.maxScaleFactor)
+    }
+
+    if !restoreState.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      setIfChanged(&searchQuery, restoreState.searchQuery)
+      scheduleSearch()
     }
   }
 
@@ -1238,6 +1261,7 @@ private struct PDFDocumentView: NSViewRepresentable {
 private struct MediaDocumentSurface: View {
   let entry: WorkspaceEntry
   let mediaDocumentStore: any MediaDocumentStoring
+  let reloadTrigger: DocumentReloadTrigger
 
   @State private var loadState: MediaDocumentLoadState = .loading
 
@@ -1277,7 +1301,7 @@ private struct MediaDocumentSurface: View {
       }
     }
     .padding(12)
-    .task(id: entry.id) {
+    .task(id: reloadTrigger) {
       await loadMedia()
     }
     .onDisappear {
@@ -1357,6 +1381,7 @@ private struct MediaPlayerView: NSViewRepresentable {
 private struct QuickLookDocumentSurface: View {
   let entry: WorkspaceEntry
   let quickLookDocumentStore: any QuickLookDocumentStoring
+  let reloadTrigger: DocumentReloadTrigger
 
   @State private var loadState: QuickLookDocumentLoadState = .loading
 
@@ -1396,7 +1421,7 @@ private struct QuickLookDocumentSurface: View {
       }
     }
     .padding(12)
-    .task(id: entry.id) {
+    .task(id: reloadTrigger) {
       await loadQuickLookDocument()
     }
   }

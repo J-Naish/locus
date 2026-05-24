@@ -1,18 +1,11 @@
 import Darwin
 import Foundation
-import SwiftUI
 
-struct TextDocumentExternalChange: Equatable {
-  let text: String
-  let encoding: String.Encoding
-  let fingerprint: TextDocumentFileFingerprint?
-}
-
-struct TextDocumentFileFingerprint: Equatable, Sendable {
+struct DocumentFileFingerprint: Equatable, Sendable {
   let size: UInt64?
   let modificationDate: Date?
 
-  static func load(at url: URL) async -> TextDocumentFileFingerprint? {
+  static func load(at url: URL) async -> DocumentFileFingerprint? {
     await Task.detached(priority: .utility) {
       let didStartAccess = url.startAccessingSecurityScopedResource()
       defer {
@@ -26,7 +19,7 @@ struct TextDocumentFileFingerprint: Equatable, Sendable {
         return nil
       }
 
-      return TextDocumentFileFingerprint(
+      return DocumentFileFingerprint(
         size: values.fileSize.map(UInt64.init),
         modificationDate: values.contentModificationDate
       )
@@ -35,7 +28,7 @@ struct TextDocumentFileFingerprint: Equatable, Sendable {
 }
 
 @MainActor
-final class TextDocumentChangeMonitor: ObservableObject {
+final class DocumentChangeMonitor: ObservableObject {
   private let debounceDuration: Duration
   private var eventSource: DispatchSourceFileSystemObject?
   private var pendingChangeTask: Task<Void, Never>?
@@ -134,39 +127,5 @@ final class TextDocumentChangeMonitor: ObservableObject {
     eventSource = nil
     self.monitoredPath = nil
     startMonitoring(URL(filePath: monitoredPath), onChange: onChange)
-  }
-}
-
-struct ExternalDocumentChangeView: View {
-  let isDirty: Bool
-  let reloadFromDisk: () -> Void
-  let keepCurrentText: () -> Void
-
-  var body: some View {
-    HStack(alignment: .firstTextBaseline, spacing: 12) {
-      Label("File Changed on Disk", systemImage: "exclamationmark.triangle")
-        .font(.caption)
-        .foregroundStyle(.orange)
-
-      Text(
-        isDirty
-          ? "Reload it or keep your edits before saving."
-          : "Reload it or keep the current text before saving."
-      )
-      .font(.caption)
-      .foregroundStyle(.secondary)
-
-      Spacer()
-
-      Button("Reload", action: reloadFromDisk)
-        .accessibilityIdentifier("document-reload-external-change-button")
-
-      Button(isDirty ? "Keep Edits" : "Keep Current", action: keepCurrentText)
-        .accessibilityIdentifier("document-keep-current-change-button")
-    }
-    .padding(8)
-    .background(.orange.opacity(0.12), in: .rect(cornerRadius: 8))
-    .accessibilityElement(children: .contain)
-    .accessibilityIdentifier("document-external-change-banner")
   }
 }

@@ -18,6 +18,13 @@ enum WorkspaceDocumentSurfaceKind: Equatable {
       return false
     }
   }
+
+  var isAutoSynced: Bool {
+    // Auto-sync currently follows every in-place surface. Keep this as a
+    // separate policy hook so a future surface can opt out without changing
+    // the open-in-place resolver.
+    supportsInPlaceOpen
+  }
 }
 
 enum WorkspaceDocumentSurfaceSupport {
@@ -70,6 +77,6 @@ enum WorkspaceDocumentSurfaceSupport {
     "png",
     "tif",
     "tiff",
-    "webp",
+    "webp"
   ]
 }
