@@ -58,6 +58,8 @@ Must support:
 - edit Markdown files
 - save Markdown as Markdown
 - common formatting such as headings, bold, lists, quotes, and code blocks
+- lightweight syntax highlighting for common readability cues such as headings,
+  inline code, links, and list markers
 - comfortable Japanese text input
 
 Should support:
@@ -81,6 +83,11 @@ Must support:
 - provide readable structure-aware presentation without hiding the underlying file format
 - support comfortable keyboard editing and Japanese text input where values include natural language
 - provide syntax highlighting for common programming, scripting, markup, and configuration languages
+
+The first syntax-highlighting slice is readability-focused rather than IDE-like:
+it highlights common keys, strings, numbers, booleans, comments, and a small set
+of broadly familiar code keywords. Language-server features, deep parsing, and
+validation are separate follow-up work.
 
 Should support:
 

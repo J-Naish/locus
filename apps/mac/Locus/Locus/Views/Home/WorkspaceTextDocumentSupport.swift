@@ -13,6 +13,21 @@ enum WorkspaceTextDocumentSupport {
             return false
         }
     }
+
+    static func syntax(for entry: WorkspaceEntry) -> TextDocumentSyntax? {
+        switch entry.fileType {
+        case .markdown:
+            return .markdown
+        case .structuredText:
+            return .structuredText
+        case .code:
+            return .code
+        case .plainText:
+            return .plainText
+        case .pdf, .office, .image, .audio, .video, .unknown:
+            return nil
+        }
+    }
 }
 
 enum WorkspaceFileTypeLabel {

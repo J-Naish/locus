@@ -21,7 +21,7 @@ struct WorkspaceDocumentSurface: View {
     @State private var activeDocumentID: WorkspaceEntry.ID?
     @State private var drafts: [WorkspaceEntry.ID: TextDocumentDraft] = [:]
     @State private var saveErrorMessage: String?
-    @FocusState private var isEditorFocused: Bool
+    @State private var isEditorFocused = false
 
     var body: some View {
         Group {
@@ -112,15 +112,16 @@ struct WorkspaceDocumentSurface: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .loaded:
-                TextEditor(text: $text)
-                    .font(.system(size: 14))
-                    .scrollContentBackground(.hidden)
-                    .focused($isEditorFocused)
-                    .disabled(entry.isReadOnly)
-                    .padding(8)
-                    .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
-                    .accessibilityLabel("\(entry.name) text")
-                    .accessibilityIdentifier("document-text-editor")
+                TextDocumentEditorView(
+                    text: $text,
+                    syntax: WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText,
+                    isReadOnly: entry.isReadOnly,
+                    accessibilityLabel: "\(entry.name) text",
+                    onFocusChange: { isFocused in
+                        isEditorFocused = isFocused
+                    }
+                )
+                .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
             }
         }
         .padding(12)
@@ -731,6 +732,7 @@ private struct PDFDocumentView: NSViewRepresentable {
         Coordinator()
     }
 
+    @MainActor
     final class Coordinator: NSObject {
         private weak var observedPDFView: PDFView?
         private weak var controller: PDFDocumentController?

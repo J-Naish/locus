@@ -58,3 +58,14 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
 - Rust FFI static library: `17682728 bytes`
 - macOS app bundle: `1836 KiB`
 - notes: Added home-folder presentation filtering for hidden files, hidden folders, and matching home shortcuts. The hidden-resource check runs off the main actor after the non-recursive core listing returns.
+
+## 2026-05-24T10:40:21Z text-syntax-highlighting
+
+- commit: pending
+- branch: `main`
+- dirty tree: `true`
+- status: `0`
+- generated folder listing: entries `1010`, avg `4.644 ms`, max `5.740 ms`
+- Rust FFI static library: `17682728 bytes`
+- macOS app bundle: `2404 KiB`
+- notes: Added NSTextView-based lightweight text highlighting. Regex patterns are cached, incremental edits re-highlight the edited paragraph, and full-document highlighting keeps a 200k UTF-16-unit guard for large files.

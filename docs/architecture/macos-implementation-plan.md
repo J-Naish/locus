@@ -182,6 +182,9 @@ Deliverables:
 
 - Markdown editor using `NSTextView`/TextKit with normal save behavior.
 - Structured plain-text editor for YAML, JSON, TOML, and common text files.
+- Lightweight readability-focused syntax highlighting for Markdown, structured
+  text, and common source files; avoid IDE-oriented language tooling in this
+  slice.
 - PDF viewer using PDFKit. The first vertical slice is a read-only in-app viewer
   with page navigation and zoom controls; text selection polish, search,
   highlights, and comments follow as separate PDF review slices.
@@ -196,6 +199,8 @@ Acceptance:
 
 - Opening a supported file chooses the right native surface.
 - Markdown and structured text save back to disk predictably.
+- Text editing remains document-oriented while making headings, keys, strings,
+  numbers, comments, and common code keywords easier to scan.
 - Office files are previewable inside Locus where macOS supports them.
 - Unsupported files still support show in Locus and copy path, with richer in-app preview/edit support added by file type.
 

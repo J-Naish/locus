@@ -30,6 +30,8 @@
 		1A00000100000000000000B6 /* MediaDocumentStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000B7 /* MediaDocumentStoreTests.swift */; };
 		1A00000100000000000000B8 /* QuickLookDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000B9 /* QuickLookDocumentStore.swift */; };
 		1A00000100000000000000BA /* QuickLookDocumentStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000BB /* QuickLookDocumentStoreTests.swift */; };
+		1A00000100000000000000BC /* TextDocumentEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000BD /* TextDocumentEditorView.swift */; };
+		1A00000100000000000000BE /* TextDocumentSyntaxHighlighter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */; };
 		1A0000010000000000000096 /* TextDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000097 /* TextDocumentStore.swift */; };
 		1A000001000000000000009C /* TextDocumentStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000009D /* TextDocumentStoreTests.swift */; };
 		1A0000010000000000000080 /* RecentFileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000081 /* RecentFileStore.swift */; };
@@ -104,6 +106,8 @@
 		1A00000100000000000000B7 /* MediaDocumentStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaDocumentStoreTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000B9 /* QuickLookDocumentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookDocumentStore.swift; sourceTree = "<group>"; };
 		1A00000100000000000000BB /* QuickLookDocumentStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookDocumentStoreTests.swift; sourceTree = "<group>"; };
+		1A00000100000000000000BD /* TextDocumentEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentEditorView.swift; sourceTree = "<group>"; };
+		1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentSyntaxHighlighter.swift; sourceTree = "<group>"; };
 		1A0000010000000000000097 /* TextDocumentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentStore.swift; sourceTree = "<group>"; };
 		1A000001000000000000009D /* TextDocumentStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentStoreTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000081 /* RecentFileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentFileStore.swift; sourceTree = "<group>"; };
@@ -276,6 +280,8 @@
 				1A0000010000000000000091 /* FileLocationShortcut.swift */,
 				1A0000010000000000000093 /* FuzzyMatching.swift */,
 				1A0000010000000000000013 /* HomeView.swift */,
+				1A00000100000000000000BD /* TextDocumentEditorView.swift */,
+				1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */,
 				1A0000010000000000000099 /* WorkspaceDocumentSurface.swift */,
 				1A0000010000000000000065 /* WorkspaceEntryOpenAction.swift */,
 				1A000001000000000000006F /* WorkspaceEntryPathCopy.swift */,
@@ -460,6 +466,8 @@
 				1A0000010000000000000084 /* QuickLookPreviewService.swift in Sources */,
 				1A0000010000000000000080 /* RecentFileStore.swift in Sources */,
 				1A0000010000000000000072 /* RecentFolderStore.swift in Sources */,
+				1A00000100000000000000BC /* TextDocumentEditorView.swift in Sources */,
+				1A00000100000000000000BE /* TextDocumentSyntaxHighlighter.swift in Sources */,
 				1A0000010000000000000096 /* TextDocumentStore.swift in Sources */,
 				1A000001000000000000008A /* WorkspaceDirectoryMonitor.swift in Sources */,
 				1A0000010000000000000098 /* WorkspaceDocumentSurface.swift in Sources */,
