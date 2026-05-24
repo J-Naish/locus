@@ -37,7 +37,7 @@ Must support:
 - search within the current working location
 - search across recent folders and recent files when the visible search flow returns
 - fast first results
-- result actions for open, preview, show in Locus, and copy path
+- result actions for open and copy path
 - result presentation that keeps local file and folder locations understandable
 - consistent name-search behavior in the current location, recent folders, and recent files
 - relevance ordering that prefers exact names, extension-stripped name matches, prefix matches, substring matches, then conservative typo matches
@@ -158,7 +158,7 @@ Must support:
 
 - recognize `.docx`, `.xlsx`, and `.pptx`
 - preview inside Locus through native Quick Look rendering where possible
-- show in Locus where the containing folder is available
+- copy path from file and shortcut context menus
 
 Should support:
 
@@ -183,12 +183,12 @@ Must support:
 - video playback through an in-app native player
 - audio playback through an in-app native player
 - in-app Quick Look preview for Office files where macOS can render them
-- in-app location navigation for unsupported files where the containing folder is available
+- copy path from file list and shortcut context menus, covering supported and unsupported file types
 
 Should support:
 
 - thumbnails
-- Quick Look preview
+- additional Quick Look fallback actions
 - file type icons
 - simple metadata
 - richer audio metadata and artwork presentation

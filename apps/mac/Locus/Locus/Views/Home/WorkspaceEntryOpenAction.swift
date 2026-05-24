@@ -3,7 +3,6 @@ import Foundation
 enum WorkspaceEntryOpenAction: Equatable, Sendable {
   case browseFolder(URL)
   case openInPlace(URL)
-  case preview(URL)
 }
 
 enum WorkspaceEntryOpenActionResolver {
@@ -21,12 +20,7 @@ enum WorkspaceEntryOpenActionResolver {
         return .openInPlace(entry.url)
       }
 
-      switch surfaceKind {
-      case .unsupported:
-        return .preview(entry.url)
-      case .folder, .editableText, .image, .pdf, .video, .audio, .quickLookPreview:
-        return nil
-      }
+      return nil
     case .other:
       return nil
     }

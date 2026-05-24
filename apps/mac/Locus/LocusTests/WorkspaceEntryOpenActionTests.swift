@@ -30,13 +30,10 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
     )
   }
 
-  func testSingleVectorImagePreviewsWithQuickLook() {
+  func testSingleVectorImageHasNoOpenAction() {
     let entry = makeWorkspaceEntry(name: "diagram.svg", kind: .file, fileType: .image)
 
-    XCTAssertEqual(
-      WorkspaceEntryOpenActionResolver.action(for: [entry]),
-      .preview(entry.url)
-    )
+    XCTAssertNil(WorkspaceEntryOpenActionResolver.action(for: [entry]))
   }
 
   func testSinglePDFFileViewsInLocus() {
@@ -75,13 +72,10 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
     )
   }
 
-  func testSingleUnknownFilePreviewsInLocus() {
+  func testSingleUnknownFileHasNoOpenAction() {
     let entry = makeWorkspaceEntry(name: "blob", kind: .file, fileType: .unknown)
 
-    XCTAssertEqual(
-      WorkspaceEntryOpenActionResolver.action(for: [entry]),
-      .preview(entry.url)
-    )
+    XCTAssertNil(WorkspaceEntryOpenActionResolver.action(for: [entry]))
   }
 
   func testSingleTextSymlinkEditsInLocus() {
@@ -102,13 +96,10 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
     )
   }
 
-  func testSingleNonTextSymlinkPreviewsInLocus() {
+  func testSingleNonTextSymlinkHasNoOpenAction() {
     let entry = makeWorkspaceEntry(name: "latest", kind: .symlink, fileType: .unknown)
 
-    XCTAssertEqual(
-      WorkspaceEntryOpenActionResolver.action(for: [entry]),
-      .preview(entry.url)
-    )
+    XCTAssertNil(WorkspaceEntryOpenActionResolver.action(for: [entry]))
   }
 
   func testOtherEntriesCannotBeOpened() {

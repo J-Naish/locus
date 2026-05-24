@@ -84,7 +84,7 @@ PDFs should start as plain native previews in the prototype. Searching, highligh
 
 Office files should focus on recognition, in-app Quick Look preview, and search metadata rather than full editing.
 
-Unsupported files should still have useful actions: preview when possible, show in Locus, and copy path. In-app navigation should be the default path when the goal is locating or selecting a file; leaving Locus should not be a primary product flow.
+Unsupported files should keep their fallback surface quiet and offer path copying where useful. External preview and explicit "show in Locus" commands are not part of the prototype chrome; opening supported items in place is the default path when the goal is locating or reviewing a file.
 
 ## UI Anti-Goals
 

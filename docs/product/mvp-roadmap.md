@@ -21,7 +21,6 @@ Build the local workspace foundation first.
 - file list browsing
 - folder navigation, including opening child folders and moving back up
 - show an item's containing folder inside Locus and select the item
-- Space-key quick preview
 - file change detection
 
 ### Phase 1B: Search as a Core Navigation Flow
@@ -32,7 +31,7 @@ Search is part of the MVP product identity, not only a later optimization pass. 
 - search across the current location, recent folders, and recent files
 - search results that remain understandable to Finder users
 - clear result grouping by file, folder, and recent item where useful
-- predictable open, show-in-Locus, preview, and copy-path actions from search results
+- predictable open and copy-path actions from search results
 - basic ranking that favors exact name matches, recent items, and current location matches
 - no launcher-only UI as the primary search experience
 
@@ -47,7 +46,7 @@ Once local movement and search are reliable, add the document work surface.
 - image viewing
 - video and audio playback
 - PDF viewing
-- common preview actions for unsupported files
+- clear unsupported-file fallback states
 
 ### Phase 1D: Review and Change Awareness
 

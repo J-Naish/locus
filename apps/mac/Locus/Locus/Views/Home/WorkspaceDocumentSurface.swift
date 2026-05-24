@@ -12,7 +12,6 @@ struct WorkspaceDocumentSurface: View {
   let pdfDocumentStore: any PDFDocumentStoring
   let mediaDocumentStore: any MediaDocumentStoring
   let quickLookDocumentStore: any QuickLookDocumentStoring
-  let preview: ([URL]) -> Void
   let onTextInputFocusChange: (Bool) -> Void
 
   @State private var loadState: TextDocumentLoadState = .empty
@@ -40,8 +39,7 @@ struct WorkspaceDocumentSurface: View {
             ImageDocumentSurface(
               entry: entry,
               imageDocumentStore: imageDocumentStore,
-              reloadTrigger: documentReloadTrigger(for: entry),
-              preview: preview
+              reloadTrigger: documentReloadTrigger(for: entry)
             )
           case .pdf:
             PDFDocumentSurface(
@@ -64,7 +62,7 @@ struct WorkspaceDocumentSurface: View {
           case .folder:
             FolderDocumentSurface(entry: entry)
           case .unsupported:
-            UnsupportedDocumentSurface(entry: entry, preview: preview)
+            UnsupportedDocumentSurface(entry: entry)
           }
         } else {
           EmptyDocumentSurface()
@@ -396,7 +394,6 @@ private struct ImageDocumentSurface: View {
   let entry: WorkspaceEntry
   let imageDocumentStore: any ImageDocumentStoring
   let reloadTrigger: DocumentReloadTrigger
-  let preview: ([URL]) -> Void
 
   @State private var loadState: ImageDocumentLoadState = .loading
 
@@ -424,10 +421,6 @@ private struct ImageDocumentSurface: View {
             Task {
               await loadImage()
             }
-          }
-
-          Button("Preview") {
-            preview([entry.url])
           }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -778,20 +771,14 @@ private struct FolderDocumentSurface: View {
 
 private struct UnsupportedDocumentSurface: View {
   let entry: WorkspaceEntry
-  let preview: ([URL]) -> Void
 
   var body: some View {
     ContentUnavailableView {
       Label("No Built-In Preview", systemImage: "doc")
     } description: {
       Text(
-        "Use Preview to inspect this \(WorkspaceFileTypeLabel.displayLabel(for: entry).lowercased())."
+        "This \(WorkspaceFileTypeLabel.displayLabel(for: entry).lowercased()) is not supported yet."
       )
-    } actions: {
-      Button("Preview") {
-        preview([entry.url])
-      }
-      .disabled(entry.kind != .file && entry.kind != .symlink)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .accessibilityIdentifier("document-unsupported-surface")

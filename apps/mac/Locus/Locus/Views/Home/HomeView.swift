@@ -49,7 +49,6 @@ struct HomeView: View {
   @State private var workspaceLoadingIndicatorTask: Task<Void, Never>?
 
   private let coreBridge: CoreBridge
-  private let quickLookPreviewService: any QuickLookPreviewing
   private let textDocumentStore: any TextDocumentStoring
   private let imageDocumentStore: any ImageDocumentStoring
   private let pdfDocumentStore: any PDFDocumentStoring
@@ -64,7 +63,6 @@ struct HomeView: View {
 
   init(
     coreBridge: CoreBridge = CoreBridge(),
-    quickLookPreviewService: any QuickLookPreviewing = QuickLookPreviewService(),
     textDocumentStore: any TextDocumentStoring = TextDocumentStore(),
     imageDocumentStore: any ImageDocumentStoring = ImageDocumentStore(),
     pdfDocumentStore: any PDFDocumentStoring = PDFDocumentStore(),
@@ -78,7 +76,6 @@ struct HomeView: View {
     homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser
   ) {
     self.coreBridge = coreBridge
-    self.quickLookPreviewService = quickLookPreviewService
     self.textDocumentStore = textDocumentStore
     self.imageDocumentStore = imageDocumentStore
     self.pdfDocumentStore = pdfDocumentStore
@@ -100,8 +97,6 @@ struct HomeView: View {
       openRecentFolder: openRecentFolder,
       removeRecentFile: removeRecentFile,
       removeRecentFolder: removeRecentFolder,
-      previewFile: previewFile,
-      showInLocus: showURLInLocus,
       copyPath: copyPath
     )
 
@@ -127,8 +122,6 @@ struct HomeView: View {
         goBack: restorePreviousWorkspaceFolder,
         goForward: restoreNextWorkspaceFolder,
         retryCurrentFolder: retryCurrentFolder,
-        preview: previewURLs,
-        showInLocus: showEntryInLocus,
         copyPaths: copyPaths,
         performOpenAction: performOpenAction
       )
@@ -495,17 +488,7 @@ struct HomeView: View {
   }
 
   @MainActor
-  private func previewURLs(_ urls: [URL]) {
-    quickLookPreviewService.preview(urls)
-  }
-
-  @MainActor
-  private func previewFile(_ url: URL) {
-    previewURLs([url])
-  }
-
-  @MainActor
-  private func showURLInLocus(_ url: URL) {
+  private func navigateToFile(_ url: URL) {
     let standardizedURL = url.standardizedFileURL
     let containingFolderURL = standardizedURL.deletingLastPathComponent()
     if selectURLInCurrentWorkspaceIfPossible(
@@ -516,19 +499,14 @@ struct HomeView: View {
 
     navigateToWorkspaceFolder(
       containingFolderURL,
-      rootChange: .set(rootURLForShowingInLocus(containing: standardizedURL)),
+      rootChange: .set(rootURLContainingFile(standardizedURL)),
       selecting: standardizedURL
     )
   }
 
   @MainActor
-  private func showEntryInLocus(_ entry: WorkspaceEntry) {
-    showURLInLocus(entry.url)
-  }
-
-  @MainActor
   private func showRecentFile(_ file: RecentFile) {
-    showURLInLocus(file.url)
+    navigateToFile(file.url)
   }
 
   @MainActor
@@ -584,9 +562,7 @@ struct HomeView: View {
     case .browseFolder(let url):
       navigateToWorkspaceFolder(url, recordRecent: true)
     case .openInPlace(let url):
-      showURLInLocus(url)
-    case .preview(let url):
-      previewFile(url)
+      navigateToFile(url)
     }
   }
 
@@ -628,7 +604,7 @@ struct HomeView: View {
     return entries.first { $0.url.locusStandardizedPath == selectedPath }?.id
   }
 
-  private func rootURLForShowingInLocus(containing url: URL) -> URL? {
+  private func rootURLContainingFile(_ url: URL) -> URL? {
     guard let workspaceRootURL,
       url.locusStandardizedPath.locusHasPathPrefix(workspaceRootURL.locusStandardizedPath)
     else {
@@ -730,8 +706,6 @@ private struct WorkspaceActions {
   let goBack: () -> Void
   let goForward: () -> Void
   let retryCurrentFolder: () -> Void
-  let preview: ([URL]) -> Void
-  let showInLocus: (WorkspaceEntry) -> Void
   let copyPaths: ([WorkspaceEntry]) -> Void
   let performOpenAction: (WorkspaceEntryOpenAction) -> Void
 }
@@ -813,7 +787,6 @@ private struct WorkspaceBrowserView: View {
         folderURL: folderURL,
         entries: searchResults.visibleEntries,
         selectedEntryID: $selectedEntryID,
-        isPreviewShortcutEnabled: !isDocumentTextInputFocused,
         actions: actions
       )
       .navigationSplitViewColumnWidth(
@@ -918,7 +891,6 @@ private struct WorkspaceBrowserView: View {
           pdfDocumentStore: pdfDocumentStore,
           mediaDocumentStore: mediaDocumentStore,
           quickLookDocumentStore: quickLookDocumentStore,
-          preview: actions.preview,
           onTextInputFocusChange: { isFocused in
             isDocumentTextInputFocused = isFocused
           }
@@ -1000,8 +972,6 @@ private struct WorkspaceShortcutSearchResultsView: View {
           maxWidth: .infinity,
           open: actions.showRecentFile,
           remove: actions.removeRecentFile,
-          preview: actions.previewFile,
-          showInLocus: actions.showInLocus,
           copyPath: actions.copyPath
         )
       }
@@ -1016,7 +986,6 @@ private struct WorkspaceShortcutSearchResultsView: View {
           maxWidth: .infinity,
           open: actions.openRecentFolder,
           remove: actions.removeRecentFolder,
-          showInLocus: actions.showInLocus,
           copyPath: actions.copyPath
         )
       }
@@ -1031,7 +1000,6 @@ private struct WorkspaceEntriesList: View {
   let folderURL: URL
   let entries: [WorkspaceEntry]
   @Binding var selectedEntryID: WorkspaceEntry.ID?
-  let isPreviewShortcutEnabled: Bool
   let actions: WorkspaceActions
 
   var body: some View {
@@ -1060,8 +1028,6 @@ private struct WorkspaceEntriesList: View {
     .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
       let selectedEntries = entries(for: selection)
       let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
-      let previewURLs = WorkspaceEntryPreviewActionResolver.previewURLs(for: selectedEntries)
-      let showInLocusEntry = selectedEntries.count == 1 ? selectedEntries.first : nil
 
       Button("Open") {
         if let openAction {
@@ -1070,20 +1036,6 @@ private struct WorkspaceEntriesList: View {
       }
       .disabled(openAction == nil)
 
-      Button("Preview") {
-        if let previewURLs {
-          actions.preview(previewURLs)
-        }
-      }
-      .disabled(previewURLs == nil)
-
-      Button("Show in Locus") {
-        if let showInLocusEntry {
-          actions.showInLocus(showInLocusEntry)
-        }
-      }
-      .disabled(showInLocusEntry == nil)
-
       Button(WorkspaceEntryPathCopy.menuTitle(for: selectedEntries)) {
         actions.copyPaths(selectedEntries)
       }
@@ -1091,7 +1043,6 @@ private struct WorkspaceEntriesList: View {
     } primaryAction: { selection in
       performPrimaryAction(for: selection)
     }
-    .background(previewKeyMonitor)
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 
@@ -1113,77 +1064,6 @@ private struct WorkspaceEntriesList: View {
     entries.filter { selection.contains($0.id) }
   }
 
-  private var previewKeyMonitor: some View {
-    LocalSpaceKeyMonitor(isEnabled: isPreviewShortcutEnabled && selectedPreviewURLs != nil) {
-      guard let selectedPreviewURLs else {
-        return false
-      }
-
-      actions.preview(selectedPreviewURLs)
-      return true
-    }
-    .frame(width: 0, height: 0)
-  }
-
-  private var selectedEntries: [WorkspaceEntry] {
-    guard let selectedEntryID else {
-      return []
-    }
-
-    return entries(for: Set([selectedEntryID]))
-  }
-
-  private var selectedPreviewURLs: [URL]? {
-    WorkspaceEntryPreviewActionResolver.previewURLs(for: selectedEntries)
-  }
-}
-
-private struct LocalSpaceKeyMonitor: NSViewRepresentable {
-  let isEnabled: Bool
-  let onSpace: () -> Bool
-
-  func makeCoordinator() -> Coordinator {
-    Coordinator(isEnabled: isEnabled, onSpace: onSpace)
-  }
-
-  func makeNSView(context: Context) -> NSView {
-    NSView(frame: .zero)
-  }
-
-  func updateNSView(_ nsView: NSView, context: Context) {
-    context.coordinator.isEnabled = isEnabled
-    context.coordinator.onSpace = onSpace
-  }
-
-  final class Coordinator {
-    private static let spaceKeyCode: UInt16 = 49
-    private var monitor: Any?
-
-    var isEnabled: Bool
-    var onSpace: () -> Bool
-
-    init(isEnabled: Bool, onSpace: @escaping () -> Bool) {
-      self.isEnabled = isEnabled
-      self.onSpace = onSpace
-      monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-        guard let self,
-          self.isEnabled,
-          event.keyCode == Self.spaceKeyCode,
-          event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty
-        else {
-          return event
-        }
-
-        return self.onSpace() ? nil : event
-      }
-    }
-
-    deinit {
-      if let monitor {
-        NSEvent.removeMonitor(monitor)
-      }
-    }
-  }
 }
 
 private struct PartialErrorsView: View {

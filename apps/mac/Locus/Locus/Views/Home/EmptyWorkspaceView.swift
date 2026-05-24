@@ -28,8 +28,6 @@ struct EmptyWorkspaceView: View {
             files: recentFiles,
             open: actions.shortcuts.showRecentFile,
             remove: actions.shortcuts.removeRecentFile,
-            preview: actions.shortcuts.previewFile,
-            showInLocus: actions.shortcuts.showInLocus,
             copyPath: actions.shortcuts.copyPath
           )
         }
@@ -41,7 +39,6 @@ struct EmptyWorkspaceView: View {
             folders: recentFolders,
             open: actions.shortcuts.openRecentFolder,
             remove: actions.shortcuts.removeRecentFolder,
-            showInLocus: actions.shortcuts.showInLocus,
             copyPath: actions.shortcuts.copyPath
           )
         }
@@ -63,8 +60,6 @@ struct FileLocationShortcutActions {
   let openRecentFolder: (RecentFolder) -> Void
   let removeRecentFile: (RecentFile) -> Void
   let removeRecentFolder: (RecentFolder) -> Void
-  let previewFile: (URL) -> Void
-  let showInLocus: (URL) -> Void
   let copyPath: (URL) -> Void
 }
 
@@ -74,8 +69,6 @@ private struct FileShortcutListView<File: FileLocationShortcut>: View {
   let files: [File]
   let open: (File) -> Void
   let remove: (File) -> Void
-  let preview: (URL) -> Void
-  let showInLocus: (URL) -> Void
   let copyPath: (URL) -> Void
 
   var body: some View {
@@ -87,8 +80,6 @@ private struct FileShortcutListView<File: FileLocationShortcut>: View {
       symbolColor: .secondary,
       open: open,
       remove: remove,
-      preview: preview,
-      showInLocus: showInLocus,
       copyPath: copyPath
     )
   }
@@ -100,7 +91,6 @@ private struct FolderShortcutListView<Folder: FileLocationShortcut>: View {
   let folders: [Folder]
   let open: (Folder) -> Void
   let remove: (Folder) -> Void
-  let showInLocus: (URL) -> Void
   let copyPath: (URL) -> Void
 
   var body: some View {
@@ -112,7 +102,6 @@ private struct FolderShortcutListView<Folder: FileLocationShortcut>: View {
       symbolColor: .blue,
       open: open,
       remove: remove,
-      showInLocus: showInLocus,
       copyPath: copyPath
     )
   }
@@ -127,9 +116,6 @@ struct ShortcutListView<Item: FileLocationShortcut>: View {
   var maxWidth: CGFloat? = 520
   let open: (Item) -> Void
   let remove: (Item) -> Void
-  // Shortcut preview is file-only for now; folders keep navigation and path actions.
-  var preview: ((URL) -> Void)? = nil
-  let showInLocus: (URL) -> Void
   let copyPath: (URL) -> Void
 
   var body: some View {
@@ -161,16 +147,6 @@ struct ShortcutListView<Item: FileLocationShortcut>: View {
           .contextMenu {
             Button("Open") {
               open(item)
-            }
-
-            if let preview {
-              Button("Preview") {
-                preview(item.url)
-              }
-            }
-
-            Button("Show in Locus") {
-              showInLocus(item.url)
             }
 
             Button("Copy Path") {

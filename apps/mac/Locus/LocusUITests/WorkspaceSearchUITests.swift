@@ -203,78 +203,25 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testContextMenuPreviewsFile() throws {
+  func testContextMenuOnlyIncludesOpenAndCopyPath() throws {
     let workspacePath = try fixtureWorkspacePath("basic")
-    let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-    let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-    let app = try launchApp(
-      workspacePath: workspacePath,
-      previewInvocationsKey: previewInvocationsKey,
-      previewInvocationsFilePath: previewInvocationsFilePath
-    )
+    let app = try launchApp(workspacePath: workspacePath)
 
     let projectBriefRowText = app.staticTexts["Project Brief.md"]
     XCTAssertTrue(projectBriefRowText.waitForExistence(timeout: 5), app.debugDescription)
 
     projectBriefRowText.rightClick()
 
-    let previewMenuItem = app.menuItems["Preview"]
-    XCTAssertTrue(previewMenuItem.waitForExistence(timeout: 2), app.debugDescription)
-    // These actions intentionally stay out of the UI; keep assertions here
-    // so future menu work does not reintroduce external handoff paths.
-    XCTAssertFalse(app.menuItems["Reveal in Finder"].exists)
-    XCTAssertFalse(app.menuItems["Open Externally"].exists)
-    previewMenuItem.click()
-
-    XCTAssertTrue(
-      waitForPreviewInvocation(
-        "\(workspacePath)/Project Brief.md",
-        key: previewInvocationsKey,
-        filePath: previewInvocationsFilePath
-      ),
-      app.debugDescription
-    )
-  }
-
-  @MainActor
-  func testSpacePreviewsSelectedFile() throws {
-    let workspacePath = try fixtureWorkspacePath("basic")
-    let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-    let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-    let app = try launchApp(
-      workspacePath: workspacePath,
-      previewInvocationsKey: previewInvocationsKey,
-      previewInvocationsFilePath: previewInvocationsFilePath
-    )
-
-    let projectBriefRow = app.outlines.firstMatch.cells
-      .containing(NSPredicate(format: "value == %@", "Project Brief.md"))
-      .firstMatch
-    XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
-    projectBriefRow.click()
-
-    app.typeKey(.space, modifierFlags: [])
-
-    XCTAssertTrue(
-      waitForPreviewInvocation(
-        "\(workspacePath)/Project Brief.md",
-        key: previewInvocationsKey,
-        filePath: previewInvocationsFilePath
-      ),
-      app.debugDescription
-    )
+    XCTAssertTrue(app.menuItems["Open"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(app.menuItems["Copy Path"].exists, app.debugDescription)
+    XCTAssertFalse(app.menuItems["Preview"].exists, app.debugDescription)
+    XCTAssertFalse(app.menuItems["Show in Locus"].exists, app.debugDescription)
   }
 
   @MainActor
   func testDoubleClickTextFileOpensDocumentEditorInLocus() throws {
     let workspacePath = try fixtureWorkspacePath("basic")
-    let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-    let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-    let app = try launchApp(
-      workspacePath: workspacePath,
-      previewInvocationsKey: previewInvocationsKey,
-      previewInvocationsFilePath: previewInvocationsFilePath
-    )
+    let app = try launchApp(workspacePath: workspacePath)
 
     let projectBriefRowText = app.staticTexts["Project Brief.md"]
     XCTAssertTrue(projectBriefRowText.waitForExistence(timeout: 5), app.debugDescription)
@@ -282,20 +229,12 @@ final class WorkspaceSearchUITests: XCTestCase {
 
     XCTAssertTrue(
       app.textViews["document-text-editor"].waitForExistence(timeout: 5), app.debugDescription)
-    XCTAssertEqual(
-      previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
   }
 
   @MainActor
   func testDoubleClickImageFileViewsImageInLocus() throws {
     let workspacePath = try fixtureWorkspacePath("file-types")
-    let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-    let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-    let app = try launchApp(
-      workspacePath: workspacePath,
-      previewInvocationsKey: previewInvocationsKey,
-      previewInvocationsFilePath: previewInvocationsFilePath
-    )
+    let app = try launchApp(workspacePath: workspacePath)
 
     let sampleRowText = app.staticTexts["sample.png"]
     XCTAssertTrue(sampleRowText.waitForExistence(timeout: 5), app.debugDescription)
@@ -304,20 +243,12 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(
       app.images["document-image-view"].waitForExistence(timeout: 5), app.debugDescription)
     XCTAssertTrue(app.staticTexts["sample.png"].waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertEqual(
-      previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
   }
 
   @MainActor
   func testDoubleClickPDFFileViewsPDFInLocus() throws {
     let workspacePath = try fixtureWorkspacePath("file-types")
-    let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-    let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-    let app = try launchApp(
-      workspacePath: workspacePath,
-      previewInvocationsKey: previewInvocationsKey,
-      previewInvocationsFilePath: previewInvocationsFilePath
-    )
+    let app = try launchApp(workspacePath: workspacePath)
 
     let sampleRowText = app.staticTexts["sample.pdf"]
     XCTAssertTrue(sampleRowText.waitForExistence(timeout: 5), app.debugDescription)
@@ -337,20 +268,12 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertFalse(app.buttons["document-pdf-zoom-in-button"].exists)
     XCTAssertFalse(app.buttons["document-pdf-previous-search-match-button"].exists)
     XCTAssertFalse(app.buttons["document-pdf-next-search-match-button"].exists)
-    XCTAssertEqual(
-      previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
   }
 
   @MainActor
   func testDoubleClickOfficeFilePreviewsInLocus() throws {
     let workspacePath = try fixtureWorkspacePath("file-types")
-    let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-    let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-    let app = try launchApp(
-      workspacePath: workspacePath,
-      previewInvocationsKey: previewInvocationsKey,
-      previewInvocationsFilePath: previewInvocationsFilePath
-    )
+    let app = try launchApp(workspacePath: workspacePath)
 
     let officeRowText = app.staticTexts["valid.docx"]
     XCTAssertTrue(officeRowText.waitForExistence(timeout: 5), app.debugDescription)
@@ -359,20 +282,12 @@ final class WorkspaceSearchUITests: XCTestCase {
     let quickLookSurface = app.descendants(matching: .any)["document-quicklook-surface"]
     XCTAssertTrue(quickLookSurface.waitForExistence(timeout: 5), app.debugDescription)
     XCTAssertTrue(app.staticTexts["valid.docx"].waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertEqual(
-      previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
   }
 
   @MainActor
   func testDoubleClickVideoFilePlaysVideoInLocus() throws {
     let workspacePath = try fixtureWorkspacePath("file-types")
-    let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-    let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-    let app = try launchApp(
-      workspacePath: workspacePath,
-      previewInvocationsKey: previewInvocationsKey,
-      previewInvocationsFilePath: previewInvocationsFilePath
-    )
+    let app = try launchApp(workspacePath: workspacePath)
 
     let videoRowText = app.staticTexts["video-placeholder.mp4"]
     XCTAssertTrue(videoRowText.waitForExistence(timeout: 5), app.debugDescription)
@@ -382,20 +297,12 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(videoSurface.waitForExistence(timeout: 5), app.debugDescription)
     XCTAssertTrue(
       app.staticTexts["video-placeholder.mp4"].waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertEqual(
-      previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
   }
 
   @MainActor
   func testDoubleClickAudioFilePlaysAudioInLocus() throws {
     let workspacePath = try fixtureWorkspacePath("file-types")
-    let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-    let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-    let app = try launchApp(
-      workspacePath: workspacePath,
-      previewInvocationsKey: previewInvocationsKey,
-      previewInvocationsFilePath: previewInvocationsFilePath
-    )
+    let app = try launchApp(workspacePath: workspacePath)
 
     let audioRowText = app.staticTexts["audio-placeholder.mp3"]
     XCTAssertTrue(audioRowText.waitForExistence(timeout: 5), app.debugDescription)
@@ -405,8 +312,6 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(audioSurface.waitForExistence(timeout: 5), app.debugDescription)
     XCTAssertTrue(
       app.staticTexts["audio-placeholder.mp3"].waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertEqual(
-      previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
   }
 
   @MainActor
@@ -452,7 +357,7 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testUndecodableImageOffersQuickLookPreviewFallback() throws {
+  func testUndecodableImageShowsErrorSurface() throws {
     let workspaceURL = FileManager.default.temporaryDirectory
       .appending(path: "locus-invalid-image-\(UUID().uuidString)", directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
@@ -461,13 +366,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     let brokenImageURL = workspaceURL.appending(path: "broken.png")
     try Data("not an image".utf8).write(to: brokenImageURL)
 
-    let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-    let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-    let app = try launchApp(
-      workspacePath: workspaceURL.path(percentEncoded: false),
-      previewInvocationsKey: previewInvocationsKey,
-      previewInvocationsFilePath: previewInvocationsFilePath
-    )
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
 
     let brokenImageRowText = app.staticTexts["broken.png"]
     XCTAssertTrue(brokenImageRowText.waitForExistence(timeout: 5), app.debugDescription)
@@ -476,19 +375,8 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(
       app.descendants(matching: .any)["document-image-error-surface"].waitForExistence(timeout: 5),
       app.debugDescription)
-
-    let previewButton = app.buttons["Preview"]
-    XCTAssertTrue(previewButton.waitForExistence(timeout: 2), app.debugDescription)
-    previewButton.click()
-
-    XCTAssertTrue(
-      waitForPreviewInvocation(
-        brokenImageURL.path(percentEncoded: false),
-        key: previewInvocationsKey,
-        filePath: previewInvocationsFilePath
-      ),
-      app.debugDescription
-    )
+    XCTAssertTrue(app.buttons["Try Again"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertFalse(app.buttons["Preview"].exists, app.debugDescription)
   }
 
   @MainActor
@@ -656,13 +544,7 @@ final class WorkspaceSearchUITests: XCTestCase {
   func testRecentFileShowsContainingFolderAndSelectsFile() throws {
     let workspacePath = try fixtureWorkspacePath("basic")
     let recentFilePath = "\(workspacePath)/Project Brief.md"
-    let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-    let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-    let app = try launchApp(
-      previewInvocationsKey: previewInvocationsKey,
-      previewInvocationsFilePath: previewInvocationsFilePath,
-      recentFiles: [recentFilePath]
-    )
+    let app = try launchApp(recentFiles: [recentFilePath])
 
     let recentFile = app.buttons.matching(identifier: "recent-file-row").firstMatch
     XCTAssertTrue(recentFile.waitForExistence(timeout: 5), app.debugDescription)
@@ -672,17 +554,6 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(
       app.staticTexts["Project Brief.md"].waitForExistence(timeout: 5), app.debugDescription)
     assertTableRow(named: "Project Brief.md", isSelectedIn: app)
-
-    app.typeKey(.space, modifierFlags: [])
-
-    XCTAssertTrue(
-      waitForPreviewInvocation(
-        recentFilePath,
-        key: previewInvocationsKey,
-        filePath: previewInvocationsFilePath
-      ),
-      app.debugDescription
-    )
   }
 
   @MainActor
@@ -704,38 +575,21 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testRecentFileShortcutCanBePreviewedFromContextMenu() throws {
+  func testRecentFileShortcutContextMenuOmitsPreviewAndShowInLocus() throws {
     let workspacePath = try fixtureWorkspacePath("basic")
     let recentFilePath = "\(workspacePath)/Project Brief.md"
-    let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-    let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-    let app = try launchApp(
-      previewInvocationsKey: previewInvocationsKey,
-      previewInvocationsFilePath: previewInvocationsFilePath,
-      recentFiles: [recentFilePath]
-    )
+    let app = try launchApp(recentFiles: [recentFilePath])
 
     let recentFile = app.buttons.matching(identifier: "recent-file-row").firstMatch
     XCTAssertTrue(recentFile.waitForExistence(timeout: 5), app.debugDescription)
 
     recentFile.rightClick()
 
-    let previewMenuItem = app.menuItems["Preview"]
-    XCTAssertTrue(previewMenuItem.waitForExistence(timeout: 2), app.debugDescription)
-    // These actions intentionally stay out of the UI; keep assertions here
-    // so future menu work does not reintroduce external handoff paths.
-    XCTAssertFalse(app.menuItems["Reveal in Finder"].exists)
-    XCTAssertFalse(app.menuItems["Open Externally"].exists)
-    previewMenuItem.click()
-
-    XCTAssertTrue(
-      waitForPreviewInvocation(
-        recentFilePath,
-        key: previewInvocationsKey,
-        filePath: previewInvocationsFilePath
-      ),
-      app.debugDescription
-    )
+    XCTAssertTrue(app.menuItems["Open"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(app.menuItems["Copy Path"].exists, app.debugDescription)
+    XCTAssertTrue(app.menuItems["Remove"].exists, app.debugDescription)
+    XCTAssertFalse(app.menuItems["Preview"].exists, app.debugDescription)
+    XCTAssertFalse(app.menuItems["Show in Locus"].exists, app.debugDescription)
   }
 
   @MainActor
@@ -778,16 +632,12 @@ final class WorkspaceSearchUITests: XCTestCase {
     workspacePath: String? = nil,
     recentFilesKey: String = "recentFiles.uiTests.\(UUID().uuidString)",
     recentFoldersKey: String = "recentFolders.uiTests.\(UUID().uuidString)",
-    previewInvocationsKey: String = "previewInvocations.uiTests.\(UUID().uuidString)",
-    previewInvocationsFilePath: String? = nil,
     recentFiles: [String] = [],
     recentFolders: [String] = []
   ) throws -> XCUIApplication {
-    let previewInvocationsFilePath = previewInvocationsFilePath ?? temporaryPreviewInvocationsPath()
     trackUserDefaultsKeys(
       recentFilesKey,
-      recentFoldersKey,
-      previewInvocationsKey
+      recentFoldersKey
     )
 
     let app = XCUIApplication()
@@ -797,10 +647,6 @@ final class WorkspaceSearchUITests: XCTestCase {
       recentFilesKey,
       "--ui-test-recent-folders-key",
       recentFoldersKey,
-      "--ui-test-preview-invocations-key",
-      previewInvocationsKey,
-      "--ui-test-preview-invocations-file",
-      previewInvocationsFilePath,
     ]
     for recentFile in recentFiles {
       app.launchArguments += ["--ui-test-recent-file", recentFile]
@@ -862,24 +708,6 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(nameCell.isSelected, app.debugDescription, file: file, line: line)
   }
 
-  private func waitForPreviewInvocation(
-    _ path: String,
-    key: String,
-    filePath: String,
-    timeout: TimeInterval = 2
-  ) -> Bool {
-    let deadline = Date().addingTimeInterval(timeout)
-    while Date() < deadline {
-      if previewInvocations(forKey: key, filePath: filePath).contains(path) {
-        return true
-      }
-
-      RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
-    }
-
-    return false
-  }
-
   private func waitForFileContents(
     _ expectedContents: String,
     at url: URL,
@@ -918,27 +746,6 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     return false
-  }
-
-  private func previewInvocations(forKey key: String, filePath: String) -> [String] {
-    if let fileContents = try? String(contentsOfFile: filePath, encoding: .utf8),
-      !fileContents.isEmpty
-    {
-      return fileContents.components(separatedBy: "\n")
-    }
-
-    let appDefaults = UserDefaults(suiteName: "com.nash.locus")
-    return appDefaults?.stringArray(forKey: key)
-      ?? UserDefaults.standard.stringArray(forKey: key)
-      ?? []
-  }
-
-  private func temporaryPreviewInvocationsPath() -> String {
-    let path = FileManager.default.temporaryDirectory
-      .appending(path: "locus-preview-invocations-\(UUID().uuidString).txt")
-      .path(percentEncoded: false)
-    filesToRemove.insert(path)
-    return path
   }
 
   private func temporaryWorkspaceCopy(ofFixtureNamed name: String) throws -> URL {

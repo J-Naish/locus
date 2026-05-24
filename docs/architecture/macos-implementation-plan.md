@@ -66,7 +66,7 @@ Use SwiftUI for app structure and normal controls, with AppKit bridges where nat
 
 - `NSTextView` / TextKit 2 for Markdown and structured text editing.
 - `PDFView` for PDFs.
-- `QLPreviewView` for Office previews inside Locus; reserve the Quick Look panel for explicit fallback paths.
+- `QLPreviewView` for Office previews inside Locus; defer Quick Look panel handoff until an explicit fallback workflow is needed.
 - `AVPlayerView` for video and audio.
 
 ## Rust Core Shape
@@ -156,7 +156,7 @@ Deliverables:
   primary list feel like a developer or spreadsheet view.
 - Add in-app "show containing folder and select item" behavior for files reached from recents and search results.
 - Add session-scoped folder Back/Forward navigation.
-- Keep file location actions inside Locus: open, preview, show containing folder, select item, and copy path.
+- Keep file and folder context menus minimal: open supported items in Locus and copy paths. External preview and explicit "show in Locus" commands are deferred until a concrete workflow needs them.
 
 Acceptance:
 
@@ -209,7 +209,7 @@ Acceptance:
 - Text editing remains document-oriented while making headings, keys, strings,
   numbers, comments, and common code keywords easier to scan.
 - Office files are previewable inside Locus where macOS supports them.
-- Unsupported files still support show in Locus and copy path, with richer in-app preview/edit support added by file type.
+- Unsupported files still support copy path, with richer in-app preview/edit support added by file type.
 
 ### 5. Search
 
@@ -222,7 +222,7 @@ Acceptance:
 
 - Search returns fast first results without full startup indexing.
 - Search flows keep users in Locus by default when the task is finding,
-  selecting, or previewing a local item.
+  selecting, or opening a local item.
 
 ### 6. File Change Detection and Sync
 
@@ -270,7 +270,7 @@ Start with these tasks in order:
 4. Extend the FFI with one coarse folder-list snapshot API and explicit free functions.
 5. Build a minimal UI: default home-folder location, folder chooser, current location title, and file list.
 6. Add in-app containing-folder navigation and row selection for file-list, recent, and search result rows.
-7. Keep context-menu actions scoped to in-app navigation, preview, and path copying.
+7. Keep context-menu actions scoped to opening supported items and path copying.
 8. Run:
    - `cargo test --manifest-path core/Cargo.toml`
    - the narrow macOS app tests available from the Xcode project
@@ -317,4 +317,4 @@ Before handoff for app-affecting work, also run the narrowest relevant Xcode/mac
 - FFI memory ownership bugs: add explicit release functions and test them early.
 - UI blocking during file scans: make folder listing asynchronous from the first UI slice.
 - Scope creep into IDE features: keep source files as editable documents, not development projects.
-- Preview framework edge cases: provide reliable fallback actions for every unsupported or failed preview.
+- Preview framework edge cases: keep unsupported or failed previews understandable without adding fallback chrome before the workflow is clear.

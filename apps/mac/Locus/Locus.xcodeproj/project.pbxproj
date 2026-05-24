@@ -19,7 +19,6 @@
 		1A0000010000000000000092 /* FuzzyMatching.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000093 /* FuzzyMatching.swift */; };
 		1A000001000000000000006C /* ClipboardService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000006D /* ClipboardService.swift */; };
 		1A0000010000000000000076 /* FileURLDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000077 /* FileURLDisplay.swift */; };
-		1A0000010000000000000084 /* QuickLookPreviewService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000085 /* QuickLookPreviewService.swift */; };
 		1A00000100000000000000A0 /* ImageDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000A1 /* ImageDocumentStore.swift */; };
 		1A00000100000000000000A2 /* ImageDocumentStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000A3 /* ImageDocumentStoreTests.swift */; };
 		1A00000100000000000000B0 /* PDFDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000B1 /* PDFDocumentStore.swift */; };
@@ -49,8 +48,6 @@
 		1A0000010000000000000098 /* WorkspaceDocumentSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000099 /* WorkspaceDocumentSurface.swift */; };
 		1A000001000000000000006E /* WorkspaceEntryPathCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000006F /* WorkspaceEntryPathCopy.swift */; };
 		1A0000010000000000000070 /* WorkspaceEntryPathCopyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000071 /* WorkspaceEntryPathCopyTests.swift */; };
-		1A0000010000000000000086 /* WorkspaceEntryPreviewAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000087 /* WorkspaceEntryPreviewAction.swift */; };
-		1A0000010000000000000088 /* WorkspaceEntryPreviewActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000089 /* WorkspaceEntryPreviewActionTests.swift */; };
 		1A0000010000000000000068 /* WorkspaceNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000069 /* WorkspaceNavigation.swift */; };
 		1A000001000000000000006A /* WorkspaceNavigationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000006B /* WorkspaceNavigationTests.swift */; };
 		1A00000100000000000000A4 /* WorkspaceDocumentSurfaceSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000A5 /* WorkspaceDocumentSurfaceSupport.swift */; };
@@ -95,7 +92,6 @@
 		1A0000010000000000000093 /* FuzzyMatching.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FuzzyMatching.swift; sourceTree = "<group>"; };
 		1A000001000000000000006D /* ClipboardService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardService.swift; sourceTree = "<group>"; };
 		1A0000010000000000000077 /* FileURLDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileURLDisplay.swift; sourceTree = "<group>"; };
-		1A0000010000000000000085 /* QuickLookPreviewService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookPreviewService.swift; sourceTree = "<group>"; };
 		1A00000100000000000000A1 /* ImageDocumentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDocumentStore.swift; sourceTree = "<group>"; };
 		1A00000100000000000000A3 /* ImageDocumentStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDocumentStoreTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000B1 /* PDFDocumentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFDocumentStore.swift; sourceTree = "<group>"; };
@@ -125,8 +121,6 @@
 		1A0000010000000000000099 /* WorkspaceDocumentSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDocumentSurface.swift; sourceTree = "<group>"; };
 		1A000001000000000000006F /* WorkspaceEntryPathCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryPathCopy.swift; sourceTree = "<group>"; };
 		1A0000010000000000000071 /* WorkspaceEntryPathCopyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryPathCopyTests.swift; sourceTree = "<group>"; };
-		1A0000010000000000000087 /* WorkspaceEntryPreviewAction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryPreviewAction.swift; sourceTree = "<group>"; };
-		1A0000010000000000000089 /* WorkspaceEntryPreviewActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryPreviewActionTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000069 /* WorkspaceNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceNavigation.swift; sourceTree = "<group>"; };
 		1A000001000000000000006B /* WorkspaceNavigationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceNavigationTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000A5 /* WorkspaceDocumentSurfaceSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDocumentSurfaceSupport.swift; sourceTree = "<group>"; };
@@ -199,7 +193,6 @@
 				1A000001000000000000008D /* WorkspaceDirectoryMonitorTests.swift */,
 				1A0000010000000000000067 /* WorkspaceEntryOpenActionTests.swift */,
 				1A0000010000000000000071 /* WorkspaceEntryPathCopyTests.swift */,
-				1A0000010000000000000089 /* WorkspaceEntryPreviewActionTests.swift */,
 				1A00000100000000000000A7 /* WorkspaceDocumentSurfaceSupportTests.swift */,
 				1A00000100000000000000AF /* WorkspaceHomeVisibilityTests.swift */,
 				1A000001000000000000006B /* WorkspaceNavigationTests.swift */,
@@ -263,7 +256,6 @@
 				1A00000100000000000000B5 /* MediaDocumentStore.swift */,
 				1A00000100000000000000B1 /* PDFDocumentStore.swift */,
 				1A00000100000000000000B9 /* QuickLookDocumentStore.swift */,
-				1A0000010000000000000085 /* QuickLookPreviewService.swift */,
 				1A0000010000000000000081 /* RecentFileStore.swift */,
 				1A0000010000000000000073 /* RecentFolderStore.swift */,
 				1A0000010000000000000097 /* TextDocumentStore.swift */,
@@ -285,7 +277,6 @@
 				1A0000010000000000000099 /* WorkspaceDocumentSurface.swift */,
 				1A0000010000000000000065 /* WorkspaceEntryOpenAction.swift */,
 				1A000001000000000000006F /* WorkspaceEntryPathCopy.swift */,
-				1A0000010000000000000087 /* WorkspaceEntryPreviewAction.swift */,
 				1A00000100000000000000A5 /* WorkspaceDocumentSurfaceSupport.swift */,
 				1A00000100000000000000AD /* WorkspaceHomeVisibility.swift */,
 				1A0000010000000000000069 /* WorkspaceNavigation.swift */,
@@ -462,7 +453,6 @@
 				1A00000100000000000000B4 /* MediaDocumentStore.swift in Sources */,
 				1A00000100000000000000B0 /* PDFDocumentStore.swift in Sources */,
 				1A00000100000000000000B8 /* QuickLookDocumentStore.swift in Sources */,
-				1A0000010000000000000084 /* QuickLookPreviewService.swift in Sources */,
 				1A0000010000000000000080 /* RecentFileStore.swift in Sources */,
 				1A0000010000000000000072 /* RecentFolderStore.swift in Sources */,
 				1A00000100000000000000BC /* TextDocumentEditorView.swift in Sources */,
@@ -473,7 +463,6 @@
 				1A0000010000000000000098 /* WorkspaceDocumentSurface.swift in Sources */,
 				1A0000010000000000000064 /* WorkspaceEntryOpenAction.swift in Sources */,
 				1A000001000000000000006E /* WorkspaceEntryPathCopy.swift in Sources */,
-				1A0000010000000000000086 /* WorkspaceEntryPreviewAction.swift in Sources */,
 				1A00000100000000000000A4 /* WorkspaceDocumentSurfaceSupport.swift in Sources */,
 				1A00000100000000000000AC /* WorkspaceHomeVisibility.swift in Sources */,
 				1A0000010000000000000068 /* WorkspaceNavigation.swift in Sources */,
@@ -500,7 +489,6 @@
 				1A000001000000000000008C /* WorkspaceDirectoryMonitorTests.swift in Sources */,
 				1A0000010000000000000066 /* WorkspaceEntryOpenActionTests.swift in Sources */,
 				1A0000010000000000000070 /* WorkspaceEntryPathCopyTests.swift in Sources */,
-				1A0000010000000000000088 /* WorkspaceEntryPreviewActionTests.swift in Sources */,
 				1A00000100000000000000A6 /* WorkspaceDocumentSurfaceSupportTests.swift in Sources */,
 				1A00000100000000000000AE /* WorkspaceHomeVisibilityTests.swift in Sources */,
 				1A000001000000000000006A /* WorkspaceNavigationTests.swift in Sources */,
