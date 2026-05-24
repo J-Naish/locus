@@ -9,7 +9,7 @@ Must support:
 - open a local folder as a working location
 - browse files and folders
 - move backward and forward through the current session's folder navigation
-  history with `Command-[` and `Command-]`
+  history
 - show the current location as a name-first file and folder list; Type, Size,
   and Modified columns are intentionally not part of the default browser
 - keep default folder listing lightweight; size and modified-time metadata
@@ -23,8 +23,6 @@ Must support:
 Should support:
 
 - restore state per location
-- visible Back and Forward toolbar affordances once the main browsing surface
-  is stable
 - reflect external changes clearly
 - delay expensive loading and thumbnails
 - expose basic metadata contextually when it helps a concrete task, without

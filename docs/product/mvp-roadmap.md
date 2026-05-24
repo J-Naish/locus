@@ -2,7 +2,11 @@
 
 ## Phase 1: macOS MVP
 
-The first release should prove the core product loop: open a local place, move through files and folders with Finder-like clarity, find files faster than Finder, preview the right item, and lightly edit common document and AI-adjacent text files.
+The first prototype should prove the core product loop: open a local place,
+move through files and folders with Finder-like clarity, find files faster than
+Finder, preview the right item, and lightly edit common document and
+AI-adjacent text files. Scope should stay focused on those prototype flows
+instead of broad polish work.
 
 ### Phase 1A: Native Shell and Folder Navigation
 
@@ -29,7 +33,6 @@ Search is part of the MVP product identity, not only a later optimization pass. 
 - search across the current location, favorite folders, recent folders, and recent files
 - search results that remain understandable to Finder users
 - clear result grouping by file, folder, favorite, and recent item where useful
-- keyboard and pointer flows that both feel natural
 - predictable open, show-in-Locus, preview, and copy-path actions from search results
 - basic ranking that favors exact name matches, recent items, favorites, and current location matches
 - no launcher-only UI as the primary search experience

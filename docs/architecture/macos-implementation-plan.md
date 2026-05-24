@@ -156,9 +156,7 @@ Deliverables:
   metadata values lazy for future contextual surfaces, and avoid making the
   primary list feel like a developer or spreadsheet view.
 - Add in-app "show containing folder and select item" behavior for files reached from recents, favorites, and search results.
-- Add session-scoped folder Back/Forward navigation with `Command-[` and
-  `Command-]`; shortcut handling should not override active text inputs such as
-  Markdown editing, workspace search, or PDF search.
+- Add session-scoped folder Back/Forward navigation.
 - Keep file location actions inside Locus: open, preview, show containing folder, select item, and copy path.
 
 Acceptance:
@@ -199,8 +197,6 @@ Deliverables:
   viewer with page navigation, zoom controls, and debounced case-insensitive
   text search with match navigation; text selection polish, highlights, and
   comments follow as separate PDF review slices.
-  `Command-F` targets PDF search while a PDF is selected; browser search keeps
-  the same shortcut for non-PDF selections.
 - Image preview.
 - Video/audio playback using AVKit. The first vertical slice uses in-app,
   manually started playback with native controls; richer audio metadata and
@@ -217,25 +213,18 @@ Acceptance:
 - Office files are previewable inside Locus where macOS supports them.
 - Unsupported files still support show in Locus and copy path, with richer in-app preview/edit support added by file type.
 
-### 5. Search and Command Palette
+### 5. Search
 
 Deliverables:
 
 - Add file-name search within the current location.
 - Add recent-item search.
-- Add `Command-K` command palette for common actions:
-  - open recent file
-  - open recent folder
-  - search files by name
-  - create Markdown document
-  - show containing folder in Locus
-  - copy path
 
 Acceptance:
 
 - Search returns fast first results without full startup indexing.
-- Command palette is useful but does not become a developer command surface.
-- Search and command flows keep users in Locus by default when the task is finding, selecting, or previewing a local item.
+- Search flows keep users in Locus by default when the task is finding,
+  selecting, or previewing a local item.
 
 ### 6. File Change Detection and Review
 
@@ -256,8 +245,8 @@ Acceptance:
 Deliverables:
 
 - Add app icon placeholder or final asset.
-- Add menus, keyboard shortcuts, toolbar polish, and empty/error states.
-- Add basic accessibility labels and keyboard navigation pass.
+- Add empty/error states where missing from the core prototype flows.
+- Add basic accessibility labels for primary prototype flows.
 - Add release-oriented build script once the app target is stable.
 - Add packaging/signing notes; defer distribution automation until needed.
 

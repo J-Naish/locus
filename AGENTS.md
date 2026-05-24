@@ -2,6 +2,11 @@
 
 This file gives coding agents the shared working rules for the whole Locus repository.
 
+Locus is currently in prototype development. Prioritize the core prototype
+flows: local folder browsing, search, in-app preview, lightweight editing, and
+external change review. Do not add convenience-only shortcuts, command palettes,
+toolbar polish, or broad secondary affordances unless explicitly requested.
+
 Directory-specific rules live closer to the code they govern:
 
 - `core/AGENTS.md` for Rust core, FFI, Cargo, and core test rules.

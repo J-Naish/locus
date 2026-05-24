@@ -38,18 +38,17 @@ The primary model is:
 - the current location should always be clear
 - users should be able to jump to an item's containing folder inside Locus and keep the item selected
 - users should be able to move backward and forward through the current
-  session's folder navigation history with `Command-[` and `Command-]`; this
-  history is intentionally session-scoped and is not persisted across app
-  restarts
+  session's folder navigation history; this history is intentionally
+  session-scoped and is not persisted across app restarts
 - users should be able to preview and edit supported files without leaving Locus
 
 Locus should feel familiar to Finder users, but search should be a first-class way to move through files and folders. The goal is not to copy a launcher UI. Users should be able to keep the mental model of folders, locations, recents, and favorites while getting fast, forgiving search across the places they care about.
 
 The current-location file browser should stay name-first, closer to a compact editor sidebar than to Finder's multi-column list. File and folder names are the primary information scent; Type, Size, and Modified metadata should not be shown as default columns. Surface metadata later only where it supports a specific decision, such as document details, search refinement, or inspection.
 
-Back and Forward controls may become visible toolbar affordances later, but the
-first slice keeps them keyboard-only to avoid expanding the toolbar before the
-core browsing, preview, and editing flows settle.
+For the prototype, prioritize visible primary flows: browsing, search,
+preview, and lightweight editing. Do not expand scope around secondary controls
+until those flows are stable.
 
 Recommended top-level areas:
 
@@ -60,21 +59,6 @@ Recommended top-level areas:
 - Tags
 
 Use plain user-facing language such as "folder", "location", "recent items", and "favorites". Internal concepts such as workspace can exist, but they should not dominate the UI language.
-
-## Command Palette
-
-The command palette should provide a fast keyboard-first path to common actions.
-
-Initial commands:
-
-- open a recent file
-- open a recent folder
-- search files by name
-- create a Markdown document
-- show containing folder in Locus
-- copy path
-
-The default shortcut should be `Command-K`.
 
 ## Language and Localization
 
