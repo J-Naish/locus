@@ -26,6 +26,27 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rust-format-lint.sh",
+            "args": [],
+            "timeout": 300,
+            "statusMessage": "Running Rust format and lint"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/swift-format-lint.sh",
+            "args": [],
+            "timeout": 300,
+            "statusMessage": "Running Swift format and lint"
+          }
+        ]
+      }
     ]
   }
 }

@@ -11,6 +11,25 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$(git rev-parse --show-toplevel)/.codex/hooks/rust-format-lint.sh\"",
+            "timeout": 300,
+            "statusMessage": "Running Rust format and lint"
+          },
+          {
+            "type": "command",
+            "command": "\"$(git rev-parse --show-toplevel)/.codex/hooks/swift-format-lint.sh\"",
+            "timeout": 300,
+            "statusMessage": "Running Swift format and lint"
+          }
+        ]
+      }
     ]
   }
 }
