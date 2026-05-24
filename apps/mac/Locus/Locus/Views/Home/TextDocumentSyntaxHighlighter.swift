@@ -2,219 +2,225 @@ import AppKit
 import Foundation
 
 enum TextDocumentSyntax: Equatable {
-    case markdown
-    case structuredText
-    case code
-    case plainText
+  case markdown
+  case structuredText
+  case code
+  case plainText
 
-    var font: NSFont {
-        switch self {
-        case .markdown, .plainText:
-            return .systemFont(ofSize: 14)
-        case .structuredText, .code:
-            return .monospacedSystemFont(ofSize: 13, weight: .regular)
-        }
+  var font: NSFont {
+    switch self {
+    case .markdown, .plainText:
+      return .systemFont(ofSize: 14)
+    case .structuredText, .code:
+      return .monospacedSystemFont(ofSize: 13, weight: .regular)
     }
+  }
 }
 
 enum TextDocumentSyntaxHighlighter {
-    // Full-document highlighting is intentionally disabled above this size.
-    // Large files remain editable with base text styling instead of doing broad
-    // regex work on the main thread.
-    static let maximumHighlightedUTF16Length = 200_000
+  // Full-document highlighting is intentionally disabled above this size.
+  // Large files remain editable with base text styling instead of doing broad
+  // regex work on the main thread.
+  static let maximumHighlightedUTF16Length = 200_000
 
-    static func apply(
-        to textStorage: NSTextStorage?,
-        text: String,
-        syntax: TextDocumentSyntax,
-        font: NSFont
-    ) {
-        guard let textStorage else {
-            return
-        }
-
-        let fullRange = NSRange(location: 0, length: (text as NSString).length)
-        apply(to: textStorage, text: text, syntax: syntax, font: font, range: fullRange)
+  static func apply(
+    to textStorage: NSTextStorage?,
+    text: String,
+    syntax: TextDocumentSyntax,
+    font: NSFont
+  ) {
+    guard let textStorage else {
+      return
     }
 
-    static func apply(
-        to textStorage: NSTextStorage,
-        text: String,
-        syntax: TextDocumentSyntax,
-        font: NSFont,
-        range: NSRange
-    ) {
-        let textLength = (text as NSString).length
-        let highlightedRange = range.clamped(toTextLength: textLength)
-        guard highlightedRange.length > 0 else {
-            return
-        }
+    let fullRange = NSRange(location: 0, length: (text as NSString).length)
+    apply(to: textStorage, text: text, syntax: syntax, font: font, range: fullRange)
+  }
 
-        textStorage.beginEditing()
-        defer {
-            textStorage.endEditing()
-        }
-        textStorage.setAttributes(baseAttributes(font: font), range: highlightedRange)
-        guard textLength <= maximumHighlightedUTF16Length else {
-            return
-        }
-
-        switch syntax {
-        case .markdown:
-            highlightMarkdown(text, in: textStorage, range: highlightedRange)
-        case .structuredText:
-            highlightStructuredText(text, in: textStorage, range: highlightedRange)
-        case .code:
-            highlightCode(text, in: textStorage, range: highlightedRange)
-        case .plainText:
-            break
-        }
+  static func apply(
+    to textStorage: NSTextStorage,
+    text: String,
+    syntax: TextDocumentSyntax,
+    font: NSFont,
+    range: NSRange
+  ) {
+    let textLength = (text as NSString).length
+    let highlightedRange = range.clamped(toTextLength: textLength)
+    guard highlightedRange.length > 0 else {
+      return
     }
 
-    static func highlightedParagraphRange(for editedRange: NSRange, in text: String) -> NSRange {
-        let nsText = text as NSString
-        let textLength = nsText.length
-        let clampedRange = editedRange.clamped(toTextLength: textLength)
-        return nsText.paragraphRange(for: clampedRange)
+    textStorage.beginEditing()
+    defer {
+      textStorage.endEditing()
+    }
+    textStorage.setAttributes(baseAttributes(font: font), range: highlightedRange)
+    guard textLength <= maximumHighlightedUTF16Length else {
+      return
     }
 
-    private static func baseAttributes(font: NSFont) -> [NSAttributedString.Key: Any] {
-        [
-            .font: font,
-            .foregroundColor: NSColor.labelColor
-        ]
+    switch syntax {
+    case .markdown:
+      highlightMarkdown(text, in: textStorage, range: highlightedRange)
+    case .structuredText:
+      highlightStructuredText(text, in: textStorage, range: highlightedRange)
+    case .code:
+      highlightCode(text, in: textStorage, range: highlightedRange)
+    case .plainText:
+      break
     }
+  }
 
-    private static func highlightMarkdown(_ text: String, in textStorage: NSTextStorage, range: NSRange) {
-        apply(rule: .markdownHeading, text: text, textStorage: textStorage, range: range)
-        apply(rule: .markdownInlineCode, text: text, textStorage: textStorage, range: range)
-        apply(rule: .markdownLink, text: text, textStorage: textStorage, range: range)
-        apply(rule: .markdownListMarker, text: text, textStorage: textStorage, range: range)
-    }
+  static func highlightedParagraphRange(for editedRange: NSRange, in text: String) -> NSRange {
+    let nsText = text as NSString
+    let textLength = nsText.length
+    let clampedRange = editedRange.clamped(toTextLength: textLength)
+    return nsText.paragraphRange(for: clampedRange)
+  }
 
-    private static func highlightStructuredText(_ text: String, in textStorage: NSTextStorage, range: NSRange) {
-        apply(rule: .structuredKey, text: text, textStorage: textStorage, range: range)
-        apply(rule: .structuredString, text: text, textStorage: textStorage, range: range)
-        apply(rule: .structuredNumber, text: text, textStorage: textStorage, range: range)
-        apply(rule: .structuredBoolean, text: text, textStorage: textStorage, range: range)
-    }
+  private static func baseAttributes(font: NSFont) -> [NSAttributedString.Key: Any] {
+    [
+      .font: font,
+      .foregroundColor: NSColor.labelColor,
+    ]
+  }
 
-    private static func highlightCode(_ text: String, in textStorage: NSTextStorage, range: NSRange) {
-        apply(rule: .codeComment, text: text, textStorage: textStorage, range: range)
-        apply(rule: .codeString, text: text, textStorage: textStorage, range: range)
-        apply(rule: .codeKeyword, text: text, textStorage: textStorage, range: range)
-    }
+  private static func highlightMarkdown(
+    _ text: String, in textStorage: NSTextStorage, range: NSRange
+  ) {
+    apply(rule: .markdownHeading, text: text, textStorage: textStorage, range: range)
+    apply(rule: .markdownInlineCode, text: text, textStorage: textStorage, range: range)
+    apply(rule: .markdownLink, text: text, textStorage: textStorage, range: range)
+    apply(rule: .markdownListMarker, text: text, textStorage: textStorage, range: range)
+  }
 
-    private static func apply(
-        rule: TextHighlightRule,
-        text: String,
-        textStorage: NSTextStorage,
-        range: NSRange
-    ) {
-        for match in rule.expression.matches(in: text, range: range) {
-            textStorage.addAttributes(rule.attributes, range: match.range)
-        }
+  private static func highlightStructuredText(
+    _ text: String, in textStorage: NSTextStorage, range: NSRange
+  ) {
+    apply(rule: .structuredKey, text: text, textStorage: textStorage, range: range)
+    apply(rule: .structuredString, text: text, textStorage: textStorage, range: range)
+    apply(rule: .structuredNumber, text: text, textStorage: textStorage, range: range)
+    apply(rule: .structuredBoolean, text: text, textStorage: textStorage, range: range)
+  }
+
+  private static func highlightCode(_ text: String, in textStorage: NSTextStorage, range: NSRange) {
+    apply(rule: .codeComment, text: text, textStorage: textStorage, range: range)
+    apply(rule: .codeString, text: text, textStorage: textStorage, range: range)
+    apply(rule: .codeKeyword, text: text, textStorage: textStorage, range: range)
+  }
+
+  private static func apply(
+    rule: TextHighlightRule,
+    text: String,
+    textStorage: NSTextStorage,
+    range: NSRange
+  ) {
+    for match in rule.expression.matches(in: text, range: range) {
+      textStorage.addAttributes(rule.attributes, range: match.range)
     }
+  }
 }
 
 private enum TextHighlightRule {
-    case markdownHeading
-    case markdownInlineCode
-    case markdownLink
-    case markdownListMarker
-    case structuredKey
-    case structuredString
-    case structuredNumber
-    case structuredBoolean
-    case codeComment
-    case codeString
-    case codeKeyword
+  case markdownHeading
+  case markdownInlineCode
+  case markdownLink
+  case markdownListMarker
+  case structuredKey
+  case structuredString
+  case structuredNumber
+  case structuredBoolean
+  case codeComment
+  case codeString
+  case codeKeyword
 
-    var expression: NSRegularExpression {
-        switch self {
-        case .markdownHeading:
-            return Self.markdownHeadingExpression
-        case .markdownInlineCode:
-            return Self.markdownInlineCodeExpression
-        case .markdownLink:
-            return Self.markdownLinkExpression
-        case .markdownListMarker:
-            return Self.markdownListMarkerExpression
-        case .structuredKey:
-            return Self.structuredKeyExpression
-        case .structuredString:
-            return Self.structuredStringExpression
-        case .structuredNumber:
-            return Self.structuredNumberExpression
-        case .structuredBoolean:
-            return Self.structuredBooleanExpression
-        case .codeComment:
-            return Self.codeCommentExpression
-        case .codeString:
-            return Self.codeStringExpression
-        case .codeKeyword:
-            return Self.codeKeywordExpression
-        }
+  var expression: NSRegularExpression {
+    switch self {
+    case .markdownHeading:
+      return Self.markdownHeadingExpression
+    case .markdownInlineCode:
+      return Self.markdownInlineCodeExpression
+    case .markdownLink:
+      return Self.markdownLinkExpression
+    case .markdownListMarker:
+      return Self.markdownListMarkerExpression
+    case .structuredKey:
+      return Self.structuredKeyExpression
+    case .structuredString:
+      return Self.structuredStringExpression
+    case .structuredNumber:
+      return Self.structuredNumberExpression
+    case .structuredBoolean:
+      return Self.structuredBooleanExpression
+    case .codeComment:
+      return Self.codeCommentExpression
+    case .codeString:
+      return Self.codeStringExpression
+    case .codeKeyword:
+      return Self.codeKeywordExpression
+    }
+  }
+
+  var attributes: [NSAttributedString.Key: Any] {
+    switch self {
+    case .markdownHeading:
+      return [
+        .foregroundColor: NSColor.controlAccentColor,
+        .font: NSFont.systemFont(ofSize: 15, weight: .semibold),
+      ]
+    case .markdownInlineCode:
+      return [
+        .foregroundColor: NSColor.systemPurple,
+        .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+      ]
+    case .markdownLink:
+      return [.foregroundColor: NSColor.linkColor]
+    case .markdownListMarker, .codeComment:
+      return [.foregroundColor: NSColor.secondaryLabelColor]
+    case .structuredKey, .codeKeyword:
+      return [
+        .foregroundColor: NSColor.controlAccentColor,
+        .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .semibold),
+      ]
+    case .structuredString, .codeString:
+      return [.foregroundColor: NSColor.systemGreen]
+    case .structuredNumber:
+      return [.foregroundColor: NSColor.systemPurple]
+    case .structuredBoolean:
+      return [.foregroundColor: NSColor.systemOrange]
+    }
+  }
+
+  private static let markdownHeadingExpression = regex(#"(?m)^#{1,6}\s.+$"#)
+  private static let markdownInlineCodeExpression = regex(#"`[^`\n]+`"#)
+  private static let markdownLinkExpression = regex(#"\[[^\]\n]+\]\([^\)\n]+\)"#)
+  private static let markdownListMarkerExpression = regex(#"(?m)^\s*[-*+]\s+"#)
+  private static let structuredKeyExpression = regex(#"(?m)^\s*["A-Za-z0-9_.-]+(?=\s*[:=])"#)
+  private static let structuredStringExpression = regex(#""(?:\\.|[^"\\])*""#)
+  private static let structuredNumberExpression = regex(#"(?<![\w.-])-?\b\d+(?:\.\d+)?\b"#)
+  private static let structuredBooleanExpression = regex(#"\b(true|false|null)\b"#)
+  private static let codeCommentExpression = regex(#"(?m)(?<![\w:])//.*$|#.*$"#)
+  private static let codeStringExpression = regex(#""(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'"#)
+  private static let codeKeywordExpression = regex(
+    #"\b(func|let|var|if|else|for|while|return|struct|class|enum|import|case|switch|public|private|async|await|throws)\b"#
+  )
+
+  private static func regex(_ pattern: String) -> NSRegularExpression {
+    guard let expression = try? NSRegularExpression(pattern: pattern) else {
+      preconditionFailure("Invalid syntax highlight pattern: \(pattern)")
     }
 
-    var attributes: [NSAttributedString.Key: Any] {
-        switch self {
-        case .markdownHeading:
-            return [
-                .foregroundColor: NSColor.controlAccentColor,
-                .font: NSFont.systemFont(ofSize: 15, weight: .semibold)
-            ]
-        case .markdownInlineCode:
-            return [
-                .foregroundColor: NSColor.systemPurple,
-                .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-            ]
-        case .markdownLink:
-            return [.foregroundColor: NSColor.linkColor]
-        case .markdownListMarker, .codeComment:
-            return [.foregroundColor: NSColor.secondaryLabelColor]
-        case .structuredKey, .codeKeyword:
-            return [
-                .foregroundColor: NSColor.controlAccentColor,
-                .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .semibold)
-            ]
-        case .structuredString, .codeString:
-            return [.foregroundColor: NSColor.systemGreen]
-        case .structuredNumber:
-            return [.foregroundColor: NSColor.systemPurple]
-        case .structuredBoolean:
-            return [.foregroundColor: NSColor.systemOrange]
-        }
-    }
-
-    private static let markdownHeadingExpression = regex(#"(?m)^#{1,6}\s.+$"#)
-    private static let markdownInlineCodeExpression = regex(#"`[^`\n]+`"#)
-    private static let markdownLinkExpression = regex(#"\[[^\]\n]+\]\([^\)\n]+\)"#)
-    private static let markdownListMarkerExpression = regex(#"(?m)^\s*[-*+]\s+"#)
-    private static let structuredKeyExpression = regex(#"(?m)^\s*["A-Za-z0-9_.-]+(?=\s*[:=])"#)
-    private static let structuredStringExpression = regex(#""(?:\\.|[^"\\])*""#)
-    private static let structuredNumberExpression = regex(#"(?<![\w.-])-?\b\d+(?:\.\d+)?\b"#)
-    private static let structuredBooleanExpression = regex(#"\b(true|false|null)\b"#)
-    private static let codeCommentExpression = regex(#"(?m)(?<![\w:])//.*$|#.*$"#)
-    private static let codeStringExpression = regex(#""(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'"#)
-    private static let codeKeywordExpression = regex(#"\b(func|let|var|if|else|for|while|return|struct|class|enum|import|case|switch|public|private|async|await|throws)\b"#)
-
-    private static func regex(_ pattern: String) -> NSRegularExpression {
-        guard let expression = try? NSRegularExpression(pattern: pattern) else {
-            preconditionFailure("Invalid syntax highlight pattern: \(pattern)")
-        }
-
-        return expression
-    }
+    return expression
+  }
 }
 
-private extension NSRange {
-    func clamped(toTextLength textLength: Int) -> NSRange {
-        guard location <= textLength else {
-            return NSRange(location: textLength, length: 0)
-        }
-
-        let maximumLength = Swift.max(0, textLength - location)
-        return NSRange(location: location, length: Swift.min(length, maximumLength))
+extension NSRange {
+  fileprivate func clamped(toTextLength textLength: Int) -> NSRange {
+    guard location <= textLength else {
+      return NSRange(location: textLength, length: 0)
     }
+
+    let maximumLength = Swift.max(0, textLength - location)
+    return NSRange(location: location, length: Swift.min(length, maximumLength))
+  }
 }

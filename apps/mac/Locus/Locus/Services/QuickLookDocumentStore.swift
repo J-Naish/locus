@@ -1,66 +1,66 @@
 import Foundation
 
 struct QuickLookDocument: @unchecked Sendable {
-    let url: URL
-    private let securityScopedAccess: SecurityScopedQuickLookAccess?
+  let url: URL
+  private let securityScopedAccess: SecurityScopedQuickLookAccess?
 
-    init(url: URL, securityScopedAccess: SecurityScopedQuickLookAccess?) {
-        self.url = url
-        self.securityScopedAccess = securityScopedAccess
-    }
+  init(url: URL, securityScopedAccess: SecurityScopedQuickLookAccess?) {
+    self.url = url
+    self.securityScopedAccess = securityScopedAccess
+  }
 }
 
 protocol QuickLookDocumentStoring: Sendable {
-    func loadQuickLookDocument(at url: URL) async throws -> QuickLookDocument
+  func loadQuickLookDocument(at url: URL) async throws -> QuickLookDocument
 }
 
 struct QuickLookDocumentStore: QuickLookDocumentStoring {
-    func loadQuickLookDocument(at url: URL) async throws -> QuickLookDocument {
-        let task = Task.detached(priority: .userInitiated) {
-            let access = SecurityScopedQuickLookAccess(url: url)
+  func loadQuickLookDocument(at url: URL) async throws -> QuickLookDocument {
+    let task = Task.detached(priority: .userInitiated) {
+      let access = SecurityScopedQuickLookAccess(url: url)
 
-            try Task.checkCancellation()
+      try Task.checkCancellation()
 
-            guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else {
-                throw QuickLookDocumentStoreError.cannotOpen
-            }
+      guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else {
+        throw QuickLookDocumentStoreError.cannotOpen
+      }
 
-            try Task.checkCancellation()
+      try Task.checkCancellation()
 
-            return QuickLookDocument(
-                url: url,
-                securityScopedAccess: access.didStartAccess ? access : nil
-            )
-        }
-
-        return try await withTaskCancellationHandler {
-            try await task.value
-        } onCancel: {
-            task.cancel()
-        }
+      return QuickLookDocument(
+        url: url,
+        securityScopedAccess: access.didStartAccess ? access : nil
+      )
     }
+
+    return try await withTaskCancellationHandler {
+      try await task.value
+    } onCancel: {
+      task.cancel()
+    }
+  }
 }
 
 enum QuickLookDocumentStoreError: LocalizedError, Equatable {
-    case cannotOpen
+  case cannotOpen
 
-    var errorDescription: String? {
-        "This file could not be opened for preview."
-    }
+  var errorDescription: String? {
+    "This file could not be opened for preview."
+  }
 }
 
 final class SecurityScopedQuickLookAccess: @unchecked Sendable {
-    let didStartAccess: Bool
-    private let url: URL
+  let didStartAccess: Bool
+  private let url: URL
 
-    init(url: URL) {
-        self.url = url
-        self.didStartAccess = url.startAccessingSecurityScopedResource()
-    }
+  init(url: URL) {
+    self.url = url
+    self.didStartAccess = url.startAccessingSecurityScopedResource()
+  }
 
-    deinit {
-        if didStartAccess {
-            url.stopAccessingSecurityScopedResource()
-        }
+  deinit {
+    if didStartAccess {
+      url.stopAccessingSecurityScopedResource()
     }
+  }
 }

@@ -97,7 +97,7 @@ fi
 if [[ -n "$swiftlint_bin" ]]; then
   cd "$mac_dir"
   for swift_file in "${swift_files[@]}"; do
-    if ! "$swiftlint_bin" lint --strict --quiet --path "$swift_file" >>"$swiftlint_output" 2>&1; then
+    if ! "$swiftlint_bin" lint --strict --quiet "$swift_file" >>"$swiftlint_output" 2>&1; then
       {
         printf 'SwiftLint failed.\n\n'
         cat "$swiftlint_output"
