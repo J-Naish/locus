@@ -46,6 +46,11 @@ Locus should feel familiar to Finder users, but search should be a first-class w
 
 The current-location file browser should stay name-first, closer to a compact editor sidebar than to Finder's multi-column list. File and folder names are the primary information scent; Type, Size, and Modified metadata should not be shown as default columns. Surface metadata later only where it supports a specific decision, such as document details, search refinement, or inspection.
 
+The main window should open large enough for the file list and document surface
+to sit side by side comfortably, but the minimum size should stay smaller than
+that default so users can place Locus next to Finder, Preview, a browser, or an
+AI agent app.
+
 For the prototype, prioritize visible primary flows: browsing, search,
 preview, and lightweight editing. Do not expand scope around secondary controls
 until those flows are stable.

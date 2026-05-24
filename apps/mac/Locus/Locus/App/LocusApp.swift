@@ -1,5 +1,16 @@
 import SwiftUI
 
+enum LocusWindowMetrics {
+  // Default to a comfortable two-pane workspace without making that size mandatory.
+  static let defaultWidth: CGFloat = 1180
+  static let defaultHeight: CGFloat = 760
+
+  // Keep the minimum near the actual split-view layout floor so users can still
+  // place Locus beside Finder, Preview, or a browser on smaller displays.
+  static let minimumWidth: CGFloat = 900
+  static let minimumHeight: CGFloat = 600
+}
+
 struct WorkspaceNavigationCommands {
   let canGoBack: Bool
   let canGoForward: Bool
@@ -52,6 +63,10 @@ struct LocusApp: App {
       )
     }
     .windowResizability(.contentMinSize)
+    .defaultSize(
+      width: LocusWindowMetrics.defaultWidth,
+      height: LocusWindowMetrics.defaultHeight
+    )
     .commands {
       WorkspaceNavigationCommandMenu()
     }

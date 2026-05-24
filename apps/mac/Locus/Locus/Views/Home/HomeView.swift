@@ -130,7 +130,10 @@ struct HomeView: View {
       )
     }
     .padding(28)
-    .frame(minWidth: 820, minHeight: 520)
+    .frame(
+      minWidth: LocusWindowMetrics.minimumWidth,
+      minHeight: LocusWindowMetrics.minimumHeight
+    )
     .task {
       refreshFileLocationShortcuts()
       loadInitialFolderIfNeeded()
