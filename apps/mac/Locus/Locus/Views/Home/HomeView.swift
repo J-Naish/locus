@@ -137,7 +137,6 @@ struct HomeView: View {
       minWidth: LocusWindowMetrics.minimumWidth,
       minHeight: LocusWindowMetrics.minimumHeight
     )
-    .navigationTitle(workspaceWindowTitle)
     .task {
       refreshFileLocationShortcuts()
       loadInitialFolderIfNeeded()
@@ -246,15 +245,6 @@ struct HomeView: View {
         message: InitialFolderFailure.homeUnavailableMessage
       )
     }
-  }
-
-  private var workspaceWindowTitle: String {
-    guard let folderURL = workspaceState.folderURL else {
-      return "Locus"
-    }
-
-    let folderName = folderURL.lastPathComponent
-    return folderName.isEmpty ? "Locus" : folderName
   }
 
   /// `request.selectedURL` is matched against loaded entries by standardized
@@ -849,6 +839,7 @@ private struct WorkspaceBrowserView: View {
       } else {
         HSplitView {
           WorkspaceEntriesList(
+            folderURL: folderURL,
             entries: searchResults.visibleEntries,
             selectedEntryID: $selectedEntryID,
             isPreviewShortcutEnabled: !isDocumentTextInputFocused,
@@ -1041,60 +1032,81 @@ private struct WorkspaceShortcutSearchResultsView: View {
     .accessibilityIdentifier("workspace-shortcut-search-results")
   }
 }
+
 private struct WorkspaceEntriesList: View {
+  let folderURL: URL
   let entries: [WorkspaceEntry]
   @Binding var selectedEntryID: WorkspaceEntry.ID?
   let isPreviewShortcutEnabled: Bool
   let actions: WorkspaceActions
 
   var body: some View {
-    List(entries, selection: $selectedEntryID) { entry in
-      Label {
-        Text(entry.name)
-          .lineLimit(1)
-          .truncationMode(.middle)
-      } icon: {
-        Image(systemName: entry.symbolName)
-          .foregroundStyle(entry.symbolColor)
+    VStack(alignment: .leading, spacing: 0) {
+      Text(displayName)
+        .font(.caption)
+        .fontWeight(.semibold)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .truncationMode(.middle)
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 6)
+        .help(Text(verbatim: displayName))
+
+      List(entries, selection: $selectedEntryID) { entry in
+        Label {
+          Text(entry.name)
+            .lineLimit(1)
+            .truncationMode(.middle)
+        } icon: {
+          Image(systemName: entry.symbolName)
+            .foregroundStyle(entry.symbolColor)
+        }
+        .help(Text(verbatim: entry.name))
       }
-      .help(Text(verbatim: entry.name))
+      .listStyle(.sidebar)
+      .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
+        let selectedEntries = entries(for: selection)
+        let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
+        let previewURLs = WorkspaceEntryPreviewActionResolver.previewURLs(for: selectedEntries)
+        let showInLocusEntry = selectedEntries.count == 1 ? selectedEntries.first : nil
+
+        Button("Open") {
+          if let openAction {
+            actions.performOpenAction(openAction)
+          }
+        }
+        .disabled(openAction == nil)
+
+        Button("Preview") {
+          if let previewURLs {
+            actions.preview(previewURLs)
+          }
+        }
+        .disabled(previewURLs == nil)
+
+        Button("Show in Locus") {
+          if let showInLocusEntry {
+            actions.showInLocus(showInLocusEntry)
+          }
+        }
+        .disabled(showInLocusEntry == nil)
+
+        Button(WorkspaceEntryPathCopy.menuTitle(for: selectedEntries)) {
+          actions.copyPaths(selectedEntries)
+        }
+        .disabled(selectedEntries.isEmpty)
+      } primaryAction: { selection in
+        performPrimaryAction(for: selection)
+      }
+      .background(previewKeyMonitor)
     }
-    .listStyle(.sidebar)
-    .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
-      let selectedEntries = entries(for: selection)
-      let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
-      let previewURLs = WorkspaceEntryPreviewActionResolver.previewURLs(for: selectedEntries)
-      let showInLocusEntry = selectedEntries.count == 1 ? selectedEntries.first : nil
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
 
-      Button("Open") {
-        if let openAction {
-          actions.performOpenAction(openAction)
-        }
-      }
-      .disabled(openAction == nil)
-
-      Button("Preview") {
-        if let previewURLs {
-          actions.preview(previewURLs)
-        }
-      }
-      .disabled(previewURLs == nil)
-
-      Button("Show in Locus") {
-        if let showInLocusEntry {
-          actions.showInLocus(showInLocusEntry)
-        }
-      }
-      .disabled(showInLocusEntry == nil)
-
-      Button(WorkspaceEntryPathCopy.menuTitle(for: selectedEntries)) {
-        actions.copyPaths(selectedEntries)
-      }
-      .disabled(selectedEntries.isEmpty)
-    } primaryAction: { selection in
-      performPrimaryAction(for: selection)
-    }
-    .background(previewKeyMonitor)
+  private var displayName: String {
+    let folderName = folderURL.lastPathComponent
+    return folderName.isEmpty ? "Workspace" : folderName
   }
 
   private func performPrimaryAction(for selection: Set<WorkspaceEntry.ID>) {

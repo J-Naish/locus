@@ -67,6 +67,7 @@ struct LocusApp: App {
         homeDirectoryURL: Self.homeDirectoryURL
       )
     }
+    .windowToolbarStyle(.unified(showsTitle: false))
     .windowResizability(.contentMinSize)
     .defaultSize(
       width: LocusWindowMetrics.defaultWidth,
