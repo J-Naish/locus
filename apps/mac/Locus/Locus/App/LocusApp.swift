@@ -57,6 +57,17 @@ private struct WorkspaceNavigationCommandMenu: Commands {
   }
 }
 
+private struct DocumentSaveCommandMenu: Commands {
+  var body: some Commands {
+    CommandGroup(replacing: .saveItem) {
+      Button("Save") {
+        NotificationCenter.default.post(name: .locusSaveDocumentCommand, object: nil)
+      }
+      .keyboardShortcut("s", modifiers: [.command])
+    }
+  }
+}
+
 @main
 struct LocusApp: App {
   var body: some Scene {
@@ -76,6 +87,7 @@ struct LocusApp: App {
       height: LocusWindowMetrics.defaultHeight
     )
     .commands {
+      DocumentSaveCommandMenu()
       WorkspaceNavigationCommandMenu()
     }
   }
@@ -208,4 +220,8 @@ struct LocusApp: App {
 
     return values
   }
+}
+
+extension Notification.Name {
+  static let locusSaveDocumentCommand = Notification.Name("com.nash.locus.saveDocument")
 }

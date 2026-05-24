@@ -580,12 +580,15 @@ final class WorkspaceSearchUITests: XCTestCase {
     app.typeKey("a", modifierFlags: [.command])
     app.typeKey("v", modifierFlags: [.command])
 
-    XCTAssertTrue(app.staticTexts["Unsaved"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertFalse(app.buttons["document-save-button"].exists, app.debugDescription)
+    XCTAssertFalse(app.buttons["Save"].exists, app.debugDescription)
+    XCTAssertTrue(waitForEditorContents(updatedText, in: app, timeout: 5), app.debugDescription)
 
-    let saveButton = app.buttons["document-save-button"]
-    XCTAssertTrue(saveButton.waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertTrue(saveButton.isEnabled, app.debugDescription)
-    saveButton.click()
+    app.menuBars.menuBarItems["File"].click()
+    let saveMenuItem = app.menuBars.menuItems["Save"]
+    XCTAssertTrue(saveMenuItem.waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(saveMenuItem.isEnabled, app.debugDescription)
+    saveMenuItem.click()
 
     XCTAssertTrue(waitForFileContents(updatedText, at: projectBriefURL), app.debugDescription)
   }
@@ -612,8 +615,6 @@ final class WorkspaceSearchUITests: XCTestCase {
     app.typeKey("a", modifierFlags: [.command])
     app.typeKey("v", modifierFlags: [.command])
 
-    XCTAssertTrue(app.staticTexts["Unsaved"].waitForExistence(timeout: 2), app.debugDescription)
-
     let notesRow = app.outlines.firstMatch.cells
       .containing(NSPredicate(format: "value == %@", "Notes.txt"))
       .firstMatch
@@ -623,8 +624,8 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertFalse(waitForFileContents(updatedText, at: projectBriefURL, timeout: 0.5))
 
     projectBriefRow.click()
-    XCTAssertTrue(app.staticTexts["Unsaved"].waitForExistence(timeout: 2), app.debugDescription)
-    app.buttons["document-save-button"].click()
+    XCTAssertTrue(waitForEditorContents(updatedText, in: app, timeout: 5), app.debugDescription)
+    app.typeKey("s", modifierFlags: [.command])
 
     XCTAssertTrue(waitForFileContents(updatedText, at: projectBriefURL), app.debugDescription)
   }
@@ -652,9 +653,8 @@ final class WorkspaceSearchUITests: XCTestCase {
       app.debugDescription
     )
 
-    let saveButton = app.buttons["document-save-button"]
-    XCTAssertTrue(saveButton.waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertFalse(saveButton.isEnabled, app.debugDescription)
+    XCTAssertFalse(app.buttons["document-save-button"].exists, app.debugDescription)
+    XCTAssertFalse(app.buttons["Save"].exists, app.debugDescription)
   }
 
   @MainActor
@@ -686,7 +686,7 @@ final class WorkspaceSearchUITests: XCTestCase {
       waitForEditorContents(externalText, in: app, timeout: 5),
       app.debugDescription
     )
-    XCTAssertFalse(app.staticTexts["Unsaved"].exists, app.debugDescription)
+    XCTAssertFalse(app.buttons["document-save-button"].exists, app.debugDescription)
   }
 
   @MainActor

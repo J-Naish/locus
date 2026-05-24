@@ -90,6 +90,9 @@ struct WorkspaceDocumentSurface: View {
     .onChange(of: isEditorFocused) {
       onTextInputFocusChange(isEditorFocused)
     }
+    .onReceive(NotificationCenter.default.publisher(for: .locusSaveDocumentCommand)) { _ in
+      saveSelectedDocument()
+    }
     .onDisappear {
       documentChangeMonitor.stopMonitoring()
       onTextInputFocusChange(false)
@@ -98,14 +101,6 @@ struct WorkspaceDocumentSurface: View {
 
   private func editableDocumentSurface(for entry: WorkspaceEntry) -> some View {
     VStack(alignment: .leading, spacing: 12) {
-      DocumentHeaderView(
-        entry: entry,
-        isDirty: text != savedText,
-        isReadOnly: entry.isReadOnly,
-        isSaveDisabled: isSaveDisabled,
-        save: saveSelectedDocument
-      )
-
       if let saveErrorMessage {
         Label(saveErrorMessage, systemImage: "exclamationmark.triangle")
           .font(.caption)
@@ -306,6 +301,7 @@ struct WorkspaceDocumentSurface: View {
       )
     }
   }
+
 }
 
 private extension WorkspaceDocumentSurface {
@@ -380,69 +376,6 @@ private struct TextDocumentDraft: Equatable {
   let encoding: String.Encoding
 }
 
-private struct DocumentHeaderView: View {
-  let entry: WorkspaceEntry
-  let isDirty: Bool
-  let isReadOnly: Bool
-  let isSaveDisabled: Bool
-  let save: () -> Void
-
-  var body: some View {
-    HStack(alignment: .firstTextBaseline, spacing: 10) {
-      VStack(alignment: .leading, spacing: 4) {
-        Text(entry.name)
-          .font(.headline)
-          .lineLimit(1)
-          .accessibilityIdentifier("document-title")
-
-        Text(WorkspaceFileTypeLabel.displayLabel(for: entry))
-          .font(.caption)
-          .foregroundStyle(.secondary)
-      }
-
-      Spacer()
-
-      if isReadOnly {
-        Text("Read-only")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-      } else if isDirty {
-        Text("Unsaved")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .accessibilityIdentifier("document-unsaved-indicator")
-      }
-
-      Button("Save", action: save)
-        .disabled(isSaveDisabled)
-        .keyboardShortcut("s", modifiers: [.command])
-        .accessibilityIdentifier("document-save-button")
-    }
-  }
-}
-
-private struct DocumentPreviewHeaderView: View {
-  let entry: WorkspaceEntry
-  let detail: String
-
-  var body: some View {
-    HStack(alignment: .firstTextBaseline, spacing: 10) {
-      VStack(alignment: .leading, spacing: 4) {
-        Text(entry.name)
-          .font(.headline)
-          .lineLimit(1)
-          .accessibilityIdentifier("document-title")
-
-        Text(detail)
-          .font(.caption)
-          .foregroundStyle(.secondary)
-      }
-
-      Spacer()
-    }
-  }
-}
-
 private struct EmptyDocumentSurface: View {
   var body: some View {
     ContentUnavailableView {
@@ -465,8 +398,6 @@ private struct ImageDocumentSurface: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
-      DocumentPreviewHeaderView(entry: entry, detail: "Image")
-
       switch loadState {
       case .loading:
         ProgressView()
@@ -544,8 +475,6 @@ private struct PDFDocumentSurface: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
-      DocumentPreviewHeaderView(entry: entry, detail: "PDF")
-
       switch loadState {
       case .loading:
         ProgressView()
@@ -1267,11 +1196,6 @@ private struct MediaDocumentSurface: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
-      DocumentPreviewHeaderView(
-        entry: entry,
-        detail: WorkspaceFileTypeLabel.displayLabel(for: entry)
-      )
-
       switch loadState {
       case .loading:
         ProgressView()
@@ -1387,11 +1311,6 @@ private struct QuickLookDocumentSurface: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
-      DocumentPreviewHeaderView(
-        entry: entry,
-        detail: WorkspaceFileTypeLabel.displayLabel(for: entry)
-      )
-
       switch loadState {
       case .loading:
         ProgressView()
