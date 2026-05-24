@@ -29,7 +29,12 @@ struct HomeView: View {
     static let delay: Duration = .milliseconds(150)
   }
 
-  @State private var workspaceState: WorkspaceState = .idle
+  private enum InitialFolderFailure {
+    static let homeUnavailableMessage =
+      "Locus couldn't open the home folder. Choose another folder to browse in Locus."
+  }
+
+  @State private var workspaceState: WorkspaceState
   @State private var selectedEntryID: WorkspaceEntry.ID?
   @State private var isFolderImporterPresented = false
   @State private var didStartInitialFolderLoad = false
@@ -85,6 +90,8 @@ struct HomeView: View {
     self.recentFolderStore = recentFolderStore
     self.initialFolderResolution = initialFolderResolution
     self.homeDirectoryURL = homeDirectoryURL
+    self._workspaceState = State(
+      initialValue: Self.initialWorkspaceState(for: initialFolderResolution))
   }
 
   var body: some View {
@@ -156,22 +163,17 @@ struct HomeView: View {
 
     didStartInitialFolderLoad = true
 
-    guard case .folder(let initialFolderURL) = initialFolderResolution else {
-      if initialFolderResolution == .unavailable {
-        workspaceState = .failed(
-          folderURL: nil,
-          message: "Locus couldn't open the home folder. Choose another folder to browse in Locus."
-        )
-      }
+    switch initialFolderResolution {
+    case .empty, .unavailable:
       return
+    case .folder(let initialFolderURL):
+      // Normal launch starts in the home folder, but this path must stay a
+      // non-recursive immediate-children listing. Do not add startup scans.
+      // Auto-opened home is also not a recent item; only explicit user
+      // folder choices should be recorded in Recents.
+      startWorkspaceLoad(
+        WorkspaceLoadRequest(folderURL: initialFolderURL, rootChange: .set(initialFolderURL)))
     }
-
-    // Normal launch starts in the home folder, but this path must stay a
-    // non-recursive immediate-children listing. Do not add startup scans.
-    // Auto-opened home is also not a recent item; only explicit user
-    // folder choices should be recorded in Recents.
-    startWorkspaceLoad(
-      WorkspaceLoadRequest(folderURL: initialFolderURL, rootChange: .set(initialFolderURL)))
   }
 
   @MainActor
@@ -230,6 +232,22 @@ struct HomeView: View {
     }
 
     return false
+  }
+
+  private static func initialWorkspaceState(
+    for initialFolderResolution: InitialFolderResolution
+  ) -> WorkspaceState {
+    switch initialFolderResolution {
+    case .empty:
+      return .idle
+    case .folder:
+      return .awaitingInitialLoad
+    case .unavailable:
+      return .failed(
+        folderURL: nil,
+        message: InitialFolderFailure.homeUnavailableMessage
+      )
+    }
   }
 
   /// `request.selectedURL` is matched against loaded entries by standardized
@@ -668,6 +686,9 @@ private struct WorkspaceContentView: View {
   var body: some View {
     Group {
       switch state {
+      case .awaitingInitialLoad:
+        Color.clear
+          .accessibilityIdentifier("workspace-awaiting-initial-load")
       case .idle:
         EmptyWorkspaceView(
           recentFiles: recentFiles,
@@ -1259,6 +1280,9 @@ private struct WorkspaceErrorView: View {
 }
 
 private enum WorkspaceState: Equatable, Sendable {
+  // Placeholder for the first automatic folder load. It intentionally draws no
+  // empty state while fast launches move directly to `.ready`.
+  case awaitingInitialLoad
   case idle
   case loading(folderURL: URL)
   case ready(folderURL: URL, snapshot: WorkspaceSnapshot, loadedAt: Date)
@@ -1270,7 +1294,7 @@ extension WorkspaceState {
     switch self {
     case .loading(let folderURL), .ready(let folderURL, _, _), .failed(let folderURL?, _):
       return folderURL
-    case .idle, .failed(nil, _):
+    case .awaitingInitialLoad, .idle, .failed(nil, _):
       return nil
     }
   }
