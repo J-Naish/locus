@@ -94,10 +94,9 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
 - generated folder listing: entries `1010`, avg `3.403 ms`, max `4.612 ms`
 - Rust FFI static library: `17683360 bytes`
 - macOS app bundle: `2556 KiB`
-- notes: Added PDF text search with input debounce, cancellable background
-  scanning, and match navigation. The smoke run covers bundle size and default
-  folder-listing budgets; PDF search latency should be profiled with a large
-  fixture during the PDF review polish pass.
+- notes: Historical entry from the earlier PDF text-search slice. The prototype
+  later removed custom PDF chrome; keep this measurement only as context for
+  the prior implementation.
 
 ## 2026-05-25T01:07:43+09:00 document-external-change-sync
 
@@ -114,3 +113,17 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
   refreshes and unrelated filesystem events avoid full document reads in the
   common no-change path. The folder-listing number is unrelated to document
   sync and appears to be local smoke-run variance; it remains below budget.
+
+## 2026-05-25T06:13:53+09:00 defer-custom-pdf-chrome
+
+- commit: pending
+- branch: `main`
+- dirty tree: `true`
+- status: `0`
+- generated folder listing: entries `1010`, avg `4.661 ms`, max `5.720 ms`
+- Rust FFI static library: `17683360 bytes`
+- macOS app bundle: `2196 KiB`
+- notes: Removed custom PDF page, zoom, and search chrome from the prototype
+  document surface and returned PDFs to a plain PDFKit preview. The app bundle
+  size dropped because the PDF controller/search UI and related UI-test fixture
+  helpers were removed.

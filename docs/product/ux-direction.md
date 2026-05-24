@@ -80,7 +80,7 @@ The broad editing layout may borrow from familiar editor patterns, but the user 
 
 Notion-like ease is a useful reference for readability and approachable document handling, but Locus should not adopt block-database complexity or hide files behind an app-specific content model. Detailed UI controls and secondary affordances can evolve later; the durable direction is a fast local file workspace with unusually strong search, preview, and lightweight editing.
 
-PDFs should focus on reading, searching, highlighting, comments, and lightweight review. Locus should not attempt full PDF content editing.
+PDFs should start as plain native previews in the prototype. Searching, highlighting, comments, and lightweight review controls can return once the PDF review flow is deliberately expanded. Locus should not attempt full PDF content editing.
 
 Office files should focus on recognition, in-app Quick Look preview, and search metadata rather than full editing.
 

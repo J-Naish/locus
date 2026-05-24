@@ -1,5 +1,4 @@
 import AppKit
-import CoreGraphics
 import XCTest
 
 final class WorkspaceSearchUITests: XCTestCase {
@@ -92,29 +91,25 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testCommandBracketDoesNotNavigateWhilePDFSearchIsFocused() throws {
+  func testCommandBracketDoesNotNavigateWhileTextEditorIsFocused() throws {
     let workspaceURL = try makeNavigationHistoryWorkspace()
-    let betaURL = workspaceURL
-      .appending(path: "Alpha", directoryHint: .isDirectory)
-      .appending(path: "Beta", directoryHint: .isDirectory)
-    try writeFixturePDF(pageCount: 1, to: betaURL.appending(path: "Beta Search.pdf"))
     let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
 
     XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
     app.staticTexts["Alpha"].doubleClick()
-    XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
-    app.staticTexts["Beta"].doubleClick()
-    XCTAssertTrue(app.staticTexts["Beta Search.pdf"].waitForExistence(timeout: 5), app.debugDescription)
-    app.staticTexts["Beta Search.pdf"].doubleClick()
+    XCTAssertTrue(app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    app.staticTexts["Alpha Note.md"].click()
 
-    let searchField = app.textFields["document-pdf-search-field"]
-    XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-    searchField.click()
-    searchField.typeText("Page")
+    let editor = app.textViews["document-text-editor"]
+    XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+    editor.click()
+    editor.typeText("Draft ")
+
     app.typeKey("[", modifierFlags: [.command])
 
-    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertFalse(app.staticTexts["Alpha Note.md"].exists)
+    XCTAssertTrue(app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertFalse(app.staticTexts["Other"].exists)
   }
 
   @MainActor
@@ -332,80 +327,18 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(pdfSurface.waitForExistence(timeout: 5), app.debugDescription)
     XCTAssertTrue(app.staticTexts["sample.pdf"].waitForExistence(timeout: 2), app.debugDescription)
 
-    let pageSummary = app.staticTexts["document-pdf-page-summary"]
-    XCTAssertTrue(pageSummary.waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertEqual(pageSummary.label, "Page 1 of 1")
-    XCTAssertTrue(
-      app.buttons["document-pdf-previous-page-button"].waitForExistence(timeout: 2),
-      app.debugDescription)
-    XCTAssertTrue(
-      app.buttons["document-pdf-next-page-button"].waitForExistence(timeout: 2),
-      app.debugDescription)
-    XCTAssertTrue(
-      app.buttons["document-pdf-zoom-out-button"].waitForExistence(timeout: 2), app.debugDescription
-    )
-    XCTAssertTrue(
-      app.buttons["document-pdf-fit-button"].waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertTrue(
-      app.buttons["document-pdf-zoom-in-button"].waitForExistence(timeout: 2), app.debugDescription)
-
-    let searchField = app.textFields["document-pdf-search-field"]
-    XCTAssertTrue(searchField.waitForExistence(timeout: 2), app.debugDescription)
-    searchField.click()
-    searchField.typeText("Locus")
-
-    let searchSummary = app.staticTexts["document-pdf-search-summary"]
-    XCTAssertTrue(waitForElement(searchSummary, toHaveLabel: "1 of 1"), app.debugDescription)
-    XCTAssertTrue(
-      app.buttons["document-pdf-previous-search-match-button"].waitForExistence(timeout: 2),
-      app.debugDescription)
-    XCTAssertTrue(
-      app.buttons["document-pdf-next-search-match-button"].waitForExistence(timeout: 2),
-      app.debugDescription)
+    XCTAssertFalse(app.staticTexts["document-pdf-page-summary"].exists)
+    XCTAssertFalse(app.staticTexts["document-pdf-zoom-summary"].exists)
+    XCTAssertFalse(app.textFields["document-pdf-search-field"].exists)
+    XCTAssertFalse(app.buttons["document-pdf-previous-page-button"].exists)
+    XCTAssertFalse(app.buttons["document-pdf-next-page-button"].exists)
+    XCTAssertFalse(app.buttons["document-pdf-zoom-out-button"].exists)
+    XCTAssertFalse(app.buttons["document-pdf-fit-button"].exists)
+    XCTAssertFalse(app.buttons["document-pdf-zoom-in-button"].exists)
+    XCTAssertFalse(app.buttons["document-pdf-previous-search-match-button"].exists)
+    XCTAssertFalse(app.buttons["document-pdf-next-search-match-button"].exists)
     XCTAssertEqual(
       previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
-  }
-
-  @MainActor
-  func testPDFControlsNavigatePagesAndZoomInLocus() throws {
-    let workspaceURL = FileManager.default.temporaryDirectory
-      .appending(path: "locus-pdf-controls-\(UUID().uuidString)", directoryHint: .isDirectory)
-    try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
-    filesToRemove.insert(workspaceURL.path(percentEncoded: false))
-    try writeFixturePDF(pageCount: 2, to: workspaceURL.appending(path: "multi-page.pdf"))
-
-    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
-
-    let pdfRowText = app.staticTexts["multi-page.pdf"]
-    XCTAssertTrue(pdfRowText.waitForExistence(timeout: 5), app.debugDescription)
-    pdfRowText.doubleClick()
-
-    let pageSummary = app.staticTexts["document-pdf-page-summary"]
-    XCTAssertTrue(pageSummary.waitForExistence(timeout: 5), app.debugDescription)
-    XCTAssertEqual(pageSummary.label, "Page 1 of 2")
-
-    app.buttons["document-pdf-next-page-button"].click()
-    XCTAssertTrue(waitForElement(pageSummary, toHaveLabel: "Page 2 of 2"), app.debugDescription)
-
-    let zoomSummary = app.staticTexts["document-pdf-zoom-summary"]
-    XCTAssertTrue(zoomSummary.waitForExistence(timeout: 2), app.debugDescription)
-    let initialZoomLabel = zoomSummary.label
-    app.buttons["document-pdf-zoom-in-button"].click()
-    XCTAssertTrue(
-      waitForElementLabelToChange(zoomSummary, from: initialZoomLabel), app.debugDescription)
-    XCTAssertTrue(zoomSummary.label.hasSuffix("%"), app.debugDescription)
-
-    let searchField = app.textFields["document-pdf-search-field"]
-    XCTAssertTrue(searchField.waitForExistence(timeout: 2), app.debugDescription)
-    searchField.click()
-    searchField.typeText("Page")
-
-    let searchSummary = app.staticTexts["document-pdf-search-summary"]
-    XCTAssertTrue(waitForElement(searchSummary, toHaveLabel: "1 of 2"), app.debugDescription)
-    app.buttons["document-pdf-next-search-match-button"].click()
-    XCTAssertTrue(waitForElement(searchSummary, toHaveLabel: "2 of 2"), app.debugDescription)
-    app.buttons["document-pdf-next-search-match-button"].click()
-    XCTAssertTrue(waitForElement(searchSummary, toHaveLabel: "1 of 2"), app.debugDescription)
   }
 
   @MainActor
@@ -987,42 +920,6 @@ final class WorkspaceSearchUITests: XCTestCase {
     return false
   }
 
-  @MainActor
-  private func waitForElement(
-    _ element: XCUIElement,
-    toHaveLabel expectedLabel: String,
-    timeout: TimeInterval = 2
-  ) -> Bool {
-    let deadline = Date().addingTimeInterval(timeout)
-    while Date() < deadline {
-      if element.label == expectedLabel {
-        return true
-      }
-
-      RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
-    }
-
-    return false
-  }
-
-  @MainActor
-  private func waitForElementLabelToChange(
-    _ element: XCUIElement,
-    from label: String,
-    timeout: TimeInterval = 2
-  ) -> Bool {
-    let deadline = Date().addingTimeInterval(timeout)
-    while Date() < deadline {
-      if element.label != label {
-        return true
-      }
-
-      RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
-    }
-
-    return false
-  }
-
   private func previewInvocations(forKey key: String, filePath: String) -> [String] {
     if let fileContents = try? String(contentsOfFile: filePath, encoding: .utf8),
       !fileContents.isEmpty
@@ -1115,37 +1012,6 @@ final class WorkspaceSearchUITests: XCTestCase {
     throw FixtureLookupError(name: name, startPath: filePath)
   }
 
-  private func writeFixturePDF(pageCount: Int, to url: URL) throws {
-    let data = NSMutableData()
-    guard let consumer = CGDataConsumer(data: data as CFMutableData) else {
-      throw PDFFixtureWriteError()
-    }
-
-    var mediaBox = CGRect(x: 0, y: 0, width: 320, height: 420)
-    guard let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
-      throw PDFFixtureWriteError()
-    }
-
-    let paragraphStyle = NSMutableParagraphStyle()
-    paragraphStyle.alignment = .center
-    let attributes: [NSAttributedString.Key: Any] = [
-      .font: NSFont.systemFont(ofSize: 28, weight: .semibold),
-      .paragraphStyle: paragraphStyle,
-    ]
-
-    for pageNumber in 1...pageCount {
-      context.beginPDFPage(nil)
-      NSGraphicsContext.saveGraphicsState()
-      NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
-      NSString(string: "Page \(pageNumber)")
-        .draw(in: CGRect(x: 40, y: 190, width: 240, height: 60), withAttributes: attributes)
-      NSGraphicsContext.restoreGraphicsState()
-      context.endPDFPage()
-    }
-
-    context.closePDF()
-    try data.write(to: url, options: .atomic)
-  }
 }
 
 private struct FixtureLookupError: Error, CustomStringConvertible {
@@ -1156,8 +1022,6 @@ private struct FixtureLookupError: Error, CustomStringConvertible {
     "Fixture workspace '\(name)' was not found from \(startPath)."
   }
 }
-
-private struct PDFFixtureWriteError: Error {}
 
 extension XCUIElement {
   @MainActor

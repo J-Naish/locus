@@ -47,7 +47,6 @@ Should support:
 
 - basic relevance ranking for exact matches, recency, and current location
 - Markdown text search
-- PDF text search
 - Office extracted text search
 - SQLite FTS5
 - incremental index updates
@@ -115,23 +114,30 @@ Not a goal:
 
 ## PDF
 
-The MVP PDF surface is an in-app PDFKit reader with page navigation, zoom
-controls, and text search before deeper review tools are added.
+The prototype PDF surface is a plain in-app PDFKit preview with no custom
+chrome. Native PDFKit behaviors such as text selection, copy, scroll-based page
+navigation, and trackpad zoom are acceptable as part of the base preview.
+Explicit page controls, explicit zoom controls, search, highlights, comments,
+thumbnails, and annotation saving are deferred until the PDF review flow is
+intentionally expanded.
 
 Must support:
 
 - fast viewing
+- native PDFKit reading behavior, including text selection and copy where the
+  PDF provides selectable text
+- scroll-based page navigation
+- native trackpad zoom where PDFKit provides it
+
+Should support:
+
+- explicit page navigation controls
+- explicit zoom controls
 - case-insensitive text search with match navigation
-- text selection and copy
-- page navigation
-- zoom
 - thumbnails
 - highlights
 - comments
 - saving annotations
-
-Should support:
-
 - drawing annotations
 - text annotations
 - shapes
