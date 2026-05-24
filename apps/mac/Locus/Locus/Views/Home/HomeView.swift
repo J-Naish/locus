@@ -105,41 +105,39 @@ struct HomeView: View {
       copyPath: copyPath
     )
 
-    VStack(alignment: .leading, spacing: 16) {
-      WorkspaceContentView(
-        state: workspaceState,
-        rootURL: workspaceRootURL,
-        recentFiles: recentFiles,
-        recentFolders: recentFolders,
-        textDocumentStore: textDocumentStore,
-        imageDocumentStore: imageDocumentStore,
-        pdfDocumentStore: pdfDocumentStore,
-        mediaDocumentStore: mediaDocumentStore,
-        quickLookDocumentStore: quickLookDocumentStore,
-        selectedEntryID: $selectedEntryID,
-        emptyActions: EmptyWorkspaceActions(
-          openFolder: openFolder,
-          shortcuts: shortcutActions
-        ),
-        shortcutActions: shortcutActions,
-        actions: WorkspaceActions(
-          canGoBack: navigationHistory.canGoBack,
-          canGoForward: navigationHistory.canGoForward,
-          goBack: restorePreviousWorkspaceFolder,
-          goForward: restoreNextWorkspaceFolder,
-          retryCurrentFolder: retryCurrentFolder,
-          preview: previewURLs,
-          showInLocus: showEntryInLocus,
-          copyPaths: copyPaths,
-          performOpenAction: performOpenAction
-        )
+    WorkspaceContentView(
+      state: workspaceState,
+      rootURL: workspaceRootURL,
+      recentFiles: recentFiles,
+      recentFolders: recentFolders,
+      textDocumentStore: textDocumentStore,
+      imageDocumentStore: imageDocumentStore,
+      pdfDocumentStore: pdfDocumentStore,
+      mediaDocumentStore: mediaDocumentStore,
+      quickLookDocumentStore: quickLookDocumentStore,
+      selectedEntryID: $selectedEntryID,
+      emptyActions: EmptyWorkspaceActions(
+        openFolder: openFolder,
+        shortcuts: shortcutActions
+      ),
+      shortcutActions: shortcutActions,
+      actions: WorkspaceActions(
+        canGoBack: navigationHistory.canGoBack,
+        canGoForward: navigationHistory.canGoForward,
+        goBack: restorePreviousWorkspaceFolder,
+        goForward: restoreNextWorkspaceFolder,
+        retryCurrentFolder: retryCurrentFolder,
+        preview: previewURLs,
+        showInLocus: showEntryInLocus,
+        copyPaths: copyPaths,
+        performOpenAction: performOpenAction
       )
-    }
-    .padding(28)
+    )
     .frame(
       minWidth: LocusWindowMetrics.minimumWidth,
       minHeight: LocusWindowMetrics.minimumHeight
     )
+    .navigationTitle(workspaceWindowTitle)
     .task {
       refreshFileLocationShortcuts()
       loadInitialFolderIfNeeded()
@@ -248,6 +246,15 @@ struct HomeView: View {
         message: InitialFolderFailure.homeUnavailableMessage
       )
     }
+  }
+
+  private var workspaceWindowTitle: String {
+    guard let folderURL = workspaceState.folderURL else {
+      return "Locus"
+    }
+
+    let folderName = folderURL.lastPathComponent
+    return folderName.isEmpty ? "Locus" : folderName
   }
 
   /// `request.selectedURL` is matched against loaded entries by standardized
@@ -695,8 +702,8 @@ private struct WorkspaceContentView: View {
           recentFolders: recentFolders,
           actions: emptyActions
         )
-      case .loading(let folderURL):
-        LoadingWorkspaceView(folderURL: folderURL)
+      case .loading:
+        LoadingWorkspaceView()
       case .ready(let folderURL, let snapshot, let loadedAt):
         WorkspaceBrowserView(
           folderURL: folderURL,
@@ -740,12 +747,10 @@ private struct WorkspaceActions {
 }
 
 private struct LoadingWorkspaceView: View {
-  let folderURL: URL
-
   var body: some View {
     VStack(spacing: 12) {
       ProgressView()
-      Text("Loading \(folderURL.lastPathComponent)")
+      Text("Loading...")
         .foregroundStyle(.secondary)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -813,13 +818,10 @@ private struct WorkspaceBrowserView: View {
   }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      WorkspaceToolbarView(
-        folderURL: folderURL
-      )
-
+    VStack(alignment: .leading, spacing: 0) {
       if !snapshot.partialErrors.isEmpty {
         PartialErrorsView(errors: snapshot.partialErrors)
+          .padding(8)
       }
 
       if searchResults.hasShortcutResults {
@@ -875,6 +877,7 @@ private struct WorkspaceBrowserView: View {
         }
       }
     }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onChange(of: searchQuery) {
       refreshSearchResults()
     }
@@ -1038,27 +1041,6 @@ private struct WorkspaceShortcutSearchResultsView: View {
     .accessibilityIdentifier("workspace-shortcut-search-results")
   }
 }
-
-private struct WorkspaceToolbarView: View {
-  let folderURL: URL
-
-  var body: some View {
-    HStack(spacing: 12) {
-      Text(displayName)
-        .font(.headline)
-        .lineLimit(1)
-
-      Spacer()
-    }
-  }
-
-  private var displayName: String {
-    folderURL.lastPathComponent.isEmpty
-      ? folderURL.path(percentEncoded: false)
-      : folderURL.lastPathComponent
-  }
-}
-
 private struct WorkspaceEntriesList: View {
   let entries: [WorkspaceEntry]
   @Binding var selectedEntryID: WorkspaceEntry.ID?

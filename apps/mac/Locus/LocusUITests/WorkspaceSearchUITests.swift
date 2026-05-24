@@ -138,7 +138,6 @@ final class WorkspaceSearchUITests: XCTestCase {
     let app = try launchApp(workspacePath: workspacePath)
 
     XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
-    XCTAssertTrue(app.staticTexts["basic"].waitForExistence(timeout: 2), app.debugDescription)
     XCTAssertFalse(app.staticTexts[workspacePath].exists)
     XCTAssertEqual(
       app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "items")).count, 0)
@@ -736,7 +735,6 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(recentFile.waitForExistence(timeout: 5), app.debugDescription)
     recentFile.click()
 
-    XCTAssertTrue(app.staticTexts["basic"].waitForExistence(timeout: 5), app.debugDescription)
     XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
     XCTAssertTrue(
       app.staticTexts["Project Brief.md"].waitForExistence(timeout: 5), app.debugDescription)
