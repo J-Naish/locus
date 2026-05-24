@@ -10,6 +10,8 @@ Must support:
 - browse files and folders
 - show the current location as a name-first file and folder list; Type, Size,
   and Modified columns are intentionally not part of the default browser
+- keep default folder listing lightweight; size and modified-time metadata
+  should be loaded only when a contextual surface explicitly needs it
 - open files
 - navigate to an item's containing folder inside Locus and select the item
 - show recent files and folders

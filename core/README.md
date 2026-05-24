@@ -5,7 +5,7 @@ Shared Rust code lives here.
 The core owns heavier cross-platform behavior:
 
 - file scanning
-- file metadata
+- lightweight file metadata needed for listing and routing
 - hashing
 - diffing
 - search indexes
@@ -14,6 +14,15 @@ The core owns heavier cross-platform behavior:
 - workspace state
 
 UI-specific behavior belongs in the native app folders.
+
+Folder listing should stay shallow and fast. The default snapshot includes the
+entry name, path, kind, file type, and readonly state; richer values such as
+size and modified time should be requested or loaded only when a contextual
+surface needs them.
+
+This policy primarily keeps the snapshot contract and Swift-side conversion
+costs lean. The current implementation still performs per-entry metadata reads
+for kind and readonly state; reducing those syscalls is a separate optimization.
 
 ## Performance Smoke
 

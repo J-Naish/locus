@@ -69,3 +69,18 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
 - Rust FFI static library: `17682728 bytes`
 - macOS app bundle: `2404 KiB`
 - notes: Added NSTextView-based lightweight text highlighting. Regex patterns are cached, incremental edits re-highlight the edited paragraph, and full-document highlighting keeps a 200k UTF-16-unit guard for large files.
+
+## 2026-05-24T13:35:42Z lazy-listing-metadata
+
+- commit: pending
+- branch: `main`
+- dirty tree: `true`
+- status: `0`
+- generated folder listing: entries `1010`, avg `5.234 ms`, max `6.231 ms`
+- Rust FFI static library: `17683360 bytes`
+- macOS app bundle: `2404 KiB`
+- notes: Default folder snapshots now omit extended size and modified-time
+  values. This is primarily a contract and Swift conversion cleanup, not yet a
+  syscall reduction; per-entry metadata reads still happen for kind and
+  readonly state. Extended metadata is available through an explicit Rust/FFI
+  list option for future contextual surfaces.

@@ -57,12 +57,17 @@ typedef struct LocusWorkspaceEntry {
      * LOCUS_FILE_TYPE_UNKNOWN and callers should ignore this field.
      */
     LocusFileType file_type;
-    /* size_bytes is valid only when has_size_bytes is true. */
+    /*
+     * size_bytes is valid only when has_size_bytes is true. The default folder
+     * listing keeps this false; callers should request or load extended
+     * metadata only for contextual surfaces that need it.
+     */
     bool has_size_bytes;
     uint64_t size_bytes;
     /*
      * modified_unix_seconds is valid only when has_modified_unix_seconds is
-     * true. The value is seconds relative to the Unix epoch.
+     * true. The default folder listing keeps this false. The value is seconds
+     * relative to the Unix epoch.
      */
     bool has_modified_unix_seconds;
     int64_t modified_unix_seconds;
@@ -146,6 +151,10 @@ const char *locus_last_error_message(void);
  * The function performs a shallow directory read only. It does not recursively
  * scan, parse, index, thumbnail, hash, or preview files.
  *
+ * This default entry point omits extended size and modified-time values. Use
+ * locus_core_list_directory_with_options when a contextual surface explicitly
+ * needs those fields.
+ *
  * On success, returns LOCUS_STATUS_OK and writes a Rust-owned snapshot to
  * out_snapshot. The caller must release that snapshot with
  * locus_workspace_snapshot_free().
@@ -167,6 +176,23 @@ const char *locus_last_error_message(void);
 LocusStatus locus_core_list_directory(
     const char *path,
     bool include_ignored,
+    LocusWorkspaceSnapshot **out_snapshot
+);
+
+/**
+ * Lists the immediate children of a local folder with explicit listing options.
+ *
+ * include_extended_metadata controls whether file size and modified-time
+ * fields are populated. Keeping it false is the preferred default for the
+ * name-first file browser.
+ *
+ * Ownership, encoding, lifetime, thread-safety, and error behavior match
+ * locus_core_list_directory().
+ */
+LocusStatus locus_core_list_directory_with_options(
+    const char *path,
+    bool include_ignored,
+    bool include_extended_metadata,
     LocusWorkspaceSnapshot **out_snapshot
 );
 

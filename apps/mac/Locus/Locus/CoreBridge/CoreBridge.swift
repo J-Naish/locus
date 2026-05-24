@@ -87,11 +87,17 @@ struct CoreBridge: Sendable {
     }.value
   }
 
-  func listDirectory(at folderURL: URL, includeIgnored: Bool = false) async throws
-    -> WorkspaceSnapshot
-  {
+  func listDirectory(
+    at folderURL: URL,
+    includeIgnored: Bool = false,
+    includeExtendedMetadata: Bool = false
+  ) async throws -> WorkspaceSnapshot {
     try await Task.detached(priority: .userInitiated) {
-      try Self.listDirectorySync(at: folderURL, includeIgnored: includeIgnored)
+      try Self.listDirectorySync(
+        at: folderURL,
+        includeIgnored: includeIgnored,
+        includeExtendedMetadata: includeExtendedMetadata
+      )
     }.value
   }
 
@@ -106,7 +112,8 @@ struct CoreBridge: Sendable {
 
   private static func listDirectorySync(
     at folderURL: URL,
-    includeIgnored: Bool
+    includeIgnored: Bool,
+    includeExtendedMetadata: Bool
   ) throws -> WorkspaceSnapshot {
     try validateABI()
 
@@ -114,7 +121,12 @@ struct CoreBridge: Sendable {
     // Keep this synchronous: lastErrorMessage() is thread-local and must be
     // read on the same thread immediately after the FFI call.
     let status = folderURL.path(percentEncoded: false).withCString { path in
-      locus_core_list_directory(path, includeIgnored, &rawSnapshot)
+      locus_core_list_directory_with_options(
+        path,
+        includeIgnored,
+        includeExtendedMetadata,
+        &rawSnapshot
+      )
     }
 
     guard status == LOCUS_STATUS_OK else {
@@ -196,17 +208,22 @@ struct CoreBridge: Sendable {
       return []
     }
 
-    return UnsafeBufferPointer(start: partialErrors, count: count).enumerated().map {
-      index, partialError in
+    let partialErrorBuffer = UnsafeBufferPointer(start: partialErrors, count: count)
+    var errors: [WorkspacePartialError] = []
+    errors.reserveCapacity(count)
+    for (index, partialError) in partialErrorBuffer.enumerated() {
       let kind = workspaceErrorKind(partialError.status)
       let message = String(cString: partialError.message)
 
-      return WorkspacePartialError(
-        id: "\(index):\(partialError.status):\(message)",
-        kind: kind,
-        message: message
+      errors.append(
+        WorkspacePartialError(
+          id: "\(index):\(partialError.status):\(message)",
+          kind: kind,
+          message: message
+        )
       )
     }
+    return errors
   }
 
   private static func workspaceEntryKind(_ value: LocusWorkspaceEntryKind) -> WorkspaceEntryKind {
@@ -226,6 +243,8 @@ struct CoreBridge: Sendable {
     }
   }
 
+  // FFI code mapping is intentionally a full switch over the C constants.
+  // swiftlint:disable:next cyclomatic_complexity
   private static func workspaceFileType(_ value: LocusFileType) -> WorkspaceFileType {
     switch value {
     case LOCUS_FILE_TYPE_MARKDOWN:

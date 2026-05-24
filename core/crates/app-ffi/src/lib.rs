@@ -102,6 +102,43 @@ pub unsafe extern "C" fn locus_core_list_directory(
     include_ignored: bool,
     out_snapshot: *mut *mut LocusWorkspaceSnapshot,
 ) -> u32 {
+    // SAFETY: this function has the same caller contract as
+    // list_directory_impl and forwards its raw pointers unchanged.
+    unsafe { list_directory_impl(path, include_ignored, false, out_snapshot) }
+}
+
+/// # Safety
+///
+/// `path` must be NULL or a valid NUL-terminated UTF-8 C string that remains
+/// valid for the duration of the call. `out_snapshot` must be NULL or point to
+/// caller-owned writable storage for a `*mut LocusWorkspaceSnapshot`. On
+/// success the caller is responsible for releasing the snapshot exactly once
+/// with `locus_workspace_snapshot_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_core_list_directory_with_options(
+    path: *const c_char,
+    include_ignored: bool,
+    include_extended_metadata: bool,
+    out_snapshot: *mut *mut LocusWorkspaceSnapshot,
+) -> u32 {
+    // SAFETY: this function has the same caller contract as
+    // list_directory_impl and forwards its raw pointers unchanged.
+    unsafe {
+        list_directory_impl(
+            path,
+            include_ignored,
+            include_extended_metadata,
+            out_snapshot,
+        )
+    }
+}
+
+unsafe fn list_directory_impl(
+    path: *const c_char,
+    include_ignored: bool,
+    include_extended_metadata: bool,
+    out_snapshot: *mut *mut LocusWorkspaceSnapshot,
+) -> u32 {
     clear_last_error_message();
 
     if out_snapshot.is_null() {
@@ -123,7 +160,9 @@ pub unsafe extern "C" fn locus_core_list_directory(
         return LOCUS_STATUS_INVALID_ARGUMENT;
     };
 
-    let options = WorkspaceListOptions::new().include_ignored(include_ignored);
+    let options = WorkspaceListOptions::new()
+        .include_ignored(include_ignored)
+        .include_extended_metadata(include_extended_metadata);
     match list_directory_with_options(path, options) {
         Ok(snapshot) => {
             let ffi_snapshot = LocusWorkspaceSnapshot::from_core_snapshot(snapshot);
@@ -450,8 +489,10 @@ mod tests {
             assert_eq!(entries[0].kind, super::LOCUS_WORKSPACE_ENTRY_DIRECTORY);
             assert_eq!(entries[1].kind, super::LOCUS_WORKSPACE_ENTRY_FILE);
             assert_eq!(entries[1].file_type, super::LOCUS_FILE_TYPE_MARKDOWN);
-            assert!(entries[1].has_size_bytes);
-            assert_eq!(entries[1].size_bytes, 5);
+            assert!(!entries[1].has_size_bytes);
+            assert_eq!(entries[1].size_bytes, 0);
+            assert!(!entries[1].has_modified_unix_seconds);
+            assert_eq!(entries[1].modified_unix_seconds, 0);
             assert_eq!(
                 super::locus_workspace_snapshot_partial_error_count(snapshot),
                 0
@@ -485,6 +526,37 @@ mod tests {
                 .collect::<Vec<_>>();
 
             assert_eq!(names, [".git", "notes.md"]);
+
+            super::locus_workspace_snapshot_free(snapshot);
+        }
+    }
+
+    #[test]
+    fn list_directory_with_options_can_include_extended_metadata() {
+        let workspace = TestWorkspace::new();
+        workspace.create_file_with_contents("notes.md", "hello");
+
+        let mut snapshot = std::ptr::null_mut();
+        let path = CString::new(workspace.path().to_string_lossy().as_ref()).unwrap();
+        // SAFETY: snapshot ownership is held by this test until the free call.
+        unsafe {
+            let status = super::locus_core_list_directory_with_options(
+                path.as_ptr(),
+                false,
+                true,
+                &mut snapshot,
+            );
+
+            assert_eq!(status, super::LOCUS_STATUS_OK);
+
+            let entries = std::slice::from_raw_parts(
+                super::locus_workspace_snapshot_entries(snapshot),
+                super::locus_workspace_snapshot_entry_count(snapshot),
+            );
+
+            assert!(entries[0].has_size_bytes);
+            assert_eq!(entries[0].size_bytes, 5);
+            assert!(entries[0].has_modified_unix_seconds);
 
             super::locus_workspace_snapshot_free(snapshot);
         }

@@ -45,7 +45,7 @@ The macOS app owns:
 The Rust core owns behavior that should be shared, tested, and reused across platforms:
 
 - file scanning
-- file metadata
+- lightweight listing metadata, with richer file metadata loaded lazily
 - hashing
 - diffing
 - search indexes

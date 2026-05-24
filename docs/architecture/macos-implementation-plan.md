@@ -90,7 +90,7 @@ Initial ownership:
 
 - `file_type`: extension and MIME-ish classification used by both app and CLI.
 - `workspace`: open a folder, list child entries, apply shallow filters, sort folders/files.
-- `metadata`: size, modified time, directory flag, readonly flag, lightweight type metadata.
+- `metadata`: directory flag, readonly flag, lightweight type metadata, and contextual size/modified-time loading when a surface needs it.
 - `search`: file-name search within the current location.
 - `recents` and `favorites`: start simple; persist through SQLite once the storage boundary is ready.
 - `storage`: SQLite wrapper for recents, favorites, metadata cache, and later FTS5.
@@ -106,7 +106,9 @@ Keep the C ABI coarse and explicit. Early APIs should support:
 - opening a workspace folder
 - listing a folder
 - file-name search
-- reading lightweight metadata
+- reading lightweight listing metadata, with size and modified time loaded lazily when needed
+- listing with explicit options through FFI when contextual surfaces request
+  extended metadata
 - storing and reading recents/favorites once persistence lands
 - releasing Rust-allocated strings and arrays
 - retrieving structured error details
@@ -117,6 +119,8 @@ Preferred pattern:
 - Return data through opaque handles or Rust-owned buffers released by Rust.
 - Keep Swift view code away from raw pointers by routing all calls through `CoreBridge`.
 - Avoid one FFI call per file row interaction; fetch folder snapshots in batches.
+- Keep the default folder-list API lightweight. Use the explicit options
+  listing API when a contextual surface needs size or modified-time values.
 
 The first app milestone can use a folder-list snapshot API before adding long-lived workspace handles, as long as ownership and release functions are explicit.
 
@@ -149,8 +153,8 @@ Deliverables:
 - Filter hidden files and folders from the home folder presentation, including hidden home shortcuts, without changing project-folder dotfile visibility.
 - Show a quiet, name-first file list for the current location. The default
   browser should not expose Type, Size, or Modified columns; keep those
-  metadata values available to the model and future contextual surfaces, but
-  avoid making the primary list feel like a developer or spreadsheet view.
+  metadata values lazy for future contextual surfaces, and avoid making the
+  primary list feel like a developer or spreadsheet view.
 - Add in-app "show containing folder and select item" behavior for files reached from recents, favorites, and search results.
 - Keep file location actions inside Locus: open, preview, show containing folder, select item, and copy path.
 
@@ -159,7 +163,8 @@ Acceptance:
 - A user can launch into their home folder, choose another local folder, and browse immediate contents without recursive startup scanning.
 - Hidden home-directory entries and shortcuts are not shown by default, while useful project dotfiles remain visible when a project folder is opened explicitly.
 - File list loading does not block the main thread.
-- Rust tests cover sorting, hidden files policy, symlink policy, and basic metadata.
+- Rust tests cover sorting, hidden files policy, symlink policy, and the lazy
+  extended metadata policy.
 
 ### 3. Home, Recents, and Favorites
 

@@ -57,11 +57,25 @@ final class CoreBridgeTests: XCTestCase {
     XCTAssertEqual(snapshot.entries[0].kind, .directory)
     XCTAssertEqual(snapshot.entries[1].kind, .file)
     XCTAssertEqual(snapshot.entries[1].fileType, .markdown)
-    XCTAssertEqual(snapshot.entries[1].sizeBytes, 5)
+    XCTAssertNil(snapshot.entries[1].sizeBytes)
+    XCTAssertNil(snapshot.entries[1].modified)
     XCTAssertEqual(
       snapshot.entries[1].id,
       snapshot.entries[1].url.path(percentEncoded: false)
     )
+  }
+
+  func testListDirectoryCanIncludeExtendedMetadata() async throws {
+    let workspace = try TestWorkspace()
+    try workspace.createFile(named: "notes.md", contents: "hello")
+
+    let snapshot = try await CoreBridge().listDirectory(
+      at: workspace.url,
+      includeExtendedMetadata: true
+    )
+
+    XCTAssertEqual(snapshot.entries[0].sizeBytes, 5)
+    XCTAssertNotNil(snapshot.entries[0].modified)
   }
 
   func testListDirectoryKeepsUsefulDotfilesAndSkipsNoiseByDefault() async throws {

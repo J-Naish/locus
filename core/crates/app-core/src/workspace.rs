@@ -10,6 +10,7 @@ use crate::file_type::{classify_path, FileType};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkspaceListOptions {
     pub include_ignored: bool,
+    pub include_extended_metadata: bool,
 }
 
 impl WorkspaceListOptions {
@@ -19,6 +20,11 @@ impl WorkspaceListOptions {
 
     pub fn include_ignored(mut self, value: bool) -> Self {
         self.include_ignored = value;
+        self
+    }
+
+    pub fn include_extended_metadata(mut self, value: bool) -> Self {
+        self.include_extended_metadata = value;
         self
     }
 }
@@ -170,7 +176,12 @@ fn list_directory_inner(
             }
         };
 
-        snapshot.push(entry_from_metadata(path, name, metadata));
+        snapshot.push(entry_from_metadata(
+            path,
+            name,
+            metadata,
+            options.include_extended_metadata,
+        ));
     }
 
     snapshot.sort_by(compare_entries);
@@ -191,7 +202,12 @@ fn read_directory_error(path: &Path, source: io::Error) -> WorkspaceError {
     }
 }
 
-fn entry_from_metadata(path: PathBuf, name: String, metadata: fs::Metadata) -> WorkspaceEntry {
+fn entry_from_metadata(
+    path: PathBuf,
+    name: String,
+    metadata: fs::Metadata,
+    include_extended_metadata: bool,
+) -> WorkspaceEntry {
     let file_type = metadata.file_type();
     let kind = if file_type.is_dir() {
         WorkspaceEntryKind::Directory
@@ -203,8 +219,11 @@ fn entry_from_metadata(path: PathBuf, name: String, metadata: fs::Metadata) -> W
         WorkspaceEntryKind::Other
     };
 
-    let size_bytes = matches!(kind, WorkspaceEntryKind::File(_)).then_some(metadata.len());
-    let modified = metadata.modified().ok();
+    let size_bytes = (include_extended_metadata && matches!(kind, WorkspaceEntryKind::File(_)))
+        .then_some(metadata.len());
+    let modified = include_extended_metadata
+        .then(|| metadata.modified().ok())
+        .flatten();
     let readonly = metadata.permissions().readonly();
 
     WorkspaceEntry {
@@ -436,13 +455,55 @@ mod tests {
     }
 
     #[test]
-    fn list_directory_records_file_metadata_without_loading_contents() {
+    fn list_directory_omits_extended_file_metadata_by_default() {
         let workspace = TestWorkspace::new();
         workspace.create_file_with_contents("notes.md", "hello");
 
         let entries = list_directory(workspace.path()).unwrap().entries;
 
-        assert_eq!(entries[0].size_bytes, Some(5));
+        assert_eq!(entries[0].size_bytes, None);
+        assert_eq!(entries[0].modified, None);
+    }
+
+    #[test]
+    fn list_directory_can_include_extended_file_metadata_without_loading_contents() {
+        let workspace = TestWorkspace::new();
+        workspace.create_dir("Drafts");
+        workspace.create_file_with_contents("notes.md", "hello");
+
+        let entries = list_directory_with_options(
+            workspace.path(),
+            WorkspaceListOptions::new().include_extended_metadata(true),
+        )
+        .unwrap()
+        .entries;
+
+        assert_eq!(entries[0].name, "Drafts");
+        assert_eq!(entries[0].size_bytes, None);
+        assert_eq!(entries[1].name, "notes.md");
+        assert_eq!(entries[1].size_bytes, Some(5));
+        assert!(entries[1].modified.is_some());
+    }
+
+    #[test]
+    fn list_directory_sort_order_does_not_depend_on_extended_metadata() {
+        let workspace = TestWorkspace::new();
+        workspace.create_dir("zeta");
+        workspace.create_dir("Alpha");
+        workspace.create_file("file10.md");
+        workspace.create_file("file2.md");
+        workspace.create_file("file1.md");
+
+        let default_names = entry_names(list_directory(workspace.path()).unwrap());
+        let extended_names = entry_names(
+            list_directory_with_options(
+                workspace.path(),
+                WorkspaceListOptions::new().include_extended_metadata(true),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(default_names, extended_names);
     }
 
     #[test]
