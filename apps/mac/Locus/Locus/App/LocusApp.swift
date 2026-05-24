@@ -1,5 +1,43 @@
 import SwiftUI
 
+struct WorkspaceNavigationCommands {
+  let canGoBack: Bool
+  let canGoForward: Bool
+  let goBack: () -> Void
+  let goForward: () -> Void
+}
+
+private struct WorkspaceNavigationCommandsKey: FocusedValueKey {
+  typealias Value = WorkspaceNavigationCommands
+}
+
+extension FocusedValues {
+  var workspaceNavigationCommands: WorkspaceNavigationCommands? {
+    get { self[WorkspaceNavigationCommandsKey.self] }
+    set { self[WorkspaceNavigationCommandsKey.self] = newValue }
+  }
+}
+
+private struct WorkspaceNavigationCommandMenu: Commands {
+  @FocusedValue(\.workspaceNavigationCommands) private var navigationCommands
+
+  var body: some Commands {
+    CommandMenu("Navigate") {
+      Button("Go Back") {
+        navigationCommands?.goBack()
+      }
+      .keyboardShortcut("[", modifiers: [.command])
+      .disabled(navigationCommands?.canGoBack != true)
+
+      Button("Go Forward") {
+        navigationCommands?.goForward()
+      }
+      .keyboardShortcut("]", modifiers: [.command])
+      .disabled(navigationCommands?.canGoForward != true)
+    }
+  }
+}
+
 @main
 struct LocusApp: App {
   var body: some Scene {
@@ -14,6 +52,9 @@ struct LocusApp: App {
       )
     }
     .windowResizability(.contentMinSize)
+    .commands {
+      WorkspaceNavigationCommandMenu()
+    }
   }
 
   private static let quickLookPreviewService: any QuickLookPreviewing = {

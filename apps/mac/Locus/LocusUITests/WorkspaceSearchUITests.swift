@@ -61,6 +61,8 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
     app.staticTexts["Beta"].doubleClick()
     XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 5), app.debugDescription)
+    app.staticTexts["Gamma"].doubleClick()
+    XCTAssertTrue(app.staticTexts["Gamma Note.md"].waitForExistence(timeout: 5), app.debugDescription)
 
     app.typeKey("[", modifierFlags: [.command])
     XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
@@ -113,6 +115,32 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
 
     app.typeKey("f", modifierFlags: [.command])
+    app.typeKey("[", modifierFlags: [.command])
+
+    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertFalse(app.staticTexts["Alpha Note.md"].exists)
+  }
+
+  @MainActor
+  func testCommandBracketDoesNotNavigateWhilePDFSearchIsFocused() throws {
+    let workspaceURL = try makeNavigationHistoryWorkspace()
+    let betaURL = workspaceURL
+      .appending(path: "Alpha", directoryHint: .isDirectory)
+      .appending(path: "Beta", directoryHint: .isDirectory)
+    try writeFixturePDF(pageCount: 1, to: betaURL.appending(path: "Beta Search.pdf"))
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
+    app.staticTexts["Alpha"].doubleClick()
+    XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
+    app.staticTexts["Beta"].doubleClick()
+    XCTAssertTrue(app.staticTexts["Beta Search.pdf"].waitForExistence(timeout: 5), app.debugDescription)
+    app.staticTexts["Beta Search.pdf"].doubleClick()
+
+    let searchField = app.textFields["document-pdf-search-field"]
+    XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
+    searchField.click()
+    searchField.typeText("Page")
     app.typeKey("[", modifierFlags: [.command])
 
     XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 2), app.debugDescription)

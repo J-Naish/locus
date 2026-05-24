@@ -911,7 +911,7 @@ private struct WorkspaceBrowserView: View {
       refreshSearchResults()
     }
     .background(searchShortcut)
-    .background(navigationHistoryShortcuts)
+    .focusedSceneValue(\.workspaceNavigationCommands, workspaceNavigationCommands)
   }
 
   private func refreshSearchResults() {
@@ -952,27 +952,32 @@ private struct WorkspaceBrowserView: View {
     }
   }
 
-  @ViewBuilder
-  private var navigationHistoryShortcuts: some View {
-    Button("Go Back") {
-      actions.goBack()
-    }
-    .keyboardShortcut("[", modifiers: [.command])
-    .disabled(!actions.canGoBack || isTextInputFocused)
-    .hidden()
-    .accessibilityHidden(true)
-
-    Button("Go Forward") {
-      actions.goForward()
-    }
-    .keyboardShortcut("]", modifiers: [.command])
-    .disabled(!actions.canGoForward || isTextInputFocused)
-    .hidden()
-    .accessibilityHidden(true)
-  }
-
   private var isTextInputFocused: Bool {
     isSearchFocused || isDocumentTextInputFocused
+  }
+
+  private var workspaceNavigationCommands: WorkspaceNavigationCommands {
+    let canGoBack = !isTextInputFocused && actions.canGoBack
+    let canGoForward = !isTextInputFocused && actions.canGoForward
+
+    return WorkspaceNavigationCommands(
+      canGoBack: canGoBack,
+      canGoForward: canGoForward,
+      goBack: {
+        guard canGoBack else {
+          return
+        }
+
+        actions.goBack()
+      },
+      goForward: {
+        guard canGoForward else {
+          return
+        }
+
+        actions.goForward()
+      }
+    )
   }
 
   private var selectedEntry: WorkspaceEntry? {
