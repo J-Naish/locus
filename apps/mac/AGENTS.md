@@ -38,6 +38,9 @@ scripts/perf-smoke.sh
 ## SwiftUI and macOS UX
 
 - Favor Finder-like and Preview-like behavior over developer-tool behavior.
+- Keep UI as close as practical to native SwiftUI/AppKit patterns. Prefer
+  system containers, controls, materials, menus, and platform behaviors before
+  building custom chrome.
 - Use plain user-facing language: folders, locations, recent items, favorites.
 - Keep advanced concepts internal unless users genuinely need them.
 - Prefer native controls and OS facilities.

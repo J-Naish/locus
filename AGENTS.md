@@ -66,6 +66,8 @@ Before making product or architecture decisions, read the relevant docs:
 ## Architecture Rules
 
 - Build native UI shells per platform.
+- For Apple platform UI, stay as close as practical to native SwiftUI and
+  AppKit patterns before introducing custom chrome or custom-drawn controls.
 - Put shared, testable behavior in Rust core.
 - Keep UI-specific behavior out of Rust unless it is truly cross-platform domain logic.
 - Use thin platform-specific bridges around the core; do not spread low-level integration details through UI code.
