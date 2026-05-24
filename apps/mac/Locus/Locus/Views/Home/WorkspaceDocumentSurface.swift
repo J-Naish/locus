@@ -28,48 +28,57 @@ struct WorkspaceDocumentSurface: View {
   @StateObject private var documentChangeMonitor = DocumentChangeMonitor()
 
   var body: some View {
-    Group {
-      if let entry {
-        switch WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry) {
-        case .editableText:
-          editableDocumentSurface(for: entry)
-        case .image:
-          ImageDocumentSurface(
-            entry: entry,
-            imageDocumentStore: imageDocumentStore,
-            reloadTrigger: documentReloadTrigger(for: entry),
-            preview: preview
-          )
-        case .pdf:
-          PDFDocumentSurface(
-            entry: entry,
-            pdfDocumentStore: pdfDocumentStore,
-            reloadTrigger: documentReloadTrigger(for: entry),
-            onSearchFocusChange: onTextInputFocusChange
-          )
-        case .video, .audio:
-          MediaDocumentSurface(
-            entry: entry,
-            mediaDocumentStore: mediaDocumentStore,
-            reloadTrigger: documentReloadTrigger(for: entry)
-          )
-        case .quickLookPreview:
-          QuickLookDocumentSurface(
-            entry: entry,
-            quickLookDocumentStore: quickLookDocumentStore,
-            reloadTrigger: documentReloadTrigger(for: entry)
-          )
-        case .folder:
-          FolderDocumentSurface(entry: entry)
-        case .unsupported:
-          UnsupportedDocumentSurface(entry: entry, preview: preview)
+    VStack(spacing: 0) {
+      Divider()
+
+      Group {
+        if let entry {
+          switch WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry) {
+          case .editableText:
+            editableDocumentSurface(for: entry)
+          case .image:
+            ImageDocumentSurface(
+              entry: entry,
+              imageDocumentStore: imageDocumentStore,
+              reloadTrigger: documentReloadTrigger(for: entry),
+              preview: preview
+            )
+          case .pdf:
+            PDFDocumentSurface(
+              entry: entry,
+              pdfDocumentStore: pdfDocumentStore,
+              reloadTrigger: documentReloadTrigger(for: entry),
+              onSearchFocusChange: onTextInputFocusChange
+            )
+          case .video, .audio:
+            MediaDocumentSurface(
+              entry: entry,
+              mediaDocumentStore: mediaDocumentStore,
+              reloadTrigger: documentReloadTrigger(for: entry)
+            )
+          case .quickLookPreview:
+            QuickLookDocumentSurface(
+              entry: entry,
+              quickLookDocumentStore: quickLookDocumentStore,
+              reloadTrigger: documentReloadTrigger(for: entry)
+            )
+          case .folder:
+            FolderDocumentSurface(entry: entry)
+          case .unsupported:
+            UnsupportedDocumentSurface(entry: entry, preview: preview)
+          }
+        } else {
+          EmptyDocumentSurface()
         }
-      } else {
-        EmptyDocumentSurface()
       }
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
     .background(.background)
+    .focusedSceneValue(
+      \.documentSaveCommand,
+      DocumentSaveCommand(canSave: !isSaveDisabled, save: saveSelectedDocument)
+    )
     .task(id: entry?.id) {
       await loadSelectedDocumentIfNeeded()
       guard !Task.isCancelled else {
@@ -90,9 +99,6 @@ struct WorkspaceDocumentSurface: View {
     .onChange(of: isEditorFocused) {
       onTextInputFocusChange(isEditorFocused)
     }
-    .onReceive(NotificationCenter.default.publisher(for: .locusSaveDocumentCommand)) { _ in
-      saveSelectedDocument()
-    }
     .onDisappear {
       documentChangeMonitor.stopMonitoring()
       onTextInputFocusChange(false)
@@ -100,11 +106,12 @@ struct WorkspaceDocumentSurface: View {
   }
 
   private func editableDocumentSurface(for entry: WorkspaceEntry) -> some View {
-    VStack(alignment: .leading, spacing: 12) {
+    VStack(alignment: .leading, spacing: 0) {
       if let saveErrorMessage {
         Label(saveErrorMessage, systemImage: "exclamationmark.triangle")
           .font(.caption)
           .foregroundStyle(.red)
+          .padding(12)
           .accessibilityIdentifier("document-save-error")
       }
 
@@ -136,10 +143,8 @@ struct WorkspaceDocumentSurface: View {
             isEditorFocused = isFocused
           }
         )
-        .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
       }
     }
-    .padding(12)
   }
 
   private func documentReloadTrigger(for entry: WorkspaceEntry) -> DocumentReloadTrigger {
@@ -397,7 +402,7 @@ private struct ImageDocumentSurface: View {
   @State private var loadState: ImageDocumentLoadState = .loading
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 12) {
+    VStack(alignment: .leading, spacing: 0) {
       switch loadState {
       case .loading:
         ProgressView()
@@ -408,7 +413,6 @@ private struct ImageDocumentSurface: View {
           .resizable()
           .scaledToFit()
           .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 8))
           .accessibilityLabel("\(entry.name) image")
           .accessibilityIdentifier("document-image-view")
       case .failed(let message):
@@ -431,7 +435,6 @@ private struct ImageDocumentSurface: View {
         .accessibilityIdentifier("document-image-error-surface")
       }
     }
-    .padding(12)
     .task(id: reloadTrigger) {
       await loadImage()
     }
@@ -474,7 +477,7 @@ private struct PDFDocumentSurface: View {
   @StateObject private var controller = PDFDocumentController()
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 12) {
+    VStack(alignment: .leading, spacing: 0) {
       switch loadState {
       case .loading:
         ProgressView()
@@ -492,7 +495,6 @@ private struct PDFDocumentSurface: View {
             controller: controller
           )
           .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 8))
           .accessibilityElement(children: .contain)
           .accessibilityLabel("\(entry.name) PDF")
           .accessibilityIdentifier("document-pdf-surface")
@@ -513,7 +515,6 @@ private struct PDFDocumentSurface: View {
         .accessibilityIdentifier("document-pdf-error-surface")
       }
     }
-    .padding(12)
     .task(id: reloadTrigger) {
       await loadPDF()
     }
@@ -1195,7 +1196,7 @@ private struct MediaDocumentSurface: View {
   @State private var loadState: MediaDocumentLoadState = .loading
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 12) {
+    VStack(alignment: .leading, spacing: 0) {
       switch loadState {
       case .loading:
         ProgressView()
@@ -1204,7 +1205,6 @@ private struct MediaDocumentSurface: View {
       case .loaded(let document):
         MediaPlayerView(player: document.player)
           .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 8))
           .accessibilityElement(children: .contain)
           .accessibilityLabel("\(entry.name) media player")
           .accessibilityIdentifier(surfaceAccessibilityIdentifier)
@@ -1224,7 +1224,6 @@ private struct MediaDocumentSurface: View {
         .accessibilityIdentifier("document-media-error-surface")
       }
     }
-    .padding(12)
     .task(id: reloadTrigger) {
       await loadMedia()
     }
@@ -1310,7 +1309,7 @@ private struct QuickLookDocumentSurface: View {
   @State private var loadState: QuickLookDocumentLoadState = .loading
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 12) {
+    VStack(alignment: .leading, spacing: 0) {
       switch loadState {
       case .loading:
         ProgressView()
@@ -1319,7 +1318,6 @@ private struct QuickLookDocumentSurface: View {
       case .loaded(let document):
         QuickLookDocumentView(url: document.url)
           .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 8))
           .accessibilityElement(children: .contain)
           .accessibilityLabel("\(entry.name) preview")
           .accessibilityIdentifier("document-quicklook-surface")
@@ -1339,7 +1337,6 @@ private struct QuickLookDocumentSurface: View {
         .accessibilityIdentifier("document-quicklook-error-surface")
       }
     }
-    .padding(12)
     .task(id: reloadTrigger) {
       await loadQuickLookDocument()
     }

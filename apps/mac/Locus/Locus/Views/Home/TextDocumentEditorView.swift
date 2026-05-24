@@ -17,7 +17,8 @@ struct TextDocumentEditorView: NSViewRepresentable {
     textView.isAutomaticDashSubstitutionEnabled = false
     textView.isAutomaticTextReplacementEnabled = false
     textView.allowsUndo = true
-    textView.drawsBackground = false
+    textView.drawsBackground = true
+    textView.backgroundColor = .textBackgroundColor
     textView.textContainerInset = NSSize(width: 8, height: 8)
     textView.textContainer?.lineFragmentPadding = 0
     textView.isHorizontallyResizable = false
@@ -31,7 +32,8 @@ struct TextDocumentEditorView: NSViewRepresentable {
     textView.onFocusChange = context.coordinator.reportFocus
 
     let scrollView = NSScrollView()
-    scrollView.drawsBackground = false
+    scrollView.drawsBackground = true
+    scrollView.backgroundColor = .textBackgroundColor
     scrollView.hasVerticalScroller = true
     scrollView.hasHorizontalScroller = false
     scrollView.borderType = .noBorder

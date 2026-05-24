@@ -26,14 +26,28 @@ struct WorkspaceNavigationCommands {
   let goForward: () -> Void
 }
 
+struct DocumentSaveCommand {
+  let canSave: Bool
+  let save: () -> Void
+}
+
 private struct WorkspaceNavigationCommandsKey: FocusedValueKey {
   typealias Value = WorkspaceNavigationCommands
+}
+
+private struct DocumentSaveCommandKey: FocusedValueKey {
+  typealias Value = DocumentSaveCommand
 }
 
 extension FocusedValues {
   var workspaceNavigationCommands: WorkspaceNavigationCommands? {
     get { self[WorkspaceNavigationCommandsKey.self] }
     set { self[WorkspaceNavigationCommandsKey.self] = newValue }
+  }
+
+  var documentSaveCommand: DocumentSaveCommand? {
+    get { self[DocumentSaveCommandKey.self] }
+    set { self[DocumentSaveCommandKey.self] = newValue }
   }
 }
 
@@ -58,12 +72,15 @@ private struct WorkspaceNavigationCommandMenu: Commands {
 }
 
 private struct DocumentSaveCommandMenu: Commands {
+  @FocusedValue(\.documentSaveCommand) private var saveCommand
+
   var body: some Commands {
     CommandGroup(replacing: .saveItem) {
       Button("Save") {
-        NotificationCenter.default.post(name: .locusSaveDocumentCommand, object: nil)
+        saveCommand?.save()
       }
       .keyboardShortcut("s", modifiers: [.command])
+      .disabled(saveCommand?.canSave != true)
     }
   }
 }
@@ -220,8 +237,4 @@ struct LocusApp: App {
 
     return values
   }
-}
-
-extension Notification.Name {
-  static let locusSaveDocumentCommand = Notification.Name("com.nash.locus.saveDocument")
 }
