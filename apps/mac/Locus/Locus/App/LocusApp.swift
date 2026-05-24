@@ -9,6 +9,12 @@ enum LocusWindowMetrics {
   // place Locus beside Finder, Preview, or a browser on smaller displays.
   static let minimumWidth: CGFloat = 900
   static let minimumHeight: CGFloat = 600
+
+  // Keep the file browser close to a compact editor sidebar by default, while
+  // still allowing the divider to expand for unusually long names.
+  static let fileListSidebarMinimumWidth: CGFloat = 170
+  static let fileListSidebarIdealWidth: CGFloat = 180
+  static let fileListSidebarMaximumWidth: CGFloat = 420
 }
 
 struct WorkspaceNavigationCommands {

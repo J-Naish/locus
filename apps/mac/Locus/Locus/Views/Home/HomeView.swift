@@ -910,7 +910,11 @@ private struct WorkspaceBrowserView: View {
             isPreviewShortcutEnabled: !isSearchFocused && !isDocumentTextInputFocused,
             actions: actions
           )
-          .frame(minWidth: 420, idealWidth: 560, maxWidth: .infinity)
+          .frame(
+            minWidth: LocusWindowMetrics.fileListSidebarMinimumWidth,
+            idealWidth: LocusWindowMetrics.fileListSidebarIdealWidth,
+            maxWidth: LocusWindowMetrics.fileListSidebarMaximumWidth
+          )
 
           WorkspaceDocumentSurface(
             entry: selectedEntry,
@@ -1239,6 +1243,7 @@ private struct WorkspaceEntriesList: View {
         Image(systemName: entry.symbolName)
           .foregroundStyle(entry.symbolColor)
       }
+      .help(Text(verbatim: entry.name))
     }
     .listStyle(.sidebar)
     .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in

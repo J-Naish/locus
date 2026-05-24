@@ -44,7 +44,7 @@ The primary model is:
 
 Locus should feel familiar to Finder users, but search should be a first-class way to move through files and folders. The goal is not to copy a launcher UI. Users should be able to keep the mental model of folders, locations, recents, and favorites while getting fast, forgiving search across the places they care about.
 
-The current-location file browser should stay name-first, closer to a compact editor sidebar than to Finder's multi-column list. File and folder names are the primary information scent; Type, Size, and Modified metadata should not be shown as default columns. Surface metadata later only where it supports a specific decision, such as document details, search refinement, or inspection.
+The current-location file browser should stay name-first, closer to a compact editor sidebar than to Finder's multi-column list. It should be narrow by default so the document surface remains dominant, while still allowing users to widen the divider when a folder has unusually long names. File and folder names are the primary information scent; Type, Size, and Modified metadata should not be shown as default columns. Surface metadata later only where it supports a specific decision, such as document details, search refinement, or inspection.
 
 The main window should open large enough for the file list and document surface
 to sit side by side comfortably, but the minimum size should stay smaller than
