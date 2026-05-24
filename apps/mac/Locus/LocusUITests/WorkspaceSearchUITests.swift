@@ -27,18 +27,6 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testCommandFFocusesWorkspaceSearchField() throws {
-    let app = try launchAppWithBasicWorkspace()
-
-    let searchField = app.textFields["workspace-search-field"]
-    XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-
-    app.typeKey("f", modifierFlags: [.command])
-
-    XCTAssertTrue(searchField.waitForKeyboardFocus(timeout: 2))
-  }
-
-  @MainActor
   func testDoubleClickDirectoryRowNavigatesIntoFolder() throws {
     let app = try launchAppWithBasicWorkspace()
 
@@ -104,24 +92,6 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testCommandBracketDoesNotNavigateWhileWorkspaceSearchIsFocused() throws {
-    let workspaceURL = try makeNavigationHistoryWorkspace()
-    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
-
-    XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
-    app.staticTexts["Alpha"].doubleClick()
-    XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
-    app.staticTexts["Beta"].doubleClick()
-    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
-
-    app.typeKey("f", modifierFlags: [.command])
-    app.typeKey("[", modifierFlags: [.command])
-
-    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertFalse(app.staticTexts["Alpha Note.md"].exists)
-  }
-
-  @MainActor
   func testCommandBracketDoesNotNavigateWhilePDFSearchIsFocused() throws {
     let workspaceURL = try makeNavigationHistoryWorkspace()
     let betaURL = workspaceURL
@@ -148,21 +118,6 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testParentFolderNavigationSelectsPreviousFolder() throws {
-    let workspaceURL = try makeNavigationHistoryWorkspace()
-    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
-
-    XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
-    app.staticTexts["Alpha"].doubleClick()
-    XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
-
-    app.buttons["Parent Folder"].click()
-
-    XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
-    assertTableRow(named: "Alpha", isSelectedIn: app)
-  }
-
-  @MainActor
   func testWorkspaceFileListDoesNotShowMetadataColumns() throws {
     let app = try launchAppWithBasicWorkspace()
 
@@ -175,6 +130,22 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertFalse(app.buttons["Size"].exists)
     XCTAssertFalse(app.staticTexts["Modified"].exists)
     XCTAssertFalse(app.buttons["Modified"].exists)
+  }
+
+  @MainActor
+  func testWorkspaceChromeOmitsPrototypeSecondaryControls() throws {
+    let workspacePath = try fixtureWorkspacePath("basic")
+    let app = try launchApp(workspacePath: workspacePath)
+
+    XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["basic"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertFalse(app.staticTexts[workspacePath].exists)
+    XCTAssertEqual(
+      app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "items")).count, 0)
+    XCTAssertFalse(app.buttons["favorite-current-folder-button"].exists)
+    XCTAssertFalse(app.buttons["Parent Folder"].exists)
+    XCTAssertFalse(app.textFields["workspace-search-field"].exists)
+    XCTAssertFalse(app.buttons["Refresh"].exists)
   }
 
   @MainActor
@@ -720,31 +691,6 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testSpaceTypesIntoFocusedSearchFieldInsteadOfPreviewing() throws {
-    let workspacePath = try fixtureWorkspacePath("basic")
-    let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-    let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-    let app = try launchApp(
-      workspacePath: workspacePath,
-      previewInvocationsKey: previewInvocationsKey,
-      previewInvocationsFilePath: previewInvocationsFilePath
-    )
-
-    let projectBriefRowText = app.staticTexts["Project Brief.md"]
-    XCTAssertTrue(projectBriefRowText.waitForExistence(timeout: 5), app.debugDescription)
-    projectBriefRowText.click()
-
-    let searchField = app.textFields["workspace-search-field"]
-    XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-    searchField.click()
-    app.typeText("Project ")
-
-    XCTAssertEqual(searchField.value as? String, "Project ")
-    XCTAssertEqual(
-      previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
-  }
-
-  @MainActor
   func testRecentFolderOpensFromHome() throws {
     let workspacePath = try fixtureWorkspacePath("basic")
     let app = try launchAppWithRecentFolder(workspacePath: workspacePath)
@@ -862,205 +808,6 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testHomeSearchFiltersSavedShortcuts() throws {
-    let workspacePath = try fixtureWorkspacePath("basic")
-    let recentFilePath = "\(workspacePath)/Project Brief.md"
-    let app = try launchApp(favoriteFolders: [workspacePath], recentFiles: [recentFilePath])
-
-    XCTAssertTrue(
-      app.staticTexts["Favorite Folders"].waitForExistence(timeout: 5), app.debugDescription)
-    XCTAssertTrue(
-      app.staticTexts["Recent Files"].waitForExistence(timeout: 5), app.debugDescription)
-
-    let searchField = app.textFields["home-shortcut-search-field"]
-    XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-    searchField.click()
-    app.typeText("brief")
-
-    XCTAssertTrue(
-      app.staticTexts["Recent Files"].waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertTrue(
-      app.buttons["Open Project Brief.md"].waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertFalse(
-      app.staticTexts["Favorite Folders"].waitForExistence(timeout: 2), app.debugDescription)
-  }
-
-  @MainActor
-  func testHomeSearchShowsEmptyStateWhenNoSavedShortcutsMatch() throws {
-    let workspacePath = try fixtureWorkspacePath("basic")
-    let app = try launchApp(favoriteFolders: [workspacePath])
-
-    let searchField = app.textFields["home-shortcut-search-field"]
-    XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-    searchField.click()
-    app.typeText("definitely-no-match")
-
-    let emptyState = app.descendants(matching: .any)["home-shortcut-search-empty-state"]
-    XCTAssertTrue(emptyState.waitForExistence(timeout: 2), app.debugDescription)
-  }
-
-  @MainActor
-  func testWorkspaceSearchIncludesRecentFiles() throws {
-    let recentFileURL = FileManager.default.temporaryDirectory
-      .appending(path: "Quarterly Forecast \(UUID().uuidString).md")
-    try "Forecast notes\n".write(to: recentFileURL, atomically: true, encoding: .utf8)
-    filesToRemove.insert(recentFileURL.path(percentEncoded: false))
-
-    let app = try launchApp(
-      workspacePath: fixtureWorkspacePath("basic"),
-      recentFiles: [recentFileURL.path(percentEncoded: false)]
-    )
-
-    let searchField = app.textFields["workspace-search-field"]
-    XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-    searchField.click()
-    app.typeText("forecast")
-
-    XCTAssertTrue(
-      app.staticTexts["Recent Files"].waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertTrue(
-      app.buttons["Open \(recentFileURL.lastPathComponent)"].waitForExistence(timeout: 2),
-      app.debugDescription)
-    XCTAssertTrue(
-      app.staticTexts["No Current Folder Results"].waitForExistence(timeout: 2),
-      app.debugDescription)
-  }
-
-  @MainActor
-  func testWorkspaceSearchRecentFileShortcutCanBePreviewedFromContextMenu() throws {
-    let recentFileURL = FileManager.default.temporaryDirectory
-      .appending(path: "Quarterly Forecast \(UUID().uuidString).md")
-    let recentFilePath = recentFileURL.path(percentEncoded: false)
-    try "Forecast notes\n".write(to: recentFileURL, atomically: true, encoding: .utf8)
-    filesToRemove.insert(recentFilePath)
-
-    let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-    let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-    let app = try launchApp(
-      workspacePath: fixtureWorkspacePath("basic"),
-      previewInvocationsKey: previewInvocationsKey,
-      previewInvocationsFilePath: previewInvocationsFilePath,
-      recentFiles: [recentFilePath]
-    )
-
-    let searchField = app.textFields["workspace-search-field"]
-    XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-    searchField.click()
-    // Direct typing can be flaky immediately after mounting the workspace
-    // search field; pasteboard input keeps this context-menu path stable.
-    NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString("forecast", forType: .string)
-    app.typeKey("v", modifierFlags: [.command])
-    app.typeKey(.return, modifierFlags: [])
-
-    let recentFile = app.buttons.matching(identifier: "workspace-search-recent-file-row").firstMatch
-    XCTAssertTrue(recentFile.waitForExistence(timeout: 2), app.debugDescription)
-    app.staticTexts["Recent Files"].click()
-    // Right-click the row body, not just the text, to keep the menu target
-    // on the shortcut row after the search result section receives focus.
-    recentFile.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.5)).rightClick()
-
-    let previewMenuItem = app.menuItems["Preview"]
-    XCTAssertTrue(previewMenuItem.waitForExistence(timeout: 2), app.debugDescription)
-    // These actions intentionally stay out of the UI; keep assertions here
-    // so future menu work does not reintroduce external handoff paths.
-    XCTAssertFalse(app.menuItems["Reveal in Finder"].exists)
-    XCTAssertFalse(app.menuItems["Open Externally"].exists)
-    previewMenuItem.click()
-
-    XCTAssertTrue(
-      waitForPreviewInvocation(
-        recentFilePath,
-        key: previewInvocationsKey,
-        filePath: previewInvocationsFilePath
-      ),
-      app.debugDescription
-    )
-  }
-
-  @MainActor
-  func testWorkspaceSearchRecentFileShortcutOpensContainingFolderAndSelectsFile() throws {
-    let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
-    let recentFileURL = workspaceURL.appending(path: "Reports/report-2026-01.md")
-    let recentFilePath = recentFileURL.path(percentEncoded: false)
-    let previewInvocationsKey = "previewInvocations.uiTests.\(UUID().uuidString)"
-    let previewInvocationsFilePath = temporaryPreviewInvocationsPath()
-    let app = try launchApp(
-      workspacePath: workspaceURL.path(percentEncoded: false),
-      previewInvocationsKey: previewInvocationsKey,
-      previewInvocationsFilePath: previewInvocationsFilePath,
-      recentFiles: [recentFilePath]
-    )
-
-    let searchField = app.textFields["workspace-search-field"]
-    XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-    searchField.click()
-    app.typeText("report")
-
-    let recentFile = app.buttons.matching(identifier: "workspace-search-recent-file-row").firstMatch
-    XCTAssertTrue(recentFile.waitForExistence(timeout: 2), app.debugDescription)
-    recentFile.click()
-
-    XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
-    XCTAssertTrue(
-      app.staticTexts["report-2026-01.md"].waitForExistence(timeout: 5), app.debugDescription)
-    assertTableRow(named: "report-2026-01.md", isSelectedIn: app)
-
-    app.typeKey(.space, modifierFlags: [])
-
-    XCTAssertTrue(
-      waitForPreviewInvocation(
-        recentFilePath,
-        key: previewInvocationsKey,
-        filePath: previewInvocationsFilePath
-      ),
-      app.debugDescription
-    )
-  }
-
-  @MainActor
-  func testWorkspaceSearchRecentFileOutsideCurrentRootCanNavigateToParentFolder() throws {
-    let outsideParentURL = FileManager.default.temporaryDirectory
-      .appending(path: "locus-outside-parent-\(UUID().uuidString)", directoryHint: .isDirectory)
-    let reportsURL = outsideParentURL.appending(path: "Reports", directoryHint: .isDirectory)
-    try FileManager.default.createDirectory(at: reportsURL, withIntermediateDirectories: true)
-    filesToRemove.insert(outsideParentURL.path(percentEncoded: false))
-
-    let recentFileURL = reportsURL.appending(path: "report-outside.md")
-    let recentFilePath = recentFileURL.path(percentEncoded: false)
-    try "Outside report\n".write(to: recentFileURL, atomically: true, encoding: .utf8)
-
-    let app = try launchApp(
-      workspacePath: fixtureWorkspacePath("basic"),
-      recentFiles: [recentFilePath]
-    )
-
-    let searchField = app.textFields["workspace-search-field"]
-    XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-    searchField.click()
-    app.typeText("outside")
-
-    let recentFile = app.buttons.matching(identifier: "workspace-search-recent-file-row").firstMatch
-    XCTAssertTrue(recentFile.waitForExistence(timeout: 2), app.debugDescription)
-    recentFile.click()
-
-    XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
-    XCTAssertTrue(
-      app.staticTexts["report-outside.md"].waitForExistence(timeout: 5), app.debugDescription)
-    assertTableRow(named: "report-outside.md", isSelectedIn: app)
-
-    let parentFolderButton = app.buttons["Parent Folder"]
-    XCTAssertTrue(parentFolderButton.waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertTrue(parentFolderButton.isEnabled)
-    parentFolderButton.click()
-
-    XCTAssertTrue(
-      app.staticTexts[outsideParentURL.lastPathComponent].waitForExistence(timeout: 5),
-      app.debugDescription)
-    XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
-  }
-
-  @MainActor
   func testRecentFileIsPrunedWhenContainingFolderCannotBeLoaded() throws {
     let recentFilesKey = "recentFiles.uiTests.\(UUID().uuidString)"
     let folderURL = FileManager.default.temporaryDirectory
@@ -1091,48 +838,6 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testWorkspaceSearchDoesNotDuplicateCurrentFileInRecentFiles() throws {
-    let workspacePath = try fixtureWorkspacePath("basic")
-    let app = try launchApp(
-      workspacePath: workspacePath,
-      recentFiles: ["\(workspacePath)/Project Brief.md"]
-    )
-
-    let searchField = app.textFields["workspace-search-field"]
-    XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-    searchField.click()
-    app.typeText("project brief")
-
-    XCTAssertTrue(
-      app.staticTexts["Project Brief.md"].waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertFalse(
-      app.staticTexts["Recent Files"].waitForExistence(timeout: 2), app.debugDescription)
-  }
-
-  @MainActor
-  func testCurrentFolderCanBePinnedAndReopenedFromHome() throws {
-    let favoriteFoldersKey = "favoriteFolders.uiTests.\(UUID().uuidString)"
-    let workspacePath = try fixtureWorkspacePath("basic")
-    var app = try launchApp(workspacePath: workspacePath, favoriteFoldersKey: favoriteFoldersKey)
-
-    let favoriteButton = app.buttons["favorite-current-folder-button"]
-    XCTAssertTrue(favoriteButton.waitForExistence(timeout: 5), app.debugDescription)
-    favoriteButton.click()
-    app.terminate()
-
-    app = try launchApp(favoriteFoldersKey: favoriteFoldersKey)
-
-    XCTAssertTrue(
-      app.staticTexts["Favorite Folders"].waitForExistence(timeout: 5), app.debugDescription)
-
-    let favoriteFolder = app.buttons.matching(identifier: "favorite-folder-row").firstMatch
-    XCTAssertTrue(favoriteFolder.waitForExistence(timeout: 5), app.debugDescription)
-    favoriteFolder.click()
-
-    XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
-  }
-
-  @MainActor
   private func launchAppWithBasicWorkspace() throws -> XCUIApplication {
     try launchApp(workspacePath: fixtureWorkspacePath("basic"))
   }
@@ -1140,18 +845,15 @@ final class WorkspaceSearchUITests: XCTestCase {
   @MainActor
   private func launchApp(
     workspacePath: String? = nil,
-    favoriteFoldersKey: String = "favoriteFolders.uiTests.\(UUID().uuidString)",
     recentFilesKey: String = "recentFiles.uiTests.\(UUID().uuidString)",
     recentFoldersKey: String = "recentFolders.uiTests.\(UUID().uuidString)",
     previewInvocationsKey: String = "previewInvocations.uiTests.\(UUID().uuidString)",
     previewInvocationsFilePath: String? = nil,
-    favoriteFolders: [String] = [],
     recentFiles: [String] = [],
     recentFolders: [String] = []
   ) throws -> XCUIApplication {
     let previewInvocationsFilePath = previewInvocationsFilePath ?? temporaryPreviewInvocationsPath()
     trackUserDefaultsKeys(
-      favoriteFoldersKey,
       recentFilesKey,
       recentFoldersKey,
       previewInvocationsKey
@@ -1160,8 +862,6 @@ final class WorkspaceSearchUITests: XCTestCase {
     let app = XCUIApplication()
     app.launchEnvironment["LOCUS_UI_TESTING"] = "1"
     app.launchArguments = [
-      "--ui-test-favorite-folders-key",
-      favoriteFoldersKey,
       "--ui-test-recent-files-key",
       recentFilesKey,
       "--ui-test-recent-folders-key",
@@ -1171,9 +871,6 @@ final class WorkspaceSearchUITests: XCTestCase {
       "--ui-test-preview-invocations-file",
       previewInvocationsFilePath,
     ]
-    for favoriteFolder in favoriteFolders {
-      app.launchArguments += ["--ui-test-favorite-folder", favoriteFolder]
-    }
     for recentFile in recentFiles {
       app.launchArguments += ["--ui-test-recent-file", recentFile]
     }

@@ -56,11 +56,11 @@ Responsibilities:
 - `App/`: app entry point, window setup, menus, command routing.
 - `CoreBridge/`: Swift wrapper around the C ABI. Owns unsafe calls, memory release, status conversion, and background dispatch.
 - `Models/`: Swift-facing view models and value types.
-- `Views/Home/`: recent items, favorites, and locations.
+- `Views/Home/`: current folder browsing, recent items, and locations.
 - `Views/Browser/`: sidebar, file list, folder navigation, search field.
 - `Views/Preview/`: PDF, Quick Look, image, audio, video, and unsupported-file views.
 - `Views/Editors/`: Markdown and structured plain-text editors.
-- `Services/`: in-app location navigation helpers, file dialogs, file watching, recents/favorites storage if still app-owned.
+- `Services/`: in-app location navigation helpers, file dialogs, file watching, and recents storage if still app-owned.
 
 Use SwiftUI for app structure and normal controls, with AppKit bridges where native document behavior matters:
 
@@ -81,7 +81,6 @@ core/crates/app-core/src/
   metadata.rs
   search.rs
   recents.rs
-  favorites.rs
   storage.rs
   diff.rs
 ```
@@ -92,8 +91,8 @@ Initial ownership:
 - `workspace`: open a folder, list child entries, apply shallow filters, sort folders/files.
 - `metadata`: directory flag, readonly flag, lightweight type metadata, and contextual size/modified-time loading when a surface needs it.
 - `search`: file-name search within the current location.
-- `recents` and `favorites`: start simple; persist through SQLite once the storage boundary is ready.
-- `storage`: SQLite wrapper for recents, favorites, metadata cache, and later FTS5.
+- `recents`: start simple; persist through SQLite once the storage boundary is ready.
+- `storage`: SQLite wrapper for recents, metadata cache, and later FTS5.
 - `diff`: defer until external-change review is implemented.
 
 Do not parse PDFs, Office documents, or media in Rust for MVP browsing. The macOS app should use native preview frameworks for those.
@@ -109,7 +108,7 @@ Keep the C ABI coarse and explicit. Early APIs should support:
 - reading lightweight listing metadata, with size and modified time loaded lazily when needed
 - listing with explicit options through FFI when contextual surfaces request
   extended metadata
-- storing and reading recents/favorites once persistence lands
+- storing and reading recents once persistence lands
 - releasing Rust-allocated strings and arrays
 - retrieving structured error details
 
@@ -155,7 +154,7 @@ Deliverables:
   browser should not expose Type, Size, or Modified columns; keep those
   metadata values lazy for future contextual surfaces, and avoid making the
   primary list feel like a developer or spreadsheet view.
-- Add in-app "show containing folder and select item" behavior for files reached from recents, favorites, and search results.
+- Add in-app "show containing folder and select item" behavior for files reached from recents and search results.
 - Add session-scoped folder Back/Forward navigation.
 - Keep file location actions inside Locus: open, preview, show containing folder, select item, and copy path.
 
@@ -166,23 +165,21 @@ Acceptance:
 - File list loading does not block the main thread.
 - Rust tests cover sorting, hidden files policy, symlink policy, and the lazy
   extended metadata policy.
-- UI tests cover browser-style folder history, forward-stack clearing after a
-  new navigation, and parent navigation selecting the folder that was left.
+- UI tests cover browser-style folder history and forward-stack clearing after
+  a new navigation.
 
-### 3. Home, Recents, and Favorites
+### 3. Home and Recents
 
 Deliverables:
 
-- Add Home view with recent files, recent folders, and favorite folders.
-- Add favorite/unfavorite actions for folders.
+- Add Home view with recent files and recent folders.
 - Decide whether initial persistence is app-owned or Rust-owned; move to Rust/SQLite before broader indexing work.
-- Add command/menu actions for opening recent folders and favorite folders.
+- Add command/menu actions for opening recent folders.
 
 Acceptance:
 
 - Recently opened folders and files survive app restart.
-- Favorites are explicit and user-controlled.
-- User-facing language uses "folders", "locations", "recent items", and "favorites".
+- User-facing language uses "folders", "locations", and "recent items".
 
 ### 4. Preview and Editing Vertical Slice
 
@@ -271,7 +268,7 @@ Start with these tasks in order:
 3. Add Rust `file_type` and `workspace` modules with unit tests.
 4. Extend the FFI with one coarse folder-list snapshot API and explicit free functions.
 5. Build a minimal UI: default home-folder location, folder chooser, current location title, and file list.
-6. Add in-app containing-folder navigation and row selection for file-list, recent, favorite, and search result rows.
+6. Add in-app containing-folder navigation and row selection for file-list, recent, and search result rows.
 7. Keep context-menu actions scoped to in-app navigation, preview, and path copying.
 8. Run:
    - `cargo test --manifest-path core/Cargo.toml`

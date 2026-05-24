@@ -42,7 +42,7 @@ The primary model is:
   session-scoped and is not persisted across app restarts
 - users should be able to preview and edit supported files without leaving Locus
 
-Locus should feel familiar to Finder users, but search should be a first-class way to move through files and folders. The goal is not to copy a launcher UI. Users should be able to keep the mental model of folders, locations, recents, and favorites while getting fast, forgiving search across the places they care about.
+Locus should feel familiar to Finder users while staying much quieter than a full file manager. Search can return once the prototype's browsing and document surfaces are stable; keep the underlying matching model available, but do not make a search box or launcher-like UI part of the default chrome yet.
 
 The current-location file browser should stay name-first, closer to a compact editor sidebar than to Finder's multi-column list. It should be narrow by default so the document surface remains dominant, while still allowing users to widen the divider when a folder has unusually long names. File and folder names are the primary information scent; Type, Size, and Modified metadata should not be shown as default columns. Surface metadata later only where it supports a specific decision, such as document details, search refinement, or inspection.
 
@@ -51,19 +51,18 @@ to sit side by side comfortably, but the minimum size should stay smaller than
 that default so users can place Locus next to Finder, Preview, a browser, or an
 AI agent app.
 
-For the prototype, prioritize visible primary flows: browsing, search,
-preview, and lightweight editing. Do not expand scope around secondary controls
+For the prototype, prioritize visible primary flows: browsing, preview, and
+lightweight editing. Do not expand scope around secondary controls
 until those flows are stable.
 
 Recommended top-level areas:
 
 - Home
-- Favorites
 - Recents
 - Locations
 - Tags
 
-Use plain user-facing language such as "folder", "location", "recent items", and "favorites". Internal concepts such as workspace can exist, but they should not dominate the UI language.
+Use plain user-facing language such as "folder", "location", and "recent items". Internal concepts such as workspace can exist, but they should not dominate the UI language.
 
 ## Language and Localization
 

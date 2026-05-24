@@ -35,10 +35,10 @@ struct HomeView: View {
   @State private var didStartInitialFolderLoad = false
   @State private var workspaceRootURL: URL?
   @State private var navigationHistory = WorkspaceNavigationHistory()
-  @State private var favoriteFolders: [FavoriteFolder] = []
   @State private var recentFiles: [RecentFile] = []
   @State private var recentFolders: [RecentFolder] = []
-  // Folder loads can overlap when users refresh or choose another folder
+  // Folder loads can overlap when the directory monitor reloads or users
+  // choose another folder.
   // quickly; only the latest generation is allowed to update visible state.
   @State private var workspaceLoadGeneration: UInt64 = 0
   @State private var workspaceLoadingIndicatorTask: Task<Void, Never>?
@@ -52,7 +52,6 @@ struct HomeView: View {
   private let quickLookDocumentStore: any QuickLookDocumentStoring
   private let clipboardService: ClipboardService
   private let workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring
-  private let favoriteFolderStore: FavoriteFolderStore
   private let recentFileStore: RecentFileStore
   private let recentFolderStore: RecentFolderStore
   private let initialFolderResolution: InitialFolderResolution
@@ -68,7 +67,6 @@ struct HomeView: View {
     quickLookDocumentStore: any QuickLookDocumentStoring = QuickLookDocumentStore(),
     clipboardService: ClipboardService = ClipboardService(),
     workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring = WorkspaceDirectoryMonitor(),
-    favoriteFolderStore: FavoriteFolderStore = FavoriteFolderStore(),
     recentFileStore: RecentFileStore = RecentFileStore(),
     recentFolderStore: RecentFolderStore = RecentFolderStore(),
     initialFolderResolution: InitialFolderResolution = .empty,
@@ -83,7 +81,6 @@ struct HomeView: View {
     self.quickLookDocumentStore = quickLookDocumentStore
     self.clipboardService = clipboardService
     self.workspaceDirectoryMonitor = workspaceDirectoryMonitor
-    self.favoriteFolderStore = favoriteFolderStore
     self.recentFileStore = recentFileStore
     self.recentFolderStore = recentFolderStore
     self.initialFolderResolution = initialFolderResolution
@@ -92,10 +89,8 @@ struct HomeView: View {
 
   var body: some View {
     let shortcutActions = FileLocationShortcutActions(
-      openFavoriteFolder: openFavoriteFolder,
       showRecentFile: showRecentFile,
       openRecentFolder: openRecentFolder,
-      removeFavoriteFolder: removeFavoriteFolder,
       removeRecentFile: removeRecentFile,
       removeRecentFolder: removeRecentFolder,
       previewFile: previewFile,
@@ -107,7 +102,6 @@ struct HomeView: View {
       WorkspaceContentView(
         state: workspaceState,
         rootURL: workspaceRootURL,
-        favoriteFolders: favoriteFolders,
         recentFiles: recentFiles,
         recentFolders: recentFolders,
         textDocumentStore: textDocumentStore,
@@ -126,9 +120,7 @@ struct HomeView: View {
           canGoForward: navigationHistory.canGoForward,
           goBack: restorePreviousWorkspaceFolder,
           goForward: restoreNextWorkspaceFolder,
-          refresh: refreshWorkspace,
-          openParentFolder: openParentFolder,
-          toggleFavoriteFolder: toggleFavoriteFolder,
+          retryCurrentFolder: retryCurrentFolder,
           preview: previewURLs,
           showInLocus: showEntryInLocus,
           copyPaths: copyPaths,
@@ -188,7 +180,7 @@ struct HomeView: View {
   }
 
   @MainActor
-  private func refreshWorkspace() {
+  private func retryCurrentFolder() {
     guard let folderURL = workspaceState.folderURL else {
       return
     }
@@ -302,7 +294,7 @@ struct HomeView: View {
   }
 
   /// Triggers a user-initiated folder change and records it in browser-style
-  /// history. Use `startWorkspaceLoad` directly for refreshes and restores.
+  /// history. Use `startWorkspaceLoad` directly for monitor-driven reloads and restores.
   @MainActor
   private func navigateToWorkspaceFolder(
     _ folderURL: URL,
@@ -429,8 +421,8 @@ struct HomeView: View {
 
     let folderURL = request.folderURL
     let previousSelectedEntryID = selectedEntryIDForReload(of: folderURL)
-    // This covers the immediate directory read. Recents and Favorites will
-    // store security-scoped bookmarks once sandboxing is enabled.
+    // This covers the immediate directory read. Recents will store
+    // security-scoped bookmarks once sandboxing is enabled.
     let didStartAccess = folderURL.startAccessingSecurityScopedResource()
     defer {
       if didStartAccess {
@@ -520,11 +512,6 @@ struct HomeView: View {
   }
 
   @MainActor
-  private func openFavoriteFolder(_ folder: FavoriteFolder) {
-    navigateToWorkspaceFolder(folder.url, rootChange: .set(folder.url), recordRecent: true)
-  }
-
-  @MainActor
   private func showRecentFile(_ file: RecentFile) {
     showURLInLocus(file.url)
   }
@@ -532,13 +519,6 @@ struct HomeView: View {
   @MainActor
   private func openRecentFolder(_ folder: RecentFolder) {
     navigateToWorkspaceFolder(folder.url, rootChange: .set(folder.url), recordRecent: true)
-  }
-
-  @MainActor
-  private func refreshFavoriteFolders() {
-    favoriteFolders = favoriteFolderStore.favoriteFolders().filter { folder in
-      !WorkspaceHomeVisibility.isHiddenHomeURL(folder.url, homeDirectoryURL: homeDirectoryURL)
-    }
   }
 
   @MainActor
@@ -557,29 +537,8 @@ struct HomeView: View {
 
   @MainActor
   private func refreshFileLocationShortcuts() {
-    refreshFavoriteFolders()
     refreshRecentFiles()
     refreshRecentFolders()
-  }
-
-  @MainActor
-  private func toggleFavoriteFolder() {
-    guard let folderURL = workspaceState.folderURL else {
-      return
-    }
-
-    if favoriteFolderStore.contains(folderURL) {
-      favoriteFolderStore.remove(folderURL)
-    } else {
-      favoriteFolderStore.add(folderURL)
-    }
-    refreshFavoriteFolders()
-  }
-
-  @MainActor
-  private func removeFavoriteFolder(_ folder: FavoriteFolder) {
-    favoriteFolderStore.remove(folder.url)
-    refreshFavoriteFolders()
   }
 
   @MainActor
@@ -602,20 +561,6 @@ struct HomeView: View {
   @MainActor
   private func copyPath(_ url: URL) {
     clipboardService.copyPlainText(url.locusStandardizedPath)
-  }
-
-  @MainActor
-  private func openParentFolder() {
-    guard let folderURL = workspaceState.folderURL,
-      let parentFolderURL = WorkspaceNavigation.parentFolderURL(
-        for: folderURL,
-        within: workspaceRootURL
-      )
-    else {
-      return
-    }
-
-    navigateToWorkspaceFolder(parentFolderURL, selecting: folderURL)
   }
 
   @MainActor
@@ -708,7 +653,6 @@ struct HomeView: View {
 private struct WorkspaceContentView: View {
   let state: WorkspaceState
   let rootURL: URL?
-  let favoriteFolders: [FavoriteFolder]
   let recentFiles: [RecentFile]
   let recentFolders: [RecentFolder]
   let textDocumentStore: any TextDocumentStoring
@@ -726,7 +670,6 @@ private struct WorkspaceContentView: View {
       switch state {
       case .idle:
         EmptyWorkspaceView(
-          favoriteFolders: favoriteFolders,
           recentFiles: recentFiles,
           recentFolders: recentFolders,
           actions: emptyActions
@@ -739,7 +682,6 @@ private struct WorkspaceContentView: View {
           snapshot: snapshot,
           loadedAt: loadedAt,
           rootURL: rootURL,
-          favoriteFolders: favoriteFolders,
           recentFiles: recentFiles,
           recentFolders: recentFolders,
           textDocumentStore: textDocumentStore,
@@ -747,7 +689,6 @@ private struct WorkspaceContentView: View {
           pdfDocumentStore: pdfDocumentStore,
           mediaDocumentStore: mediaDocumentStore,
           quickLookDocumentStore: quickLookDocumentStore,
-          isFavorite: favoriteFolders.contains { $0.path == folderURL.locusStandardizedPath },
           selectedEntryID: $selectedEntryID,
           shortcutActions: shortcutActions,
           actions: actions
@@ -757,7 +698,7 @@ private struct WorkspaceContentView: View {
           folderURL: folderURL,
           message: message,
           openFolder: emptyActions.openFolder,
-          retry: actions.refresh
+          retry: actions.retryCurrentFolder
         )
       }
     }
@@ -770,9 +711,7 @@ private struct WorkspaceActions {
   let canGoForward: Bool
   let goBack: () -> Void
   let goForward: () -> Void
-  let refresh: () -> Void
-  let openParentFolder: () -> Void
-  let toggleFavoriteFolder: () -> Void
+  let retryCurrentFolder: () -> Void
   let preview: ([URL]) -> Void
   let showInLocus: (WorkspaceEntry) -> Void
   let copyPaths: ([WorkspaceEntry]) -> Void
@@ -798,7 +737,6 @@ private struct WorkspaceBrowserView: View {
   let snapshot: WorkspaceSnapshot
   let loadedAt: Date
   let rootURL: URL?
-  let favoriteFolders: [FavoriteFolder]
   let recentFiles: [RecentFile]
   let recentFolders: [RecentFolder]
   let textDocumentStore: any TextDocumentStoring
@@ -806,21 +744,18 @@ private struct WorkspaceBrowserView: View {
   let pdfDocumentStore: any PDFDocumentStoring
   let mediaDocumentStore: any MediaDocumentStoring
   let quickLookDocumentStore: any QuickLookDocumentStoring
-  let isFavorite: Bool
   @Binding var selectedEntryID: WorkspaceEntry.ID?
   let shortcutActions: FileLocationShortcutActions
   let actions: WorkspaceActions
   @State private var searchQuery = ""
   @State private var searchResults: WorkspaceBrowserSearchResults
   @State private var isDocumentTextInputFocused = false
-  @FocusState private var isSearchFocused: Bool
 
   init(
     folderURL: URL,
     snapshot: WorkspaceSnapshot,
     loadedAt: Date,
     rootURL: URL?,
-    favoriteFolders: [FavoriteFolder],
     recentFiles: [RecentFile],
     recentFolders: [RecentFolder],
     textDocumentStore: any TextDocumentStoring,
@@ -828,7 +763,6 @@ private struct WorkspaceBrowserView: View {
     pdfDocumentStore: any PDFDocumentStoring,
     mediaDocumentStore: any MediaDocumentStoring,
     quickLookDocumentStore: any QuickLookDocumentStoring,
-    isFavorite: Bool,
     selectedEntryID: Binding<WorkspaceEntry.ID?>,
     shortcutActions: FileLocationShortcutActions,
     actions: WorkspaceActions
@@ -837,7 +771,6 @@ private struct WorkspaceBrowserView: View {
     self.snapshot = snapshot
     self.loadedAt = loadedAt
     self.rootURL = rootURL
-    self.favoriteFolders = favoriteFolders
     self.recentFiles = recentFiles
     self.recentFolders = recentFolders
     self.textDocumentStore = textDocumentStore
@@ -845,14 +778,12 @@ private struct WorkspaceBrowserView: View {
     self.pdfDocumentStore = pdfDocumentStore
     self.mediaDocumentStore = mediaDocumentStore
     self.quickLookDocumentStore = quickLookDocumentStore
-    self.isFavorite = isFavorite
     self._selectedEntryID = selectedEntryID
     self.shortcutActions = shortcutActions
     self.actions = actions
     self._searchResults = State(
       initialValue: WorkspaceBrowserSearchResults.resolve(
         entries: snapshot.entries,
-        favoriteFolders: favoriteFolders,
         recentFiles: recentFiles,
         recentFolders: recentFolders,
         query: ""
@@ -863,16 +794,7 @@ private struct WorkspaceBrowserView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
       WorkspaceToolbarView(
-        folderURL: folderURL,
-        snapshot: snapshot,
-        loadedAt: loadedAt,
-        rootURL: rootURL,
-        isFavorite: isFavorite,
-        searchQuery: $searchQuery,
-        isSearchFocused: $isSearchFocused,
-        openParentFolder: actions.openParentFolder,
-        toggleFavoriteFolder: actions.toggleFavoriteFolder,
-        refresh: actions.refresh
+        folderURL: folderURL
       )
 
       if !snapshot.partialErrors.isEmpty {
@@ -881,7 +803,6 @@ private struct WorkspaceBrowserView: View {
 
       if searchResults.hasShortcutResults {
         WorkspaceShortcutSearchResultsView(
-          favoriteFolders: searchResults.favoriteFolders,
           recentFiles: searchResults.recentFiles,
           recentFolders: searchResults.recentFolders,
           actions: shortcutActions
@@ -907,7 +828,7 @@ private struct WorkspaceBrowserView: View {
           WorkspaceEntriesList(
             entries: searchResults.visibleEntries,
             selectedEntryID: $selectedEntryID,
-            isPreviewShortcutEnabled: !isSearchFocused && !isDocumentTextInputFocused,
+            isPreviewShortcutEnabled: !isDocumentTextInputFocused,
             actions: actions
           )
           .frame(
@@ -939,9 +860,6 @@ private struct WorkspaceBrowserView: View {
     .onChange(of: snapshot.entries) {
       refreshSearchResults()
     }
-    .onChange(of: favoriteFolders) {
-      refreshSearchResults()
-    }
     .onChange(of: recentFiles) {
       refreshSearchResults()
     }
@@ -953,14 +871,15 @@ private struct WorkspaceBrowserView: View {
       isDocumentTextInputFocused = false
       refreshSearchResults()
     }
-    .background(searchShortcut)
     .focusedSceneValue(\.workspaceNavigationCommands, workspaceNavigationCommands)
   }
 
   private func refreshSearchResults() {
+    // Search UI is intentionally hidden in the prototype toolbar, but the
+    // filtering model stays wired so the feature can return without rebuilding
+    // ranking, selection preservation, or shortcut matching.
     let refreshedResults = WorkspaceBrowserSearchResults.resolve(
       entries: snapshot.entries,
-      favoriteFolders: favoriteFolders,
       recentFiles: recentFiles,
       recentFolders: recentFolders,
       query: searchQuery
@@ -974,29 +893,8 @@ private struct WorkspaceBrowserView: View {
     }
   }
 
-  @ViewBuilder
-  private var searchShortcut: some View {
-    if selectedEntrySurfaceKind != .pdf {
-      // Keep Command-F local to the mounted browser until Locus has a
-      // broader menu command surface.
-      Button("Focus Search Field") {
-        focusSearchField()
-      }
-      .keyboardShortcut("f", modifiers: [.command])
-      .hidden()
-      .accessibilityHidden(true)
-    }
-  }
-
-  private func focusSearchField() {
-    isSearchFocused = true
-    DispatchQueue.main.async {
-      NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
-    }
-  }
-
   private var isTextInputFocused: Bool {
-    isSearchFocused || isDocumentTextInputFocused
+    isDocumentTextInputFocused
   }
 
   private var workspaceNavigationCommands: WorkspaceNavigationCommands {
@@ -1031,24 +929,22 @@ private struct WorkspaceBrowserView: View {
     return searchResults.visibleEntries.first { $0.id == selectedEntryID }
   }
 
-  private var selectedEntrySurfaceKind: WorkspaceDocumentSurfaceKind? {
-    selectedEntry.map(WorkspaceDocumentSurfaceSupport.surfaceKind(for:))
-  }
 }
 
+/// Search-backed browser content kept while the prototype hides search chrome.
+/// With an empty query this is just the folder entries; when search returns it
+/// also carries matching recent shortcuts without reworking selection logic.
 struct WorkspaceBrowserSearchResults {
   let visibleEntries: [WorkspaceEntry]
-  let favoriteFolders: [FavoriteFolder]
   let recentFiles: [RecentFile]
   let recentFolders: [RecentFolder]
 
   var hasShortcutResults: Bool {
-    !favoriteFolders.isEmpty || !recentFiles.isEmpty || !recentFolders.isEmpty
+    !recentFiles.isEmpty || !recentFolders.isEmpty
   }
 
   static func resolve(
     entries: [WorkspaceEntry],
-    favoriteFolders: [FavoriteFolder],
     recentFiles: [RecentFile],
     recentFolders: [RecentFolder],
     query: String
@@ -1057,22 +953,18 @@ struct WorkspaceBrowserSearchResults {
     guard WorkspaceEntrySearch.hasSearchTerms(in: query) else {
       return WorkspaceBrowserSearchResults(
         visibleEntries: visibleEntries,
-        favoriteFolders: [],
         recentFiles: [],
         recentFolders: []
       )
     }
 
     let visibleEntryPaths = Set(visibleEntries.map(\.url.locusStandardizedPath))
-    let visibleFavoriteFolders = WorkspaceEntrySearch.filteredShortcuts(
-      favoriteFolders, query: query)
     let visibleRecentFiles = WorkspaceEntrySearch.filteredShortcuts(recentFiles, query: query)
       .filter { !visibleEntryPaths.contains($0.path) }
     let visibleRecentFolders = WorkspaceEntrySearch.filteredShortcuts(recentFolders, query: query)
 
     return WorkspaceBrowserSearchResults(
       visibleEntries: visibleEntries,
-      favoriteFolders: visibleFavoriteFolders,
       recentFiles: visibleRecentFiles,
       recentFolders: visibleRecentFolders
     )
@@ -1080,28 +972,15 @@ struct WorkspaceBrowserSearchResults {
 }
 
 private struct WorkspaceShortcutSearchResultsView: View {
-  let favoriteFolders: [FavoriteFolder]
+  // This view is intentionally retained while the prototype hides the search
+  // field. The branch is unreachable with an empty query, but keeping it here
+  // preserves the recents shortcut surface for the later search reintroduction.
   let recentFiles: [RecentFile]
   let recentFolders: [RecentFolder]
   let actions: FileLocationShortcutActions
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
-      if !favoriteFolders.isEmpty {
-        ShortcutListView(
-          title: "Favorite Folders",
-          rowAccessibilityIdentifier: "workspace-search-favorite-folder-row",
-          items: favoriteFolders,
-          systemImage: "folder",
-          symbolColor: .blue,
-          maxWidth: .infinity,
-          open: actions.openFavoriteFolder,
-          remove: actions.removeFavoriteFolder,
-          showInLocus: actions.showInLocus,
-          copyPath: actions.copyPath
-        )
-      }
-
       if !recentFiles.isEmpty {
         ShortcutListView(
           title: "Recent Files",
@@ -1141,89 +1020,21 @@ private struct WorkspaceShortcutSearchResultsView: View {
 
 private struct WorkspaceToolbarView: View {
   let folderURL: URL
-  let snapshot: WorkspaceSnapshot
-  let loadedAt: Date
-  let rootURL: URL?
-  let isFavorite: Bool
-  @Binding var searchQuery: String
-  let isSearchFocused: FocusState<Bool>.Binding
-  let openParentFolder: () -> Void
-  let toggleFavoriteFolder: () -> Void
-  let refresh: () -> Void
 
   var body: some View {
     HStack(spacing: 12) {
-      VStack(alignment: .leading, spacing: 4) {
-        Text(folderURL.lastPathComponent)
-          .font(.headline)
-          .lineLimit(1)
-
-        Text(folderURL.path(percentEncoded: false))
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .lineLimit(1)
-          .truncationMode(.middle)
-      }
+      Text(displayName)
+        .font(.headline)
+        .lineLimit(1)
 
       Spacer()
-
-      Text("\(snapshot.entries.count) items")
-        .font(.callout)
-        .foregroundStyle(.secondary)
-
-      Text(loadedAt, style: .time)
-        .font(.callout)
-        .foregroundStyle(.secondary)
-
-      Button(action: toggleFavoriteFolder) {
-        Label(favoriteButtonTitle, systemImage: isFavorite ? "star.fill" : "star")
-      }
-      .labelStyle(.iconOnly)
-      .help(favoriteButtonTitle)
-      .accessibilityIdentifier("favorite-current-folder-button")
-
-      Button(action: openParentFolder) {
-        Label("Parent Folder", systemImage: "arrow.up")
-      }
-      .labelStyle(.iconOnly)
-      .disabled(parentFolderURL == nil)
-      .help(parentFolderHelp)
-
-      TextField("Search", text: $searchQuery)
-        .textFieldStyle(.roundedBorder)
-        .focused(isSearchFocused)
-        .frame(width: 180)
-        .accessibilityLabel("Search files and folders")
-        .accessibilityIdentifier("workspace-search-field")
-
-      Button(action: refresh) {
-        Label("Refresh", systemImage: "arrow.clockwise")
-      }
-      .labelStyle(.iconOnly)
-      .keyboardShortcut("r", modifiers: [.command])
-      .help("Refresh")
     }
   }
 
-  private var parentFolderURL: URL? {
-    WorkspaceNavigation.parentFolderURL(for: folderURL, within: rootURL)
-  }
-
-  private var favoriteButtonTitle: String {
-    isFavorite ? "Remove from Favorites" : "Add to Favorites"
-  }
-
-  private var parentFolderHelp: String {
-    guard let parentFolderURL else {
-      return "No parent folder"
-    }
-
-    let displayName =
-      parentFolderURL.lastPathComponent.isEmpty
-      ? parentFolderURL.path(percentEncoded: false)
-      : parentFolderURL.lastPathComponent
-
-    return "Open \(displayName)"
+  private var displayName: String {
+    folderURL.lastPathComponent.isEmpty
+      ? folderURL.path(percentEncoded: false)
+      : folderURL.lastPathComponent
   }
 }
 
@@ -1416,10 +1227,10 @@ private struct PartialErrorsView: View {
 
   private var summaryTitle: String {
     if errors.count == 1 {
-      return "1 item could not be read"
+      return "An item could not be read"
     }
 
-    return "\(errors.count) items could not be read"
+    return "Some items could not be read"
   }
 }
 

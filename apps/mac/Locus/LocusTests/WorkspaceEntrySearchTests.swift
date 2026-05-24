@@ -194,9 +194,6 @@ final class WorkspaceEntrySearchTests: XCTestCase {
         return makeWorkspaceEntry(name: "Document-\(index).md")
       }
     }
-    let favoriteFolders = (0..<1_000).map { index in
-      makeFavoriteFolder(displayName: "Folder \(index)", path: "/tmp/folders/\(index)")
-    }
     let recentFiles = (0..<1_000).map { index in
       switch index {
       case 20:
@@ -218,7 +215,6 @@ final class WorkspaceEntrySearchTests: XCTestCase {
     let elapsed = ContinuousClock().measure {
       result = WorkspaceBrowserSearchResults.resolve(
         entries: entries,
-        favoriteFolders: favoriteFolders,
         recentFiles: recentFiles,
         recentFolders: recentFolders,
         query: "forecast"
@@ -228,7 +224,6 @@ final class WorkspaceEntrySearchTests: XCTestCase {
     XCTAssertEqual(
       result?.visibleEntries.map(\.name), ["Project Forecast.md", "Quarterly Forecast.md"])
     XCTAssertEqual(result?.recentFiles.map(\.displayName), ["Quarterly Forecast.md"])
-    XCTAssertEqual(result?.favoriteFolders, [])
     XCTAssertEqual(result?.recentFolders, [])
     XCTAssertLessThan(elapsed.milliseconds, 500)
   }
@@ -248,9 +243,9 @@ final class WorkspaceEntrySearchTests: XCTestCase {
 
   func testFiltersShortcutsByDisplayName() {
     let shortcuts = [
-      makeFavoriteFolder(displayName: "Client Materials", path: "/Users/nash/Documents/Acme"),
-      makeFavoriteFolder(displayName: "Project Briefs", path: "/Users/nash/Documents/Briefs"),
-      makeFavoriteFolder(displayName: "Invoices", path: "/Users/nash/Documents/Finance"),
+      makeRecentFolder(displayName: "Client Materials", path: "/Users/nash/Documents/Acme"),
+      makeRecentFolder(displayName: "Project Briefs", path: "/Users/nash/Documents/Briefs"),
+      makeRecentFolder(displayName: "Invoices", path: "/Users/nash/Documents/Finance"),
     ]
 
     XCTAssertEqual(
@@ -269,9 +264,9 @@ final class WorkspaceEntrySearchTests: XCTestCase {
 
   func testRequiresEveryWhitespaceSeparatedTermForShortcuts() {
     let shortcuts = [
-      makeFavoriteFolder(displayName: "Project Briefs", path: "/tmp/briefs"),
-      makeFavoriteFolder(displayName: "Project Notes", path: "/tmp/notes"),
-      makeFavoriteFolder(displayName: "Brief Archive", path: "/tmp/archive"),
+      makeRecentFolder(displayName: "Project Briefs", path: "/tmp/briefs"),
+      makeRecentFolder(displayName: "Project Notes", path: "/tmp/notes"),
+      makeRecentFolder(displayName: "Brief Archive", path: "/tmp/archive"),
     ]
 
     XCTAssertEqual(
@@ -287,8 +282,8 @@ final class WorkspaceEntrySearchTests: XCTestCase {
 
   func testFiltersShortcutNamesCaseInsensitively() {
     let shortcuts = [
-      makeFavoriteFolder(displayName: "Budget Archive", path: "/tmp/budget"),
-      makeFavoriteFolder(displayName: "Meeting Notes", path: "/tmp/notes"),
+      makeRecentFolder(displayName: "Budget Archive", path: "/tmp/budget"),
+      makeRecentFolder(displayName: "Meeting Notes", path: "/tmp/notes"),
     ]
 
     XCTAssertEqual(
@@ -299,8 +294,8 @@ final class WorkspaceEntrySearchTests: XCTestCase {
 
   func testMatchesShortcutNamesWithOneCharacterTypo() {
     let shortcuts = [
-      makeFavoriteFolder(displayName: "Project Breifs", path: "/tmp/briefs"),
-      makeFavoriteFolder(displayName: "Meeting Notes", path: "/tmp/notes"),
+      makeRecentFolder(displayName: "Project Breifs", path: "/tmp/briefs"),
+      makeRecentFolder(displayName: "Meeting Notes", path: "/tmp/notes"),
     ]
 
     XCTAssertEqual(
@@ -311,8 +306,8 @@ final class WorkspaceEntrySearchTests: XCTestCase {
 
   func testReturnsOriginalShortcutOrderForBlankQuery() {
     let shortcuts = [
-      makeFavoriteFolder(displayName: "First", path: "/tmp/first"),
-      makeFavoriteFolder(displayName: "Second", path: "/tmp/second"),
+      makeRecentFolder(displayName: "First", path: "/tmp/first"),
+      makeRecentFolder(displayName: "Second", path: "/tmp/second"),
     ]
 
     XCTAssertEqual(
@@ -359,16 +354,6 @@ private func makeWorkspaceEntry(
     sizeBytes: nil,
     modified: nil,
     isReadOnly: false
-  )
-}
-
-private func makeFavoriteFolder(displayName: String, path: String) -> FavoriteFolder {
-  FavoriteFolder(
-    id: path,
-    url: URL(filePath: path, directoryHint: .isDirectory),
-    displayName: displayName,
-    path: path,
-    addedAt: Date(timeIntervalSince1970: 0)
   )
 }
 

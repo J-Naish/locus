@@ -16,7 +16,6 @@ Build the local workspace foundation first.
 - shared Rust core
 - Home screen
 - Finder-like sidebar
-- favorite folders
 - recent files and folders
 - open a local folder as the current working location
 - file list browsing
@@ -30,11 +29,11 @@ Build the local workspace foundation first.
 Search is part of the MVP product identity, not only a later optimization pass. The first version does not need every advanced index, but it must already feel like a better everyday file search experience than Finder for the active local workspace.
 
 - fast file and folder name search in the current location
-- search across the current location, favorite folders, recent folders, and recent files
+- search across the current location, recent folders, and recent files
 - search results that remain understandable to Finder users
-- clear result grouping by file, folder, favorite, and recent item where useful
+- clear result grouping by file, folder, and recent item where useful
 - predictable open, show-in-Locus, preview, and copy-path actions from search results
-- basic ranking that favors exact name matches, recent items, favorites, and current location matches
+- basic ranking that favors exact name matches, recent items, and current location matches
 - no launcher-only UI as the primary search experience
 
 ### Phase 1C: Lightweight Preview and Editing Foundation
@@ -68,7 +67,7 @@ After the MVP works end to end, improve search depth, document richness, and pol
 - SQLite FTS5
 - metadata cache
 - incremental index updates
-- cross-location search beyond favorites and recents
+- cross-location search beyond recents
 - saved search scopes
 - richer Markdown editing
 - richer structured text validation

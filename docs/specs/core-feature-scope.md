@@ -17,7 +17,6 @@ Must support:
 - open files
 - navigate to an item's containing folder inside Locus and select the item
 - show recent files and folders
-- pin favorite folders
 - detect file changes
 
 Should support:
@@ -36,17 +35,17 @@ Must support:
 - folder name search
 - recent item search
 - search within the current working location
-- search across favorites, recent folders, and recent files
+- search across recent folders and recent files when the visible search flow returns
 - fast first results
 - result actions for open, preview, show in Locus, and copy path
 - result presentation that keeps local file and folder locations understandable
-- consistent name-search behavior in the current location, favorites, recent folders, and recent files
+- consistent name-search behavior in the current location, recent folders, and recent files
 - relevance ordering that prefers exact names, extension-stripped name matches, prefix matches, substring matches, then conservative typo matches
 - typo matching only for four-or-more-character terms; Japanese and other CJK names should rely on exact, prefix, and substring matching until a dedicated tokenizer exists
 
 Should support:
 
-- basic relevance ranking for exact matches, recency, favorites, and current location
+- basic relevance ranking for exact matches, recency, and current location
 - Markdown text search
 - PDF text search
 - Office extracted text search

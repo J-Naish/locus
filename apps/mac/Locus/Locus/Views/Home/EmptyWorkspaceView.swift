@@ -1,31 +1,14 @@
 import SwiftUI
 
-extension FavoriteFolder: FileLocationShortcut {}
 extension RecentFile: FileLocationShortcut {}
 extension RecentFolder: FileLocationShortcut {}
 
 struct EmptyWorkspaceView: View {
-  let favoriteFolders: [FavoriteFolder]
   let recentFiles: [RecentFile]
   let recentFolders: [RecentFolder]
   let actions: EmptyWorkspaceActions
-  @State private var searchQuery = ""
 
   var body: some View {
-    let filteredFavoriteFolders = WorkspaceEntrySearch.filteredShortcuts(
-      favoriteFolders, query: searchQuery)
-    let filteredRecentFiles = WorkspaceEntrySearch.filteredShortcuts(
-      recentFiles, query: searchQuery)
-    let filteredRecentFolders = WorkspaceEntrySearch.filteredShortcuts(
-      recentFolders, query: searchQuery)
-    let hasAnyShortcuts = !favoriteFolders.isEmpty || !recentFiles.isEmpty || !recentFolders.isEmpty
-    let hasActiveSearch = WorkspaceEntrySearch.hasSearchTerms(in: searchQuery)
-    let hasNoSearchResults =
-      hasActiveSearch
-      && filteredFavoriteFolders.isEmpty
-      && filteredRecentFiles.isEmpty
-      && filteredRecentFolders.isEmpty
-
     ScrollView {
       VStack(spacing: 24) {
         ContentUnavailableView {
@@ -38,31 +21,11 @@ struct EmptyWorkspaceView: View {
           }
         }
 
-        if hasAnyShortcuts {
-          TextField("Search favorites and recent items", text: $searchQuery)
-            .textFieldStyle(.roundedBorder)
-            .frame(maxWidth: 520)
-            .accessibilityLabel("Search favorites and recent items")
-            .accessibilityIdentifier("home-shortcut-search-field")
-        }
-
-        if !filteredFavoriteFolders.isEmpty {
-          FolderShortcutListView(
-            title: "Favorite Folders",
-            rowAccessibilityIdentifier: "favorite-folder-row",
-            folders: filteredFavoriteFolders,
-            open: actions.shortcuts.openFavoriteFolder,
-            remove: actions.shortcuts.removeFavoriteFolder,
-            showInLocus: actions.shortcuts.showInLocus,
-            copyPath: actions.shortcuts.copyPath
-          )
-        }
-
-        if !filteredRecentFiles.isEmpty {
+        if !recentFiles.isEmpty {
           FileShortcutListView(
             title: "Recent Files",
             rowAccessibilityIdentifier: "recent-file-row",
-            files: filteredRecentFiles,
+            files: recentFiles,
             open: actions.shortcuts.showRecentFile,
             remove: actions.shortcuts.removeRecentFile,
             preview: actions.shortcuts.previewFile,
@@ -71,37 +34,22 @@ struct EmptyWorkspaceView: View {
           )
         }
 
-        if !filteredRecentFolders.isEmpty {
+        if !recentFolders.isEmpty {
           FolderShortcutListView(
             title: "Recent Folders",
             rowAccessibilityIdentifier: "recent-folder-row",
-            folders: filteredRecentFolders,
+            folders: recentFolders,
             open: actions.shortcuts.openRecentFolder,
             remove: actions.shortcuts.removeRecentFolder,
             showInLocus: actions.shortcuts.showInLocus,
             copyPath: actions.shortcuts.copyPath
           )
         }
-
-        if hasAnyShortcuts, hasNoSearchResults {
-          ContentUnavailableView(
-            "No Matching Items",
-            systemImage: "magnifyingglass",
-            description: Text(verbatim: "No favorites or recent items match \"\(searchQuery)\".")
-          )
-          .frame(maxWidth: 520)
-          .accessibilityIdentifier("home-shortcut-search-empty-state")
-        }
       }
       .frame(maxWidth: .infinity)
       .padding(.vertical, 4)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .onChange(of: hasAnyShortcuts) { _, hasAnyShortcuts in
-      if !hasAnyShortcuts {
-        searchQuery = ""
-      }
-    }
   }
 }
 
@@ -111,10 +59,8 @@ struct EmptyWorkspaceActions {
 }
 
 struct FileLocationShortcutActions {
-  let openFavoriteFolder: (FavoriteFolder) -> Void
   let showRecentFile: (RecentFile) -> Void
   let openRecentFolder: (RecentFolder) -> Void
-  let removeFavoriteFolder: (FavoriteFolder) -> Void
   let removeRecentFile: (RecentFile) -> Void
   let removeRecentFolder: (RecentFolder) -> Void
   let previewFile: (URL) -> Void
@@ -205,12 +151,6 @@ struct ShortcutListView<Item: FileLocationShortcut>: View {
               VStack(alignment: .leading, spacing: 2) {
                 Text(item.displayName)
                   .lineLimit(1)
-
-                Text(item.path)
-                  .font(.caption)
-                  .foregroundStyle(.secondary)
-                  .lineLimit(1)
-                  .truncationMode(.middle)
               }
 
               Spacer()

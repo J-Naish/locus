@@ -108,7 +108,6 @@ Expected uses:
 
 - workspace metadata
 - recent items
-- favorites
 - file metadata cache
 - search index data
 - FTS5 when full-text search becomes necessary

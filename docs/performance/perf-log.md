@@ -34,7 +34,7 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
 - folder listing: entries `1010`, avg `4.190 ms`, max `5.349 ms`
 - Rust FFI static library: `17682728 bytes`
 - macOS app bundle: `1348 KiB`
-- notes: Workspace search now surfaces matching favorite and recent items alongside current folder results; debug XCTest 10k-entry plus 3k-shortcut resolver guard ran in 0.108s.
+- notes: Before the prototype chrome trim, workspace search surfaced saved shortcuts alongside current folder results; debug XCTest 10k-entry plus 3k-shortcut resolver guard ran in 0.108s.
 
 ## 2026-05-22T18:56:29Z home-default-launch
 

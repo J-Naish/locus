@@ -61,7 +61,6 @@ struct LocusApp: App {
     WindowGroup {
       HomeView(
         quickLookPreviewService: Self.quickLookPreviewService,
-        favoriteFolderStore: Self.favoriteFolderStore,
         recentFileStore: Self.recentFileStore,
         recentFolderStore: Self.recentFolderStore,
         initialFolderResolution: Self.initialFolderResolution,
@@ -90,33 +89,6 @@ struct LocusApp: App {
       )
     #else
       return QuickLookPreviewService()
-    #endif
-  }()
-
-  private static let favoriteFolderStore: FavoriteFolderStore = {
-    #if DEBUG
-      guard ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1" else {
-        return FavoriteFolderStore()
-      }
-
-      let store = FavoriteFolderStore(key: uiTestFavoriteFoldersKey)
-      for path in argumentValues(
-        named: "--ui-test-favorite-folder", in: ProcessInfo.processInfo.arguments)
-      {
-        guard !path.isEmpty else {
-          continue
-        }
-
-        var isDirectory: ObjCBool = false
-        if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
-          isDirectory.boolValue
-        {
-          store.add(URL(filePath: path, directoryHint: .isDirectory))
-        }
-      }
-      return store
-    #else
-      return FavoriteFolderStore()
     #endif
   }()
 
@@ -179,11 +151,6 @@ struct LocusApp: App {
   }
 
   private static let homeDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
-
-  private static var uiTestFavoriteFoldersKey: String {
-    argumentValue(named: "--ui-test-favorite-folders-key", in: ProcessInfo.processInfo.arguments)
-      ?? "favoriteFolders.uiTests"
-  }
 
   private static var uiTestRecentFoldersKey: String {
     argumentValue(named: "--ui-test-recent-folders-key", in: ProcessInfo.processInfo.arguments)
