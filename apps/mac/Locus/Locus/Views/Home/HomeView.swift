@@ -785,15 +785,18 @@ private struct WorkspaceBrowserView: View {
     }
   }
 
+  @ViewBuilder
   private var searchShortcut: some View {
-    // Keep Command-F local to the mounted browser until Locus has a
-    // broader menu command surface.
-    Button("Focus Search Field") {
-      focusSearchField()
+    if selectedEntrySurfaceKind != .pdf {
+      // Keep Command-F local to the mounted browser until Locus has a
+      // broader menu command surface.
+      Button("Focus Search Field") {
+        focusSearchField()
+      }
+      .keyboardShortcut("f", modifiers: [.command])
+      .hidden()
+      .accessibilityHidden(true)
     }
-    .keyboardShortcut("f", modifiers: [.command])
-    .hidden()
-    .accessibilityHidden(true)
   }
 
   private func focusSearchField() {
@@ -809,6 +812,10 @@ private struct WorkspaceBrowserView: View {
     }
 
     return searchResults.visibleEntries.first { $0.id == selectedEntryID }
+  }
+
+  private var selectedEntrySurfaceKind: WorkspaceDocumentSurfaceKind? {
+    selectedEntry.map(WorkspaceDocumentSurfaceSupport.surfaceKind(for:))
   }
 }
 

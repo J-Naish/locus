@@ -483,74 +483,154 @@ private enum PDFDocumentLoadState {
 
 private struct PDFDocumentControlsView: View {
   @ObservedObject var controller: PDFDocumentController
+  @FocusState private var isSearchFocused: Bool
 
   var body: some View {
-    HStack(spacing: 8) {
-      Button {
-        controller.goToPreviousPage()
-      } label: {
-        Image(systemName: "chevron.up")
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(spacing: 8) {
+        Button {
+          controller.goToPreviousPage()
+        } label: {
+          Image(systemName: "chevron.up")
+        }
+        .help("Previous Page")
+        .disabled(!controller.canGoToPreviousPage)
+        .accessibilityLabel("Previous Page")
+        .accessibilityIdentifier("document-pdf-previous-page-button")
+
+        Button {
+          controller.goToNextPage()
+        } label: {
+          Image(systemName: "chevron.down")
+        }
+        .help("Next Page")
+        .disabled(!controller.canGoToNextPage)
+        .accessibilityLabel("Next Page")
+        .accessibilityIdentifier("document-pdf-next-page-button")
+
+        Text(controller.pageSummary)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .monospacedDigit()
+          .accessibilityIdentifier("document-pdf-page-summary")
+
+        Spacer()
+
+        Button {
+          controller.zoomOut()
+        } label: {
+          Image(systemName: "minus.magnifyingglass")
+        }
+        .help("Zoom Out")
+        .disabled(!controller.canZoomOut)
+        .accessibilityLabel("Zoom Out")
+        .accessibilityIdentifier("document-pdf-zoom-out-button")
+
+        Button {
+          controller.fitToWindow()
+        } label: {
+          Image(systemName: "arrow.up.left.and.down.right.magnifyingglass")
+        }
+        .help("Fit")
+        .accessibilityLabel("Fit")
+        .accessibilityIdentifier("document-pdf-fit-button")
+
+        Button {
+          controller.zoomIn()
+        } label: {
+          Image(systemName: "plus.magnifyingglass")
+        }
+        .help("Zoom In")
+        .disabled(!controller.canZoomIn)
+        .accessibilityLabel("Zoom In")
+        .accessibilityIdentifier("document-pdf-zoom-in-button")
+
+        Text(controller.zoomSummary)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .monospacedDigit()
+          .frame(minWidth: 44, alignment: .trailing)
+          .accessibilityIdentifier("document-pdf-zoom-summary")
       }
-      .help("Previous Page")
-      .disabled(!controller.canGoToPreviousPage)
-      .accessibilityLabel("Previous Page")
-      .accessibilityIdentifier("document-pdf-previous-page-button")
 
-      Button {
-        controller.goToNextPage()
-      } label: {
-        Image(systemName: "chevron.down")
+      HStack(spacing: 6) {
+        Image(systemName: "magnifyingglass")
+          .foregroundStyle(.secondary)
+
+        TextField(
+          "Search PDF",
+          text: Binding(
+            get: { controller.searchQuery },
+            set: { controller.updateSearchQuery($0) }
+          )
+        )
+        .textFieldStyle(.roundedBorder)
+        .frame(minWidth: 180, idealWidth: 220, maxWidth: 280)
+        .focused($isSearchFocused)
+        .accessibilityIdentifier("document-pdf-search-field")
+
+        Text(controller.searchSummary)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .monospacedDigit()
+          .frame(minWidth: 70, alignment: .leading)
+          .accessibilityIdentifier("document-pdf-search-summary")
+
+        Button {
+          controller.goToPreviousSearchMatch()
+        } label: {
+          Image(systemName: "chevron.up")
+        }
+        .help("Previous Match")
+        .disabled(!controller.canGoToPreviousSearchMatch)
+        .accessibilityLabel("Previous Match")
+        .accessibilityIdentifier("document-pdf-previous-search-match-button")
+
+        Button {
+          controller.goToNextSearchMatch()
+        } label: {
+          Image(systemName: "chevron.down")
+        }
+        .help("Next Match")
+        .disabled(!controller.canGoToNextSearchMatch)
+        .accessibilityLabel("Next Match")
+        .accessibilityIdentifier("document-pdf-next-search-match-button")
+
+        Spacer()
       }
-      .help("Next Page")
-      .disabled(!controller.canGoToNextPage)
-      .accessibilityLabel("Next Page")
-      .accessibilityIdentifier("document-pdf-next-page-button")
-
-      Text(controller.pageSummary)
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .monospacedDigit()
-        .accessibilityIdentifier("document-pdf-page-summary")
-
-      Spacer()
-
-      Button {
-        controller.zoomOut()
-      } label: {
-        Image(systemName: "minus.magnifyingglass")
-      }
-      .help("Zoom Out")
-      .disabled(!controller.canZoomOut)
-      .accessibilityLabel("Zoom Out")
-      .accessibilityIdentifier("document-pdf-zoom-out-button")
-
-      Button {
-        controller.fitToWindow()
-      } label: {
-        Image(systemName: "arrow.up.left.and.down.right.magnifyingglass")
-      }
-      .help("Fit")
-      .accessibilityLabel("Fit")
-      .accessibilityIdentifier("document-pdf-fit-button")
-
-      Button {
-        controller.zoomIn()
-      } label: {
-        Image(systemName: "plus.magnifyingglass")
-      }
-      .help("Zoom In")
-      .disabled(!controller.canZoomIn)
-      .accessibilityLabel("Zoom In")
-      .accessibilityIdentifier("document-pdf-zoom-in-button")
-
-      Text(controller.zoomSummary)
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .monospacedDigit()
-        .frame(minWidth: 44, alignment: .trailing)
-        .accessibilityIdentifier("document-pdf-zoom-summary")
     }
     .controlSize(.small)
+    .background(searchShortcuts)
+  }
+
+  private var searchShortcuts: some View {
+    Group {
+      Button("Focus PDF Search") {
+        focusSearchField()
+      }
+      .keyboardShortcut("f", modifiers: [.command])
+
+      Button("Next PDF Search Match") {
+        controller.goToNextSearchMatch()
+      }
+      .keyboardShortcut("g", modifiers: [.command])
+      .disabled(!controller.canGoToNextSearchMatch)
+
+      Button("Previous PDF Search Match") {
+        controller.goToPreviousSearchMatch()
+      }
+      .keyboardShortcut("g", modifiers: [.command, .shift])
+      .disabled(!controller.canGoToPreviousSearchMatch)
+    }
+    .hidden()
+    .accessibilityHidden(true)
+  }
+
+  private func focusSearchField() {
+    isSearchFocused = true
+    DispatchQueue.main.async {
+      NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+    }
   }
 }
 
@@ -563,12 +643,21 @@ private final class PDFDocumentController: ObservableObject {
   @Published private(set) var canGoToNextPage = false
   @Published private(set) var canZoomIn = false
   @Published private(set) var canZoomOut = false
+  @Published private(set) var searchQuery = ""
+  @Published private(set) var searchMatchCount = 0
+  @Published private(set) var currentSearchMatchNumber = 0
+  @Published private(set) var canGoToPreviousSearchMatch = false
+  @Published private(set) var canGoToNextSearchMatch = false
 
   private static let zoomLevels: [CGFloat] = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4]
   private static let zoomComparisonEpsilon: CGFloat = 0.001
+  private static let searchDebounceNanoseconds: UInt64 = 250_000_000
 
   private weak var pdfView: PDFView?
   private var isFitToWindow = true
+  private var searchSelections: [PDFSelection] = []
+  private var currentSearchSelectionIndex: Int?
+  private var searchTask: Task<Void, Never>?
 
   var pageSummary: String {
     guard pageCount > 0 else {
@@ -590,7 +679,21 @@ private final class PDFDocumentController: ObservableObject {
     return isFitToWindow ? "Fit" : "\(zoomPercent)%"
   }
 
+  var searchSummary: String {
+    if searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      return ""
+    }
+
+    guard searchMatchCount > 0 else {
+      return "No results"
+    }
+
+    return "\(currentSearchMatchNumber) of \(searchMatchCount)"
+  }
+
   func reset() {
+    searchTask?.cancel()
+    searchTask = nil
     pdfView = nil
     setIfChanged(&currentPageNumber, 0)
     setIfChanged(&pageCount, 0)
@@ -599,6 +702,8 @@ private final class PDFDocumentController: ObservableObject {
     setIfChanged(&canGoToNextPage, false)
     setIfChanged(&canZoomIn, false)
     setIfChanged(&canZoomOut, false)
+    setIfChanged(&searchQuery, "")
+    clearSearchState()
     isFitToWindow = true
   }
 
@@ -674,6 +779,32 @@ private final class PDFDocumentController: ObservableObject {
     refresh(from: pdfView)
   }
 
+  func updateSearchQuery(_ query: String) {
+    setIfChanged(&searchQuery, query)
+    scheduleSearch()
+  }
+
+  func goToPreviousSearchMatch() {
+    guard !searchSelections.isEmpty else {
+      return
+    }
+
+    let currentIndex = currentSearchSelectionIndex ?? 0
+    currentSearchSelectionIndex =
+      currentIndex == 0 ? searchSelections.count - 1 : currentIndex - 1
+    goToCurrentSearchSelection()
+  }
+
+  func goToNextSearchMatch() {
+    guard !searchSelections.isEmpty else {
+      return
+    }
+
+    let currentIndex = currentSearchSelectionIndex ?? -1
+    currentSearchSelectionIndex = (currentIndex + 1) % searchSelections.count
+    goToCurrentSearchSelection()
+  }
+
   private func setManualZoom(_ scaleFactor: CGFloat, in pdfView: PDFView) {
     isFitToWindow = false
     pdfView.autoScales = false
@@ -697,11 +828,127 @@ private final class PDFDocumentController: ObservableObject {
     }
   }
 
+  private func scheduleSearch() {
+    searchTask?.cancel()
+
+    guard
+      let pdfView,
+      let document = pdfView.document
+    else {
+      clearSearchState()
+      return
+    }
+
+    let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !query.isEmpty else {
+      pdfView.highlightedSelections = nil
+      clearSearchState()
+      return
+    }
+
+    clearSearchState()
+    pdfView.highlightedSelections = nil
+
+    let searchableDocument = SearchablePDFDocument(document: document)
+    searchTask = Task { [weak self] in
+      do {
+        try await Task.sleep(nanoseconds: Self.searchDebounceNanoseconds)
+        let results = try await Self.findSelections(in: searchableDocument, query: query)
+        try Task.checkCancellation()
+        self?.applySearchResults(results, query: query, document: document)
+      } catch is CancellationError {
+        return
+      } catch {
+        return
+      }
+    }
+  }
+
+  private func applySearchResults(
+    _ results: PDFSearchResults,
+    query: String,
+    document: PDFDocument
+  ) {
+    guard
+      let pdfView,
+      pdfView.document === document,
+      searchQuery.trimmingCharacters(in: .whitespacesAndNewlines) == query
+    else {
+      return
+    }
+
+    let selections = results.selections
+    pdfView.highlightedSelections = selections
+    searchSelections = selections
+    setIfChanged(&searchMatchCount, selections.count)
+    setIfChanged(&canGoToPreviousSearchMatch, !selections.isEmpty)
+    setIfChanged(&canGoToNextSearchMatch, !selections.isEmpty)
+    currentSearchSelectionIndex = selections.isEmpty ? nil : 0
+
+    if selections.isEmpty {
+      setIfChanged(&currentSearchMatchNumber, 0)
+    } else {
+      goToCurrentSearchSelection()
+    }
+  }
+
+  private nonisolated static func findSelections(
+    in document: SearchablePDFDocument,
+    query: String
+  ) async throws -> PDFSearchResults {
+    let task = Task.detached(priority: .userInitiated) {
+      try Task.checkCancellation()
+      let selections = document.document.findString(query, withOptions: .caseInsensitive)
+      try Task.checkCancellation()
+      return PDFSearchResults(selections: selections)
+    }
+
+    return try await withTaskCancellationHandler {
+      try await task.value
+    } onCancel: {
+      task.cancel()
+    }
+  }
+
+  private func goToCurrentSearchSelection() {
+    guard
+      let pdfView,
+      let currentSearchSelectionIndex,
+      searchSelections.indices.contains(currentSearchSelectionIndex)
+    else {
+      setIfChanged(&currentSearchMatchNumber, 0)
+      return
+    }
+
+    let selection = searchSelections[currentSearchSelectionIndex]
+    pdfView.setCurrentSelection(selection, animate: false)
+    pdfView.go(to: selection)
+    setIfChanged(&currentSearchMatchNumber, currentSearchSelectionIndex + 1)
+    refresh(from: pdfView)
+  }
+
+  private func clearSearchState() {
+    searchSelections = []
+    currentSearchSelectionIndex = nil
+    setIfChanged(&searchMatchCount, 0)
+    setIfChanged(&currentSearchMatchNumber, 0)
+    setIfChanged(&canGoToPreviousSearchMatch, false)
+    setIfChanged(&canGoToNextSearchMatch, false)
+  }
+
   private func setIfChanged<Value: Equatable>(_ value: inout Value, _ nextValue: Value) {
     if value != nextValue {
       value = nextValue
     }
   }
+}
+
+private struct SearchablePDFDocument: @unchecked Sendable {
+  let document: PDFDocument
+}
+
+private struct PDFSearchResults: @unchecked Sendable {
+  let selections: [PDFSelection]
 }
 
 @MainActor

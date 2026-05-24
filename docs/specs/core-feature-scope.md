@@ -108,13 +108,13 @@ Not a goal:
 
 ## PDF
 
-The MVP PDF surface is an in-app PDFKit reader with page navigation and zoom
-controls before deeper review tools are added.
+The MVP PDF surface is an in-app PDFKit reader with page navigation, zoom
+controls, and text search before deeper review tools are added.
 
 Must support:
 
 - fast viewing
-- text search
+- case-insensitive text search with match navigation
 - text selection and copy
 - page navigation
 - zoom

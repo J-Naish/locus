@@ -267,6 +267,20 @@ final class WorkspaceSearchUITests: XCTestCase {
       app.buttons["document-pdf-fit-button"].waitForExistence(timeout: 2), app.debugDescription)
     XCTAssertTrue(
       app.buttons["document-pdf-zoom-in-button"].waitForExistence(timeout: 2), app.debugDescription)
+
+    let searchField = app.textFields["document-pdf-search-field"]
+    XCTAssertTrue(searchField.waitForExistence(timeout: 2), app.debugDescription)
+    searchField.click()
+    searchField.typeText("Locus")
+
+    let searchSummary = app.staticTexts["document-pdf-search-summary"]
+    XCTAssertTrue(waitForElement(searchSummary, toHaveLabel: "1 of 1"), app.debugDescription)
+    XCTAssertTrue(
+      app.buttons["document-pdf-previous-search-match-button"].waitForExistence(timeout: 2),
+      app.debugDescription)
+    XCTAssertTrue(
+      app.buttons["document-pdf-next-search-match-button"].waitForExistence(timeout: 2),
+      app.debugDescription)
     XCTAssertEqual(
       previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
   }
@@ -299,6 +313,18 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(
       waitForElementLabelToChange(zoomSummary, from: initialZoomLabel), app.debugDescription)
     XCTAssertTrue(zoomSummary.label.hasSuffix("%"), app.debugDescription)
+
+    let searchField = app.textFields["document-pdf-search-field"]
+    XCTAssertTrue(searchField.waitForExistence(timeout: 2), app.debugDescription)
+    searchField.click()
+    searchField.typeText("Page")
+
+    let searchSummary = app.staticTexts["document-pdf-search-summary"]
+    XCTAssertTrue(waitForElement(searchSummary, toHaveLabel: "1 of 2"), app.debugDescription)
+    app.buttons["document-pdf-next-search-match-button"].click()
+    XCTAssertTrue(waitForElement(searchSummary, toHaveLabel: "2 of 2"), app.debugDescription)
+    app.buttons["document-pdf-next-search-match-button"].click()
+    XCTAssertTrue(waitForElement(searchSummary, toHaveLabel: "1 of 2"), app.debugDescription)
   }
 
   @MainActor

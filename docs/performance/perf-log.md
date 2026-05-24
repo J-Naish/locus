@@ -84,3 +84,17 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
   syscall reduction; per-entry metadata reads still happen for kind and
   readonly state. Extended metadata is available through an explicit Rust/FFI
   list option for future contextual surfaces.
+
+## 2026-05-24T14:27:02Z pdf-text-search
+
+- commit: pending
+- branch: `main`
+- dirty tree: `true`
+- status: `0`
+- generated folder listing: entries `1010`, avg `3.403 ms`, max `4.612 ms`
+- Rust FFI static library: `17683360 bytes`
+- macOS app bundle: `2556 KiB`
+- notes: Added PDF text search with input debounce, cancellable background
+  scanning, and match navigation. The smoke run covers bundle size and default
+  folder-listing budgets; PDF search latency should be profiled with a large
+  fixture during the PDF review polish pass.

@@ -190,9 +190,12 @@ Deliverables:
 - Lightweight readability-focused syntax highlighting for Markdown, structured
   text, and common source files; avoid IDE-oriented language tooling in this
   slice.
-- PDF viewer using PDFKit. The first vertical slice is a read-only in-app viewer
-  with page navigation and zoom controls; text selection polish, search,
-  highlights, and comments follow as separate PDF review slices.
+- PDF viewer using PDFKit. The current vertical slice is a read-only in-app
+  viewer with page navigation, zoom controls, and debounced case-insensitive
+  text search with match navigation; text selection polish, highlights, and
+  comments follow as separate PDF review slices.
+  `Command-F` targets PDF search while a PDF is selected; browser search keeps
+  the same shortcut for non-PDF selections.
 - Image preview.
 - Video/audio playback using AVKit. The first vertical slice uses in-app,
   manually started playback with native controls; richer audio metadata and
