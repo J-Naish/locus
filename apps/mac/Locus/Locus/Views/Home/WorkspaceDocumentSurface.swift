@@ -12,7 +12,7 @@ struct WorkspaceDocumentSurface: View {
   let mediaDocumentStore: any MediaDocumentStoring
   let quickLookDocumentStore: any QuickLookDocumentStoring
   let preview: ([URL]) -> Void
-  let onEditorFocusChange: (Bool) -> Void
+  let onTextInputFocusChange: (Bool) -> Void
 
   @State private var loadState: TextDocumentLoadState = .empty
   @State private var text = ""
@@ -38,7 +38,8 @@ struct WorkspaceDocumentSurface: View {
         case .pdf:
           PDFDocumentSurface(
             entry: entry,
-            pdfDocumentStore: pdfDocumentStore
+            pdfDocumentStore: pdfDocumentStore,
+            onSearchFocusChange: onTextInputFocusChange
           )
         case .video, .audio:
           MediaDocumentSurface(
@@ -66,13 +67,13 @@ struct WorkspaceDocumentSurface: View {
     }
     .onChange(of: entry?.id) {
       isEditorFocused = false
-      onEditorFocusChange(false)
+      onTextInputFocusChange(false)
     }
     .onChange(of: isEditorFocused) {
-      onEditorFocusChange(isEditorFocused)
+      onTextInputFocusChange(isEditorFocused)
     }
     .onDisappear {
-      onEditorFocusChange(false)
+      onTextInputFocusChange(false)
     }
   }
 
@@ -404,6 +405,7 @@ private enum ImageDocumentLoadState {
 private struct PDFDocumentSurface: View {
   let entry: WorkspaceEntry
   let pdfDocumentStore: any PDFDocumentStoring
+  let onSearchFocusChange: (Bool) -> Void
 
   @State private var loadState: PDFDocumentLoadState = .loading
   @StateObject private var controller = PDFDocumentController()
@@ -419,7 +421,10 @@ private struct PDFDocumentSurface: View {
           .accessibilityIdentifier("document-pdf-loading-indicator")
       case .loaded(let document):
         VStack(spacing: 8) {
-          PDFDocumentControlsView(controller: controller)
+          PDFDocumentControlsView(
+            controller: controller,
+            onSearchFocusChange: onSearchFocusChange
+          )
 
           PDFDocumentView(
             document: document,
@@ -450,6 +455,9 @@ private struct PDFDocumentSurface: View {
     .padding(12)
     .task(id: entry.id) {
       await loadPDF()
+    }
+    .onDisappear {
+      onSearchFocusChange(false)
     }
   }
 
@@ -483,6 +491,7 @@ private enum PDFDocumentLoadState {
 
 private struct PDFDocumentControlsView: View {
   @ObservedObject var controller: PDFDocumentController
+  let onSearchFocusChange: (Bool) -> Void
   @FocusState private var isSearchFocused: Bool
 
   var body: some View {
@@ -601,6 +610,12 @@ private struct PDFDocumentControlsView: View {
     }
     .controlSize(.small)
     .background(searchShortcuts)
+    .onChange(of: isSearchFocused) {
+      onSearchFocusChange(isSearchFocused)
+    }
+    .onDisappear {
+      onSearchFocusChange(false)
+    }
   }
 
   private var searchShortcuts: some View {

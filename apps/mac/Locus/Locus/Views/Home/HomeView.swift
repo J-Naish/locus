@@ -7,11 +7,28 @@ struct HomeView: View {
     case set(URL?)
   }
 
+  private struct WorkspaceLoadFailureRecovery {
+    let state: WorkspaceState
+    let selectedEntryID: WorkspaceEntry.ID?
+    let rootURL: URL?
+  }
+
+  private struct WorkspaceLoadRequest {
+    let folderURL: URL
+    var rootChange: WorkspaceRootChange = .preserve
+    var recordRecent = false
+    var showsLoading = true
+    var selectedURL: URL?
+    var restoreOnFailure: WorkspaceLoadFailureRecovery?
+    var onSuccess: (() -> Void)?
+  }
+
   @State private var workspaceState: WorkspaceState = .idle
   @State private var selectedEntryID: WorkspaceEntry.ID?
   @State private var isFolderImporterPresented = false
   @State private var didStartInitialFolderLoad = false
   @State private var workspaceRootURL: URL?
+  @State private var navigationHistory = WorkspaceNavigationHistory()
   @State private var favoriteFolders: [FavoriteFolder] = []
   @State private var recentFiles: [RecentFile] = []
   @State private var recentFolders: [RecentFolder] = []
@@ -98,6 +115,10 @@ struct HomeView: View {
         ),
         shortcutActions: shortcutActions,
         actions: WorkspaceActions(
+          canGoBack: navigationHistory.canGoBack,
+          canGoForward: navigationHistory.canGoForward,
+          goBack: restorePreviousWorkspaceFolder,
+          goForward: restoreNextWorkspaceFolder,
           refresh: refreshWorkspace,
           openParentFolder: openParentFolder,
           toggleFavoriteFolder: toggleFavoriteFolder,
@@ -147,7 +168,8 @@ struct HomeView: View {
     // non-recursive immediate-children listing. Do not add startup scans.
     // Auto-opened home is also not a recent item; only explicit user
     // folder choices should be recorded in Recents.
-    startWorkspaceLoad(initialFolderURL, rootChange: .set(initialFolderURL))
+    startWorkspaceLoad(
+      WorkspaceLoadRequest(folderURL: initialFolderURL, rootChange: .set(initialFolderURL)))
   }
 
   @MainActor
@@ -161,7 +183,7 @@ struct HomeView: View {
       return
     }
 
-    startWorkspaceLoad(folderURL)
+    startWorkspaceLoad(WorkspaceLoadRequest(folderURL: folderURL))
   }
 
   @MainActor
@@ -174,7 +196,7 @@ struct HomeView: View {
         return
       }
 
-      startWorkspaceLoad(folderURL, rootChange: .set(folderURL), recordRecent: true)
+      navigateToWorkspaceFolder(folderURL, rootChange: .set(folderURL), recordRecent: true)
     case .failure(let error):
       // SwiftUI's .fileImporter delivers user cancellation as a Cocoa
       // user-cancelled error or as Swift's CancellationError. Treat both
@@ -208,22 +230,18 @@ struct HomeView: View {
     return false
   }
 
-  /// `selecting` is matched against loaded entries by standardized path. Use
-  /// `rootChange: .set(nil)` for ad hoc locations that should allow normal
-  /// parent navigation beyond the first containing folder.
+  /// `request.selectedURL` is matched against loaded entries by standardized
+  /// path. Use `request.rootChange: .set(nil)` for ad hoc locations that
+  /// should allow normal parent navigation beyond the first containing folder.
   @MainActor
   private func startWorkspaceLoad(
-    _ folderURL: URL,
-    rootChange: WorkspaceRootChange = .preserve,
-    recordRecent: Bool = false,
-    showsLoading: Bool = true,
-    selecting selectedURL: URL? = nil
+    _ request: WorkspaceLoadRequest
   ) {
-    if case .set(let rootURL) = rootChange {
+    if case .set(let rootURL) = request.rootChange {
       workspaceRootURL = rootURL
     }
 
-    if showsLoading {
+    if request.showsLoading {
       workspaceDirectoryMonitor.stopMonitoring()
     }
     workspaceLoadGeneration &+= 1
@@ -231,11 +249,8 @@ struct HomeView: View {
 
     Task {
       await loadWorkspace(
-        folderURL,
-        generation: generation,
-        recordRecent: recordRecent,
-        showsLoading: showsLoading,
-        selectedURL: selectedURL
+        request,
+        generation: generation
       )
     }
   }
@@ -246,20 +261,135 @@ struct HomeView: View {
     workspaceLoadGeneration &+= 1
   }
 
+  /// Triggers a user-initiated folder change and records it in browser-style
+  /// history. Use `startWorkspaceLoad` directly for refreshes and restores.
+  @MainActor
+  private func navigateToWorkspaceFolder(
+    _ folderURL: URL,
+    rootChange: WorkspaceRootChange = .preserve,
+    recordRecent: Bool = false,
+    selecting selectedURL: URL? = nil
+  ) {
+    let currentEntry = currentHistoryEntry()
+    let destinationEntry = WorkspaceHistoryEntry(
+      folderURL: folderURL,
+      rootURL: rootURL(after: rootChange),
+      selectedURL: selectedURL
+    )
+
+    let request = WorkspaceLoadRequest(
+      folderURL: folderURL,
+      rootChange: rootChange,
+      recordRecent: recordRecent,
+      selectedURL: selectedURL,
+      onSuccess: {
+        recordCompletedNavigation(from: currentEntry, to: destinationEntry)
+      }
+    )
+    startWorkspaceLoad(request)
+  }
+
+  @MainActor
+  private func restorePreviousWorkspaceFolder() {
+    guard let currentEntry = currentHistoryEntry(),
+      let previousEntry = navigationHistory.previousEntry
+    else {
+      return
+    }
+
+    restoreWorkspaceHistoryEntry(previousEntry) {
+      navigationHistory.commitBackNavigation(from: currentEntry)
+    }
+  }
+
+  @MainActor
+  private func restoreNextWorkspaceFolder() {
+    guard let currentEntry = currentHistoryEntry(),
+      let nextEntry = navigationHistory.nextEntry
+    else {
+      return
+    }
+
+    restoreWorkspaceHistoryEntry(nextEntry) {
+      navigationHistory.commitForwardNavigation(from: currentEntry)
+    }
+  }
+
+  @MainActor
+  private func restoreWorkspaceHistoryEntry(
+    _ entry: WorkspaceHistoryEntry,
+    onSuccess: @escaping () -> Void
+  ) {
+    startWorkspaceLoad(
+      WorkspaceLoadRequest(
+        folderURL: entry.folderURL,
+        rootChange: .set(entry.rootURL),
+        selectedURL: entry.selectedURL,
+        restoreOnFailure: WorkspaceLoadFailureRecovery(
+          state: workspaceState,
+          selectedEntryID: selectedEntryID,
+          rootURL: workspaceRootURL
+        ),
+        onSuccess: onSuccess
+      )
+    )
+  }
+
+  @MainActor
+  private func recordCompletedNavigation(
+    from current: WorkspaceHistoryEntry?,
+    to destination: WorkspaceHistoryEntry
+  ) {
+    guard currentHistoryEntry()?.hasSameLocation(as: destination) == true else {
+      return
+    }
+
+    navigationHistory.recordNavigation(from: current, to: destination)
+  }
+
+  @MainActor
+  private func currentHistoryEntry() -> WorkspaceHistoryEntry? {
+    guard case .ready(let folderURL, let snapshot, _) = workspaceState else {
+      return nil
+    }
+
+    return WorkspaceHistoryEntry(
+      folderURL: folderURL,
+      rootURL: workspaceRootURL,
+      selectedURL: selectedEntryURL(in: snapshot)
+    )
+  }
+
+  private func selectedEntryURL(in snapshot: WorkspaceSnapshot) -> URL? {
+    guard let selectedEntryID else {
+      return nil
+    }
+
+    return snapshot.entries.first { $0.id == selectedEntryID }?.url
+  }
+
+  @MainActor
+  private func rootURL(after rootChange: WorkspaceRootChange) -> URL? {
+    switch rootChange {
+    case .preserve:
+      workspaceRootURL
+    case .set(let rootURL):
+      rootURL
+    }
+  }
+
   @MainActor
   private func loadWorkspace(
-    _ folderURL: URL,
-    generation: UInt64,
-    recordRecent: Bool,
-    showsLoading: Bool,
-    selectedURL: URL?
+    _ request: WorkspaceLoadRequest,
+    generation: UInt64
   ) async {
     guard generation == workspaceLoadGeneration else {
       return
     }
 
+    let folderURL = request.folderURL
     let previousSelectedEntryID = selectedEntryIDForReload(of: folderURL)
-    if showsLoading {
+    if request.showsLoading {
       workspaceState = .loading(folderURL: folderURL)
     }
     // This covers the immediate directory read. Recents and Favorites will
@@ -281,7 +411,7 @@ struct HomeView: View {
       guard generation == workspaceLoadGeneration else {
         return
       }
-      if let selectedEntryID = entryID(in: snapshot.entries, matching: selectedURL) {
+      if let selectedEntryID = entryID(in: snapshot.entries, matching: request.selectedURL) {
         self.selectedEntryID = selectedEntryID
       } else if snapshot.entries.contains(where: { $0.id == previousSelectedEntryID }) {
         selectedEntryID = previousSelectedEntryID
@@ -290,17 +420,27 @@ struct HomeView: View {
       }
       workspaceState = .ready(folderURL: folderURL, snapshot: snapshot, loadedAt: Date())
       startWorkspaceChangeMonitoring(for: folderURL)
-      if recordRecent {
+      if request.recordRecent {
         recentFolderStore.record(folderURL)
         refreshRecentFolders()
       }
+      request.onSuccess?()
     } catch {
       guard generation == workspaceLoadGeneration else {
         return
       }
       workspaceDirectoryMonitor.stopMonitoring()
+      if let restoreOnFailure = request.restoreOnFailure {
+        workspaceState = restoreOnFailure.state
+        selectedEntryID = restoreOnFailure.selectedEntryID
+        workspaceRootURL = restoreOnFailure.rootURL
+        if let folderURL = restoreOnFailure.state.folderURL {
+          startWorkspaceChangeMonitoring(for: folderURL)
+        }
+        return
+      }
       selectedEntryID = nil
-      pruneRecentFileIfSelectionLoadFailed(selectedURL)
+      pruneRecentFileIfSelectionLoadFailed(request.selectedURL)
       workspaceState = .failed(
         folderURL: folderURL,
         message: error.localizedDescription
@@ -328,7 +468,7 @@ struct HomeView: View {
       return
     }
 
-    startWorkspaceLoad(
+    navigateToWorkspaceFolder(
       containingFolderURL,
       rootChange: .set(rootURLForShowingInLocus(containing: standardizedURL)),
       selecting: standardizedURL
@@ -342,7 +482,7 @@ struct HomeView: View {
 
   @MainActor
   private func openFavoriteFolder(_ folder: FavoriteFolder) {
-    startWorkspaceLoad(folder.url, rootChange: .set(folder.url), recordRecent: true)
+    navigateToWorkspaceFolder(folder.url, rootChange: .set(folder.url), recordRecent: true)
   }
 
   @MainActor
@@ -352,7 +492,7 @@ struct HomeView: View {
 
   @MainActor
   private func openRecentFolder(_ folder: RecentFolder) {
-    startWorkspaceLoad(folder.url, rootChange: .set(folder.url), recordRecent: true)
+    navigateToWorkspaceFolder(folder.url, rootChange: .set(folder.url), recordRecent: true)
   }
 
   @MainActor
@@ -436,14 +576,14 @@ struct HomeView: View {
       return
     }
 
-    startWorkspaceLoad(parentFolderURL)
+    navigateToWorkspaceFolder(parentFolderURL, selecting: folderURL)
   }
 
   @MainActor
   private func performOpenAction(_ action: WorkspaceEntryOpenAction) {
     switch action {
     case .browseFolder(let url):
-      startWorkspaceLoad(url, recordRecent: true)
+      navigateToWorkspaceFolder(url, recordRecent: true)
     case .openInPlace(let url):
       showURLInLocus(url)
     case .preview(let url):
@@ -464,7 +604,7 @@ struct HomeView: View {
       return
     }
 
-    startWorkspaceLoad(folderURL, showsLoading: false)
+    startWorkspaceLoad(WorkspaceLoadRequest(folderURL: folderURL, showsLoading: false))
   }
 
   @MainActor
@@ -587,6 +727,10 @@ private struct WorkspaceContentView: View {
 }
 
 private struct WorkspaceActions {
+  let canGoBack: Bool
+  let canGoForward: Bool
+  let goBack: () -> Void
+  let goForward: () -> Void
   let refresh: () -> Void
   let openParentFolder: () -> Void
   let toggleFavoriteFolder: () -> Void
@@ -629,7 +773,7 @@ private struct WorkspaceBrowserView: View {
   let actions: WorkspaceActions
   @State private var searchQuery = ""
   @State private var searchResults: WorkspaceBrowserSearchResults
-  @State private var isDocumentEditorFocused = false
+  @State private var isDocumentTextInputFocused = false
   @FocusState private var isSearchFocused: Bool
 
   init(
@@ -724,7 +868,7 @@ private struct WorkspaceBrowserView: View {
           WorkspaceEntriesList(
             entries: searchResults.visibleEntries,
             selectedEntryID: $selectedEntryID,
-            isPreviewShortcutEnabled: !isSearchFocused && !isDocumentEditorFocused,
+            isPreviewShortcutEnabled: !isSearchFocused && !isDocumentTextInputFocused,
             actions: actions
           )
           .frame(minWidth: 420, idealWidth: 560, maxWidth: .infinity)
@@ -737,8 +881,8 @@ private struct WorkspaceBrowserView: View {
             mediaDocumentStore: mediaDocumentStore,
             quickLookDocumentStore: quickLookDocumentStore,
             preview: actions.preview,
-            onEditorFocusChange: { isFocused in
-              isDocumentEditorFocused = isFocused
+            onTextInputFocusChange: { isFocused in
+              isDocumentTextInputFocused = isFocused
             }
           )
           .frame(minWidth: 340, idealWidth: 460)
@@ -762,10 +906,11 @@ private struct WorkspaceBrowserView: View {
     }
     .onChange(of: folderURL) {
       searchQuery = ""
-      isDocumentEditorFocused = false
+      isDocumentTextInputFocused = false
       refreshSearchResults()
     }
     .background(searchShortcut)
+    .background(navigationHistoryShortcuts)
   }
 
   private func refreshSearchResults() {
@@ -804,6 +949,29 @@ private struct WorkspaceBrowserView: View {
     DispatchQueue.main.async {
       NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
     }
+  }
+
+  @ViewBuilder
+  private var navigationHistoryShortcuts: some View {
+    Button("Go Back") {
+      actions.goBack()
+    }
+    .keyboardShortcut("[", modifiers: [.command])
+    .disabled(!actions.canGoBack || isTextInputFocused)
+    .hidden()
+    .accessibilityHidden(true)
+
+    Button("Go Forward") {
+      actions.goForward()
+    }
+    .keyboardShortcut("]", modifiers: [.command])
+    .disabled(!actions.canGoForward || isTextInputFocused)
+    .hidden()
+    .accessibilityHidden(true)
+  }
+
+  private var isTextInputFocused: Bool {
+    isSearchFocused || isDocumentTextInputFocused
   }
 
   private var selectedEntry: WorkspaceEntry? {

@@ -52,6 +52,89 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testCommandBracketNavigatesWorkspaceFolderHistoryBackwardAndForward() throws {
+    let workspaceURL = try makeNavigationHistoryWorkspace()
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
+    app.staticTexts["Alpha"].doubleClick()
+    XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
+    app.staticTexts["Beta"].doubleClick()
+    XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 5), app.debugDescription)
+
+    app.typeKey("[", modifierFlags: [.command])
+    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 2), app.debugDescription)
+
+    app.typeKey("[", modifierFlags: [.command])
+    XCTAssertTrue(app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 2), app.debugDescription)
+
+    app.typeKey("]", modifierFlags: [.command])
+    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 2), app.debugDescription)
+  }
+
+  @MainActor
+  func testCommandForwardHistoryIsClearedAfterNewFolderNavigation() throws {
+    let workspaceURL = try makeNavigationHistoryWorkspace()
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
+    app.staticTexts["Alpha"].doubleClick()
+    XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
+    app.staticTexts["Beta"].doubleClick()
+    XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 5), app.debugDescription)
+
+    app.typeKey("[", modifierFlags: [.command])
+    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    app.typeKey("[", modifierFlags: [.command])
+    XCTAssertTrue(app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    app.typeKey("[", modifierFlags: [.command])
+    XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 5), app.debugDescription)
+
+    app.staticTexts["Other"].doubleClick()
+    XCTAssertTrue(app.staticTexts["Other Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+
+    app.typeKey("]", modifierFlags: [.command])
+    XCTAssertTrue(app.staticTexts["Other Note.md"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertFalse(app.staticTexts["Alpha Note.md"].exists)
+  }
+
+  @MainActor
+  func testCommandBracketDoesNotNavigateWhileWorkspaceSearchIsFocused() throws {
+    let workspaceURL = try makeNavigationHistoryWorkspace()
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
+    app.staticTexts["Alpha"].doubleClick()
+    XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
+    app.staticTexts["Beta"].doubleClick()
+    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+
+    app.typeKey("f", modifierFlags: [.command])
+    app.typeKey("[", modifierFlags: [.command])
+
+    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertFalse(app.staticTexts["Alpha Note.md"].exists)
+  }
+
+  @MainActor
+  func testParentFolderNavigationSelectsPreviousFolder() throws {
+    let workspaceURL = try makeNavigationHistoryWorkspace()
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
+    app.staticTexts["Alpha"].doubleClick()
+    XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
+
+    app.buttons["Parent Folder"].click()
+
+    XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
+    assertTableRow(named: "Alpha", isSelectedIn: app)
+  }
+
+  @MainActor
   func testWorkspaceFileListDoesNotShowMetadataColumns() throws {
     let app = try launchAppWithBasicWorkspace()
 
@@ -1162,6 +1245,41 @@ final class WorkspaceSearchUITests: XCTestCase {
     try FileManager.default.copyItem(at: source, to: destination)
     filesToRemove.insert(destination.path(percentEncoded: false))
     return destination
+  }
+
+  private func makeNavigationHistoryWorkspace() throws -> URL {
+    let workspaceURL = FileManager.default.temporaryDirectory
+      .appending(path: "locus-navigation-history-\(UUID().uuidString)", directoryHint: .isDirectory)
+    let alphaURL = workspaceURL.appending(path: "Alpha", directoryHint: .isDirectory)
+    let betaURL = alphaURL.appending(path: "Beta", directoryHint: .isDirectory)
+    let gammaURL = betaURL.appending(path: "Gamma", directoryHint: .isDirectory)
+    let otherURL = workspaceURL.appending(path: "Other", directoryHint: .isDirectory)
+
+    try FileManager.default.createDirectory(at: gammaURL, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: otherURL, withIntermediateDirectories: true)
+    try "Alpha\n".write(
+      to: alphaURL.appending(path: "Alpha Note.md"),
+      atomically: true,
+      encoding: .utf8
+    )
+    try "Beta\n".write(
+      to: betaURL.appending(path: "Beta Note.md"),
+      atomically: true,
+      encoding: .utf8
+    )
+    try "Gamma\n".write(
+      to: gammaURL.appending(path: "Gamma Note.md"),
+      atomically: true,
+      encoding: .utf8
+    )
+    try "Other\n".write(
+      to: otherURL.appending(path: "Other Note.md"),
+      atomically: true,
+      encoding: .utf8
+    )
+
+    filesToRemove.insert(workspaceURL.path(percentEncoded: false))
+    return workspaceURL
   }
 
   private func fixtureWorkspacePath(_ name: String, filePath: String = #filePath) throws -> String {

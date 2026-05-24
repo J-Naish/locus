@@ -156,6 +156,9 @@ Deliverables:
   metadata values lazy for future contextual surfaces, and avoid making the
   primary list feel like a developer or spreadsheet view.
 - Add in-app "show containing folder and select item" behavior for files reached from recents, favorites, and search results.
+- Add session-scoped folder Back/Forward navigation with `Command-[` and
+  `Command-]`; shortcut handling should not override active text inputs such as
+  Markdown editing, workspace search, or PDF search.
 - Keep file location actions inside Locus: open, preview, show containing folder, select item, and copy path.
 
 Acceptance:
@@ -165,6 +168,8 @@ Acceptance:
 - File list loading does not block the main thread.
 - Rust tests cover sorting, hidden files policy, symlink policy, and the lazy
   extended metadata policy.
+- UI tests cover browser-style folder history, forward-stack clearing after a
+  new navigation, and parent navigation selecting the folder that was left.
 
 ### 3. Home, Recents, and Favorites
 
