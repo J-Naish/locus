@@ -403,6 +403,7 @@ private struct PDFDocumentSurface: View {
     let pdfDocumentStore: any PDFDocumentStoring
 
     @State private var loadState: PDFDocumentLoadState = .loading
+    @StateObject private var controller = PDFDocumentController()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -414,12 +415,19 @@ private struct PDFDocumentSurface: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .accessibilityIdentifier("document-pdf-loading-indicator")
             case let .loaded(document):
-                PDFDocumentView(document: document)
+                VStack(spacing: 8) {
+                    PDFDocumentControlsView(controller: controller)
+
+                    PDFDocumentView(
+                        document: document,
+                        controller: controller
+                    )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 8))
                     .accessibilityElement(children: .contain)
                     .accessibilityLabel("\(entry.name) PDF")
                     .accessibilityIdentifier("document-pdf-surface")
+                }
             case let .failed(message):
                 ContentUnavailableView {
                     Label("PDF Could Not Be Opened", systemImage: "exclamationmark.triangle")
@@ -445,6 +453,7 @@ private struct PDFDocumentSurface: View {
     @MainActor
     private func loadPDF() async {
         loadState = .loading
+        controller.reset()
 
         do {
             let document = try await pdfDocumentStore.loadPDF(at: entry.url)
@@ -469,8 +478,230 @@ private enum PDFDocumentLoadState {
     case failed(String)
 }
 
+private struct PDFDocumentControlsView: View {
+    @ObservedObject var controller: PDFDocumentController
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button {
+                controller.goToPreviousPage()
+            } label: {
+                Image(systemName: "chevron.up")
+            }
+            .help("Previous Page")
+            .disabled(!controller.canGoToPreviousPage)
+            .accessibilityLabel("Previous Page")
+            .accessibilityIdentifier("document-pdf-previous-page-button")
+
+            Button {
+                controller.goToNextPage()
+            } label: {
+                Image(systemName: "chevron.down")
+            }
+            .help("Next Page")
+            .disabled(!controller.canGoToNextPage)
+            .accessibilityLabel("Next Page")
+            .accessibilityIdentifier("document-pdf-next-page-button")
+
+            Text(controller.pageSummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .accessibilityIdentifier("document-pdf-page-summary")
+
+            Spacer()
+
+            Button {
+                controller.zoomOut()
+            } label: {
+                Image(systemName: "minus.magnifyingglass")
+            }
+            .help("Zoom Out")
+            .disabled(!controller.canZoomOut)
+            .accessibilityLabel("Zoom Out")
+            .accessibilityIdentifier("document-pdf-zoom-out-button")
+
+            Button {
+                controller.fitToWindow()
+            } label: {
+                Image(systemName: "arrow.up.left.and.down.right.magnifyingglass")
+            }
+            .help("Fit")
+            .accessibilityLabel("Fit")
+            .accessibilityIdentifier("document-pdf-fit-button")
+
+            Button {
+                controller.zoomIn()
+            } label: {
+                Image(systemName: "plus.magnifyingglass")
+            }
+            .help("Zoom In")
+            .disabled(!controller.canZoomIn)
+            .accessibilityLabel("Zoom In")
+            .accessibilityIdentifier("document-pdf-zoom-in-button")
+
+            Text(controller.zoomSummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(minWidth: 44, alignment: .trailing)
+                .accessibilityIdentifier("document-pdf-zoom-summary")
+        }
+        .controlSize(.small)
+    }
+}
+
+@MainActor
+private final class PDFDocumentController: ObservableObject {
+    @Published private(set) var currentPageNumber = 0
+    @Published private(set) var pageCount = 0
+    @Published private(set) var zoomPercent: Int?
+    @Published private(set) var canGoToPreviousPage = false
+    @Published private(set) var canGoToNextPage = false
+    @Published private(set) var canZoomIn = false
+    @Published private(set) var canZoomOut = false
+
+    private static let zoomLevels: [CGFloat] = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4]
+    private static let zoomComparisonEpsilon: CGFloat = 0.001
+
+    private weak var pdfView: PDFView?
+    private var isFitToWindow = true
+
+    var pageSummary: String {
+        guard pageCount > 0 else {
+            return "No pages"
+        }
+
+        guard currentPageNumber > 0 else {
+            return "Loading..."
+        }
+
+        return "Page \(currentPageNumber) of \(pageCount)"
+    }
+
+    var zoomSummary: String {
+        guard let zoomPercent else {
+            return "Fit"
+        }
+
+        return isFitToWindow ? "Fit" : "\(zoomPercent)%"
+    }
+
+    func reset() {
+        pdfView = nil
+        setIfChanged(&currentPageNumber, 0)
+        setIfChanged(&pageCount, 0)
+        setIfChanged(&zoomPercent, nil)
+        setIfChanged(&canGoToPreviousPage, false)
+        setIfChanged(&canGoToNextPage, false)
+        setIfChanged(&canZoomIn, false)
+        setIfChanged(&canZoomOut, false)
+        isFitToWindow = true
+    }
+
+    func attach(_ pdfView: PDFView) {
+        self.pdfView = pdfView
+    }
+
+    func refresh(from pdfView: PDFView) {
+        self.pdfView = pdfView
+
+        let document = pdfView.document
+        let nextPageCount = document?.pageCount ?? 0
+
+        let nextCurrentPageNumber: Int
+        if let document, let currentPage = pdfView.currentPage {
+            nextCurrentPageNumber = document.index(for: currentPage) + 1
+        } else {
+            nextCurrentPageNumber = 0
+        }
+
+        let scaleFactor = pdfView.scaleFactor
+        setIfChanged(&pageCount, nextPageCount)
+        setIfChanged(&currentPageNumber, nextCurrentPageNumber)
+        setIfChanged(&zoomPercent, Int((scaleFactor * 100).rounded()))
+        setIfChanged(&canGoToPreviousPage, nextCurrentPageNumber > 1)
+        setIfChanged(&canGoToNextPage, nextPageCount > 0 && nextCurrentPageNumber < nextPageCount)
+        setIfChanged(&canZoomIn, nextZoomLevel(after: scaleFactor, in: pdfView) != nil)
+        setIfChanged(&canZoomOut, previousZoomLevel(before: scaleFactor, in: pdfView) != nil)
+    }
+
+    func goToPreviousPage() {
+        guard let pdfView else {
+            return
+        }
+
+        pdfView.goToPreviousPage(nil)
+        refresh(from: pdfView)
+    }
+
+    func goToNextPage() {
+        guard let pdfView else {
+            return
+        }
+
+        pdfView.goToNextPage(nil)
+        refresh(from: pdfView)
+    }
+
+    func zoomIn() {
+        guard let pdfView, let zoomLevel = nextZoomLevel(after: pdfView.scaleFactor, in: pdfView) else {
+            return
+        }
+
+        setManualZoom(zoomLevel, in: pdfView)
+    }
+
+    func zoomOut() {
+        guard let pdfView, let zoomLevel = previousZoomLevel(before: pdfView.scaleFactor, in: pdfView) else {
+            return
+        }
+
+        setManualZoom(zoomLevel, in: pdfView)
+    }
+
+    func fitToWindow() {
+        guard let pdfView else {
+            return
+        }
+
+        isFitToWindow = true
+        pdfView.autoScales = true
+        refresh(from: pdfView)
+    }
+
+    private func setManualZoom(_ scaleFactor: CGFloat, in pdfView: PDFView) {
+        isFitToWindow = false
+        pdfView.autoScales = false
+        pdfView.scaleFactor = scaleFactor
+        refresh(from: pdfView)
+    }
+
+    private func nextZoomLevel(after scaleFactor: CGFloat, in pdfView: PDFView) -> CGFloat? {
+        let maximumZoom = min(Self.zoomLevels.last ?? pdfView.maxScaleFactor, pdfView.maxScaleFactor)
+        return Self.zoomLevels.first {
+            $0 > scaleFactor + Self.zoomComparisonEpsilon && $0 <= maximumZoom + Self.zoomComparisonEpsilon
+        }
+    }
+
+    private func previousZoomLevel(before scaleFactor: CGFloat, in pdfView: PDFView) -> CGFloat? {
+        let minimumZoom = max(Self.zoomLevels.first ?? pdfView.minScaleFactor, pdfView.minScaleFactor)
+        return Self.zoomLevels.reversed().first {
+            $0 < scaleFactor - Self.zoomComparisonEpsilon && $0 >= minimumZoom - Self.zoomComparisonEpsilon
+        }
+    }
+
+    private func setIfChanged<Value: Equatable>(_ value: inout Value, _ nextValue: Value) {
+        if value != nextValue {
+            value = nextValue
+        }
+    }
+}
+
+@MainActor
 private struct PDFDocumentView: NSViewRepresentable {
     let document: PDFDocument
+    @ObservedObject var controller: PDFDocumentController
 
     func makeNSView(context: Context) -> PDFView {
         let pdfView = PDFView()
@@ -479,14 +710,95 @@ private struct PDFDocumentView: NSViewRepresentable {
         pdfView.displayDirection = .vertical
         pdfView.backgroundColor = .clear
         pdfView.setAccessibilityIdentifier("document-pdf-view")
+        context.coordinator.observe(pdfView, controller: controller)
         return pdfView
     }
 
     func updateNSView(_ pdfView: PDFView, context: Context) {
+        context.coordinator.observe(pdfView, controller: controller)
+        controller.attach(pdfView)
+
         if pdfView.document !== document {
             pdfView.document = document
             // Re-apply fit-to-window scaling after document swaps.
             pdfView.autoScales = true
+        }
+
+        context.coordinator.scheduleRefresh(from: pdfView)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator: NSObject {
+        private weak var observedPDFView: PDFView?
+        private weak var controller: PDFDocumentController?
+
+        func observe(_ pdfView: PDFView, controller: PDFDocumentController) {
+            self.controller = controller
+
+            guard observedPDFView !== pdfView else {
+                return
+            }
+
+            if let observedPDFView {
+                NotificationCenter.default.removeObserver(
+                    self,
+                    name: Notification.Name.PDFViewPageChanged,
+                    object: observedPDFView
+                )
+                NotificationCenter.default.removeObserver(
+                    self,
+                    name: Notification.Name.PDFViewScaleChanged,
+                    object: observedPDFView
+                )
+            }
+
+            observedPDFView = pdfView
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(pdfViewPageChanged(_:)),
+                name: Notification.Name.PDFViewPageChanged,
+                object: pdfView
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(pdfViewScaleChanged(_:)),
+                name: Notification.Name.PDFViewScaleChanged,
+                object: pdfView
+            )
+        }
+
+        func scheduleRefresh(from pdfView: PDFView) {
+            let controller = controller
+            Task { @MainActor [weak controller, weak pdfView] in
+                guard let controller, let pdfView else {
+                    return
+                }
+
+                controller.refresh(from: pdfView)
+            }
+        }
+
+        @objc private func pdfViewPageChanged(_ notification: Notification) {
+            guard let pdfView = notification.object as? PDFView else {
+                return
+            }
+
+            scheduleRefresh(from: pdfView)
+        }
+
+        @objc private func pdfViewScaleChanged(_ notification: Notification) {
+            guard let pdfView = notification.object as? PDFView else {
+                return
+            }
+
+            scheduleRefresh(from: pdfView)
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
         }
     }
 }

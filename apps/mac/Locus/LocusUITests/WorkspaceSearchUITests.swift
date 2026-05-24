@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import XCTest
 
 final class WorkspaceSearchUITests: XCTestCase {
@@ -240,7 +241,45 @@ final class WorkspaceSearchUITests: XCTestCase {
         let pdfSurface = app.descendants(matching: .any)["document-pdf-surface"]
         XCTAssertTrue(pdfSurface.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.staticTexts["sample.pdf"].waitForExistence(timeout: 2), app.debugDescription)
+
+        let pageSummary = app.staticTexts["document-pdf-page-summary"]
+        XCTAssertTrue(pageSummary.waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertEqual(pageSummary.label, "Page 1 of 1")
+        XCTAssertTrue(app.buttons["document-pdf-previous-page-button"].waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertTrue(app.buttons["document-pdf-next-page-button"].waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertTrue(app.buttons["document-pdf-zoom-out-button"].waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertTrue(app.buttons["document-pdf-fit-button"].waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertTrue(app.buttons["document-pdf-zoom-in-button"].waitForExistence(timeout: 2), app.debugDescription)
         XCTAssertEqual(previewInvocations(forKey: previewInvocationsKey, filePath: previewInvocationsFilePath), [])
+    }
+
+    @MainActor
+    func testPDFControlsNavigatePagesAndZoomInLocus() throws {
+        let workspaceURL = FileManager.default.temporaryDirectory
+            .appending(path: "locus-pdf-controls-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
+        filesToRemove.insert(workspaceURL.path(percentEncoded: false))
+        try writeFixturePDF(pageCount: 2, to: workspaceURL.appending(path: "multi-page.pdf"))
+
+        let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+        let pdfRowText = app.staticTexts["multi-page.pdf"]
+        XCTAssertTrue(pdfRowText.waitForExistence(timeout: 5), app.debugDescription)
+        pdfRowText.doubleClick()
+
+        let pageSummary = app.staticTexts["document-pdf-page-summary"]
+        XCTAssertTrue(pageSummary.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(pageSummary.label, "Page 1 of 2")
+
+        app.buttons["document-pdf-next-page-button"].click()
+        XCTAssertTrue(waitForElement(pageSummary, toHaveLabel: "Page 2 of 2"), app.debugDescription)
+
+        let zoomSummary = app.staticTexts["document-pdf-zoom-summary"]
+        XCTAssertTrue(zoomSummary.waitForExistence(timeout: 2), app.debugDescription)
+        let initialZoomLabel = zoomSummary.label
+        app.buttons["document-pdf-zoom-in-button"].click()
+        XCTAssertTrue(waitForElementLabelToChange(zoomSummary, from: initialZoomLabel), app.debugDescription)
+        XCTAssertTrue(zoomSummary.label.hasSuffix("%"), app.debugDescription)
     }
 
     @MainActor
@@ -977,6 +1016,42 @@ final class WorkspaceSearchUITests: XCTestCase {
         return false
     }
 
+    @MainActor
+    private func waitForElement(
+        _ element: XCUIElement,
+        toHaveLabel expectedLabel: String,
+        timeout: TimeInterval = 2
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if element.label == expectedLabel {
+                return true
+            }
+
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+
+        return false
+    }
+
+    @MainActor
+    private func waitForElementLabelToChange(
+        _ element: XCUIElement,
+        from label: String,
+        timeout: TimeInterval = 2
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if element.label != label {
+                return true
+            }
+
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+
+        return false
+    }
+
     private func previewInvocations(forKey key: String, filePath: String) -> [String] {
         if let fileContents = try? String(contentsOfFile: filePath, encoding: .utf8),
            !fileContents.isEmpty {
@@ -1026,6 +1101,38 @@ final class WorkspaceSearchUITests: XCTestCase {
 
         throw FixtureLookupError(name: name, startPath: filePath)
     }
+
+    private func writeFixturePDF(pageCount: Int, to url: URL) throws {
+        let data = NSMutableData()
+        guard let consumer = CGDataConsumer(data: data as CFMutableData) else {
+            throw PDFFixtureWriteError()
+        }
+
+        var mediaBox = CGRect(x: 0, y: 0, width: 320, height: 420)
+        guard let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            throw PDFFixtureWriteError()
+        }
+
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 28, weight: .semibold),
+            .paragraphStyle: paragraphStyle
+        ]
+
+        for pageNumber in 1...pageCount {
+            context.beginPDFPage(nil)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            NSString(string: "Page \(pageNumber)")
+                .draw(in: CGRect(x: 40, y: 190, width: 240, height: 60), withAttributes: attributes)
+            NSGraphicsContext.restoreGraphicsState()
+            context.endPDFPage()
+        }
+
+        context.closePDF()
+        try data.write(to: url, options: .atomic)
+    }
 }
 
 private struct FixtureLookupError: Error, CustomStringConvertible {
@@ -1036,6 +1143,8 @@ private struct FixtureLookupError: Error, CustomStringConvertible {
         "Fixture workspace '\(name)' was not found from \(startPath)."
     }
 }
+
+private struct PDFFixtureWriteError: Error {}
 
 private extension XCUIElement {
     @MainActor

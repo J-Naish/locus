@@ -182,7 +182,9 @@ Deliverables:
 
 - Markdown editor using `NSTextView`/TextKit with normal save behavior.
 - Structured plain-text editor for YAML, JSON, TOML, and common text files.
-- PDF viewer using PDFKit. The first vertical slice is a read-only in-app viewer; page navigation, zoom controls, text selection polish, search, highlights, and comments follow as separate PDF review slices.
+- PDF viewer using PDFKit. The first vertical slice is a read-only in-app viewer
+  with page navigation and zoom controls; text selection polish, search,
+  highlights, and comments follow as separate PDF review slices.
 - Image preview.
 - Video/audio playback using AVKit. The first vertical slice uses in-app,
   manually started playback with native controls; richer audio metadata and
