@@ -23,6 +23,12 @@ struct HomeView: View {
     var onSuccess: (() -> Void)?
   }
 
+  private enum WorkspaceLoadingIndicator {
+    // Folder listings that finish inside this threshold feel instant; slower
+    // loads need feedback so the app does not appear stuck.
+    static let delay: Duration = .milliseconds(150)
+  }
+
   @State private var workspaceState: WorkspaceState = .idle
   @State private var selectedEntryID: WorkspaceEntry.ID?
   @State private var isFolderImporterPresented = false
@@ -35,6 +41,7 @@ struct HomeView: View {
   // Folder loads can overlap when users refresh or choose another folder
   // quickly; only the latest generation is allowed to update visible state.
   @State private var workspaceLoadGeneration: UInt64 = 0
+  @State private var workspaceLoadingIndicatorTask: Task<Void, Never>?
 
   private let coreBridge: CoreBridge
   private let quickLookPreviewService: any QuickLookPreviewing
@@ -244,11 +251,15 @@ struct HomeView: View {
       workspaceRootURL = rootURL
     }
 
-    if request.showsLoading {
-      workspaceDirectoryMonitor.stopMonitoring()
-    }
     workspaceLoadGeneration &+= 1
     let generation = workspaceLoadGeneration
+
+    if request.showsLoading {
+      workspaceDirectoryMonitor.stopMonitoring()
+      scheduleWorkspaceLoadingIndicator(for: request.folderURL, generation: generation)
+    } else {
+      cancelWorkspaceLoadingIndicator()
+    }
 
     Task {
       await loadWorkspace(
@@ -262,6 +273,32 @@ struct HomeView: View {
   private func invalidateWorkspaceLoads() {
     workspaceDirectoryMonitor.stopMonitoring()
     workspaceLoadGeneration &+= 1
+    cancelWorkspaceLoadingIndicator()
+  }
+
+  @MainActor
+  private func scheduleWorkspaceLoadingIndicator(for folderURL: URL, generation: UInt64) {
+    workspaceLoadingIndicatorTask?.cancel()
+    workspaceLoadingIndicatorTask = Task { @MainActor in
+      do {
+        try await Task.sleep(for: WorkspaceLoadingIndicator.delay)
+      } catch {
+        return
+      }
+
+      guard !Task.isCancelled, generation == workspaceLoadGeneration else {
+        return
+      }
+
+      workspaceState = .loading(folderURL: folderURL)
+      workspaceLoadingIndicatorTask = nil
+    }
+  }
+
+  @MainActor
+  private func cancelWorkspaceLoadingIndicator() {
+    workspaceLoadingIndicatorTask?.cancel()
+    workspaceLoadingIndicatorTask = nil
   }
 
   /// Triggers a user-initiated folder change and records it in browser-style
@@ -392,9 +429,6 @@ struct HomeView: View {
 
     let folderURL = request.folderURL
     let previousSelectedEntryID = selectedEntryIDForReload(of: folderURL)
-    if request.showsLoading {
-      workspaceState = .loading(folderURL: folderURL)
-    }
     // This covers the immediate directory read. Recents and Favorites will
     // store security-scoped bookmarks once sandboxing is enabled.
     let didStartAccess = folderURL.startAccessingSecurityScopedResource()
@@ -414,6 +448,7 @@ struct HomeView: View {
       guard generation == workspaceLoadGeneration else {
         return
       }
+      cancelWorkspaceLoadingIndicator()
       if let selectedEntryID = entryID(in: snapshot.entries, matching: request.selectedURL) {
         self.selectedEntryID = selectedEntryID
       } else if snapshot.entries.contains(where: { $0.id == previousSelectedEntryID }) {
@@ -432,6 +467,7 @@ struct HomeView: View {
       guard generation == workspaceLoadGeneration else {
         return
       }
+      cancelWorkspaceLoadingIndicator()
       workspaceDirectoryMonitor.stopMonitoring()
       if let restoreOnFailure = request.restoreOnFailure {
         workspaceState = restoreOnFailure.state
