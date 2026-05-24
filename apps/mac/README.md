@@ -31,6 +31,7 @@ The Rust build is routed through `scripts/build-rust-ffi.sh`.
 Useful commands from the repository root:
 
 ```sh
+scripts/mac/run-app.sh
 xcodebuild -project apps/mac/Locus/Locus.xcodeproj -scheme Locus -configuration Debug -derivedDataPath .build/xcode-derived -destination 'platform=macOS' build
 xcodebuild -project apps/mac/Locus/Locus.xcodeproj -scheme Locus -configuration Debug -derivedDataPath .build/xcode-derived -destination 'platform=macOS' test
 ```
