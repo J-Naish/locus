@@ -290,6 +290,39 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testRecentFoldersAppearCollapsedAtBottomOfSidebarAndOpenWorkspace() throws {
+    let workspacePath = try fixtureWorkspacePath("basic")
+    let recentFolderPath = try fixtureWorkspacePath("sorting")
+    let app = try launchApp(workspacePath: workspacePath, recentFolders: [recentFolderPath])
+
+    if !app.staticTexts["Reports"].waitForExistence(timeout: 2) {
+      let showSidebarButton = app.buttons["Show Sidebar"]
+      XCTAssertTrue(showSidebarButton.waitForExistence(timeout: 2), app.debugDescription)
+      showSidebarButton.click()
+    }
+    XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
+
+    let recentFoldersDisclosure = app.buttons
+      .matching(identifier: "workspace-sidebar-recent-folders-disclosure")
+      .firstMatch
+    XCTAssertTrue(recentFoldersDisclosure.waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertEqual(recentFoldersDisclosure.label, "Expand Recent Folders")
+    XCTAssertFalse(app.buttons["Open sorting"].exists, app.debugDescription)
+
+    recentFoldersDisclosure.click()
+
+    let recentFolder = app.buttons
+      .matching(identifier: "workspace-sidebar-recent-folder-row")
+      .firstMatch
+    XCTAssertTrue(recentFolder.waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertEqual(recentFoldersDisclosure.label, "Collapse Recent Folders")
+
+    recentFolder.click()
+
+    XCTAssertTrue(app.staticTexts["Folder 2"].waitForExistence(timeout: 5), app.debugDescription)
+  }
+
+  @MainActor
   func testWorkspaceChromeOmitsPrototypeSecondaryControls() throws {
     let workspacePath = try fixtureWorkspacePath("basic")
     let app = try launchApp(workspacePath: workspacePath)
@@ -799,7 +832,8 @@ final class WorkspaceSearchUITests: XCTestCase {
   ) throws -> XCUIApplication {
     trackUserDefaultsKeys(
       recentFilesKey,
-      recentFoldersKey
+      recentFoldersKey,
+      "workspace.sidebar.recentFoldersExpanded"
     )
 
     let app = XCUIApplication()
@@ -850,8 +884,11 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   private func trackUserDefaultsKeys(_ keys: String...) {
+    let appDefaults = UserDefaults(suiteName: "com.nash.locus")
     for key in keys {
       userDefaultsKeysToRemove.insert(key)
+      UserDefaults.standard.removeObject(forKey: key)
+      appDefaults?.removeObject(forKey: key)
     }
   }
 

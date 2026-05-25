@@ -807,10 +807,12 @@ private struct WorkspaceBrowserView: View {
 
   var body: some View {
     NavigationSplitView {
-      WorkspaceEntriesList(
+      WorkspaceSidebarView(
         folderURL: folderURL,
         entries: searchResults.visibleEntries,
+        recentFolders: recentFolders,
         selectedEntryID: $selectedEntryID,
+        shortcutActions: shortcutActions,
         actions: actions,
         onVisibleEntriesChange: updateSidebarVisibleEntries
       )
@@ -1036,11 +1038,13 @@ private struct WorkspaceShortcutSearchResultsView: View {
   }
 }
 
-private struct WorkspaceEntriesList: View {
+private struct WorkspaceSidebarView: View {
   let folderURL: URL
   let entries: [WorkspaceEntry]
+  let recentFolders: [RecentFolder]
   private let rootEntry: WorkspaceEntry
   @Binding var selectedEntryID: WorkspaceEntry.ID?
+  let shortcutActions: FileLocationShortcutActions
   let actions: WorkspaceActions
   let onVisibleEntriesChange: ([WorkspaceEntry]) -> Void
   @State private var expandedFolderIDs: Set<WorkspaceEntry.ID> = []
@@ -1049,61 +1053,82 @@ private struct WorkspaceEntriesList: View {
   @State private var childLoadTokens: [WorkspaceEntry.ID: UUID] = [:]
   @State private var expansionGeneration: UInt64 = 0
   @State private var isRootExpanded = true
+  @AppStorage("workspace.sidebar.recentFoldersExpanded")
+  private var isRecentFoldersExpanded = false
 
   init(
     folderURL: URL,
     entries: [WorkspaceEntry],
+    recentFolders: [RecentFolder],
     selectedEntryID: Binding<WorkspaceEntry.ID?>,
+    shortcutActions: FileLocationShortcutActions,
     actions: WorkspaceActions,
     onVisibleEntriesChange: @escaping ([WorkspaceEntry]) -> Void
   ) {
     self.folderURL = folderURL
     self.entries = entries
+    self.recentFolders = recentFolders
     self.rootEntry = WorkspaceEntry.workspaceRoot(at: folderURL)
     self._selectedEntryID = selectedEntryID
+    self.shortcutActions = shortcutActions
     self.actions = actions
     self.onVisibleEntriesChange = onVisibleEntriesChange
   }
 
   var body: some View {
-    List(selection: $selectedEntryID) {
-      ForEach(rows) { row in
-        switch row.content {
-        case .entry(let entry):
-          WorkspaceSidebarEntryRow(
-            entry: entry,
-            depth: row.depth,
-            isExpanded: isExpanded(entry),
-            toggleExpansion: {
-              toggleExpansion(for: entry)
-            }
-          )
-          .tag(entry.id)
-        case .status(let status):
-          WorkspaceSidebarStatusRow(status: status, depth: row.depth)
+    VStack(spacing: 0) {
+      List(selection: $selectedEntryID) {
+        ForEach(rows) { row in
+          switch row.content {
+          case .entry(let entry):
+            WorkspaceSidebarEntryRow(
+              entry: entry,
+              depth: row.depth,
+              isExpanded: isExpanded(entry),
+              toggleExpansion: {
+                toggleExpansion(for: entry)
+              }
+            )
+            .tag(entry.id)
+          case .status(let status):
+            WorkspaceSidebarStatusRow(status: status, depth: row.depth)
+          }
         }
       }
-    }
-    .listStyle(.sidebar)
-    .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
-      let selectedEntries = entries(for: selection)
-      let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
+      .listStyle(.sidebar)
+      .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
+        let selectedEntries = entries(for: selection)
+        let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
 
-      Button("Open") {
-        if let openAction {
-          actions.performOpenAction(openAction)
+        Button("Open") {
+          if let openAction {
+            actions.performOpenAction(openAction)
+          }
         }
-      }
-      .disabled(openAction == nil)
+        .disabled(openAction == nil)
 
-      Button(WorkspaceEntryPathCopy.menuTitle(for: selectedEntries)) {
-        actions.copyPaths(selectedEntries)
+        Button(WorkspaceEntryPathCopy.menuTitle(for: selectedEntries)) {
+          actions.copyPaths(selectedEntries)
+        }
+        .disabled(selectedEntries.isEmpty)
+      } primaryAction: { selection in
+        // Keep row double-click, Return, and VoiceOver default actions on the
+        // native List path; folder expansion belongs to the disclosure Button.
+        performPrimaryAction(for: selection)
       }
-      .disabled(selectedEntries.isEmpty)
-    } primaryAction: { selection in
-      // Keep row double-click, Return, and VoiceOver default actions on the
-      // native List path; folder expansion belongs to the disclosure Button.
-      performPrimaryAction(for: selection)
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+      if !recentFolders.isEmpty {
+        Divider()
+
+        WorkspaceSidebarRecentFoldersSection(
+          folders: recentFolders,
+          isExpanded: $isRecentFoldersExpanded,
+          open: shortcutActions.openRecentFolder,
+          remove: shortcutActions.removeRecentFolder,
+          copyPath: shortcutActions.copyPath
+        )
+      }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onAppear {
@@ -1361,6 +1386,118 @@ private struct WorkspaceEntriesList: View {
   }
 }
 
+private struct WorkspaceSidebarRecentFoldersSection: View {
+  let folders: [RecentFolder]
+  @Binding var isExpanded: Bool
+  let open: (RecentFolder) -> Void
+  let remove: (RecentFolder) -> Void
+  let copyPath: (URL) -> Void
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      Button {
+        isExpanded.toggle()
+      } label: {
+        HStack(spacing: 6) {
+          Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .frame(width: WorkspaceSidebarMetrics.chevronColumnWidth)
+            .accessibilityHidden(true)
+
+          Text("Recent Folders")
+            .font(.caption)
+            .fontWeight(.semibold)
+            .foregroundStyle(.secondary)
+
+          Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel(Text(isExpanded ? "Collapse Recent Folders" : "Expand Recent Folders"))
+      .accessibilityIdentifier("workspace-sidebar-recent-folders-disclosure")
+      .padding(.horizontal, 12)
+      .frame(height: WorkspaceSidebarMetrics.recentFoldersHeaderHeight)
+
+      if isExpanded {
+        ScrollView {
+          LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(folders) { folder in
+              WorkspaceSidebarRecentFolderRow(
+                folder: folder,
+                open: open,
+                remove: remove,
+                copyPath: copyPath
+              )
+            }
+          }
+        }
+        .frame(maxHeight: WorkspaceSidebarMetrics.recentFoldersMaximumHeight)
+        .padding(.bottom, 6)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .accessibilityElement(children: .contain)
+    .accessibilityIdentifier("workspace-sidebar-recent-folders")
+  }
+}
+
+private struct WorkspaceSidebarRecentFolderRow: View {
+  let folder: RecentFolder
+  let open: (RecentFolder) -> Void
+  let remove: (RecentFolder) -> Void
+  let copyPath: (URL) -> Void
+  @State private var isHovered = false
+
+  var body: some View {
+    Button {
+      open(folder)
+    } label: {
+      HStack(spacing: 6) {
+        Color.clear
+          .frame(width: WorkspaceSidebarMetrics.chevronColumnWidth)
+          .accessibilityHidden(true)
+
+        Image(systemName: "folder")
+          .foregroundStyle(.blue)
+          .accessibilityHidden(true)
+
+        Text(folder.displayName)
+          .lineLimit(1)
+          .truncationMode(.middle)
+
+        Spacer(minLength: 0)
+      }
+      .padding(.horizontal, 12)
+      .frame(height: WorkspaceSidebarMetrics.recentFolderRowHeight)
+      .contentShape(Rectangle())
+      .background {
+        RoundedRectangle(cornerRadius: 5)
+          .fill(isHovered ? Color.primary.opacity(0.08) : Color.clear)
+      }
+    }
+    .buttonStyle(.plain)
+    .onHover { isHovered = $0 }
+    .contextMenu {
+      Button("Open") {
+        open(folder)
+      }
+
+      Button("Copy Path") {
+        copyPath(folder.url)
+      }
+
+      Button("Remove") {
+        remove(folder)
+      }
+    }
+    .accessibilityLabel(Text("Open \(folder.displayName)"))
+    .accessibilityIdentifier("workspace-sidebar-recent-folder-row")
+    .help(Text(verbatim: folder.path))
+  }
+}
+
 private enum WorkspaceSidebarChildState: Equatable {
   case pending
   case loading
@@ -1371,6 +1508,9 @@ private enum WorkspaceSidebarChildState: Equatable {
 private enum WorkspaceSidebarMetrics {
   static let depthIndent: CGFloat = 14
   static let chevronColumnWidth: CGFloat = 10
+  static let recentFoldersHeaderHeight: CGFloat = 28
+  static let recentFolderRowHeight: CGFloat = 28
+  static let recentFoldersMaximumHeight: CGFloat = 224
 
   // Fast child listings should appear directly. Show "Loading..." only when a
   // real read stays in flight long enough that silent waiting would feel stuck.

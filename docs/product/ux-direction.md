@@ -51,7 +51,9 @@ outline-style row that starts expanded; users can collapse it to hide its
 contents. Nested folder rows can expand inline by clicking the disclosure
 chevron so users can peek into nearby folders without losing the current
 location. Double-click remains the deliberate gesture for navigating into a
-folder.
+folder. The sidebar also keeps a collapsed Recent Folders section at the bottom
+so users can reopen locations they have explicitly visited without interrupting
+the current folder tree.
 
 The main window should open large enough for the file list and document surface
 to sit side by side comfortably, but the minimum size should stay smaller than

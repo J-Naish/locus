@@ -15,6 +15,8 @@ Must support:
 - keep double-clicking a folder as an explicit navigation into that folder
 - move backward and forward through the current session's folder navigation
   history
+- show a collapsed Recent Folders section below the sidebar's folder tree for
+  folders the user has explicitly opened
 - show the current location as a name-first file and folder list; Type, Size,
   and Modified columns are intentionally not part of the default browser
 - keep default folder listing lightweight; size and modified-time metadata
