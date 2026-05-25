@@ -154,9 +154,9 @@ Deliverables:
   browser should not expose Type, Size, or Modified columns; keep those
   metadata values lazy for future contextual surfaces, and avoid making the
   primary list feel like a developer or spreadsheet view.
-- Let folder rows expand inline in the sidebar on click, loading child folder
-  contents lazily and indenting nested items; double-clicking a folder remains
-  the explicit navigation action.
+- Let folder rows expand inline from a native outline-style disclosure chevron
+  in the sidebar, loading child folder contents lazily and indenting nested
+  items; double-clicking a folder remains the explicit navigation action.
 - Add in-app "show containing folder and select item" behavior for files reached from recents and search results.
 - Add session-scoped folder Back/Forward navigation.
 - Keep file and folder context menus minimal: open supported items in Locus and copy paths. External preview and explicit "show in Locus" commands are deferred until a concrete workflow needs them.
@@ -164,9 +164,9 @@ Deliverables:
 Acceptance:
 
 - A user can launch into their home folder, choose another local folder, and browse immediate contents without recursive startup scanning.
-- A user can expand a folder row to inspect nearby children without changing
-  the current working location, and can still double-click the folder to
-  navigate into it.
+- A user can expand a folder row by clicking its disclosure chevron to inspect
+  nearby children without changing the current working location, and can still
+  double-click the folder to navigate into it.
 - Hidden home-directory entries and shortcuts are not shown by default, while useful project dotfiles remain visible when a project folder is opened explicitly.
 - File list loading does not block the main thread.
 - Rust tests cover sorting, hidden files policy, symlink policy, and the lazy

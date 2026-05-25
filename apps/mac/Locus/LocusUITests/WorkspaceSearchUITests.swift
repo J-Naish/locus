@@ -39,7 +39,7 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testClickDirectoryRowExpandsChildrenWithoutNavigating() throws {
+  func testClickDirectoryRowDoesNotExpandFolder() throws {
     let workspaceURL = try makeNavigationHistoryWorkspace()
     let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
 
@@ -48,28 +48,72 @@ final class WorkspaceSearchUITests: XCTestCase {
 
     app.staticTexts["Alpha"].click()
 
-    XCTAssertTrue(app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertFalse(
+      app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 1), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 2), app.debugDescription)
+  }
+
+  @MainActor
+  func testClickDirectoryDisclosureExpandsAndCollapsesFolderWithoutNavigating() throws {
+    let workspaceURL = try makeNavigationHistoryWorkspace()
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 5), app.debugDescription)
+
+    let alphaDisclosure = disclosureButton(for: workspaceURL.appending(path: "Alpha"), in: app)
+    XCTAssertTrue(alphaDisclosure.waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertEqual(alphaDisclosure.label, "Expand Alpha")
+    alphaDisclosure.click()
+
+    XCTAssertTrue(
+      app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 5), app.debugDescription)
     XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
     XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertEqual(alphaDisclosure.label, "Collapse Alpha")
 
-    app.staticTexts["Beta"].click()
+    alphaDisclosure.click()
 
-    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
-    XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 5), app.debugDescription)
-    XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 2), app.debugDescription)
-
-    app.staticTexts["Beta"].click()
-
-    XCTAssertFalse(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 1), app.debugDescription)
-    XCTAssertFalse(app.staticTexts["Gamma"].exists, app.debugDescription)
-    XCTAssertTrue(app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 2), app.debugDescription)
-
-    app.staticTexts["Alpha"].click()
-
-    XCTAssertFalse(app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 1), app.debugDescription)
+    XCTAssertFalse(
+      app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 1), app.debugDescription)
     XCTAssertFalse(app.staticTexts["Beta"].exists, app.debugDescription)
     XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertEqual(alphaDisclosure.label, "Expand Alpha")
+  }
+
+  @MainActor
+  func testNestedDirectoryDisclosuresExpandAndCollapseIndependently() throws {
+    let workspaceURL = try makeNavigationHistoryWorkspace()
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
+
+    let alphaDisclosure = disclosureButton(for: workspaceURL.appending(path: "Alpha"), in: app)
+    XCTAssertTrue(alphaDisclosure.waitForExistence(timeout: 5), app.debugDescription)
+    alphaDisclosure.click()
+    XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
+
+    let betaURL = workspaceURL.appending(path: "Alpha").appending(path: "Beta")
+    let betaDisclosure = disclosureButton(for: betaURL, in: app)
+    XCTAssertTrue(betaDisclosure.waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertEqual(betaDisclosure.label, "Expand Beta")
+    betaDisclosure.click()
+
+    XCTAssertTrue(
+      app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertEqual(betaDisclosure.label, "Collapse Beta")
+
+    betaDisclosure.click()
+
+    XCTAssertFalse(
+      app.staticTexts["Beta Note.md"].waitForExistence(timeout: 1), app.debugDescription)
+    XCTAssertFalse(app.staticTexts["Gamma"].exists, app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertEqual(betaDisclosure.label, "Expand Beta")
   }
 
   @MainActor
@@ -78,12 +122,13 @@ final class WorkspaceSearchUITests: XCTestCase {
     let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
 
     XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
-    app.staticTexts["Alpha"].click()
+    disclosureButton(for: workspaceURL.appending(path: "Alpha"), in: app).click()
     XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
 
     app.staticTexts["Beta"].doubleClick()
 
-    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
     XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 2), app.debugDescription)
     XCTAssertFalse(app.staticTexts["Alpha Note.md"].exists, app.debugDescription)
     XCTAssertFalse(app.staticTexts["Other"].exists, app.debugDescription)
@@ -100,18 +145,22 @@ final class WorkspaceSearchUITests: XCTestCase {
     app.staticTexts["Beta"].doubleClick()
     XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 5), app.debugDescription)
     app.staticTexts["Gamma"].doubleClick()
-    XCTAssertTrue(app.staticTexts["Gamma Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Gamma Note.md"].waitForExistence(timeout: 5), app.debugDescription)
 
     app.typeKey("[", modifierFlags: [.command])
-    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
     XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 2), app.debugDescription)
 
     app.typeKey("[", modifierFlags: [.command])
-    XCTAssertTrue(app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 5), app.debugDescription)
     XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 2), app.debugDescription)
 
     app.typeKey("]", modifierFlags: [.command])
-    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
     XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 2), app.debugDescription)
   }
 
@@ -127,17 +176,21 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 5), app.debugDescription)
 
     app.typeKey("[", modifierFlags: [.command])
-    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
     app.typeKey("[", modifierFlags: [.command])
-    XCTAssertTrue(app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 5), app.debugDescription)
     app.typeKey("[", modifierFlags: [.command])
     XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 5), app.debugDescription)
 
     app.staticTexts["Other"].doubleClick()
-    XCTAssertTrue(app.staticTexts["Other Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Other Note.md"].waitForExistence(timeout: 5), app.debugDescription)
 
     app.typeKey("]", modifierFlags: [.command])
-    XCTAssertTrue(app.staticTexts["Other Note.md"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Other Note.md"].waitForExistence(timeout: 2), app.debugDescription)
     XCTAssertFalse(app.staticTexts["Alpha Note.md"].exists)
   }
 
@@ -148,7 +201,8 @@ final class WorkspaceSearchUITests: XCTestCase {
 
     XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
     app.staticTexts["Alpha"].doubleClick()
-    XCTAssertTrue(app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 5), app.debugDescription)
     app.staticTexts["Alpha Note.md"].click()
 
     let editor = app.textViews["document-text-editor"]
@@ -158,7 +212,8 @@ final class WorkspaceSearchUITests: XCTestCase {
 
     app.typeKey("[", modifierFlags: [.command])
 
-    XCTAssertTrue(app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 2), app.debugDescription)
     XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 2), app.debugDescription)
     XCTAssertFalse(app.staticTexts["Other"].exists)
   }
@@ -742,6 +797,22 @@ final class WorkspaceSearchUITests: XCTestCase {
     for key in keys {
       userDefaultsKeysToRemove.insert(key)
     }
+  }
+
+  @MainActor
+  private func disclosureButton(for directoryURL: URL, in app: XCUIApplication) -> XCUIElement {
+    let path = directoryURL.path(percentEncoded: false)
+    let identifier = "workspace-sidebar-disclosure-\(stableHash(for: path))"
+    return app.buttons.matching(identifier: identifier).firstMatch
+  }
+
+  private func stableHash(for value: String) -> String {
+    var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+    for byte in value.utf8 {
+      hash ^= UInt64(byte)
+      hash &*= 0x100_0000_01b3
+    }
+    return String(hash, radix: 16)
   }
 
   @MainActor

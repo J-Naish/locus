@@ -1052,10 +1052,13 @@ private struct WorkspaceEntriesList: View {
             WorkspaceSidebarEntryRow(
               entry: entry,
               depth: row.depth,
-              isExpanded: expandedFolderIDs.contains(entry.id)
+              isExpanded: expandedFolderIDs.contains(entry.id),
+              toggleExpansion: {
+                toggleFolderExpansion(for: entry)
+              }
             )
             .tag(entry.id)
-            .simultaneousGesture(entryTapGesture(for: entry))
+            .simultaneousGesture(entryDoubleTapGesture(for: entry))
           case .status(let status):
             WorkspaceSidebarStatusRow(status: status, depth: row.depth)
           }
@@ -1114,17 +1117,11 @@ private struct WorkspaceEntriesList: View {
     actions.performOpenAction(openAction)
   }
 
-  private func entryTapGesture(for entry: WorkspaceEntry) -> some Gesture {
-    TapGesture(count: 1)
+  private func entryDoubleTapGesture(for entry: WorkspaceEntry) -> some Gesture {
+    TapGesture(count: 2)
       .onEnded {
-        toggleFolderExpansion(for: entry)
+        performPrimaryAction(for: [entry.id])
       }
-      .simultaneously(
-        with: TapGesture(count: 2)
-          .onEnded {
-            performPrimaryAction(for: [entry.id])
-          }
-      )
   }
 
   private func entries(for selection: Set<WorkspaceEntry.ID>) -> [WorkspaceEntry] {
@@ -1343,6 +1340,21 @@ private enum WorkspaceSidebarMetrics {
   static let loadingIndicatorDelay: Duration = .milliseconds(180)
 }
 
+private enum WorkspaceSidebarAccessibility {
+  static func disclosureIdentifier(for entry: WorkspaceEntry) -> String {
+    "workspace-sidebar-disclosure-\(stableHash(for: entry.id))"
+  }
+
+  private static func stableHash(for value: String) -> String {
+    var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+    for byte in value.utf8 {
+      hash ^= UInt64(byte)
+      hash &*= 0x100_0000_01b3
+    }
+    return String(hash, radix: 16)
+  }
+}
+
 private struct WorkspaceSidebarRow: Identifiable, Equatable {
   enum Content: Equatable {
     case entry(WorkspaceEntry)
@@ -1431,15 +1443,24 @@ private struct WorkspaceSidebarEntryRow: View {
   let entry: WorkspaceEntry
   let depth: Int
   let isExpanded: Bool
+  let toggleExpansion: () -> Void
 
   var body: some View {
     HStack(spacing: 6) {
       if entry.kind == .directory {
-        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-          .font(.caption2)
-          .foregroundStyle(.tertiary)
-          .frame(width: WorkspaceSidebarMetrics.chevronColumnWidth)
-          .accessibilityHidden(true)
+        Button(action: toggleExpansion) {
+          Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .frame(width: WorkspaceSidebarMetrics.chevronColumnWidth)
+            // Expand the Button hit shape from the SF Symbol's drawn pixels
+            // to the full chevron column so the icon stays clickable along
+            // its entire bounds.
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(disclosureAccessibilityLabel)
+        .accessibilityIdentifier(WorkspaceSidebarAccessibility.disclosureIdentifier(for: entry))
       } else {
         Color.clear
           .frame(width: WorkspaceSidebarMetrics.chevronColumnWidth)
@@ -1459,6 +1480,11 @@ private struct WorkspaceSidebarEntryRow: View {
     .frame(maxWidth: .infinity, alignment: .leading)
     .contentShape(Rectangle())
     .help(Text(verbatim: entry.name))
+  }
+
+  private var disclosureAccessibilityLabel: Text {
+    let action = isExpanded ? "Collapse" : "Expand"
+    return Text(verbatim: "\(action) \(entry.name)")
   }
 }
 
