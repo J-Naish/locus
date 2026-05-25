@@ -762,6 +762,7 @@ private struct WorkspaceBrowserView: View {
   @State private var searchResults: WorkspaceBrowserSearchResults
   @State private var sidebarVisibleEntries: [WorkspaceEntry]
   @State private var isDocumentTextInputFocused = false
+  @State private var documentTabs: [WorkspaceDocumentTab] = []
 
   init(
     folderURL: URL,
@@ -813,7 +814,7 @@ private struct WorkspaceBrowserView: View {
         recentFolders: recentFolders,
         selectedEntryID: $selectedEntryID,
         shortcutActions: shortcutActions,
-        actions: actions,
+        actions: sidebarActions,
         onVisibleEntriesChange: updateSidebarVisibleEntries
       )
       .navigationSplitViewColumnWidth(
@@ -840,6 +841,7 @@ private struct WorkspaceBrowserView: View {
     .onChange(of: folderURL) {
       searchQuery = ""
       isDocumentTextInputFocused = false
+      documentTabs.removeAll()
       refreshSearchResults()
     }
     .focusedSceneValue(\.workspaceNavigationCommands, workspaceNavigationCommands)
@@ -895,19 +897,87 @@ private struct WorkspaceBrowserView: View {
     )
   }
 
+  private var sidebarActions: WorkspaceActions {
+    WorkspaceActions(
+      canGoBack: actions.canGoBack,
+      canGoForward: actions.canGoForward,
+      goBack: actions.goBack,
+      goForward: actions.goForward,
+      retryCurrentFolder: actions.retryCurrentFolder,
+      copyPaths: actions.copyPaths,
+      loadFolderChildren: actions.loadFolderChildren,
+      performOpenAction: performWorkspaceOpenAction
+    )
+  }
+
   private var selectedEntry: WorkspaceEntry? {
     guard let selectedEntryID else {
       return nil
     }
 
     return sidebarVisibleEntries.first { $0.id == selectedEntryID }
+      ?? documentTabs.first { $0.id == selectedEntryID }?.entry
+  }
+
+  private func performWorkspaceOpenAction(_ openAction: WorkspaceEntryOpenAction) {
+    if case .openInPlace(let url) = openAction,
+      let entry = sidebarVisibleEntries.first(where: {
+        $0.url.locusStandardizedPath == url.locusStandardizedPath
+      })
+    {
+      trackDocumentTab(for: entry)
+    }
+
+    actions.performOpenAction(openAction)
+  }
+
+  private func trackDocumentTab(for entry: WorkspaceEntry) {
+    guard let tab = WorkspaceDocumentTab(entry: entry),
+      !documentTabs.contains(where: { $0.id == tab.id })
+    else {
+      return
+    }
+
+    documentTabs.append(tab)
+  }
+
+  private func selectDocumentTab(_ tab: WorkspaceDocumentTab) {
+    selectedEntryID = tab.id
+  }
+
+  private func closeDocumentTab(_ tab: WorkspaceDocumentTab) {
+    guard let closedIndex = documentTabs.firstIndex(where: { $0.id == tab.id }) else {
+      return
+    }
+
+    let wasSelected = selectedEntryID == tab.id
+    documentTabs.remove(at: closedIndex)
+
+    guard wasSelected else {
+      return
+    }
+
+    if let replacement = replacementTab(afterClosingIndex: closedIndex) {
+      selectDocumentTab(replacement)
+    } else {
+      selectedEntryID = nil
+    }
+  }
+
+  private func replacementTab(afterClosingIndex closedIndex: Int) -> WorkspaceDocumentTab? {
+    if closedIndex < documentTabs.count {
+      return documentTabs[closedIndex]
+    }
+
+    return documentTabs.last
   }
 
   private func updateSidebarVisibleEntries(_ entries: [WorkspaceEntry]) {
     sidebarVisibleEntries = entries
 
     guard let selectedEntryID,
-      !entries.contains(where: { $0.id == selectedEntryID })
+      !entries.contains(where: { $0.id == selectedEntryID }),
+      !documentTabs.contains(where: { $0.id == selectedEntryID })
     else {
       return
     }
@@ -925,18 +995,30 @@ private struct WorkspaceBrowserView: View {
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
-        WorkspaceDocumentSurface(
-          entry: selectedEntry,
-          workspaceRefreshToken: loadedAt,
-          textDocumentStore: textDocumentStore,
-          imageDocumentStore: imageDocumentStore,
-          pdfDocumentStore: pdfDocumentStore,
-          mediaDocumentStore: mediaDocumentStore,
-          quickLookDocumentStore: quickLookDocumentStore,
-          onTextInputFocusChange: { isFocused in
-            isDocumentTextInputFocused = isFocused
-          }
-        )
+        VStack(spacing: 0) {
+          WorkspaceDocumentTabsHeader(
+            tabs: documentTabs,
+            selectedTabID: selectedEntryID,
+            select: selectDocumentTab,
+            close: closeDocumentTab
+          )
+          .frame(height: documentTabs.isEmpty ? 0 : WorkspaceDocumentTabMetrics.height)
+          .clipped()
+
+          WorkspaceDocumentSurface(
+            entry: selectedEntry,
+            showsTopDivider: documentTabs.isEmpty,
+            workspaceRefreshToken: loadedAt,
+            textDocumentStore: textDocumentStore,
+            imageDocumentStore: imageDocumentStore,
+            pdfDocumentStore: pdfDocumentStore,
+            mediaDocumentStore: mediaDocumentStore,
+            quickLookDocumentStore: quickLookDocumentStore,
+            onTextInputFocusChange: { isFocused in
+              isDocumentTextInputFocused = isFocused
+            }
+          )
+        }
         .navigationSplitViewColumnWidth(
           min: LocusWindowMetrics.documentSurfaceMinimumWidth,
           ideal: LocusWindowMetrics.documentSurfaceIdealWidth
@@ -952,6 +1034,168 @@ private struct WorkspaceBrowserView: View {
       }
     }
   }
+}
+
+private struct WorkspaceDocumentTab: Identifiable, Equatable {
+  let entry: WorkspaceEntry
+
+  var id: WorkspaceEntry.ID {
+    entry.id
+  }
+
+  var url: URL {
+    entry.url
+  }
+
+  var name: String {
+    entry.name
+  }
+
+  var symbolName: String {
+    entry.symbolName
+  }
+
+  var symbolColor: Color {
+    entry.symbolColor
+  }
+
+  init?(entry: WorkspaceEntry) {
+    guard WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry).supportsInPlaceOpen else {
+      return nil
+    }
+
+    self.entry = entry
+  }
+}
+
+private struct WorkspaceDocumentTabsHeader: View {
+  let tabs: [WorkspaceDocumentTab]
+  let selectedTabID: WorkspaceEntry.ID?
+  let select: (WorkspaceDocumentTab) -> Void
+  let close: (WorkspaceDocumentTab) -> Void
+
+  var body: some View {
+    VStack(spacing: 0) {
+      ScrollViewReader { proxy in
+        ScrollView(.horizontal, showsIndicators: false) {
+          HStack(spacing: 0) {
+            ForEach(tabs) { tab in
+              WorkspaceDocumentTabItem(
+                tab: tab,
+                isSelected: tab.id == selectedTabID,
+                select: select,
+                close: close
+              )
+              .id(tab.id)
+            }
+          }
+          .frame(height: WorkspaceDocumentTabMetrics.height)
+        }
+        .onAppear {
+          scrollSelectedTab(proxy)
+        }
+        .onChange(of: selectedTabID) {
+          scrollSelectedTab(proxy)
+        }
+      }
+
+      Divider()
+    }
+    .background(.bar)
+    .accessibilityElement(children: .contain)
+    .accessibilityIdentifier("document-tab-bar")
+    .accessibilityHidden(tabs.isEmpty)
+  }
+
+  private func scrollSelectedTab(_ proxy: ScrollViewProxy) {
+    guard let selectedTabID else {
+      return
+    }
+
+    withAnimation(.easeInOut(duration: 0.15)) {
+      proxy.scrollTo(selectedTabID, anchor: .center)
+    }
+  }
+}
+
+private struct WorkspaceDocumentTabItem: View {
+  let tab: WorkspaceDocumentTab
+  let isSelected: Bool
+  let select: (WorkspaceDocumentTab) -> Void
+  let close: (WorkspaceDocumentTab) -> Void
+  @State private var isHovered = false
+
+  var body: some View {
+    HStack(spacing: 8) {
+      Button {
+        select(tab)
+      } label: {
+        HStack(spacing: 8) {
+          Image(systemName: tab.symbolName)
+            .foregroundStyle(tab.symbolColor)
+            .accessibilityHidden(true)
+
+          Text(tab.name)
+            .lineLimit(1)
+            .truncationMode(.middle)
+
+          Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel(Text(verbatim: tab.name))
+      .accessibilityIdentifier("document-tab-item")
+
+      Button {
+        close(tab)
+      } label: {
+        Image(systemName: "xmark")
+          .font(.caption2)
+          .frame(
+            width: WorkspaceDocumentTabMetrics.closeButtonSize,
+            height: WorkspaceDocumentTabMetrics.closeButtonSize
+          )
+          .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .foregroundStyle(.secondary)
+      .accessibilityLabel(Text(verbatim: "Close \(tab.name)"))
+      .accessibilityIdentifier("document-tab-close-button")
+      .help(Text(verbatim: "Close \(tab.name)"))
+    }
+    .padding(.horizontal, 8)
+    .frame(
+      minWidth: WorkspaceDocumentTabMetrics.minimumWidth,
+      maxWidth: WorkspaceDocumentTabMetrics.maximumWidth,
+      minHeight: WorkspaceDocumentTabMetrics.height,
+      maxHeight: WorkspaceDocumentTabMetrics.height
+    )
+    .background {
+      Rectangle()
+        .fill(backgroundColor)
+    }
+    .overlay(alignment: .trailing) {
+      Divider()
+    }
+    .onHover { isHovered = $0 }
+    .help(Text(verbatim: tab.url.locusStandardizedPath))
+  }
+
+  private var backgroundColor: Color {
+    if isSelected {
+      return Color.primary.opacity(0.10)
+    }
+
+    return isHovered ? Color.primary.opacity(0.06) : Color.clear
+  }
+}
+
+private enum WorkspaceDocumentTabMetrics {
+  static let height: CGFloat = 32
+  static let minimumWidth: CGFloat = 112
+  static let maximumWidth: CGFloat = 192
+  static let closeButtonSize: CGFloat = 24
 }
 
 /// Search-backed browser content kept while the prototype hides search chrome.
@@ -1053,7 +1297,7 @@ private struct WorkspaceSidebarView: View {
   @State private var childLoadTokens: [WorkspaceEntry.ID: UUID] = [:]
   @State private var expansionGeneration: UInt64 = 0
   @State private var isRootExpanded = true
-  @AppStorage("workspace.sidebar.recentFoldersExpanded")
+  @AppStorage(LocusPersistedDefaults.recentFoldersExpanded)
   private var isRecentFoldersExpanded = false
 
   init(

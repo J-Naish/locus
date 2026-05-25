@@ -6,6 +6,7 @@ import SwiftUI
 
 struct WorkspaceDocumentSurface: View {
   let entry: WorkspaceEntry?
+  let showsTopDivider: Bool
   let workspaceRefreshToken: Date
   let textDocumentStore: any TextDocumentStoring
   let imageDocumentStore: any ImageDocumentStoring
@@ -25,10 +26,13 @@ struct WorkspaceDocumentSurface: View {
   @State private var documentReloadGeneration = 0
   @State private var isEditorFocused = false
   @StateObject private var documentChangeMonitor = DocumentChangeMonitor()
+  @Environment(\.scenePhase) private var scenePhase
 
   var body: some View {
     VStack(spacing: 0) {
-      Divider()
+      if showsTopDivider {
+        Divider()
+      }
 
       Group {
         if let entry {
@@ -77,6 +81,9 @@ struct WorkspaceDocumentSurface: View {
       DocumentSaveCommand(canSave: !isSaveDisabled, save: saveSelectedDocument)
     )
     .task(id: entry?.id) {
+      // Start before and after loading so external writes during the load path
+      // still trigger a sync without relying on the later refresh token.
+      startDocumentMonitoringIfNeeded(for: entry)
       await loadSelectedDocumentIfNeeded()
       guard !Task.isCancelled else {
         return
@@ -89,6 +96,22 @@ struct WorkspaceDocumentSurface: View {
       onTextInputFocusChange(false)
     }
     .onChange(of: workspaceRefreshToken) {
+      Task {
+        await syncDisplayedDocumentIfChanged()
+      }
+    }
+    .onReceive(
+      Timer.publish(
+        every: WorkspaceDocumentSurfaceMetrics.externalChangePollInterval,
+        on: .main,
+        in: .common
+      )
+      .autoconnect()
+    ) { _ in
+      guard scenePhase == .active, shouldPollDisplayedDocumentForExternalChanges else {
+        return
+      }
+
       Task {
         await syncDisplayedDocumentIfChanged()
       }
@@ -146,6 +169,16 @@ struct WorkspaceDocumentSurface: View {
 
   private func documentReloadTrigger(for entry: WorkspaceEntry) -> DocumentReloadTrigger {
     DocumentReloadTrigger(entryID: entry.id, generation: documentReloadGeneration)
+  }
+
+  private var shouldPollDisplayedDocumentForExternalChanges: Bool {
+    guard let entry,
+      WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry).isAutoSynced
+    else {
+      return false
+    }
+
+    return true
   }
 
   private var isSaveDisabled: Bool {
@@ -376,6 +409,12 @@ private struct TextDocumentDraft: Equatable {
   let text: String
   let savedText: String
   let encoding: String.Encoding
+}
+
+private enum WorkspaceDocumentSurfaceMetrics {
+  // Fallback for external writes missed by DispatchSource on network volumes
+  // or behind atomic-rename editors.
+  static let externalChangePollInterval: TimeInterval = 0.8
 }
 
 private struct EmptyDocumentSurface: View {

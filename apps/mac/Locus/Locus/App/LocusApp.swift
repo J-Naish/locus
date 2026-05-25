@@ -37,6 +37,13 @@ struct DocumentSaveCommand {
   let save: () -> Void
 }
 
+enum LocusPersistedDefaults {
+  static let recentFoldersExpanded = "workspace.sidebar.recentFoldersExpanded"
+  static let uiTestResetKeys = [
+    recentFoldersExpanded
+  ]
+}
+
 private struct WorkspaceNavigationCommandsKey: FocusedValueKey {
   typealias Value = WorkspaceNavigationCommands
 }
@@ -93,6 +100,10 @@ private struct DocumentSaveCommandMenu: Commands {
 
 @main
 struct LocusApp: App {
+  init() {
+    Self.resetUITestUserDefaultsIfNeeded()
+  }
+
   var body: some Scene {
     WindowGroup {
       HomeView(
@@ -182,6 +193,18 @@ struct LocusApp: App {
   private static var uiTestRecentFilesKey: String {
     argumentValue(named: "--ui-test-recent-files-key", in: ProcessInfo.processInfo.arguments)
       ?? "recentFiles.uiTests"
+  }
+
+  private static func resetUITestUserDefaultsIfNeeded() {
+    #if DEBUG
+      guard ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1" else {
+        return
+      }
+
+      for key in LocusPersistedDefaults.uiTestResetKeys {
+        UserDefaults.standard.removeObject(forKey: key)
+      }
+    #endif
   }
 
   private static func argumentValue(named name: String, in arguments: [String]) -> String? {

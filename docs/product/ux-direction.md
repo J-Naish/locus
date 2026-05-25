@@ -55,6 +55,12 @@ folder. The sidebar also keeps a collapsed Recent Folders section at the bottom
 so users can reopen locations they have explicitly visited without interrupting
 the current folder tree.
 
+The document surface can keep a compact tab strip for files explicitly opened
+during the current workspace browsing session. The strip resets when the
+workspace location changes. Selecting a tab should return to that file in
+place, and closing a tab should remove only that document surface shortcut
+without changing the file on disk.
+
 The main window should open large enough for the file list and document surface
 to sit side by side comfortably, but the minimum size should stay smaller than
 that default so users can place Locus next to Finder, Preview, a browser, or an
