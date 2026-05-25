@@ -251,6 +251,45 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testWorkspaceRootRowIsExpandedByDefaultAndTogglesViaDisclosure() throws {
+    let workspaceURL = URL(filePath: try fixtureWorkspacePath("basic"), directoryHint: .isDirectory)
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    let rootDisclosure = disclosureButton(for: workspaceURL, in: app)
+    XCTAssertTrue(rootDisclosure.waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertEqual(rootDisclosure.label, "Collapse basic")
+    XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
+
+    rootDisclosure.click()
+
+    XCTAssertEqual(rootDisclosure.label, "Expand basic")
+    XCTAssertFalse(app.staticTexts["Reports"].waitForExistence(timeout: 1), app.debugDescription)
+
+    rootDisclosure.click()
+
+    XCTAssertEqual(rootDisclosure.label, "Collapse basic")
+    XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
+  }
+
+  @MainActor
+  func testDoubleClickWorkspaceRootRowDoesNotNavigate() throws {
+    let workspaceURL = URL(filePath: try fixtureWorkspacePath("basic"), directoryHint: .isDirectory)
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    let rootDisclosure = disclosureButton(for: workspaceURL, in: app)
+    XCTAssertTrue(rootDisclosure.waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Reports"].waitForExistence(timeout: 5), app.debugDescription)
+
+    rootDisclosure.click()
+    XCTAssertFalse(app.staticTexts["Reports"].waitForExistence(timeout: 1), app.debugDescription)
+
+    app.staticTexts["basic"].doubleClick()
+
+    XCTAssertFalse(app.staticTexts["Reports"].waitForExistence(timeout: 1), app.debugDescription)
+    XCTAssertEqual(rootDisclosure.label, "Expand basic")
+  }
+
+  @MainActor
   func testWorkspaceChromeOmitsPrototypeSecondaryControls() throws {
     let workspacePath = try fixtureWorkspacePath("basic")
     let app = try launchApp(workspacePath: workspacePath)

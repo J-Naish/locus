@@ -8,6 +8,8 @@ Must support:
 - hide hidden files and folders whenever the home folder itself is shown, while preserving useful dotfiles in explicit project folders
 - open a local folder as a working location
 - browse files and folders
+- present the current workspace folder as the top expandable row in the
+  sidebar, defaulting to expanded
 - expand folder rows inline from a disclosure chevron in the sidebar, loading
   children lazily and indenting nested items
 - keep double-clicking a folder as an explicit navigation into that folder

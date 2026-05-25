@@ -452,6 +452,8 @@ struct HomeView: View {
       cancelWorkspaceLoadingIndicator()
       if let selectedEntryID = entryID(in: snapshot.entries, matching: request.selectedURL) {
         self.selectedEntryID = selectedEntryID
+      } else if previousSelectedEntryID == WorkspaceEntry.workspaceRoot(at: folderURL).id {
+        selectedEntryID = previousSelectedEntryID
       } else if snapshot.entries.contains(where: { $0.id == previousSelectedEntryID }) {
         selectedEntryID = previousSelectedEntryID
       } else {
@@ -799,7 +801,8 @@ private struct WorkspaceBrowserView: View {
         query: ""
       )
     )
-    self._sidebarVisibleEntries = State(initialValue: snapshot.entries)
+    self._sidebarVisibleEntries = State(
+      initialValue: [WorkspaceEntry.workspaceRoot(at: folderURL)] + snapshot.entries)
   }
 
   var body: some View {
@@ -851,10 +854,12 @@ private struct WorkspaceBrowserView: View {
       query: searchQuery
     )
     searchResults = refreshedResults
-    sidebarVisibleEntries = refreshedResults.visibleEntries
+    let rootEntry = WorkspaceEntry.workspaceRoot(at: folderURL)
+    sidebarVisibleEntries = [rootEntry] + refreshedResults.visibleEntries
 
     if !WorkspaceEntrySearch.shouldKeepSelection(
-      selectedEntryID, in: refreshedResults.visibleEntries)
+      selectedEntryID,
+      in: [rootEntry] + refreshedResults.visibleEntries)
     {
       selectedEntryID = nil
     }
@@ -1034,6 +1039,7 @@ private struct WorkspaceShortcutSearchResultsView: View {
 private struct WorkspaceEntriesList: View {
   let folderURL: URL
   let entries: [WorkspaceEntry]
+  private let rootEntry: WorkspaceEntry
   @Binding var selectedEntryID: WorkspaceEntry.ID?
   let actions: WorkspaceActions
   let onVisibleEntriesChange: ([WorkspaceEntry]) -> Void
@@ -1042,31 +1048,40 @@ private struct WorkspaceEntriesList: View {
   @State private var childLoadTasks: [WorkspaceEntry.ID: Task<Void, Never>] = [:]
   @State private var childLoadTokens: [WorkspaceEntry.ID: UUID] = [:]
   @State private var expansionGeneration: UInt64 = 0
+  @State private var isRootExpanded = true
+
+  init(
+    folderURL: URL,
+    entries: [WorkspaceEntry],
+    selectedEntryID: Binding<WorkspaceEntry.ID?>,
+    actions: WorkspaceActions,
+    onVisibleEntriesChange: @escaping ([WorkspaceEntry]) -> Void
+  ) {
+    self.folderURL = folderURL
+    self.entries = entries
+    self.rootEntry = WorkspaceEntry.workspaceRoot(at: folderURL)
+    self._selectedEntryID = selectedEntryID
+    self.actions = actions
+    self.onVisibleEntriesChange = onVisibleEntriesChange
+  }
 
   var body: some View {
     List(selection: $selectedEntryID) {
-      Section {
-        ForEach(rows) { row in
-          switch row.content {
-          case .entry(let entry):
-            WorkspaceSidebarEntryRow(
-              entry: entry,
-              depth: row.depth,
-              isExpanded: expandedFolderIDs.contains(entry.id),
-              toggleExpansion: {
-                toggleFolderExpansion(for: entry)
-              }
-            )
-            .tag(entry.id)
-          case .status(let status):
-            WorkspaceSidebarStatusRow(status: status, depth: row.depth)
-          }
+      ForEach(rows) { row in
+        switch row.content {
+        case .entry(let entry):
+          WorkspaceSidebarEntryRow(
+            entry: entry,
+            depth: row.depth,
+            isExpanded: isExpanded(entry),
+            toggleExpansion: {
+              toggleExpansion(for: entry)
+            }
+          )
+          .tag(entry.id)
+        case .status(let status):
+          WorkspaceSidebarStatusRow(status: status, depth: row.depth)
         }
-      } header: {
-        Text(displayName)
-          .lineLimit(1)
-          .truncationMode(.middle)
-          .help(Text(verbatim: displayName))
       }
     }
     .listStyle(.sidebar)
@@ -1102,13 +1117,12 @@ private struct WorkspaceEntriesList: View {
     }
   }
 
-  private var displayName: String {
-    let folderName = folderURL.lastPathComponent
-    return folderName.isEmpty ? "Workspace" : folderName
-  }
-
   private var rows: [WorkspaceSidebarRow] {
-    rows(for: entries, depth: 0)
+    var result = [WorkspaceSidebarRow(entry: rootEntry, depth: 0)]
+    if isRootExpanded {
+      result.append(contentsOf: rows(for: entries, depth: 1))
+    }
+    return result
   }
 
   private func performPrimaryAction(for selection: Set<WorkspaceEntry.ID>) {
@@ -1117,11 +1131,27 @@ private struct WorkspaceEntriesList: View {
       return
     }
 
+    if isBrowseActionForWorkspaceRoot(openAction) {
+      return
+    }
+
     actions.performOpenAction(openAction)
+  }
+
+  private func isBrowseActionForWorkspaceRoot(_ action: WorkspaceEntryOpenAction) -> Bool {
+    guard case .browseFolder(let url) = action else {
+      return false
+    }
+
+    return url.locusStandardizedPath == folderURL.locusStandardizedPath
   }
 
   private func entries(for selection: Set<WorkspaceEntry.ID>) -> [WorkspaceEntry] {
     rows.compactMap(\.entry).filter { selection.contains($0.id) }
+  }
+
+  private func isExpanded(_ entry: WorkspaceEntry) -> Bool {
+    entry.id == rootEntry.id ? isRootExpanded : expandedFolderIDs.contains(entry.id)
   }
 
   private func rows(for entries: [WorkspaceEntry], depth: Int) -> [WorkspaceSidebarRow] {
@@ -1209,6 +1239,16 @@ private struct WorkspaceEntriesList: View {
 
   private func visibleEntries() -> [WorkspaceEntry] {
     rows.compactMap(\.entry)
+  }
+
+  private func toggleExpansion(for entry: WorkspaceEntry) {
+    if entry.id == rootEntry.id {
+      isRootExpanded.toggle()
+      publishVisibleEntries()
+      return
+    }
+
+    toggleFolderExpansion(for: entry)
   }
 
   private func toggleFolderExpansion(for entry: WorkspaceEntry) {
@@ -1310,6 +1350,7 @@ private struct WorkspaceEntriesList: View {
   private func resetExpansion() {
     expansionGeneration &+= 1
     cancelAllChildLoads()
+    isRootExpanded = true
     expandedFolderIDs.removeAll()
     childStates.removeAll()
     publishVisibleEntries()
@@ -1620,6 +1661,25 @@ extension WorkspaceState {
 }
 
 extension WorkspaceEntry {
+  /// Synthesizes a `WorkspaceEntry` for the workspace root folder itself.
+  /// The FFI lists only a folder's children, so the root row has no
+  /// metadata-bearing entry to copy. Fields not directly observable from the
+  /// URL are intentionally left nil, unknown, or false.
+  fileprivate static func workspaceRoot(at folderURL: URL) -> WorkspaceEntry {
+    let standardizedURL = folderURL.standardizedFileURL
+    let folderName = standardizedURL.lastPathComponent
+    return WorkspaceEntry(
+      id: standardizedURL.path(percentEncoded: false),
+      url: standardizedURL,
+      name: folderName.isEmpty ? "Workspace" : folderName,
+      kind: .directory,
+      fileType: .unknown,
+      sizeBytes: nil,
+      modified: nil,
+      isReadOnly: false
+    )
+  }
+
   fileprivate var symbolName: String {
     switch kind {
     case .directory:
