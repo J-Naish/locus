@@ -1456,6 +1456,8 @@ private struct WorkspaceSidebarEntryRow: View {
       Spacer(minLength: 0)
     }
     .padding(.leading, CGFloat(depth) * WorkspaceSidebarMetrics.depthIndent)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .contentShape(Rectangle())
     .help(Text(verbatim: entry.name))
   }
 }
