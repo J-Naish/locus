@@ -1053,12 +1053,6 @@ private struct WorkspaceEntriesList: View {
               entry: entry,
               depth: row.depth,
               isExpanded: expandedFolderIDs.contains(entry.id),
-              selectEntry: {
-                selectedEntryID = entry.id
-              },
-              performPrimaryAction: {
-                performPrimaryAction(for: [entry.id])
-              },
               toggleExpansion: {
                 toggleFolderExpansion(for: entry)
               }
@@ -1091,6 +1085,10 @@ private struct WorkspaceEntriesList: View {
         actions.copyPaths(selectedEntries)
       }
       .disabled(selectedEntries.isEmpty)
+    } primaryAction: { selection in
+      // Keep row double-click, Return, and VoiceOver default actions on the
+      // native List path; folder expansion belongs to the disclosure Button.
+      performPrimaryAction(for: selection)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onAppear {
@@ -1441,8 +1439,6 @@ private struct WorkspaceSidebarEntryRow: View {
   let entry: WorkspaceEntry
   let depth: Int
   let isExpanded: Bool
-  let selectEntry: () -> Void
-  let performPrimaryAction: () -> Void
   let toggleExpansion: () -> Void
 
   var body: some View {
@@ -1488,8 +1484,6 @@ private struct WorkspaceSidebarEntryRow: View {
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .contentShape(Rectangle())
-    .simultaneousGesture(entrySingleTapGesture)
-    .simultaneousGesture(entryDoubleTapGesture)
   }
 
   private var disclosureAccessibilityLabel: Text {
@@ -1497,21 +1491,6 @@ private struct WorkspaceSidebarEntryRow: View {
     return Text(verbatim: "\(action) \(entry.name)")
   }
 
-  private var entrySingleTapGesture: some Gesture {
-    TapGesture(count: 1)
-      .onEnded {
-        // The row double-tap gesture prevents List(selection:) from reliably
-        // applying the standard single-click selection, so restore it here.
-        selectEntry()
-      }
-  }
-
-  private var entryDoubleTapGesture: some Gesture {
-    TapGesture(count: 2)
-      .onEnded {
-        performPrimaryAction()
-      }
-  }
 }
 
 private struct WorkspaceSidebarStatusRow: View {
