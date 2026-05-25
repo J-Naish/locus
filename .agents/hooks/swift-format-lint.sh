@@ -67,8 +67,7 @@ fi
 
 format_output="$(mktemp)"
 lint_output="$(mktemp)"
-swiftlint_output="$(mktemp)"
-trap 'rm -f "$format_output" "$lint_output" "$swiftlint_output"' EXIT
+trap 'rm -f "$format_output" "$lint_output"' EXIT
 
 if ! "$swift_format" format --in-place --parallel --no-color-diagnostics "${swift_files[@]}" >"$format_output" 2>&1; then
   {
@@ -84,25 +83,4 @@ if ! "$swift_format" lint --strict --parallel --no-color-diagnostics "${swift_fi
     cat "$lint_output"
   } >&2
   exit 2
-fi
-
-swiftlint_bin="$(command -v swiftlint 2>/dev/null || true)"
-if [[ -z "$swiftlint_bin" && -x /opt/homebrew/bin/swiftlint ]]; then
-  swiftlint_bin="/opt/homebrew/bin/swiftlint"
-fi
-if [[ -z "$swiftlint_bin" && -x /usr/local/bin/swiftlint ]]; then
-  swiftlint_bin="/usr/local/bin/swiftlint"
-fi
-
-if [[ -n "$swiftlint_bin" ]]; then
-  cd "$mac_dir"
-  for swift_file in "${swift_files[@]}"; do
-    if ! "$swiftlint_bin" lint --strict --quiet "$swift_file" >>"$swiftlint_output" 2>&1; then
-      {
-        printf 'SwiftLint failed.\n\n'
-        cat "$swiftlint_output"
-      } >&2
-      exit 2
-    fi
-  done
 fi

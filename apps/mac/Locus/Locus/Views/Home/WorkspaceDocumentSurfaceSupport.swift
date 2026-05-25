@@ -77,6 +77,6 @@ enum WorkspaceDocumentSurfaceSupport {
     "png",
     "tif",
     "tiff",
-    "webp"
+    "webp",
   ]
 }

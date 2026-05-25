@@ -14,7 +14,8 @@ struct DocumentFileFingerprint: Equatable, Sendable {
         }
       }
 
-      guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+      guard
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
       else {
         return nil
       }

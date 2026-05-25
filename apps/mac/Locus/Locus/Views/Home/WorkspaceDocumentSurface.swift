@@ -306,9 +306,9 @@ struct WorkspaceDocumentSurface: View {
 
 }
 
-private extension WorkspaceDocumentSurface {
+extension WorkspaceDocumentSurface {
   @MainActor
-  func syncDisplayedDocumentIfChanged() async {
+  fileprivate func syncDisplayedDocumentIfChanged() async {
     guard let entry,
       WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry).isAutoSynced
     else {
@@ -333,7 +333,7 @@ private extension WorkspaceDocumentSurface {
   }
 
   @MainActor
-  func syncTextDocumentFromDisk(
+  fileprivate func syncTextDocumentFromDisk(
     _ entry: WorkspaceEntry,
     fingerprint: DocumentFileFingerprint?
   ) async {
