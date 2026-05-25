@@ -1055,16 +1055,7 @@ private struct WorkspaceEntriesList: View {
               isExpanded: expandedFolderIDs.contains(entry.id)
             )
             .tag(entry.id)
-            .simultaneousGesture(
-              TapGesture(count: 2).onEnded {
-                performPrimaryAction(for: [entry.id])
-              }
-            )
-            .simultaneousGesture(
-              TapGesture(count: 1).onEnded {
-                toggleFolderExpansion(for: entry)
-              }
-            )
+            .simultaneousGesture(entryTapGesture(for: entry))
           case .status(let status):
             WorkspaceSidebarStatusRow(status: status, depth: row.depth)
           }
@@ -1092,8 +1083,6 @@ private struct WorkspaceEntriesList: View {
         actions.copyPaths(selectedEntries)
       }
       .disabled(selectedEntries.isEmpty)
-    } primaryAction: { selection in
-      performPrimaryAction(for: selection)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onAppear {
@@ -1125,6 +1114,19 @@ private struct WorkspaceEntriesList: View {
     actions.performOpenAction(openAction)
   }
 
+  private func entryTapGesture(for entry: WorkspaceEntry) -> some Gesture {
+    TapGesture(count: 2)
+      .onEnded {
+        performPrimaryAction(for: [entry.id])
+      }
+      .exclusively(
+        before: TapGesture(count: 1)
+          .onEnded {
+            toggleFolderExpansion(for: entry)
+          }
+      )
+  }
+
   private func entries(for selection: Set<WorkspaceEntry.ID>) -> [WorkspaceEntry] {
     rows.compactMap(\.entry).filter { selection.contains($0.id) }
   }
@@ -1152,7 +1154,7 @@ private struct WorkspaceEntriesList: View {
         }
       case .failed:
         result.append(.status(.failed(parentID: entry.id), depth: depth + 1))
-      case nil:
+      case .pending, nil:
         break
       }
 
@@ -1203,9 +1205,12 @@ private struct WorkspaceEntriesList: View {
     childLoadTokens.removeAll()
   }
 
-  private func clearLoadingStateIfNeeded(for entryID: WorkspaceEntry.ID) {
-    if case .loading = childStates[entryID] {
+  private func clearPendingStateIfNeeded(for entryID: WorkspaceEntry.ID) {
+    switch childStates[entryID] {
+    case .pending, .loading:
       childStates[entryID] = nil
+    case .loaded, .failed, nil:
+      break
     }
   }
 
@@ -1221,7 +1226,7 @@ private struct WorkspaceEntriesList: View {
     if expandedFolderIDs.contains(entry.id) {
       expandedFolderIDs.remove(entry.id)
       cancelChildLoad(for: entry.id)
-      clearLoadingStateIfNeeded(for: entry.id)
+      clearPendingStateIfNeeded(for: entry.id)
       publishVisibleEntries()
       return
     }
@@ -1233,13 +1238,13 @@ private struct WorkspaceEntriesList: View {
 
   private func loadChildrenIfNeeded(for entry: WorkspaceEntry) {
     switch childStates[entry.id] {
-    case .loaded, .loading:
+    case .loaded, .pending, .loading:
       return
     case .failed, nil:
       break
     }
 
-    childStates[entry.id] = .loading
+    childStates[entry.id] = .pending
     let generation = expansionGeneration
     let loadToken = UUID()
     childLoadTokens[entry.id] = loadToken
@@ -1252,12 +1257,35 @@ private struct WorkspaceEntriesList: View {
       }
 
       do {
-        try await Task.sleep(for: WorkspaceSidebarMetrics.childLoadDelay)
         guard !Task.isCancelled,
           generation == expansionGeneration,
           expandedFolderIDs.contains(entry.id)
         else {
           return
+        }
+
+        let loadingIndicatorTask = Task { @MainActor in
+          do {
+            try await Task.sleep(for: WorkspaceSidebarMetrics.loadingIndicatorDelay)
+            guard !Task.isCancelled,
+              childLoadTokens[entry.id] == loadToken,
+              generation == expansionGeneration,
+              expandedFolderIDs.contains(entry.id),
+              childStates[entry.id] == .pending
+            else {
+              return
+            }
+
+            childStates[entry.id] = .loading
+            publishVisibleEntries()
+          } catch is CancellationError {
+            return
+          } catch {
+            return
+          }
+        }
+        defer {
+          loadingIndicatorTask.cancel()
         }
 
         let snapshot = try await actions.loadFolderChildren(entry.url)
@@ -1300,6 +1328,7 @@ private struct WorkspaceEntriesList: View {
 }
 
 private enum WorkspaceSidebarChildState: Equatable {
+  case pending
   case loading
   case loaded(WorkspaceSnapshot)
   case failed
@@ -1309,9 +1338,9 @@ private enum WorkspaceSidebarMetrics {
   static let depthIndent: CGFloat = 14
   static let chevronColumnWidth: CGFloat = 10
 
-  // Defers child listing just long enough for a double-click navigation to
-  // cancel the inline expansion work before it reaches the filesystem.
-  static let childLoadDelay: Duration = .milliseconds(120)
+  // Fast child listings should appear directly. Show "Loading..." only when a
+  // real read stays in flight long enough that silent waiting would feel stuck.
+  static let loadingIndicatorDelay: Duration = .milliseconds(180)
 }
 
 private struct WorkspaceSidebarRow: Identifiable, Equatable {
