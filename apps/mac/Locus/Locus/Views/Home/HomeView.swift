@@ -1115,14 +1115,14 @@ private struct WorkspaceEntriesList: View {
   }
 
   private func entryTapGesture(for entry: WorkspaceEntry) -> some Gesture {
-    TapGesture(count: 2)
+    TapGesture(count: 1)
       .onEnded {
-        performPrimaryAction(for: [entry.id])
+        toggleFolderExpansion(for: entry)
       }
-      .exclusively(
-        before: TapGesture(count: 1)
+      .simultaneously(
+        with: TapGesture(count: 2)
           .onEnded {
-            toggleFolderExpansion(for: entry)
+            performPrimaryAction(for: [entry.id])
           }
       )
   }
