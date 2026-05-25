@@ -2,23 +2,26 @@ import SwiftUI
 
 enum LocusWindowMetrics {
   // Default to a comfortable two-pane workspace without making that size mandatory.
-  static let defaultWidth: CGFloat = 1180
+  static let defaultWidth: CGFloat = 1184
   static let defaultHeight: CGFloat = 760
+  static let splitViewChromeWidth: CGFloat = 16
 
   // Keep the file browser close to a compact native outline by default, while
   // allowing the divider to expand for deep folders and unusually long names.
-  static let fileListSidebarMinimumWidth: CGFloat = 170
-  static let fileListSidebarIdealWidth: CGFloat = 180
+  static let fileListSidebarMinimumWidth: CGFloat = 160
+  static let fileListSidebarIdealWidth: CGFloat = 184
+  static let documentSurfaceMinimumWidth: CGFloat = 320
+  static let documentSurfaceIdealWidth: CGFloat = 464
+
   // At the default window width, this leaves the document surface at its own
   // minimum. Wider windows can make both panes generous at the same time.
-  static let fileListSidebarMaximumWidth: CGFloat = 840
-  static let documentSurfaceMinimumWidth: CGFloat = 340
-  static let documentSurfaceIdealWidth: CGFloat = 460
+  static let fileListSidebarMaximumWidth: CGFloat =
+    defaultWidth - documentSurfaceMinimumWidth - splitViewChromeWidth
 
   // Keep the window minimum at the split-view layout floor: both panes at their
   // own minimums, plus room for the divider and standard split-view chrome.
   static let minimumWidth: CGFloat =
-    fileListSidebarMinimumWidth + documentSurfaceMinimumWidth + 20
+    fileListSidebarMinimumWidth + documentSurfaceMinimumWidth + splitViewChromeWidth
   static let minimumHeight: CGFloat = 600
 }
 
