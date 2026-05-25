@@ -10,7 +10,7 @@ enum LocusWindowMetrics {
   static let minimumWidth: CGFloat = 900
   static let minimumHeight: CGFloat = 600
 
-  // Keep the file browser close to a compact editor sidebar by default, while
+  // Keep the file browser close to a compact native outline by default, while
   // still allowing the divider to expand for unusually long names.
   static let fileListSidebarMinimumWidth: CGFloat = 170
   static let fileListSidebarIdealWidth: CGFloat = 180

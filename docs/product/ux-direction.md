@@ -44,7 +44,11 @@ The primary model is:
 
 Locus should feel familiar to Finder users while staying much quieter than a full file manager. Search can return once the prototype's browsing and document surfaces are stable; keep the underlying matching model available, but do not make a search box or launcher-like UI part of the default chrome yet.
 
-The current-location file browser should stay name-first, closer to a compact editor sidebar than to Finder's multi-column list. It should be narrow by default so the document surface remains dominant, while still allowing users to widen the divider when a folder has unusually long names. File and folder names are the primary information scent; Type, Size, and Modified metadata should not be shown as default columns. Surface metadata later only where it supports a specific decision, such as document details, search refinement, or inspection.
+The current-location file browser should stay name-first, closer to a compact native outline than to Finder's multi-column list. It should be narrow by default so the document surface remains dominant, while still allowing users to widen the divider when a folder has unusually long names. File and folder names are the primary information scent; Type, Size, and Modified metadata should not be shown as default columns. Surface metadata later only where it supports a specific decision, such as document details, search refinement, or inspection.
+
+Folder rows can expand inline like a native outline-style sidebar so users can peek
+into nearby folders without losing the current location. Double-click remains
+the deliberate gesture for navigating into a folder.
 
 The main window should open large enough for the file list and document surface
 to sit side by side comfortably, but the minimum size should stay smaller than

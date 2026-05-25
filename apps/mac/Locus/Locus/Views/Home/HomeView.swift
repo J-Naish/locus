@@ -123,6 +123,7 @@ struct HomeView: View {
         goForward: restoreNextWorkspaceFolder,
         retryCurrentFolder: retryCurrentFolder,
         copyPaths: copyPaths,
+        loadFolderChildren: loadSidebarFolderChildren,
         performOpenAction: performOpenAction
       )
     )
@@ -557,6 +558,23 @@ struct HomeView: View {
   }
 
   @MainActor
+  private func loadSidebarFolderChildren(_ folderURL: URL) async throws -> WorkspaceSnapshot {
+    let didStartAccess = folderURL.startAccessingSecurityScopedResource()
+    defer {
+      if didStartAccess {
+        folderURL.stopAccessingSecurityScopedResource()
+      }
+    }
+
+    let rawSnapshot = try await coreBridge.listDirectory(at: folderURL)
+    return await WorkspaceHomeVisibility.filteredSnapshotOffMainActor(
+      rawSnapshot,
+      folderURL: folderURL,
+      homeDirectoryURL: homeDirectoryURL
+    )
+  }
+
+  @MainActor
   private func performOpenAction(_ action: WorkspaceEntryOpenAction) {
     switch action {
     case .browseFolder(let url):
@@ -707,6 +725,7 @@ private struct WorkspaceActions {
   let goForward: () -> Void
   let retryCurrentFolder: () -> Void
   let copyPaths: ([WorkspaceEntry]) -> Void
+  let loadFolderChildren: (URL) async throws -> WorkspaceSnapshot
   let performOpenAction: (WorkspaceEntryOpenAction) -> Void
 }
 
@@ -739,6 +758,7 @@ private struct WorkspaceBrowserView: View {
   let actions: WorkspaceActions
   @State private var searchQuery = ""
   @State private var searchResults: WorkspaceBrowserSearchResults
+  @State private var sidebarVisibleEntries: [WorkspaceEntry]
   @State private var isDocumentTextInputFocused = false
 
   init(
@@ -779,6 +799,7 @@ private struct WorkspaceBrowserView: View {
         query: ""
       )
     )
+    self._sidebarVisibleEntries = State(initialValue: snapshot.entries)
   }
 
   var body: some View {
@@ -787,7 +808,8 @@ private struct WorkspaceBrowserView: View {
         folderURL: folderURL,
         entries: searchResults.visibleEntries,
         selectedEntryID: $selectedEntryID,
-        actions: actions
+        actions: actions,
+        onVisibleEntriesChange: updateSidebarVisibleEntries
       )
       .navigationSplitViewColumnWidth(
         min: LocusWindowMetrics.fileListSidebarMinimumWidth,
@@ -829,6 +851,7 @@ private struct WorkspaceBrowserView: View {
       query: searchQuery
     )
     searchResults = refreshedResults
+    sidebarVisibleEntries = refreshedResults.visibleEntries
 
     if !WorkspaceEntrySearch.shouldKeepSelection(
       selectedEntryID, in: refreshedResults.visibleEntries)
@@ -870,7 +893,19 @@ private struct WorkspaceBrowserView: View {
       return nil
     }
 
-    return searchResults.visibleEntries.first { $0.id == selectedEntryID }
+    return sidebarVisibleEntries.first { $0.id == selectedEntryID }
+  }
+
+  private func updateSidebarVisibleEntries(_ entries: [WorkspaceEntry]) {
+    sidebarVisibleEntries = entries
+
+    guard let selectedEntryID,
+      !entries.contains(where: { $0.id == selectedEntryID })
+    else {
+      return
+    }
+
+    self.selectedEntryID = nil
   }
 
   private var workspaceDetail: some View {
@@ -1001,21 +1036,38 @@ private struct WorkspaceEntriesList: View {
   let entries: [WorkspaceEntry]
   @Binding var selectedEntryID: WorkspaceEntry.ID?
   let actions: WorkspaceActions
+  let onVisibleEntriesChange: ([WorkspaceEntry]) -> Void
+  @State private var expandedFolderIDs: Set<WorkspaceEntry.ID> = []
+  @State private var childStates: [WorkspaceEntry.ID: WorkspaceSidebarChildState] = [:]
+  @State private var childLoadTasks: [WorkspaceEntry.ID: Task<Void, Never>] = [:]
+  @State private var childLoadTokens: [WorkspaceEntry.ID: UUID] = [:]
+  @State private var expansionGeneration: UInt64 = 0
 
   var body: some View {
     List(selection: $selectedEntryID) {
       Section {
-        ForEach(entries) { entry in
-          Label {
-            Text(entry.name)
-              .lineLimit(1)
-              .truncationMode(.middle)
-          } icon: {
-            Image(systemName: entry.symbolName)
-              .foregroundStyle(entry.symbolColor)
+        ForEach(rows) { row in
+          switch row.content {
+          case .entry(let entry):
+            WorkspaceSidebarEntryRow(
+              entry: entry,
+              depth: row.depth,
+              isExpanded: expandedFolderIDs.contains(entry.id)
+            )
+            .tag(entry.id)
+            .simultaneousGesture(
+              TapGesture(count: 2).onEnded {
+                performPrimaryAction(for: [entry.id])
+              }
+            )
+            .simultaneousGesture(
+              TapGesture(count: 1).onEnded {
+                toggleFolderExpansion(for: entry)
+              }
+            )
+          case .status(let status):
+            WorkspaceSidebarStatusRow(status: status, depth: row.depth)
           }
-          .tag(entry.id)
-          .help(Text(verbatim: entry.name))
         }
       } header: {
         Text(displayName)
@@ -1044,11 +1096,24 @@ private struct WorkspaceEntriesList: View {
       performPrimaryAction(for: selection)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .onAppear {
+      publishVisibleEntries()
+    }
+    .onChange(of: entries) {
+      pruneExpansion(for: entries)
+    }
+    .onChange(of: folderURL) {
+      resetExpansion()
+    }
   }
 
   private var displayName: String {
     let folderName = folderURL.lastPathComponent
     return folderName.isEmpty ? "Workspace" : folderName
+  }
+
+  private var rows: [WorkspaceSidebarRow] {
+    rows(for: entries, depth: 0)
   }
 
   private func performPrimaryAction(for selection: Set<WorkspaceEntry.ID>) {
@@ -1061,9 +1126,336 @@ private struct WorkspaceEntriesList: View {
   }
 
   private func entries(for selection: Set<WorkspaceEntry.ID>) -> [WorkspaceEntry] {
-    entries.filter { selection.contains($0.id) }
+    rows.compactMap(\.entry).filter { selection.contains($0.id) }
   }
 
+  private func rows(for entries: [WorkspaceEntry], depth: Int) -> [WorkspaceSidebarRow] {
+    entries.flatMap { entry -> [WorkspaceSidebarRow] in
+      var result = [WorkspaceSidebarRow(entry: entry, depth: depth)]
+
+      guard entry.kind == .directory, expandedFolderIDs.contains(entry.id) else {
+        return result
+      }
+
+      switch childStates[entry.id] {
+      case .loading:
+        result.append(.status(.loading(parentID: entry.id), depth: depth + 1))
+      case .loaded(let snapshot):
+        if snapshot.entries.isEmpty {
+          result.append(.status(.empty(parentID: entry.id), depth: depth + 1))
+        } else {
+          result.append(contentsOf: rows(for: snapshot.entries, depth: depth + 1))
+        }
+
+        if !snapshot.partialErrors.isEmpty {
+          result.append(.status(.partialErrors(parentID: entry.id), depth: depth + 1))
+        }
+      case .failed:
+        result.append(.status(.failed(parentID: entry.id), depth: depth + 1))
+      case nil:
+        break
+      }
+
+      return result
+    }
+  }
+
+  private func validEntryIDs(in entries: [WorkspaceEntry]) -> Set<WorkspaceEntry.ID> {
+    var ids = Set<WorkspaceEntry.ID>()
+
+    func collect(_ entries: [WorkspaceEntry]) {
+      for entry in entries {
+        ids.insert(entry.id)
+        if case .loaded(let snapshot) = childStates[entry.id] {
+          collect(snapshot.entries)
+        }
+      }
+    }
+
+    collect(entries)
+    return ids
+  }
+
+  private func pruneExpansion(for entries: [WorkspaceEntry]) {
+    let validIDs = validEntryIDs(in: entries)
+    let removedExpandedIDs = expandedFolderIDs.subtracting(validIDs)
+    for entryID in removedExpandedIDs {
+      cancelChildLoad(for: entryID)
+    }
+
+    expandedFolderIDs.formIntersection(validIDs)
+    childStates = childStates.filter { validIDs.contains($0.key) }
+    publishVisibleEntries()
+  }
+
+  private func cancelChildLoad(for entryID: WorkspaceEntry.ID) {
+    childLoadTasks[entryID]?.cancel()
+    childLoadTasks[entryID] = nil
+    childLoadTokens[entryID] = nil
+  }
+
+  private func cancelAllChildLoads() {
+    for task in childLoadTasks.values {
+      task.cancel()
+    }
+
+    childLoadTasks.removeAll()
+    childLoadTokens.removeAll()
+  }
+
+  private func clearLoadingStateIfNeeded(for entryID: WorkspaceEntry.ID) {
+    if case .loading = childStates[entryID] {
+      childStates[entryID] = nil
+    }
+  }
+
+  private func visibleEntries() -> [WorkspaceEntry] {
+    rows.compactMap(\.entry)
+  }
+
+  private func toggleFolderExpansion(for entry: WorkspaceEntry) {
+    guard entry.kind == .directory else {
+      return
+    }
+
+    if expandedFolderIDs.contains(entry.id) {
+      expandedFolderIDs.remove(entry.id)
+      cancelChildLoad(for: entry.id)
+      clearLoadingStateIfNeeded(for: entry.id)
+      publishVisibleEntries()
+      return
+    }
+
+    expandedFolderIDs.insert(entry.id)
+    loadChildrenIfNeeded(for: entry)
+    publishVisibleEntries()
+  }
+
+  private func loadChildrenIfNeeded(for entry: WorkspaceEntry) {
+    switch childStates[entry.id] {
+    case .loaded, .loading:
+      return
+    case .failed, nil:
+      break
+    }
+
+    childStates[entry.id] = .loading
+    let generation = expansionGeneration
+    let loadToken = UUID()
+    childLoadTokens[entry.id] = loadToken
+    childLoadTasks[entry.id] = Task { @MainActor in
+      defer {
+        if childLoadTokens[entry.id] == loadToken {
+          childLoadTasks[entry.id] = nil
+          childLoadTokens[entry.id] = nil
+        }
+      }
+
+      do {
+        try await Task.sleep(for: WorkspaceSidebarMetrics.childLoadDelay)
+        guard !Task.isCancelled,
+          generation == expansionGeneration,
+          expandedFolderIDs.contains(entry.id)
+        else {
+          return
+        }
+
+        let snapshot = try await actions.loadFolderChildren(entry.url)
+        guard !Task.isCancelled,
+          generation == expansionGeneration,
+          expandedFolderIDs.contains(entry.id)
+        else {
+          return
+        }
+
+        childStates[entry.id] = .loaded(snapshot)
+      } catch is CancellationError {
+        return
+      } catch {
+        guard !Task.isCancelled,
+          generation == expansionGeneration,
+          expandedFolderIDs.contains(entry.id)
+        else {
+          return
+        }
+
+        childStates[entry.id] = .failed
+      }
+
+      publishVisibleEntries()
+    }
+  }
+
+  private func resetExpansion() {
+    expansionGeneration &+= 1
+    cancelAllChildLoads()
+    expandedFolderIDs.removeAll()
+    childStates.removeAll()
+    publishVisibleEntries()
+  }
+
+  private func publishVisibleEntries() {
+    onVisibleEntriesChange(visibleEntries())
+  }
+}
+
+private enum WorkspaceSidebarChildState: Equatable {
+  case loading
+  case loaded(WorkspaceSnapshot)
+  case failed
+}
+
+private enum WorkspaceSidebarMetrics {
+  static let depthIndent: CGFloat = 14
+  static let chevronColumnWidth: CGFloat = 10
+
+  // Defers child listing just long enough for a double-click navigation to
+  // cancel the inline expansion work before it reaches the filesystem.
+  static let childLoadDelay: Duration = .milliseconds(120)
+}
+
+private struct WorkspaceSidebarRow: Identifiable, Equatable {
+  enum Content: Equatable {
+    case entry(WorkspaceEntry)
+    case status(WorkspaceSidebarStatus)
+  }
+
+  let content: Content
+  let depth: Int
+
+  var id: String {
+    switch content {
+    case .entry(let entry):
+      entry.id
+    case .status(let status):
+      status.id
+    }
+  }
+
+  var entry: WorkspaceEntry? {
+    guard case .entry(let entry) = content else {
+      return nil
+    }
+
+    return entry
+  }
+
+  init(entry: WorkspaceEntry, depth: Int) {
+    self.content = .entry(entry)
+    self.depth = depth
+  }
+
+  static func status(_ status: WorkspaceSidebarStatus, depth: Int) -> WorkspaceSidebarRow {
+    WorkspaceSidebarRow(content: .status(status), depth: depth)
+  }
+
+  private init(content: Content, depth: Int) {
+    self.content = content
+    self.depth = depth
+  }
+}
+
+private struct WorkspaceSidebarStatus: Equatable {
+  let id: String
+  let title: String
+  let systemImage: String
+  let isError: Bool
+
+  static func loading(parentID: WorkspaceEntry.ID) -> WorkspaceSidebarStatus {
+    WorkspaceSidebarStatus(
+      id: "\(parentID)::loading",
+      title: "Loading...",
+      systemImage: "hourglass",
+      isError: false
+    )
+  }
+
+  static func empty(parentID: WorkspaceEntry.ID) -> WorkspaceSidebarStatus {
+    WorkspaceSidebarStatus(
+      id: "\(parentID)::empty",
+      title: "Empty folder",
+      systemImage: "folder",
+      isError: false
+    )
+  }
+
+  static func failed(parentID: WorkspaceEntry.ID) -> WorkspaceSidebarStatus {
+    WorkspaceSidebarStatus(
+      id: "\(parentID)::failed",
+      title: "Couldn't read folder",
+      systemImage: "exclamationmark.triangle",
+      isError: true
+    )
+  }
+
+  static func partialErrors(parentID: WorkspaceEntry.ID) -> WorkspaceSidebarStatus {
+    WorkspaceSidebarStatus(
+      id: "\(parentID)::partial-errors",
+      title: "Some items could not be read",
+      systemImage: "exclamationmark.triangle",
+      isError: true
+    )
+  }
+}
+
+private struct WorkspaceSidebarEntryRow: View {
+  let entry: WorkspaceEntry
+  let depth: Int
+  let isExpanded: Bool
+
+  var body: some View {
+    HStack(spacing: 6) {
+      if entry.kind == .directory {
+        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+          .font(.caption2)
+          .foregroundStyle(.tertiary)
+          .frame(width: WorkspaceSidebarMetrics.chevronColumnWidth)
+          .accessibilityHidden(true)
+      } else {
+        Color.clear
+          .frame(width: WorkspaceSidebarMetrics.chevronColumnWidth)
+          .accessibilityHidden(true)
+      }
+
+      Image(systemName: entry.symbolName)
+        .foregroundStyle(entry.symbolColor)
+
+      Text(entry.name)
+        .lineLimit(1)
+        .truncationMode(.middle)
+
+      Spacer(minLength: 0)
+    }
+    .padding(.leading, CGFloat(depth) * WorkspaceSidebarMetrics.depthIndent)
+    .help(Text(verbatim: entry.name))
+  }
+}
+
+private struct WorkspaceSidebarStatusRow: View {
+  let status: WorkspaceSidebarStatus
+  let depth: Int
+
+  var body: some View {
+    HStack(spacing: 6) {
+      Color.clear
+        .frame(width: WorkspaceSidebarMetrics.chevronColumnWidth)
+        .accessibilityHidden(true)
+
+      Image(systemName: status.systemImage)
+        .font(.caption)
+        .foregroundStyle(status.isError ? .orange : .secondary)
+        .accessibilityHidden(true)
+
+      Text(status.title)
+        .lineLimit(1)
+        .foregroundStyle(status.isError ? .secondary : .tertiary)
+
+      Spacer(minLength: 0)
+    }
+    .font(.caption)
+    .padding(.leading, CGFloat(depth) * WorkspaceSidebarMetrics.depthIndent)
+    .accessibilityLabel(Text(status.title))
+  }
 }
 
 private struct PartialErrorsView: View {

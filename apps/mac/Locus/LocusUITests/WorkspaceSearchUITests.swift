@@ -39,6 +39,57 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testClickDirectoryRowExpandsChildrenWithoutNavigating() throws {
+    let workspaceURL = try makeNavigationHistoryWorkspace()
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 5), app.debugDescription)
+
+    app.staticTexts["Alpha"].click()
+
+    XCTAssertTrue(app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 2), app.debugDescription)
+
+    app.staticTexts["Beta"].click()
+
+    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 2), app.debugDescription)
+
+    app.staticTexts["Beta"].click()
+
+    XCTAssertFalse(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 1), app.debugDescription)
+    XCTAssertFalse(app.staticTexts["Gamma"].exists, app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 2), app.debugDescription)
+
+    app.staticTexts["Alpha"].click()
+
+    XCTAssertFalse(app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 1), app.debugDescription)
+    XCTAssertFalse(app.staticTexts["Beta"].exists, app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 2), app.debugDescription)
+  }
+
+  @MainActor
+  func testDoubleClickExpandedDirectoryRowStillNavigatesIntoFolder() throws {
+    let workspaceURL = try makeNavigationHistoryWorkspace()
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    XCTAssertTrue(app.staticTexts["Alpha"].waitForExistence(timeout: 5), app.debugDescription)
+    app.staticTexts["Alpha"].click()
+    XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
+
+    app.staticTexts["Beta"].doubleClick()
+
+    XCTAssertTrue(app.staticTexts["Beta Note.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertFalse(app.staticTexts["Alpha Note.md"].exists, app.debugDescription)
+    XCTAssertFalse(app.staticTexts["Other"].exists, app.debugDescription)
+  }
+
+  @MainActor
   func testCommandBracketNavigatesWorkspaceFolderHistoryBackwardAndForward() throws {
     let workspaceURL = try makeNavigationHistoryWorkspace()
     let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))

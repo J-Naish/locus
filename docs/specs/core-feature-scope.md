@@ -8,6 +8,9 @@ Must support:
 - hide hidden files and folders whenever the home folder itself is shown, while preserving useful dotfiles in explicit project folders
 - open a local folder as a working location
 - browse files and folders
+- expand folder rows inline in the sidebar on click, loading children lazily and
+  indenting nested items
+- keep double-clicking a folder as an explicit navigation into that folder
 - move backward and forward through the current session's folder navigation
   history
 - show the current location as a name-first file and folder list; Type, Size,
