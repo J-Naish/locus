@@ -5,18 +5,21 @@ enum LocusWindowMetrics {
   static let defaultWidth: CGFloat = 1180
   static let defaultHeight: CGFloat = 760
 
-  // Keep the minimum near the actual split-view layout floor so users can still
-  // place Locus beside Finder, Preview, or a browser on smaller displays.
-  static let minimumWidth: CGFloat = 900
-  static let minimumHeight: CGFloat = 600
-
   // Keep the file browser close to a compact native outline by default, while
-  // still allowing the divider to expand for unusually long names.
+  // allowing the divider to expand for deep folders and unusually long names.
   static let fileListSidebarMinimumWidth: CGFloat = 170
   static let fileListSidebarIdealWidth: CGFloat = 180
-  static let fileListSidebarMaximumWidth: CGFloat = 420
+  // At the default window width, this leaves the document surface at its own
+  // minimum. Wider windows can make both panes generous at the same time.
+  static let fileListSidebarMaximumWidth: CGFloat = 840
   static let documentSurfaceMinimumWidth: CGFloat = 340
   static let documentSurfaceIdealWidth: CGFloat = 460
+
+  // Keep the window minimum at the split-view layout floor: both panes at their
+  // own minimums, plus room for the divider and standard split-view chrome.
+  static let minimumWidth: CGFloat =
+    fileListSidebarMinimumWidth + documentSurfaceMinimumWidth + 20
+  static let minimumHeight: CGFloat = 600
 }
 
 struct WorkspaceNavigationCommands {
