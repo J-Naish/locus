@@ -1053,12 +1053,17 @@ private struct WorkspaceEntriesList: View {
               entry: entry,
               depth: row.depth,
               isExpanded: expandedFolderIDs.contains(entry.id),
+              selectEntry: {
+                selectedEntryID = entry.id
+              },
+              performPrimaryAction: {
+                performPrimaryAction(for: [entry.id])
+              },
               toggleExpansion: {
                 toggleFolderExpansion(for: entry)
               }
             )
             .tag(entry.id)
-            .simultaneousGesture(entryDoubleTapGesture(for: entry))
           case .status(let status):
             WorkspaceSidebarStatusRow(status: status, depth: row.depth)
           }
@@ -1115,13 +1120,6 @@ private struct WorkspaceEntriesList: View {
     }
 
     actions.performOpenAction(openAction)
-  }
-
-  private func entryDoubleTapGesture(for entry: WorkspaceEntry) -> some Gesture {
-    TapGesture(count: 2)
-      .onEnded {
-        performPrimaryAction(for: [entry.id])
-      }
   }
 
   private func entries(for selection: Set<WorkspaceEntry.ID>) -> [WorkspaceEntry] {
@@ -1443,6 +1441,8 @@ private struct WorkspaceSidebarEntryRow: View {
   let entry: WorkspaceEntry
   let depth: Int
   let isExpanded: Bool
+  let selectEntry: () -> Void
+  let performPrimaryAction: () -> Void
   let toggleExpansion: () -> Void
 
   var body: some View {
@@ -1467,6 +1467,16 @@ private struct WorkspaceSidebarEntryRow: View {
           .accessibilityHidden(true)
       }
 
+      rowContent
+    }
+    .padding(.leading, CGFloat(depth) * WorkspaceSidebarMetrics.depthIndent)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .contentShape(Rectangle())
+    .help(Text(verbatim: entry.name))
+  }
+
+  private var rowContent: some View {
+    HStack(spacing: 6) {
       Image(systemName: entry.symbolName)
         .foregroundStyle(entry.symbolColor)
 
@@ -1476,15 +1486,31 @@ private struct WorkspaceSidebarEntryRow: View {
 
       Spacer(minLength: 0)
     }
-    .padding(.leading, CGFloat(depth) * WorkspaceSidebarMetrics.depthIndent)
     .frame(maxWidth: .infinity, alignment: .leading)
     .contentShape(Rectangle())
-    .help(Text(verbatim: entry.name))
+    .simultaneousGesture(entrySingleTapGesture)
+    .simultaneousGesture(entryDoubleTapGesture)
   }
 
   private var disclosureAccessibilityLabel: Text {
     let action = isExpanded ? "Collapse" : "Expand"
     return Text(verbatim: "\(action) \(entry.name)")
+  }
+
+  private var entrySingleTapGesture: some Gesture {
+    TapGesture(count: 1)
+      .onEnded {
+        // The row double-tap gesture prevents List(selection:) from reliably
+        // applying the standard single-click selection, so restore it here.
+        selectEntry()
+      }
+  }
+
+  private var entryDoubleTapGesture: some Gesture {
+    TapGesture(count: 2)
+      .onEnded {
+        performPrimaryAction()
+      }
   }
 }
 

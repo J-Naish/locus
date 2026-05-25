@@ -39,7 +39,7 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testClickDirectoryRowDoesNotExpandFolder() throws {
+  func testClickDirectoryRowSelectsWithoutExpanding() throws {
     let workspaceURL = try makeNavigationHistoryWorkspace()
     let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
 
@@ -48,9 +48,26 @@ final class WorkspaceSearchUITests: XCTestCase {
 
     app.staticTexts["Alpha"].click()
 
+    assertTableRow(named: "Alpha", isSelectedIn: app)
     XCTAssertFalse(
       app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 1), app.debugDescription)
     XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 2), app.debugDescription)
+  }
+
+  @MainActor
+  func testDirectoryDisclosureClickDoesNotChangeRowSelection() throws {
+    let workspaceURL = try makeNavigationHistoryWorkspace()
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    XCTAssertTrue(app.staticTexts["Other"].waitForExistence(timeout: 5), app.debugDescription)
+
+    app.staticTexts["Other"].click()
+    assertTableRow(named: "Other", isSelectedIn: app)
+
+    disclosureButton(for: workspaceURL.appending(path: "Alpha"), in: app).click()
+
+    XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
+    assertTableRow(named: "Other", isSelectedIn: app)
   }
 
   @MainActor
