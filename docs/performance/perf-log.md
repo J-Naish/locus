@@ -61,7 +61,7 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
 
 ## 2026-05-24T10:40:21Z text-syntax-highlighting
 
-- commit: pending
+- commit: `ad0ef03`
 - branch: `main`
 - dirty tree: `true`
 - status: `0`
@@ -72,7 +72,7 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
 
 ## 2026-05-24T13:35:42Z lazy-listing-metadata
 
-- commit: pending
+- commit: `b6da469`
 - branch: `main`
 - dirty tree: `true`
 - status: `0`
@@ -87,7 +87,7 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
 
 ## 2026-05-24T14:27:02Z pdf-text-search
 
-- commit: pending
+- commit: `773354b`
 - branch: `main`
 - dirty tree: `true`
 - status: `0`
@@ -100,7 +100,7 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
 
 ## 2026-05-25T01:07:43+09:00 document-external-change-sync
 
-- commit: pending
+- commit: `4a396e3`
 - branch: `main`
 - dirty tree: `true`
 - status: `0`
@@ -116,7 +116,7 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
 
 ## 2026-05-25T06:13:53+09:00 defer-custom-pdf-chrome
 
-- commit: pending
+- commit: `a975896`
 - branch: `main`
 - dirty tree: `true`
 - status: `0`

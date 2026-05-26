@@ -19,8 +19,15 @@ Use two levels of access:
 - Stored bookmarks are resolved before later folder reads, previews, edits, or in-app location navigation flows that need access after the original picker session.
 - The app should enable App Sandbox and entitlements before relying on recents as a product feature.
 
+Current prototype note: until sandboxing is enabled, `FileLocationBookmarkStore`
+uses plain bookmark data for recent-location restoration. Treat that as a
+temporary compatibility path, not a change to the sandboxed distribution model.
+
 ## Consequences
 
 Milestone 2 can keep the implementation small while still following the correct access pattern for selected folders.
 
 Milestone 3 must introduce bookmark persistence alongside recents rather than storing raw path strings as the source of truth for user-granted folder access.
+
+Before enabling App Sandbox, revisit this ADR and switch persistent recent
+locations to security-scoped bookmarks end to end.

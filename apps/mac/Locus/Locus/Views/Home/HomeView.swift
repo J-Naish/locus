@@ -1009,7 +1009,6 @@ private struct WorkspaceBrowserView: View {
           WorkspaceDocumentSurface(
             entry: selectedEntry,
             showsTopDivider: documentTabs.isEmpty,
-            workspaceRefreshToken: loadedAt,
             textDocumentStore: textDocumentStore,
             imageDocumentStore: imageDocumentStore,
             pdfDocumentStore: pdfDocumentStore,
@@ -1239,50 +1238,6 @@ struct WorkspaceBrowserSearchResults {
   }
 }
 
-private struct WorkspaceShortcutSearchResultsView: View {
-  // This view is intentionally retained while the prototype hides the search
-  // field. The branch is unreachable with an empty query, but keeping it here
-  // preserves the recents shortcut surface for the later search reintroduction.
-  let recentFiles: [RecentFile]
-  let recentFolders: [RecentFolder]
-  let actions: FileLocationShortcutActions
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      if !recentFiles.isEmpty {
-        ShortcutListView(
-          title: "Recent Files",
-          rowAccessibilityIdentifier: "workspace-search-recent-file-row",
-          items: recentFiles,
-          systemImage: "doc",
-          symbolColor: .secondary,
-          maxWidth: .infinity,
-          open: actions.showRecentFile,
-          remove: actions.removeRecentFile,
-          copyPath: actions.copyPath
-        )
-      }
-
-      if !recentFolders.isEmpty {
-        ShortcutListView(
-          title: "Recent Folders",
-          rowAccessibilityIdentifier: "workspace-search-recent-folder-row",
-          items: recentFolders,
-          systemImage: "folder",
-          symbolColor: .blue,
-          maxWidth: .infinity,
-          open: actions.openRecentFolder,
-          remove: actions.removeRecentFolder,
-          copyPath: actions.copyPath
-        )
-      }
-    }
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .accessibilityElement(children: .contain)
-    .accessibilityIdentifier("workspace-shortcut-search-results")
-  }
-}
-
 private struct WorkspaceSidebarView: View {
   let folderURL: URL
   let entries: [WorkspaceEntry]
@@ -1298,6 +1253,7 @@ private struct WorkspaceSidebarView: View {
   @State private var childLoadTokens: [WorkspaceEntry.ID: UUID] = [:]
   @State private var expansionGeneration: UInt64 = 0
   @State private var isRootExpanded = true
+  @State private var visibleRows: [WorkspaceSidebarRow] = []
   @AppStorage(LocusPersistedDefaults.recentFoldersExpanded)
   private var isRecentFoldersExpanded = false
 
@@ -1323,7 +1279,7 @@ private struct WorkspaceSidebarView: View {
   var body: some View {
     VStack(spacing: 0) {
       List(selection: $selectedEntryID) {
-        ForEach(rows) { row in
+        ForEach(visibleRows) { row in
           switch row.content {
           case .entry(let entry):
             WorkspaceSidebarEntryRow(
@@ -1379,6 +1335,9 @@ private struct WorkspaceSidebarView: View {
     .onAppear {
       publishVisibleEntries()
     }
+    .onDisappear {
+      cancelAllChildLoads()
+    }
     .onChange(of: entries) {
       pruneExpansion(for: entries)
     }
@@ -1387,7 +1346,7 @@ private struct WorkspaceSidebarView: View {
     }
   }
 
-  private var rows: [WorkspaceSidebarRow] {
+  private func currentRows() -> [WorkspaceSidebarRow] {
     var result = [WorkspaceSidebarRow(entry: rootEntry, depth: 0)]
     if isRootExpanded {
       result.append(contentsOf: rows(for: entries, depth: 1))
@@ -1417,7 +1376,7 @@ private struct WorkspaceSidebarView: View {
   }
 
   private func entries(for selection: Set<WorkspaceEntry.ID>) -> [WorkspaceEntry] {
-    rows.compactMap(\.entry).filter { selection.contains($0.id) }
+    visibleRows.compactMap(\.entry).filter { selection.contains($0.id) }
   }
 
   private func isExpanded(_ entry: WorkspaceEntry) -> Bool {
@@ -1508,7 +1467,7 @@ private struct WorkspaceSidebarView: View {
   }
 
   private func visibleEntries() -> [WorkspaceEntry] {
-    rows.compactMap(\.entry)
+    visibleRows.compactMap(\.entry)
   }
 
   private func toggleExpansion(for entry: WorkspaceEntry) {
@@ -1627,6 +1586,7 @@ private struct WorkspaceSidebarView: View {
   }
 
   private func publishVisibleEntries() {
+    visibleRows = currentRows()
     onVisibleEntriesChange(visibleEntries())
   }
 }

@@ -65,29 +65,27 @@ Use SwiftUI for app structure and normal controls, with AppKit bridges where nat
 
 ## Rust Core Shape
 
-Grow `core/crates/app-core` in small modules:
+Current `core/crates/app-core` modules:
 
 ```text
 core/crates/app-core/src/
   lib.rs
   file_type.rs
   workspace.rs
-  metadata.rs
-  search.rs
-  recents.rs
-  storage.rs
-  diff.rs
 ```
 
-Initial ownership:
+Current ownership:
 
 - `file_type`: extension and MIME-ish classification used by both app and CLI.
 - `workspace`: open a folder, list child entries, apply shallow filters, sort folders/files.
-- `metadata`: directory flag, readonly flag, lightweight type metadata, and contextual size/modified-time loading when a surface needs it.
-- `search`: file-name search within the current location.
-- `recents`: start simple; persist through SQLite once the storage boundary is ready.
-- `storage`: SQLite wrapper for recents, metadata cache, and later FTS5.
-- `diff`: defer until external-change review is implemented.
+
+Deferred modules and boundaries:
+
+- `metadata`: keep as a future Rust module only if contextual metadata grows beyond the current listing options.
+- `search`: current-location ranking is implemented in Swift for the hidden prototype search surface; move reusable search to Rust when cross-platform search or indexing begins.
+- `recents`: currently app-owned in Swift; move to Rust/SQLite before broader cross-platform persistence.
+- `storage`: introduce when SQLite-backed recents, metadata cache, or FTS5 lands.
+- `diff`: defer until external-change review needs shared text comparison logic.
 
 Do not parse PDFs, Office documents, or media in Rust for MVP browsing. The macOS app should use native preview frameworks for those.
 
@@ -98,13 +96,14 @@ Keep the C ABI coarse and explicit. Early APIs should support:
 - core version and ABI version checks
 - opening a workspace folder
 - listing a folder
-- file-name search
 - reading lightweight listing metadata, with size and modified time loaded lazily when needed
 - listing with explicit options through FFI when contextual surfaces request
   extended metadata
-- storing and reading recents once persistence lands
 - releasing Rust-allocated strings and arrays
 - retrieving structured error details
+
+Future ABI additions should cover file-name search and recents only once those
+behaviors move from Swift prototype code into shared Rust modules.
 
 Preferred pattern:
 
@@ -215,8 +214,10 @@ Acceptance:
 
 Deliverables:
 
-- Add file-name search within the current location.
-- Add recent-item search.
+- Add file-name search within the current location. The ranking and tests exist
+  in Swift, while the visible search field is intentionally deferred during the
+  prototype sidebar/documents pass.
+- Add recent-item search when the search surface returns.
 
 Acceptance:
 

@@ -7,7 +7,6 @@ import SwiftUI
 struct WorkspaceDocumentSurface: View {
   let entry: WorkspaceEntry?
   let showsTopDivider: Bool
-  let workspaceRefreshToken: Date
   let textDocumentStore: any TextDocumentStoring
   let imageDocumentStore: any ImageDocumentStoring
   let pdfDocumentStore: any PDFDocumentStoring
@@ -88,18 +87,12 @@ struct WorkspaceDocumentSurface: View {
         return
       }
       startDocumentMonitoringIfNeeded(for: entry)
-      await pollDisplayedDocumentForExternalChangesIfNeeded()
     }
     .onChange(of: entry?.id) {
       persistActiveDraftIfNeeded()
       isEditorFocused = false
       knownDocumentFingerprint = nil
       onTextInputFocusChange(false)
-    }
-    .onChange(of: workspaceRefreshToken) {
-      Task {
-        await syncDisplayedDocumentIfChanged()
-      }
     }
     .onChange(of: isEditorFocused) {
       onTextInputFocusChange(isEditorFocused)
@@ -157,16 +150,6 @@ struct WorkspaceDocumentSurface: View {
 
   private func documentReloadTrigger(for entry: WorkspaceEntry) -> DocumentReloadTrigger {
     DocumentReloadTrigger(entryID: entry.id, generation: documentReloadGeneration)
-  }
-
-  private var shouldPollDisplayedDocumentForExternalChanges: Bool {
-    guard let entry,
-      WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry).isAutoSynced
-    else {
-      return false
-    }
-
-    return true
   }
 
   private var isSaveDisabled: Bool {
@@ -238,23 +221,6 @@ struct WorkspaceDocumentSurface: View {
       Task {
         await syncDisplayedDocumentIfChanged()
       }
-    }
-  }
-
-  @MainActor
-  private func pollDisplayedDocumentForExternalChangesIfNeeded() async {
-    guard shouldPollDisplayedDocumentForExternalChanges else {
-      return
-    }
-
-    while !Task.isCancelled {
-      do {
-        try await Task.sleep(for: WorkspaceDocumentSurfaceMetrics.externalChangePollInterval)
-      } catch {
-        return
-      }
-
-      await syncDisplayedDocumentIfChanged()
     }
   }
 
@@ -423,12 +389,6 @@ private struct TextDocumentDraft: Equatable {
   let savedText: String
   let encoding: String.Encoding
   let knownDocumentFingerprint: DocumentFileFingerprint?
-}
-
-private enum WorkspaceDocumentSurfaceMetrics {
-  // Fallback for external writes missed by DispatchSource on network volumes
-  // or behind atomic-rename editors.
-  static let externalChangePollInterval: Duration = .milliseconds(800)
 }
 
 private struct EmptyDocumentSurface: View {

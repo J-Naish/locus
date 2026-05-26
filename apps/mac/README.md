@@ -22,8 +22,8 @@ It contains:
 
 - `Locus.xcodeproj`: app and unit test targets.
 - `Locus/CoreBridge`: Swift wrapper around the Rust C ABI.
-- `Locus/Views/Home`: current folder browsing, inline folder expansion, recent locations, in-app document tabs, preview routing, and text editing surfaces.
-- `Locus/Services`: document loading, recents storage, path copying, and file-system monitoring boundaries.
+- `Locus/Views/Home`: current folder browsing, inline folder expansion, recent locations, document tabs, search ranking support, preview routing, text editing, and open-document change sync.
+- `Locus/Services`: text/image/PDF/media/Quick Look document loading, recents and bookmark storage, path copying, file dialog helpers, and file-system monitoring boundaries.
 
 The Xcode target builds the Rust `app-ffi` static library before linking the app.
 Debug builds link `core/target/debug/libapp_ffi.a`; Release builds link `core/target/release/libapp_ffi.a`.

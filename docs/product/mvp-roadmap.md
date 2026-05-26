@@ -52,11 +52,13 @@ Once local movement and search are reliable, add the document work surface.
 
 Round out the MVP with the minimum review capabilities needed for local document work.
 
-- external change synchronization
+- external change synchronization for the current folder and displayed document
+  is implemented in the prototype; conflict review remains deferred
 - Markdown diff view for changed text documents
 - basic PDF highlights and comments
 - workspace state restoration for the current location
-- performance and size smoke checks for the full app
+- performance and size smoke checks for the full app are covered by
+  `scripts/perf-smoke.sh`
 
 ## Phase 2: macOS Quality
 

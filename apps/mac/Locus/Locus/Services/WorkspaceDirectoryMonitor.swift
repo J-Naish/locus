@@ -52,7 +52,7 @@ final class WorkspaceDirectoryMonitor: WorkspaceDirectoryMonitoring {
       queue: .main
     )
     source.setEventHandler { [weak self] in
-      Task { @MainActor in
+      Task { @MainActor [weak self] in
         self?.scheduleChange(onChange, generation: generation)
       }
     }
