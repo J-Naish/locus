@@ -7,9 +7,9 @@ enum WorkspaceTextDocumentSupport {
     }
 
     switch entry.fileType {
-    case .markdown, .structuredText, .plainText, .code:
+    case .markdown, .structuredText, .plainText, .code, .unknown:
       return true
-    case .pdf, .office, .image, .audio, .video, .unknown:
+    case .pdf, .office, .image, .audio, .video:
       return false
     }
   }

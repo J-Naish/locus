@@ -16,15 +16,23 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       WorkspaceTextDocumentSupport.canEdit(makeEntry(name: "script.swift", fileType: .code)))
   }
 
-  func testBinaryAndUnknownFilesAreNotEditableTextDocuments() {
+  func testBinaryFilesAreNotEditableTextDocuments() {
     XCTAssertFalse(
       WorkspaceTextDocumentSupport.canEdit(makeEntry(name: "brief.pdf", fileType: .pdf)))
     XCTAssertFalse(
       WorkspaceTextDocumentSupport.canEdit(makeEntry(name: "photo.png", fileType: .image)))
     XCTAssertFalse(
       WorkspaceTextDocumentSupport.canEdit(makeEntry(name: "deck.pptx", fileType: .office)))
-    XCTAssertFalse(
-      WorkspaceTextDocumentSupport.canEdit(makeEntry(name: "blob", fileType: .unknown)))
+  }
+
+  func testUnknownFilesAreEditableTextCandidates() {
+    XCTAssertTrue(
+      WorkspaceTextDocumentSupport.canEdit(makeEntry(name: ".customignore", fileType: .unknown)))
+    XCTAssertEqual(
+      WorkspaceTextDocumentSupport.syntax(
+        for: makeEntry(name: ".customignore", fileType: .unknown)),
+      nil
+    )
   }
 
   func testDirectoriesAreNotEditableTextDocuments() {

@@ -72,10 +72,13 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
     )
   }
 
-  func testSingleUnknownFileHasNoOpenAction() {
+  func testSingleUnknownFileTriesInPlaceTextOpen() {
     let entry = makeWorkspaceEntry(name: "blob", kind: .file, fileType: .unknown)
 
-    XCTAssertNil(WorkspaceEntryOpenActionResolver.action(for: [entry]))
+    XCTAssertEqual(
+      WorkspaceEntryOpenActionResolver.action(for: [entry]),
+      .openInPlace(entry.url)
+    )
   }
 
   func testSingleTextSymlinkEditsInLocus() {
@@ -96,10 +99,13 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
     )
   }
 
-  func testSingleNonTextSymlinkHasNoOpenAction() {
+  func testSingleUnknownSymlinkTriesInPlaceTextOpen() {
     let entry = makeWorkspaceEntry(name: "latest", kind: .symlink, fileType: .unknown)
 
-    XCTAssertNil(WorkspaceEntryOpenActionResolver.action(for: [entry]))
+    XCTAssertEqual(
+      WorkspaceEntryOpenActionResolver.action(for: [entry]),
+      .openInPlace(entry.url)
+    )
   }
 
   func testOtherEntriesCannotBeOpened() {

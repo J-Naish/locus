@@ -91,6 +91,8 @@ YAML, JSON, TOML, source code, scripts, and similar plain-text files should be t
 Must support:
 
 - open `.yaml`, `.yml`, `.json`, and `.toml` files
+- open common extensionless text files such as `.gitignore`, `.env`,
+  `README`, `Dockerfile`, and similar local tool configuration files
 - open common source code and script files as plain text
 - edit these files with the same level of care as Markdown
 - preserve valid plain-text file formats on save

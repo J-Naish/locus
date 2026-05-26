@@ -35,11 +35,20 @@ impl FileType {
 }
 
 pub fn classify_path(path: impl AsRef<Path>) -> FileType {
-    let Some(extension) = path.as_ref().extension().and_then(|value| value.to_str()) else {
-        return FileType::Unknown;
-    };
+    if let Some(file_type) = path
+        .as_ref()
+        .file_name()
+        .and_then(|value| value.to_str())
+        .and_then(classify_extensionless_name)
+    {
+        return file_type;
+    }
 
-    classify_extension(extension)
+    path.as_ref()
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(classify_extension)
+        .unwrap_or(FileType::Unknown)
 }
 
 pub fn classify_extension(extension: &str) -> FileType {
@@ -60,6 +69,69 @@ pub fn classify_extension(extension: &str) -> FileType {
         _ => FileType::Unknown,
     }
 }
+
+fn classify_extensionless_name(name: &str) -> Option<FileType> {
+    if name.eq_ignore_ascii_case(".env")
+        || name.eq_ignore_ascii_case(".envrc")
+        || name
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(".env."))
+    {
+        return Some(FileType::PlainText);
+    }
+
+    if KNOWN_PLAIN_TEXT_NAMES
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    {
+        return Some(FileType::PlainText);
+    }
+
+    if KNOWN_STRUCTURED_TEXT_NAMES
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    {
+        return Some(FileType::StructuredText);
+    }
+
+    if KNOWN_CODE_NAMES
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    {
+        return Some(FileType::Code);
+    }
+
+    None
+}
+
+const KNOWN_PLAIN_TEXT_NAMES: &[&str] = &[
+    ".gitignore",
+    ".cursorignore",
+    ".dockerignore",
+    ".eslintignore",
+    ".prettierignore",
+    ".npmignore",
+    "readme",
+    "license",
+    "notice",
+    "changelog",
+    "contributing",
+    "authors",
+];
+
+const KNOWN_STRUCTURED_TEXT_NAMES: &[&str] =
+    &[".editorconfig", ".eslintrc", ".prettierrc", ".babelrc"];
+
+const KNOWN_CODE_NAMES: &[&str] = &[
+    "dockerfile",
+    "containerfile",
+    "makefile",
+    "rakefile",
+    "gemfile",
+    "brewfile",
+    "justfile",
+    "procfile",
+];
 
 #[cfg(test)]
 mod tests {
@@ -90,8 +162,32 @@ mod tests {
     }
 
     #[test]
-    fn classify_path_returns_unknown_when_extension_is_missing() {
-        assert_eq!(classify_path("README"), FileType::Unknown);
+    fn classify_path_recognizes_common_extensionless_text_files() {
+        assert_eq!(classify_path(".gitignore"), FileType::PlainText);
+        assert_eq!(classify_path(".cursorignore"), FileType::PlainText);
+        assert_eq!(classify_path("README"), FileType::PlainText);
+        assert_eq!(classify_path(".env.local"), FileType::PlainText);
+        assert_eq!(classify_path(".envrc"), FileType::PlainText);
+    }
+
+    #[test]
+    fn classify_path_does_not_apply_env_rule_to_other_prefixed_files() {
+        assert_eq!(classify_path(".envoyproxy.yaml"), FileType::StructuredText);
+        assert_eq!(
+            classify_path(".environment-config.json"),
+            FileType::StructuredText
+        );
+    }
+
+    #[test]
+    fn classify_path_recognizes_common_extensionless_code_files() {
+        assert_eq!(classify_path("Dockerfile"), FileType::Code);
+        assert_eq!(classify_path("Makefile"), FileType::Code);
+    }
+
+    #[test]
+    fn classify_path_keeps_unknown_extensionless_files_unknown() {
+        assert_eq!(classify_path("opaque-file"), FileType::Unknown);
     }
 
     #[test]

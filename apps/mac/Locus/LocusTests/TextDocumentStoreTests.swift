@@ -61,20 +61,104 @@ final class TextDocumentStoreTests: XCTestCase {
     XCTAssertEqual(String(data: savedData, encoding: .shiftJIS), "title: 請求書\n")
   }
 
+  func testLoadsExtensionlessUTF8TextDocument() async throws {
+    let url = try temporaryFile(named: ".customignore", contents: "target/\n*.tmp\n")
+    let store = TextDocumentStore()
+
+    let loaded = try await store.loadText(at: url)
+
+    XCTAssertEqual(loaded.text, "target/\n*.tmp\n")
+    XCTAssertEqual(loaded.encoding, .utf8)
+  }
+
+  func testStripsUTF8ByteOrderMarkOnLoad() async throws {
+    var data = Data([0xEF, 0xBB, 0xBF])
+    data.append(try XCTUnwrap("hello\n".data(using: .utf8)))
+    let url = try temporaryFile(named: "notes", data: data)
+    let store = TextDocumentStore()
+
+    let loaded = try await store.loadText(at: url)
+
+    XCTAssertEqual(loaded.text, "hello\n")
+    XCTAssertEqual(loaded.encoding, .utf8)
+  }
+
+  func testLoadsUTF16LittleEndianTextDocumentWithByteOrderMark() async throws {
+    let text = "hello\nこんにちは\n"
+    var data = Data([0xFF, 0xFE])
+    data.append(try XCTUnwrap(text.data(using: .utf16LittleEndian)))
+    let url = try temporaryFile(named: "notes", data: data)
+    let store = TextDocumentStore()
+
+    let loaded = try await store.loadText(at: url)
+
+    XCTAssertEqual(loaded.text, text)
+  }
+
+  func testLoadsUTF16BigEndianTextDocumentWithByteOrderMark() async throws {
+    let text = "hello\nこんにちは\n"
+    var data = Data([0xFE, 0xFF])
+    data.append(try XCTUnwrap(text.data(using: .utf16BigEndian)))
+    let url = try temporaryFile(named: "notes", data: data)
+    let store = TextDocumentStore()
+
+    let loaded = try await store.loadText(at: url)
+
+    XCTAssertEqual(loaded.text, text)
+  }
+
+  func testRejectsBinaryDataEvenWhenFallbackEncodingCouldDecodeBytes() async throws {
+    let url = try temporaryFile(named: "blob", data: Data([0x00, 0x01, 0x02, 0xFF]))
+    let store = TextDocumentStore()
+
+    do {
+      _ = try await store.loadText(at: url)
+      XCTFail("Expected binary data to fail text loading")
+    } catch {
+      XCTAssertFalse(error.localizedDescription.isEmpty)
+    }
+  }
+
+  func testRejectsOversizedTextDocumentBeforeLoadingContents() async throws {
+    let url = try temporaryFile(named: "large-unknown", byteCount: 16 * 1024 * 1024 + 1)
+    let store = TextDocumentStore()
+
+    do {
+      _ = try await store.loadText(at: url)
+      XCTFail("Expected oversized text loading to fail")
+    } catch TextDocumentStoreError.fileTooLarge {
+      // Expected.
+    } catch {
+      XCTFail("Expected fileTooLarge, got \(error)")
+    }
+  }
+
   private func temporaryFile(named name: String, contents: String) throws -> URL {
     try temporaryFile(named: name, data: try XCTUnwrap(contents.data(using: .utf8)))
   }
 
+  private func temporaryFile(named name: String, byteCount: UInt64) throws -> URL {
+    let url = try temporaryURL(named: name)
+    _ = FileManager.default.createFile(atPath: url.path(percentEncoded: false), contents: nil)
+    let handle = try FileHandle(forWritingTo: url)
+    try handle.truncate(atOffset: byteCount)
+    try handle.close()
+    return url
+  }
+
   private func temporaryFile(named name: String, data: Data) throws -> URL {
+    let url = try temporaryURL(named: name)
+    try data.write(to: url)
+    return url
+  }
+
+  private func temporaryURL(named name: String) throws -> URL {
     let directory = FileManager.default.temporaryDirectory
       .appending(path: "locus-text-store-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     addTeardownBlock {
       try? FileManager.default.removeItem(at: directory)
     }
-
-    let url = directory.appending(path: name)
-    try data.write(to: url)
-    return url
+    return directory.appending(path: name)
   }
 }

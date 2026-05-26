@@ -11,6 +11,14 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
     )
   }
 
+  func testUnknownFilesTryEditableTextSurface() {
+    XCTAssertEqual(
+      WorkspaceDocumentSurfaceSupport.surfaceKind(
+        for: makeEntry(name: ".customignore", fileType: .unknown)),
+      .editableText
+    )
+  }
+
   func testRasterImagesUseImageSurface() {
     XCTAssertEqual(
       WorkspaceDocumentSurfaceSupport.surfaceKind(
