@@ -14,19 +14,25 @@ Expected stack:
 
 The app should call the shared Rust core through a thin Swift bridge rather than using the C ABI directly across the UI layer.
 
-## Current Scaffold
+## Current Prototype
 
-The initial macOS app lives at `apps/mac/Locus/`.
+The macOS app lives at `apps/mac/Locus/`.
 
 It contains:
 
 - `Locus.xcodeproj`: app and unit test targets.
 - `Locus/CoreBridge`: Swift wrapper around the Rust C ABI.
-- `Locus/Views/Home`: minimal launch surface that verifies the Rust core link.
+- `Locus/Views/Home`: current folder browsing, inline folder expansion, recent locations, in-app document tabs, preview routing, and text editing surfaces.
+- `Locus/Services`: document loading, recents storage, path copying, and file-system monitoring boundaries.
 
 The Xcode target builds the Rust `app-ffi` static library before linking the app.
 Debug builds link `core/target/debug/libapp_ffi.a`; Release builds link `core/target/release/libapp_ffi.a`.
 The Rust build is routed through `scripts/build-rust-ffi.sh`.
+
+The default launch opens the user's home folder when available, but the initial
+home folder is not recorded as a recent location. UI tests use launch arguments
+such as `--ui-test-workspace`, `--ui-test-recent-file`, and
+`--ui-test-recent-folder` to avoid system file dialogs and shared recents state.
 
 Useful commands from the repository root:
 

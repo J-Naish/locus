@@ -191,6 +191,9 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(app.staticTexts["Beta"].waitForExistence(timeout: 5), app.debugDescription)
     app.staticTexts["Beta"].doubleClick()
     XCTAssertTrue(app.staticTexts["Gamma"].waitForExistence(timeout: 5), app.debugDescription)
+    app.staticTexts["Gamma"].doubleClick()
+    XCTAssertTrue(
+      app.staticTexts["Gamma Note.md"].waitForExistence(timeout: 5), app.debugDescription)
 
     app.typeKey("[", modifierFlags: [.command])
     XCTAssertTrue(
@@ -673,6 +676,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     NSPasteboard.general.setString(updatedText, forType: .string)
     app.typeKey("a", modifierFlags: [.command])
     app.typeKey("v", modifierFlags: [.command])
+    XCTAssertTrue(waitForEditorContents(updatedText, in: app, timeout: 5), app.debugDescription)
 
     let notesRow = app.outlines.firstMatch.cells
       .containing(NSPredicate(format: "value == %@", "Notes.txt"))
@@ -737,6 +741,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     NSPasteboard.general.setString(userText, forType: .string)
     app.typeKey("a", modifierFlags: [.command])
     app.typeKey("v", modifierFlags: [.command])
+    XCTAssertTrue(waitForEditorContents(userText, in: app, timeout: 5), app.debugDescription)
 
     let externalText = "# External Update\n\nChanged outside Locus.\n"
     try externalText.write(to: projectBriefURL, atomically: true, encoding: .utf8)

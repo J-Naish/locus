@@ -15,14 +15,16 @@ struct DocumentFileFingerprint: Equatable, Sendable {
       }
 
       guard
-        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        let attributes = try? FileManager.default.attributesOfItem(
+          atPath: url.path(percentEncoded: false)
+        )
       else {
         return nil
       }
 
       return DocumentFileFingerprint(
-        size: values.fileSize.map(UInt64.init),
-        modificationDate: values.contentModificationDate
+        size: (attributes[.size] as? NSNumber).map(\.uint64Value),
+        modificationDate: attributes[.modificationDate] as? Date
       )
     }.value
   }
@@ -67,7 +69,7 @@ final class DocumentChangeMonitor: ObservableObject {
 
     let source = DispatchSource.makeFileSystemObjectSource(
       fileDescriptor: descriptor,
-      eventMask: [.write, .delete, .rename, .extend],
+      eventMask: [.write, .delete, .rename, .extend, .attrib, .link],
       queue: .main
     )
     source.setEventHandler { [weak self] in

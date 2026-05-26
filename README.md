@@ -24,4 +24,6 @@ scripts/        development and release automation
 
 ## Current Status
 
-This repository is in the initial skeleton phase. The first implementation target is the macOS MVP described in the requirements.
+This repository is in prototype development. The macOS app can launch into a local folder, browse a native sidebar-style file list, navigate folder history, track recent files and folders, preview common document/media files, and lightly edit Markdown, structured text, plain text, and common source files through an in-app document surface.
+
+Search ranking, Rust folder listing, FFI ownership, recents, preview routing, text editing, and the main macOS flows have automated coverage. The next product work should stay focused on the MVP flows in [docs/product/mvp-roadmap.md](docs/product/mvp-roadmap.md), especially richer search, external-change review, state restoration, and measured performance/size checks.

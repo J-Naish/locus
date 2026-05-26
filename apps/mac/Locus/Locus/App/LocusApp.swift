@@ -132,7 +132,7 @@ struct LocusApp: App {
       }
 
       let store = RecentFolderStore(key: uiTestRecentFoldersKey)
-      for path in argumentValues(
+      for path in LaunchArgumentValues.values(
         named: "--ui-test-recent-folder", in: ProcessInfo.processInfo.arguments)
       {
         guard !path.isEmpty else {
@@ -159,7 +159,7 @@ struct LocusApp: App {
       }
 
       let store = RecentFileStore(key: uiTestRecentFilesKey)
-      for path in argumentValues(
+      for path in LaunchArgumentValues.values(
         named: "--ui-test-recent-file", in: ProcessInfo.processInfo.arguments)
       {
         guard !path.isEmpty else {
@@ -186,12 +186,14 @@ struct LocusApp: App {
   private static let homeDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
 
   private static var uiTestRecentFoldersKey: String {
-    argumentValue(named: "--ui-test-recent-folders-key", in: ProcessInfo.processInfo.arguments)
+    LaunchArgumentValues.value(
+      named: "--ui-test-recent-folders-key", in: ProcessInfo.processInfo.arguments)
       ?? "recentFolders.uiTests"
   }
 
   private static var uiTestRecentFilesKey: String {
-    argumentValue(named: "--ui-test-recent-files-key", in: ProcessInfo.processInfo.arguments)
+    LaunchArgumentValues.value(
+      named: "--ui-test-recent-files-key", in: ProcessInfo.processInfo.arguments)
       ?? "recentFiles.uiTests"
   }
 
@@ -205,32 +207,5 @@ struct LocusApp: App {
         UserDefaults.standard.removeObject(forKey: key)
       }
     #endif
-  }
-
-  private static func argumentValue(named name: String, in arguments: [String]) -> String? {
-    argumentValues(named: name, in: arguments).first
-  }
-
-  private static func argumentValues(named name: String, in arguments: [String]) -> [String] {
-    var values: [String] = []
-    for (index, argument) in arguments.enumerated() {
-      if argument.hasPrefix("\(name)=") {
-        values.append(String(argument.dropFirst("\(name)=".count)))
-        continue
-      }
-
-      guard argument == name else {
-        continue
-      }
-
-      let pathIndex = arguments.index(after: index)
-      guard arguments.indices.contains(pathIndex) else {
-        continue
-      }
-
-      values.append(arguments[pathIndex])
-    }
-
-    return values
   }
 }

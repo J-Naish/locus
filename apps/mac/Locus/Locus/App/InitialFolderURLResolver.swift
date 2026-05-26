@@ -19,7 +19,7 @@ enum InitialFolderURLResolver {
           return .folder(workspaceURL)
         }
 
-        if hasArgument(named: "--ui-test-workspace", in: arguments) {
+        if LaunchArgumentValues.hasArgument(named: "--ui-test-workspace", in: arguments) {
           return .unavailable
         }
 
@@ -45,7 +45,7 @@ enum InitialFolderURLResolver {
     in arguments: [String],
     fileManager: FileManager
   ) -> URL? {
-    guard let path = argumentValue(named: "--ui-test-workspace", in: arguments),
+    guard let path = LaunchArgumentValues.value(named: "--ui-test-workspace", in: arguments),
       !path.isEmpty
     else {
       return nil
@@ -69,12 +69,14 @@ enum InitialFolderURLResolver {
 
     return url
   }
+}
 
-  private static func argumentValue(named name: String, in arguments: [String]) -> String? {
-    argumentValues(named: name, in: arguments).first
+enum LaunchArgumentValues {
+  static func value(named name: String, in arguments: [String]) -> String? {
+    values(named: name, in: arguments).first
   }
 
-  private static func argumentValues(named name: String, in arguments: [String]) -> [String] {
+  static func values(named name: String, in arguments: [String]) -> [String] {
     var values: [String] = []
     for (index, argument) in arguments.enumerated() {
       if argument.hasPrefix("\(name)=") {
@@ -97,7 +99,7 @@ enum InitialFolderURLResolver {
     return values
   }
 
-  private static func hasArgument(named name: String, in arguments: [String]) -> Bool {
+  static func hasArgument(named name: String, in arguments: [String]) -> Bool {
     arguments.contains { argument in
       argument == name || argument.hasPrefix("\(name)=")
     }

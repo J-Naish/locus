@@ -162,6 +162,24 @@ final class WorkspaceEntrySearchTests: XCTestCase {
     )
   }
 
+  func testCJKTermsDoNotUseFuzzyMatchingEvenAtFourCharacters() {
+    let entries = [
+      makeWorkspaceEntry(name: "資料計画.md"),
+      makeWorkspaceEntry(name: "資料計用.md"),
+      makeWorkspaceEntry(name: "报告计划.md"),
+      makeWorkspaceEntry(name: "报告计用.md"),
+    ]
+
+    XCTAssertEqual(
+      WorkspaceEntrySearch.filteredEntries(entries, query: "資料計画").map(\.name),
+      ["資料計画.md"]
+    )
+    XCTAssertEqual(
+      WorkspaceEntrySearch.filteredEntries(entries, query: "报告计划").map(\.name),
+      ["报告计划.md"]
+    )
+  }
+
   func testRanksTenThousandEntriesWithinInteractiveBudget() {
     let entries = (0..<10_000).map { index in
       switch index {

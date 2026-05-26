@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use app_core::workspace::list_directory;
 
 const DEFAULT_ITERATIONS: usize = 5;
+const MAX_ITERATIONS: usize = u32::MAX as usize;
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -186,6 +187,11 @@ fn parse_nonzero_usize(name: &str, value: &str) -> Result<usize, CliError> {
     if parsed == 0 {
         return Err(CliError::Usage(format!("{name} must be greater than zero")));
     }
+    if parsed > MAX_ITERATIONS {
+        return Err(CliError::Usage(format!(
+            "{name} must be less than or equal to {MAX_ITERATIONS}"
+        )));
+    }
     Ok(parsed)
 }
 
@@ -294,6 +300,30 @@ mod tests {
 
         assert_eq!(error.exit_code(), 2);
         assert_eq!(error.to_string(), "--iterations must be greater than zero");
+    }
+
+    #[test]
+    fn parse_perf_list_directory_options_rejects_iterations_that_cannot_be_averaged() {
+        let too_many_iterations = (super::MAX_ITERATIONS + 1).to_string();
+
+        let error = PerfListDirectoryOptions::parse(
+            [
+                "/tmp/workspace".to_string(),
+                "--iterations".to_string(),
+                too_many_iterations,
+            ]
+            .into_iter(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.exit_code(), 2);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "--iterations must be less than or equal to {}",
+                super::MAX_ITERATIONS
+            )
+        );
     }
 
     #[test]

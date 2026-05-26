@@ -120,7 +120,7 @@ private struct SearchTerm {
     let characters = Array(normalized)
     self.normalized = normalized
     self.characters = characters
-    allowsFuzzyMatch = characters.count >= 4
+    allowsFuzzyMatch = characters.count >= 4 && !Self.containsCJKCharacter(in: normalized)
   }
 
   private static func normalizedSearchString(_ string: String) -> String {
@@ -128,6 +128,22 @@ private struct SearchTerm {
       options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
       locale: .current
     )
+  }
+
+  private static func containsCJKCharacter(in string: String) -> Bool {
+    string.unicodeScalars.contains { scalar in
+      switch scalar.value {
+      case 0x3040...0x309F,  // Hiragana
+        0x30A0...0x30FF,  // Katakana
+        0x3400...0x4DBF,  // CJK Extension A
+        0x4E00...0x9FFF,  // CJK Unified Ideographs
+        0xF900...0xFAFF,  // CJK Compatibility Ideographs
+        0xFF66...0xFF9F:  // Halfwidth Katakana
+        return true
+      default:
+        return false
+      }
+    }
   }
 }
 

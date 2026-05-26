@@ -53,6 +53,20 @@ final class InitialFolderURLResolverTests: XCTestCase {
     XCTAssertEqual(resolution, .folder(workspaceURL))
   }
 
+  func testLaunchArgumentValuesCollectRepeatedFlagsInBothSupportedForms() {
+    let arguments = [
+      "Locus",
+      "--ui-test-recent-file=/tmp/one.md",
+      "--ui-test-recent-file",
+      "/tmp/two.md",
+    ]
+
+    XCTAssertEqual(
+      LaunchArgumentValues.values(named: "--ui-test-recent-file", in: arguments),
+      ["/tmp/one.md", "/tmp/two.md"]
+    )
+  }
+
   func testUITestingCanOptIntoHomeDefault() throws {
     let homeURL = try temporaryDirectory()
 

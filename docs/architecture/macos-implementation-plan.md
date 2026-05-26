@@ -6,11 +6,13 @@ Build the first usable native macOS version of Locus: a quiet local document wor
 
 The implementation should keep the product native, local-first, fast, and document-oriented. It should not introduce Electron, a built-in AI chat surface, plugin execution, IDE workflows, or heavy startup indexing.
 
-## Current Starting Point
+## Current Implementation Baseline
 
-- `apps/mac/` contains the macOS app direction but no app implementation yet.
-- `core/` contains a minimal Rust workspace with `app-core`, `app-ffi`, and `app-cli`.
-- The Rust FFI surface currently exposes only `locus_core_version`.
+- `apps/mac/Locus/` contains the active native macOS prototype.
+- The app launches into the home folder when available, supports explicit folder opening, shows a name-first sidebar file browser, expands folders inline, keeps session folder history, and tracks recent files/folders.
+- The document surface supports editable Markdown, structured text, plain text, and common source files, plus native previews for images, PDFs, media, and Office files through Quick Look where macOS can render them.
+- `core/` contains the Rust workspace with `app-core`, `app-ffi`, and `app-cli`; the current core covers file type classification, shallow folder listing, lightweight listing metadata, ignored-name policy, FFI snapshots, and a performance-listing CLI.
+- The Rust FFI surface exposes ABI/version checks, folder listing with explicit options, stable status codes, partial listing errors, and Rust-owned snapshot release functions.
 - Product scope and architecture are defined in:
   - `docs/product/mvp-roadmap.md`
   - `docs/specs/core-feature-scope.md`
@@ -28,11 +30,11 @@ The implementation should keep the product native, local-first, fast, and docume
 - Use native frameworks for previews: PDFKit, Quick Look, AVKit, image views, and TextKit 2/NSTextView.
 - Defer full-text search, delayed thumbnails, PDF annotation persistence polish, and state restoration until the basic MVP path is stable.
 
-## Proposed macOS App Shape
+## macOS App Shape
 
-Create the macOS app under `apps/mac/Locus/`.
+The app is under `apps/mac/Locus/`.
 
-Initial structure:
+Current structure:
 
 ```text
 apps/mac/Locus/
@@ -40,12 +42,8 @@ apps/mac/Locus/
   Locus/
     App/
     CoreBridge/
-    Models/
     Views/
     Views/Home/
-    Views/Browser/
-    Views/Preview/
-    Views/Editors/
     Services/
   LocusTests/
   LocusUITests/
@@ -55,11 +53,7 @@ Responsibilities:
 
 - `App/`: app entry point, window setup, menus, command routing.
 - `CoreBridge/`: Swift wrapper around the C ABI. Owns unsafe calls, memory release, status conversion, and background dispatch.
-- `Models/`: Swift-facing view models and value types.
-- `Views/Home/`: current folder browsing, recent items, and locations.
-- `Views/Browser/`: sidebar, file list, folder navigation, search field.
-- `Views/Preview/`: PDF, Quick Look, image, audio, video, and unsupported-file views.
-- `Views/Editors/`: Markdown and structured plain-text editors.
+- `Views/Home/`: current folder browsing, inline folder expansion, recent items, search ranking support, document tabs, preview surfaces, and text editor bridge.
 - `Services/`: in-app location navigation helpers, file dialogs, file watching, and recents storage if still app-owned.
 
 Use SwiftUI for app structure and normal controls, with AppKit bridges where native document behavior matters:
@@ -266,22 +260,16 @@ Acceptance:
 - MVP user flows work without manual setup beyond building the app.
 - Narrow Rust tests and macOS unit tests pass.
 
-## First Implementation Sprint
+## Current Validation Focus
 
-Start with these tasks in order:
+Keep validation tied to the active prototype rather than the old scaffold path:
 
-1. Add the macOS app scaffold in `apps/mac/Locus/`.
-2. Add a Swift `CoreBridge` that calls the existing `locus_core_version`.
-3. Add Rust `file_type` and `workspace` modules with unit tests.
-4. Extend the FFI with one coarse folder-list snapshot API and explicit free functions.
-5. Build a minimal UI: default home-folder location, folder chooser, current location title, and file list.
-6. Add in-app containing-folder navigation and row selection for file-list, recent, and search result rows.
-7. Keep context-menu actions scoped to opening supported items and path copying.
-8. Run:
-   - `cargo test --manifest-path core/Cargo.toml`
-   - the narrow macOS app tests available from the Xcode project
-
-This produces the smallest useful vertical slice and validates the core architectural boundary before preview/editing depth is added.
+1. Run focused Rust tests and clippy when touching `core/`.
+2. Run focused macOS unit/UI tests when touching app flows.
+3. Keep the sidebar visible by default because folder browsing is the primary workspace flow.
+4. Keep search ranking tested separately from visible search chrome so the matching model remains ready without reintroducing launcher-style UI.
+5. Keep context-menu actions scoped to opening supported items in Locus and path copying.
+6. Run `scripts/perf-smoke.sh` before handoff for changes affecting speed, size, startup, file listing, FFI, or the app bundle.
 
 ## Test Strategy
 

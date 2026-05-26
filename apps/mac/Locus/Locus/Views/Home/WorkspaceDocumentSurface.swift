@@ -26,7 +26,6 @@ struct WorkspaceDocumentSurface: View {
   @State private var documentReloadGeneration = 0
   @State private var isEditorFocused = false
   @StateObject private var documentChangeMonitor = DocumentChangeMonitor()
-  @Environment(\.scenePhase) private var scenePhase
 
   var body: some View {
     VStack(spacing: 0) {
@@ -89,8 +88,10 @@ struct WorkspaceDocumentSurface: View {
         return
       }
       startDocumentMonitoringIfNeeded(for: entry)
+      await pollDisplayedDocumentForExternalChangesIfNeeded()
     }
     .onChange(of: entry?.id) {
+      persistActiveDraftIfNeeded()
       isEditorFocused = false
       knownDocumentFingerprint = nil
       onTextInputFocusChange(false)
@@ -100,24 +101,11 @@ struct WorkspaceDocumentSurface: View {
         await syncDisplayedDocumentIfChanged()
       }
     }
-    .onReceive(
-      Timer.publish(
-        every: WorkspaceDocumentSurfaceMetrics.externalChangePollInterval,
-        on: .main,
-        in: .common
-      )
-      .autoconnect()
-    ) { _ in
-      guard scenePhase == .active, shouldPollDisplayedDocumentForExternalChanges else {
-        return
-      }
-
-      Task {
-        await syncDisplayedDocumentIfChanged()
-      }
-    }
     .onChange(of: isEditorFocused) {
       onTextInputFocusChange(isEditorFocused)
+    }
+    .onChange(of: text) {
+      persistActiveDraftIfNeeded()
     }
     .onDisappear {
       documentChangeMonitor.stopMonitoring()
@@ -254,12 +242,29 @@ struct WorkspaceDocumentSurface: View {
   }
 
   @MainActor
+  private func pollDisplayedDocumentForExternalChangesIfNeeded() async {
+    guard shouldPollDisplayedDocumentForExternalChanges else {
+      return
+    }
+
+    while !Task.isCancelled {
+      do {
+        try await Task.sleep(for: WorkspaceDocumentSurfaceMetrics.externalChangePollInterval)
+      } catch {
+        return
+      }
+
+      await syncDisplayedDocumentIfChanged()
+    }
+  }
+
+  @MainActor
   private func restoreDraft(_ draft: TextDocumentDraft, for entry: WorkspaceEntry) {
-    text = draft.text
     savedText = draft.savedText
+    text = draft.text
     encoding = draft.encoding
     loadState = .loaded
-    knownDocumentFingerprint = nil
+    knownDocumentFingerprint = draft.knownDocumentFingerprint
     Task {
       await syncDisplayedDocumentIfChanged()
     }
@@ -279,8 +284,8 @@ struct WorkspaceDocumentSurface: View {
     _ document: TextDocument,
     fingerprint: DocumentFileFingerprint?
   ) {
-    text = document.text
     savedText = document.text
+    text = document.text
     encoding = document.encoding
     knownDocumentFingerprint = fingerprint
     loadState = .loaded
@@ -332,7 +337,9 @@ struct WorkspaceDocumentSurface: View {
       drafts[activeDocumentID] = TextDocumentDraft(
         text: text,
         savedText: savedText,
-        encoding: encoding
+        encoding: encoding,
+        knownDocumentFingerprint: knownDocumentFingerprint
+          ?? drafts[activeDocumentID]?.knownDocumentFingerprint
       )
     }
   }
@@ -380,6 +387,12 @@ extension WorkspaceDocumentSurface {
         return
       }
 
+      if text != savedText, document.text == savedText {
+        knownDocumentFingerprint = fingerprint
+        saveErrorMessage = nil
+        return
+      }
+
       applyLoadedTextDocument(document, fingerprint: fingerprint)
       saveErrorMessage = nil
       drafts.removeValue(forKey: entry.id)
@@ -409,12 +422,13 @@ private struct TextDocumentDraft: Equatable {
   let text: String
   let savedText: String
   let encoding: String.Encoding
+  let knownDocumentFingerprint: DocumentFileFingerprint?
 }
 
 private enum WorkspaceDocumentSurfaceMetrics {
   // Fallback for external writes missed by DispatchSource on network volumes
   // or behind atomic-rename editors.
-  static let externalChangePollInterval: TimeInterval = 0.8
+  static let externalChangePollInterval: Duration = .milliseconds(800)
 }
 
 private struct EmptyDocumentSurface: View {

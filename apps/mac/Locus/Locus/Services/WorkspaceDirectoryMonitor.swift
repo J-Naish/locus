@@ -48,7 +48,7 @@ final class WorkspaceDirectoryMonitor: WorkspaceDirectoryMonitoring {
 
     let source = DispatchSource.makeFileSystemObjectSource(
       fileDescriptor: descriptor,
-      eventMask: [.write, .delete, .rename, .extend],
+      eventMask: [.write, .delete, .rename, .extend, .attrib, .link],
       queue: .main
     )
     source.setEventHandler { [weak self] in

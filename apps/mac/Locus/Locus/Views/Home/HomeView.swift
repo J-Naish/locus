@@ -763,6 +763,7 @@ private struct WorkspaceBrowserView: View {
   @State private var sidebarVisibleEntries: [WorkspaceEntry]
   @State private var isDocumentTextInputFocused = false
   @State private var documentTabs: [WorkspaceDocumentTab] = []
+  @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
   init(
     folderURL: URL,
@@ -807,7 +808,7 @@ private struct WorkspaceBrowserView: View {
   }
 
   var body: some View {
-    NavigationSplitView {
+    NavigationSplitView(columnVisibility: $columnVisibility) {
       WorkspaceSidebarView(
         folderURL: folderURL,
         entries: searchResults.visibleEntries,
