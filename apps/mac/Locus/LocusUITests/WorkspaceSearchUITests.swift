@@ -431,11 +431,11 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(newFileMenuItem.waitForExistence(timeout: 2), app.debugDescription)
     newFileMenuItem.click()
 
-    let nameField = app.textFields["Name"]
+    let nameField = app.textFields["workspace-sidebar-creation-name-field"]
     XCTAssertTrue(nameField.waitForExistence(timeout: 2), app.debugDescription)
     nameField.click()
     app.typeText("Created From Menu.md")
-    app.sheets.firstMatch.buttons["Create"].click()
+    app.typeKey(XCUIKeyboardKey.return, modifierFlags: [])
 
     let createdURL = workspaceURL.appending(path: "Created From Menu.md")
     XCTAssertTrue(
@@ -446,6 +446,106 @@ final class WorkspaceSearchUITests: XCTestCase {
       app.debugDescription
     )
     assertTableRow(named: "Created From Menu.md", isSelectedIn: app)
+  }
+
+  @MainActor
+  func testContextMenuCreationCanBeCancelledWithEscape() throws {
+    let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    let projectBriefRowText = app.staticTexts["Project Brief.md"]
+    XCTAssertTrue(projectBriefRowText.waitForExistence(timeout: 5), app.debugDescription)
+
+    projectBriefRowText.rightClick()
+    let newFileMenuItem = app.menuItems["New File"]
+    XCTAssertTrue(newFileMenuItem.waitForExistence(timeout: 2), app.debugDescription)
+    newFileMenuItem.click()
+
+    let nameField = app.textFields["workspace-sidebar-creation-name-field"]
+    XCTAssertTrue(nameField.waitForExistence(timeout: 2), app.debugDescription)
+    app.typeKey(XCUIKeyboardKey.escape, modifierFlags: [])
+
+    XCTAssertFalse(
+      app.textFields["workspace-sidebar-creation-name-field"].waitForExistence(timeout: 1),
+      app.debugDescription
+    )
+  }
+
+  @MainActor
+  func testContextMenuCreationReportsEmptyNameInline() throws {
+    let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    let projectBriefRowText = app.staticTexts["Project Brief.md"]
+    XCTAssertTrue(projectBriefRowText.waitForExistence(timeout: 5), app.debugDescription)
+
+    projectBriefRowText.rightClick()
+    let newFileMenuItem = app.menuItems["New File"]
+    XCTAssertTrue(newFileMenuItem.waitForExistence(timeout: 2), app.debugDescription)
+    newFileMenuItem.click()
+
+    let nameField = app.textFields["workspace-sidebar-creation-name-field"]
+    XCTAssertTrue(nameField.waitForExistence(timeout: 2), app.debugDescription)
+    nameField.click()
+    app.typeKey(XCUIKeyboardKey.return, modifierFlags: [])
+
+    let errorText = app.staticTexts["workspace-sidebar-creation-error"]
+    XCTAssertTrue(errorText.waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Enter a name."].exists, app.debugDescription)
+  }
+
+  @MainActor
+  func testContextMenuCreationReportsExistingNameInline() throws {
+    let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    let projectBriefRowText = app.staticTexts["Project Brief.md"]
+    XCTAssertTrue(projectBriefRowText.waitForExistence(timeout: 5), app.debugDescription)
+
+    projectBriefRowText.rightClick()
+    let newFileMenuItem = app.menuItems["New File"]
+    XCTAssertTrue(newFileMenuItem.waitForExistence(timeout: 2), app.debugDescription)
+    newFileMenuItem.click()
+
+    let nameField = app.textFields["workspace-sidebar-creation-name-field"]
+    XCTAssertTrue(nameField.waitForExistence(timeout: 2), app.debugDescription)
+    nameField.click()
+    app.typeText("Project Brief.md")
+    app.typeKey(XCUIKeyboardKey.return, modifierFlags: [])
+
+    let errorText = app.staticTexts["workspace-sidebar-creation-error"]
+    XCTAssertTrue(errorText.waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["'Project Brief.md' already exists."].exists, app.debugDescription)
+  }
+
+  @MainActor
+  func testContextMenuCreatesNewFileInSelectedFolder() throws {
+    let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    let reportsRowText = app.staticTexts["Reports"]
+    XCTAssertTrue(reportsRowText.waitForExistence(timeout: 5), app.debugDescription)
+
+    reportsRowText.rightClick()
+    let newFileMenuItem = app.menuItems["New File"]
+    XCTAssertTrue(newFileMenuItem.waitForExistence(timeout: 2), app.debugDescription)
+    newFileMenuItem.click()
+
+    let nameField = app.textFields["workspace-sidebar-creation-name-field"]
+    XCTAssertTrue(nameField.waitForExistence(timeout: 2), app.debugDescription)
+    nameField.click()
+    app.typeText("Nested Created.md")
+    app.typeKey(XCUIKeyboardKey.return, modifierFlags: [])
+
+    let createdURL = workspaceURL.appending(path: "Reports/Nested Created.md")
+    XCTAssertTrue(
+      FileManager.default.fileExists(atPath: createdURL.path(percentEncoded: false))
+    )
+    XCTAssertTrue(
+      app.staticTexts["Nested Created.md"].waitForExistence(timeout: 5),
+      app.debugDescription
+    )
   }
 
   @MainActor

@@ -563,10 +563,17 @@ struct HomeView: View {
   @MainActor
   private func createWorkspaceItem(
     _ kind: WorkspaceItemCreationKind,
-    named name: String
+    named name: String,
+    in targetFolderURL: URL
   ) async throws -> URL {
     guard let folderURL = workspaceState.folderURL else {
       assertionFailure("createWorkspaceItem invoked without an active workspace")
+      throw WorkspaceItemCreationError.noActiveWorkspace
+    }
+
+    guard targetFolderURL.locusStandardizedPath.locusHasPathPrefix(folderURL.locusStandardizedPath)
+    else {
+      assertionFailure("createWorkspaceItem invoked outside the active workspace")
       throw WorkspaceItemCreationError.noActiveWorkspace
     }
 
@@ -577,14 +584,17 @@ struct HomeView: View {
       }
     }
 
-    let createdURL = try WorkspaceItemCreation.create(kind, named: name, in: folderURL)
-    startWorkspaceLoad(
-      WorkspaceLoadRequest(
-        folderURL: folderURL,
-        showsLoading: false,
-        selectedURL: createdURL
+    let createdURL = try WorkspaceItemCreation.create(kind, named: name, in: targetFolderURL)
+    if targetFolderURL.locusStandardizedPath == folderURL.locusStandardizedPath {
+      startWorkspaceLoad(
+        WorkspaceLoadRequest(
+          folderURL: folderURL,
+          showsLoading: false,
+          selectedURL: createdURL
+        )
       )
-    )
+    }
+
     return createdURL
   }
 
@@ -756,7 +766,7 @@ private struct WorkspaceActions {
   let goForward: () -> Void
   let retryCurrentFolder: () -> Void
   let copyPaths: ([WorkspaceEntry]) -> Void
-  let createItem: (WorkspaceItemCreationKind, String) async throws -> URL
+  let createItem: (WorkspaceItemCreationKind, String, URL) async throws -> URL
   let loadFolderChildren: (URL) async throws -> WorkspaceSnapshot
   let performOpenAction: (WorkspaceEntryOpenAction) -> Void
 }
@@ -794,9 +804,6 @@ private struct WorkspaceBrowserView: View {
   @State private var isDocumentTextInputFocused = false
   @State private var documentTabs: [WorkspaceDocumentTab] = []
   @State private var columnVisibility: NavigationSplitViewVisibility = .all
-  @State private var creationAlert: WorkspaceCreationAlert?
-  @State private var creationName = ""
-  @State private var creationTask: Task<Void, Never>?
 
   init(
     folderURL: URL,
@@ -849,7 +856,6 @@ private struct WorkspaceBrowserView: View {
         selectedEntryID: $selectedEntryID,
         shortcutActions: shortcutActions,
         actions: sidebarActions,
-        requestCreation: beginCreation,
         onVisibleEntriesChange: updateSidebarVisibleEntries
       )
       .navigationSplitViewColumnWidth(
@@ -877,34 +883,9 @@ private struct WorkspaceBrowserView: View {
       searchQuery = ""
       isDocumentTextInputFocused = false
       documentTabs.removeAll()
-      cancelCreationTask()
-      resetCreationDialog()
       refreshSearchResults()
     }
-    .onDisappear {
-      cancelCreationTask()
-    }
     .focusedSceneValue(\.workspaceNavigationCommands, workspaceNavigationCommands)
-    .alert(creationAlertTitle, isPresented: isCreationAlertPresented) {
-      if isShowingCreationDialog {
-        TextField("Name", text: $creationName)
-
-        Button("Create") {
-          createPendingItem()
-        }
-        .disabled(!canSubmitCreationName)
-
-        Button("Cancel", role: .cancel) {
-          resetCreationDialog()
-        }
-      } else {
-        Button("OK", role: .cancel) {
-          creationAlert = nil
-        }
-      }
-    } message: {
-      Text(creationAlertMessage)
-    }
   }
 
   private func refreshSearchResults() {
@@ -969,100 +950,6 @@ private struct WorkspaceBrowserView: View {
       loadFolderChildren: actions.loadFolderChildren,
       performOpenAction: performWorkspaceOpenAction
     )
-  }
-
-  private var isCreationAlertPresented: Binding<Bool> {
-    Binding(
-      get: {
-        creationAlert != nil
-      },
-      set: { isPresented in
-        if !isPresented {
-          creationAlert = nil
-          creationName = ""
-        }
-      }
-    )
-  }
-
-  private var isShowingCreationDialog: Bool {
-    if case .naming = creationAlert {
-      return true
-    }
-
-    return false
-  }
-
-  private var canSubmitCreationName: Bool {
-    !creationName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-  }
-
-  private var creationAlertTitle: String {
-    switch creationAlert {
-    case .naming(.file):
-      return "New File"
-    case .naming(.folder):
-      return "New Folder"
-    case .error:
-      return "Couldn't Create Item"
-    case nil:
-      return "New Item"
-    }
-  }
-
-  private var creationAlertMessage: String {
-    switch creationAlert {
-    case .naming(.file):
-      return "Create the new file in \(folderURL.lastPathComponent). Use a single name."
-    case .naming(.folder):
-      return "Create the new folder in \(folderURL.lastPathComponent). Use a single name."
-    case .error(let message):
-      return message
-    case nil:
-      return ""
-    }
-  }
-
-  private func beginCreation(_ kind: WorkspaceItemCreationKind) {
-    cancelCreationTask()
-    creationAlert = .naming(kind)
-    creationName = ""
-  }
-
-  private func createPendingItem() {
-    guard case .naming(let kind) = creationAlert else {
-      return
-    }
-
-    cancelCreationTask()
-    let name = creationName
-    creationTask = Task { @MainActor in
-      defer {
-        creationTask = nil
-      }
-
-      do {
-        _ = try await actions.createItem(kind, name)
-        resetCreationDialog()
-      } catch {
-        guard !Task.isCancelled else {
-          return
-        }
-
-        resetCreationDialog()
-        creationAlert = .error(error.localizedDescription)
-      }
-    }
-  }
-
-  private func resetCreationDialog() {
-    creationAlert = nil
-    creationName = ""
-  }
-
-  private func cancelCreationTask() {
-    creationTask?.cancel()
-    creationTask = nil
   }
 
   private var selectedEntry: WorkspaceEntry? {
@@ -1352,11 +1239,6 @@ private enum WorkspaceDocumentTabMetrics {
   static let closeButtonSize: CGFloat = 24
 }
 
-private enum WorkspaceCreationAlert: Equatable {
-  case naming(WorkspaceItemCreationKind)
-  case error(String)
-}
-
 /// Search-backed browser content kept while the prototype hides search chrome.
 /// With an empty query this is just the folder entries; when search returns it
 /// also carries matching recent shortcuts without reworking selection logic.
@@ -1405,7 +1287,6 @@ private struct WorkspaceSidebarView: View {
   @Binding var selectedEntryID: WorkspaceEntry.ID?
   let shortcutActions: FileLocationShortcutActions
   let actions: WorkspaceActions
-  let requestCreation: (WorkspaceItemCreationKind) -> Void
   let onVisibleEntriesChange: ([WorkspaceEntry]) -> Void
   @State private var expandedFolderIDs: Set<WorkspaceEntry.ID> = []
   @State private var childStates: [WorkspaceEntry.ID: WorkspaceSidebarChildState] = [:]
@@ -1414,6 +1295,12 @@ private struct WorkspaceSidebarView: View {
   @State private var expansionGeneration: UInt64 = 0
   @State private var isRootExpanded = true
   @State private var visibleRows: [WorkspaceSidebarRow] = []
+  @State private var creationKind: WorkspaceItemCreationKind?
+  @State private var creationParent: WorkspaceEntry?
+  @State private var creationName = ""
+  @State private var creationErrorMessage: String?
+  @State private var isCreatingItem = false
+  @State private var creationTask: Task<Void, Never>?
   @AppStorage(LocusPersistedDefaults.recentFoldersExpanded)
   private var isRecentFoldersExpanded = false
 
@@ -1424,7 +1311,6 @@ private struct WorkspaceSidebarView: View {
     selectedEntryID: Binding<WorkspaceEntry.ID?>,
     shortcutActions: FileLocationShortcutActions,
     actions: WorkspaceActions,
-    requestCreation: @escaping (WorkspaceItemCreationKind) -> Void,
     onVisibleEntriesChange: @escaping ([WorkspaceEntry]) -> Void
   ) {
     self.folderURL = folderURL
@@ -1434,7 +1320,6 @@ private struct WorkspaceSidebarView: View {
     self._selectedEntryID = selectedEntryID
     self.shortcutActions = shortcutActions
     self.actions = actions
-    self.requestCreation = requestCreation
     self.onVisibleEntriesChange = onVisibleEntriesChange
   }
 
@@ -1453,6 +1338,17 @@ private struct WorkspaceSidebarView: View {
               }
             )
             .tag(entry.id)
+          case .creation(let kind):
+            WorkspaceSidebarCreationRow(
+              kind: kind,
+              name: $creationName,
+              errorMessage: creationErrorMessage,
+              isCreating: isCreatingItem,
+              submit: createPendingItem,
+              cancel: cancelCreation,
+              focusLost: cancelCreation
+            )
+            .padding(.leading, CGFloat(row.depth) * WorkspaceSidebarMetrics.depthIndent)
           case .status(let status):
             WorkspaceSidebarStatusRow(status: status, depth: row.depth)
           }
@@ -1462,15 +1358,16 @@ private struct WorkspaceSidebarView: View {
       .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
         let selectedEntries = entries(for: selection)
         let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
+        let creationParent = creationParent(for: selectedEntries)
 
         Button {
-          requestCreation(.file)
+          beginCreation(.file, in: creationParent)
         } label: {
           Label("New File", systemImage: "doc")
         }
 
         Button {
-          requestCreation(.folder)
+          beginCreation(.folder, in: creationParent)
         } label: {
           Label("New Folder", systemImage: "folder")
         }
@@ -1512,12 +1409,14 @@ private struct WorkspaceSidebarView: View {
       publishVisibleEntries()
     }
     .onDisappear {
+      cancelCreationTask()
       cancelAllChildLoads()
     }
     .onChange(of: entries) {
       pruneExpansion(for: entries)
     }
     .onChange(of: folderURL) {
+      cancelCreation()
       resetExpansion()
     }
   }
@@ -1525,6 +1424,9 @@ private struct WorkspaceSidebarView: View {
   private func currentRows() -> [WorkspaceSidebarRow] {
     var result = [WorkspaceSidebarRow(entry: rootEntry, depth: 0)]
     if isRootExpanded {
+      if let creationKind, creationParent?.id == rootEntry.id {
+        result.append(.creation(creationKind, depth: 1))
+      }
       result.append(contentsOf: rows(for: entries, depth: 1))
     }
     return result
@@ -1555,6 +1457,16 @@ private struct WorkspaceSidebarView: View {
     visibleRows.compactMap(\.entry).filter { selection.contains($0.id) }
   }
 
+  private func creationParent(for selectedEntries: [WorkspaceEntry]) -> WorkspaceEntry {
+    guard selectedEntries.count == 1, let selectedEntry = selectedEntries.first,
+      selectedEntry.kind == .directory
+    else {
+      return rootEntry
+    }
+
+    return selectedEntry
+  }
+
   private func isExpanded(_ entry: WorkspaceEntry) -> Bool {
     entry.id == rootEntry.id ? isRootExpanded : expandedFolderIDs.contains(entry.id)
   }
@@ -1565,6 +1477,10 @@ private struct WorkspaceSidebarView: View {
 
       guard entry.kind == .directory, expandedFolderIDs.contains(entry.id) else {
         return result
+      }
+
+      if let creationKind, creationParent?.id == entry.id {
+        result.append(.creation(creationKind, depth: depth + 1))
       }
 
       switch childStates[entry.id] {
@@ -1765,6 +1681,82 @@ private struct WorkspaceSidebarView: View {
     visibleRows = currentRows()
     onVisibleEntriesChange(visibleEntries())
   }
+
+  private func beginCreation(_ kind: WorkspaceItemCreationKind, in parent: WorkspaceEntry) {
+    cancelCreationTask()
+    if parent.id == rootEntry.id {
+      isRootExpanded = true
+    } else {
+      expandedFolderIDs.insert(parent.id)
+    }
+
+    creationKind = kind
+    creationParent = parent
+    creationName = ""
+    creationErrorMessage = nil
+    isCreatingItem = false
+    selectedEntryID = nil
+    publishVisibleEntries()
+  }
+
+  private func createPendingItem() {
+    guard let creationKind, let creationParent, !isCreatingItem else {
+      return
+    }
+
+    cancelCreationTask()
+    creationErrorMessage = nil
+    isCreatingItem = true
+    let name = creationName
+    creationTask = Task { @MainActor in
+      defer {
+        creationTask = nil
+        isCreatingItem = false
+      }
+
+      do {
+        _ = try await actions.createItem(creationKind, name, creationParent.url)
+        refreshCreationParentIfNeeded(creationParent)
+        clearCreationState()
+      } catch {
+        guard !Task.isCancelled else {
+          return
+        }
+
+        creationErrorMessage = error.localizedDescription
+      }
+    }
+  }
+
+  private func cancelCreation() {
+    cancelCreationTask()
+    clearCreationState()
+  }
+
+  private func clearCreationState() {
+    creationKind = nil
+    creationParent = nil
+    creationName = ""
+    creationErrorMessage = nil
+    isCreatingItem = false
+    publishVisibleEntries()
+  }
+
+  private func refreshCreationParentIfNeeded(_ parent: WorkspaceEntry) {
+    guard parent.id != rootEntry.id else {
+      return
+    }
+
+    cancelChildLoad(for: parent.id)
+    childStates[parent.id] = nil
+    expandedFolderIDs.insert(parent.id)
+    loadChildrenIfNeeded(for: parent)
+  }
+
+  private func cancelCreationTask() {
+    creationTask?.cancel()
+    creationTask = nil
+  }
 }
 
 private struct WorkspaceSidebarRecentFoldersSection: View {
@@ -1916,6 +1908,7 @@ private enum WorkspaceSidebarAccessibility {
 private struct WorkspaceSidebarRow: Identifiable, Equatable {
   enum Content: Equatable {
     case entry(WorkspaceEntry)
+    case creation(WorkspaceItemCreationKind)
     case status(WorkspaceSidebarStatus)
   }
 
@@ -1926,6 +1919,8 @@ private struct WorkspaceSidebarRow: Identifiable, Equatable {
     switch content {
     case .entry(let entry):
       entry.id
+    case .creation(let kind):
+      "workspace-sidebar-creation-\(kind.idComponent)"
     case .status(let status):
       status.id
     }
@@ -1948,9 +1943,36 @@ private struct WorkspaceSidebarRow: Identifiable, Equatable {
     WorkspaceSidebarRow(content: .status(status), depth: depth)
   }
 
+  static func creation(
+    _ kind: WorkspaceItemCreationKind,
+    depth: Int
+  ) -> WorkspaceSidebarRow {
+    WorkspaceSidebarRow(content: .creation(kind), depth: depth)
+  }
+
   private init(content: Content, depth: Int) {
     self.content = content
     self.depth = depth
+  }
+}
+
+extension WorkspaceItemCreationKind {
+  fileprivate var idComponent: String {
+    switch self {
+    case .file:
+      return "file"
+    case .folder:
+      return "folder"
+    }
+  }
+
+  fileprivate var sidebarSymbolName: String {
+    switch self {
+    case .file:
+      return "doc"
+    case .folder:
+      return "folder"
+    }
   }
 }
 
@@ -1994,6 +2016,75 @@ private struct WorkspaceSidebarStatus: Equatable {
       systemImage: "exclamationmark.triangle",
       isError: true
     )
+  }
+}
+
+private struct WorkspaceSidebarCreationRow: View {
+  let kind: WorkspaceItemCreationKind
+  @Binding var name: String
+  let errorMessage: String?
+  let isCreating: Bool
+  let submit: () -> Void
+  let cancel: () -> Void
+  let focusLost: () -> Void
+  @FocusState private var isFocused: Bool
+
+  var body: some View {
+    HStack(alignment: .top, spacing: 6) {
+      Color.clear
+        .frame(width: WorkspaceSidebarMetrics.chevronColumnWidth)
+        .accessibilityHidden(true)
+
+      Image(systemName: kind.sidebarSymbolName)
+        .foregroundStyle(kind == .folder ? .blue : .secondary)
+        .padding(.top, 3)
+        .accessibilityHidden(true)
+
+      VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 6) {
+          TextField("Name", text: $name)
+            .textFieldStyle(.roundedBorder)
+            .focused($isFocused)
+            .disabled(isCreating)
+            .onSubmit(submit)
+            .onExitCommand(perform: cancel)
+            .accessibilityIdentifier("workspace-sidebar-creation-name-field")
+
+          if isCreating {
+            ProgressView()
+              .controlSize(.small)
+              .accessibilityLabel(Text("Creating"))
+          }
+        }
+        .overlay {
+          if errorMessage != nil {
+            RoundedRectangle(cornerRadius: 5)
+              .stroke(Color.red.opacity(0.7), lineWidth: 1)
+          }
+        }
+
+        if let errorMessage {
+          Text(errorMessage)
+            .font(.caption2)
+            .foregroundStyle(.red)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("workspace-sidebar-creation-error")
+        }
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .task {
+      isFocused = true
+    }
+    .onChange(of: isFocused) { _, isFocused in
+      guard !isFocused, !isCreating else {
+        return
+      }
+
+      focusLost()
+    }
   }
 }
 
