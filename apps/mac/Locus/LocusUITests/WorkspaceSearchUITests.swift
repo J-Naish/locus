@@ -562,6 +562,27 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testClickingEmptySidebarAreaClearsSelectionWithoutClosingDocument() throws {
+    let workspacePath = try fixtureWorkspacePath("basic")
+    let app = try launchApp(workspacePath: workspacePath)
+
+    let projectBriefRowText = app.staticTexts["Project Brief.md"]
+    XCTAssertTrue(projectBriefRowText.waitForExistence(timeout: 5), app.debugDescription)
+    projectBriefRowText.doubleClick()
+
+    XCTAssertTrue(
+      app.textViews["document-text-editor"].waitForExistence(timeout: 5), app.debugDescription)
+    assertTableRow(named: "Project Brief.md", isSelectedIn: app)
+
+    let sidebarList = workspaceSidebarList(in: app)
+    XCTAssertTrue(sidebarList.waitForExistence(timeout: 2), app.debugDescription)
+    emptyAreaCoordinate(in: sidebarList, app: app).click()
+
+    assertTableRow(named: "Project Brief.md", isNotSelectedIn: app)
+    XCTAssertTrue(app.textViews["document-text-editor"].exists, app.debugDescription)
+  }
+
+  @MainActor
   func testDocumentTabsTrackOpenedFilesAndCloseBackToAnotherTab() throws {
     let workspacePath = try fixtureWorkspacePath("basic")
     let app = try launchApp(workspacePath: workspacePath)
@@ -1095,6 +1116,54 @@ final class WorkspaceSearchUITests: XCTestCase {
       .firstMatch
   }
 
+  @MainActor
+  private func emptyAreaCoordinate(
+    in sidebarList: XCUIElement,
+    app: XCUIApplication,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) -> XCUICoordinate {
+    let sidebarFrame = sidebarList.frame
+    let visibleRowFrames = sidebarList.cells.allElementsBoundByIndex
+      .filter { $0.exists && $0.frame.intersects(sidebarFrame) }
+      .map(\.frame)
+
+    let lastRowMaxY = visibleRowFrames.map(\.maxY).max() ?? sidebarFrame.minY
+    XCTAssertLessThan(
+      lastRowMaxY + 8,
+      sidebarFrame.maxY,
+      "The fixture no longer leaves clickable empty sidebar space.",
+      file: file,
+      line: line
+    )
+
+    let point = CGPoint(
+      x: sidebarFrame.midX,
+      y: min((lastRowMaxY + sidebarFrame.maxY) / 2, sidebarFrame.maxY - 4)
+    )
+    return sidebarList.coordinate(
+      withNormalizedOffset: CGVector(
+        dx: (point.x - sidebarFrame.minX) / sidebarFrame.width,
+        dy: (point.y - sidebarFrame.minY) / sidebarFrame.height
+      )
+    )
+  }
+
+  @MainActor
+  private func workspaceSidebarList(in app: XCUIApplication) -> XCUIElement {
+    let outline = app.outlines["workspace-sidebar-list"].firstMatch
+    if outline.exists {
+      return outline
+    }
+
+    let table = app.tables["workspace-sidebar-list"].firstMatch
+    if table.exists {
+      return table
+    }
+
+    return app.scrollViews["workspace-sidebar-list"].firstMatch
+  }
+
   private func stableHash(for value: String) -> String {
     var hash: UInt64 = 0xcbf2_9ce4_8422_2325
     for byte in value.utf8 {
@@ -1117,6 +1186,21 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(
       nameCell.waitForExistence(timeout: 2), app.debugDescription, file: file, line: line)
     XCTAssertTrue(nameCell.isSelected, app.debugDescription, file: file, line: line)
+  }
+
+  @MainActor
+  private func assertTableRow(
+    named name: String,
+    isNotSelectedIn app: XCUIApplication,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) {
+    let nameCell = app.cells
+      .containing(NSPredicate(format: "value == %@", name))
+      .firstMatch
+    XCTAssertTrue(
+      nameCell.waitForExistence(timeout: 2), app.debugDescription, file: file, line: line)
+    XCTAssertFalse(nameCell.isSelected, app.debugDescription, file: file, line: line)
   }
 
   private func waitForFileContents(

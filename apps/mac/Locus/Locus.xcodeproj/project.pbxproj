@@ -35,6 +35,8 @@
 		1A00000100000000000000C8 /* WorkspaceDocumentTabs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000C9 /* WorkspaceDocumentTabs.swift */; };
 		1A00000100000000000000CA /* WorkspaceEntryPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000CB /* WorkspaceEntryPresentation.swift */; };
 		1A00000100000000000000CC /* WorkspaceSidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000CD /* WorkspaceSidebarView.swift */; };
+		1A00000100000000000000CE /* WorkspaceSidebarSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000CF /* WorkspaceSidebarSelection.swift */; };
+		1A00000100000000000000D0 /* WorkspaceSidebarSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000D1 /* WorkspaceSidebarSelectionTests.swift */; };
 		1A00000100000000000000BE /* TextDocumentSyntaxHighlighter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */; };
 		1A0000010000000000000096 /* TextDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000097 /* TextDocumentStore.swift */; };
 		1A000001000000000000009C /* TextDocumentStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000009D /* TextDocumentStoreTests.swift */; };
@@ -113,6 +115,8 @@
 		1A00000100000000000000C9 /* WorkspaceDocumentTabs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDocumentTabs.swift; sourceTree = "<group>"; };
 		1A00000100000000000000CB /* WorkspaceEntryPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryPresentation.swift; sourceTree = "<group>"; };
 		1A00000100000000000000CD /* WorkspaceSidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSidebarView.swift; sourceTree = "<group>"; };
+		1A00000100000000000000CF /* WorkspaceSidebarSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSidebarSelection.swift; sourceTree = "<group>"; };
+		1A00000100000000000000D1 /* WorkspaceSidebarSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSidebarSelectionTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentSyntaxHighlighter.swift; sourceTree = "<group>"; };
 		1A0000010000000000000097 /* TextDocumentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentStore.swift; sourceTree = "<group>"; };
 		1A000001000000000000009D /* TextDocumentStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentStoreTests.swift; sourceTree = "<group>"; };
@@ -207,6 +211,7 @@
 				1A00000100000000000000A7 /* WorkspaceDocumentSurfaceSupportTests.swift */,
 				1A00000100000000000000AF /* WorkspaceHomeVisibilityTests.swift */,
 				1A000001000000000000006B /* WorkspaceNavigationTests.swift */,
+				1A00000100000000000000D1 /* WorkspaceSidebarSelectionTests.swift */,
 				1A000001000000000000009F /* WorkspaceTextDocumentSupportTests.swift */,
 				1A0000010000000000000048 /* WorkspaceEntrySearchTests.swift */,
 			);
@@ -291,6 +296,7 @@
 				1A0000010000000000000065 /* WorkspaceEntryOpenAction.swift */,
 				1A000001000000000000006F /* WorkspaceEntryPathCopy.swift */,
 				1A00000100000000000000C5 /* WorkspaceItemCreation.swift */,
+				1A00000100000000000000CF /* WorkspaceSidebarSelection.swift */,
 				1A00000100000000000000CD /* WorkspaceSidebarView.swift */,
 				1A00000100000000000000A5 /* WorkspaceDocumentSurfaceSupport.swift */,
 				1A00000100000000000000AD /* WorkspaceHomeVisibility.swift */,
@@ -481,6 +487,7 @@
 				1A00000100000000000000C4 /* WorkspaceItemCreation.swift in Sources */,
 				1A00000100000000000000C8 /* WorkspaceDocumentTabs.swift in Sources */,
 				1A00000100000000000000CA /* WorkspaceEntryPresentation.swift in Sources */,
+				1A00000100000000000000CE /* WorkspaceSidebarSelection.swift in Sources */,
 				1A00000100000000000000CC /* WorkspaceSidebarView.swift in Sources */,
 				1A00000100000000000000A4 /* WorkspaceDocumentSurfaceSupport.swift in Sources */,
 				1A00000100000000000000AC /* WorkspaceHomeVisibility.swift in Sources */,
@@ -512,6 +519,7 @@
 				1A00000100000000000000A6 /* WorkspaceDocumentSurfaceSupportTests.swift in Sources */,
 				1A00000100000000000000AE /* WorkspaceHomeVisibilityTests.swift in Sources */,
 				1A000001000000000000006A /* WorkspaceNavigationTests.swift in Sources */,
+				1A00000100000000000000D0 /* WorkspaceSidebarSelectionTests.swift in Sources */,
 				1A0000010000000000000047 /* WorkspaceEntrySearchTests.swift in Sources */,
 				1A000001000000000000009E /* WorkspaceTextDocumentSupportTests.swift in Sources */,
 			);

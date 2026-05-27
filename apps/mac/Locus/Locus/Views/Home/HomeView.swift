@@ -800,6 +800,7 @@ private struct WorkspaceBrowserView: View {
   @State private var searchQuery = ""
   @State private var searchResults: WorkspaceBrowserSearchResults
   @State private var sidebarVisibleEntries: [WorkspaceEntry]
+  @State private var sidebarSelectionState: WorkspaceSidebarSelectionState
   @State private var isDocumentTextInputFocused = false
   @State private var documentTabs: [WorkspaceDocumentTab] = []
   @State private var columnVisibility: NavigationSplitViewVisibility = .all
@@ -844,6 +845,14 @@ private struct WorkspaceBrowserView: View {
     )
     self._sidebarVisibleEntries = State(
       initialValue: [WorkspaceEntry.workspaceRoot(at: folderURL)] + snapshot.entries)
+    let initialVisibleEntryIDs =
+      ([WorkspaceEntry.workspaceRoot(at: folderURL)] + snapshot.entries).map(\.id)
+    self._sidebarSelectionState = State(
+      initialValue: WorkspaceSidebarSelectionState(
+        activeEntryID: selectedEntryID.wrappedValue,
+        visibleEntryIDs: Set(initialVisibleEntryIDs)
+      )
+    )
   }
 
   var body: some View {
@@ -852,7 +861,7 @@ private struct WorkspaceBrowserView: View {
         folderURL: folderURL,
         entries: searchResults.visibleEntries,
         recentFolders: recentFolders,
-        selectedEntryID: $selectedEntryID,
+        highlightedEntryID: sidebarHighlight,
         shortcutActions: shortcutActions,
         actions: sidebarActions,
         onVisibleEntriesChange: updateSidebarVisibleEntries
@@ -881,8 +890,12 @@ private struct WorkspaceBrowserView: View {
     .onChange(of: folderURL) {
       searchQuery = ""
       isDocumentTextInputFocused = false
+      sidebarSelectionState.reset()
       documentTabs.removeAll()
       refreshSearchResults()
+    }
+    .onChange(of: selectedEntryID) { _, newSelection in
+      sidebarSelectionState.setActiveEntryID(newSelection)
     }
     .focusedSceneValue(\.workspaceNavigationCommands, workspaceNavigationCommands)
   }
@@ -951,6 +964,24 @@ private struct WorkspaceBrowserView: View {
     )
   }
 
+  private var sidebarHighlight: Binding<WorkspaceEntry.ID?> {
+    // The sidebar highlight is visual focus, while selectedEntryID is the
+    // active document/folder. Empty sidebar clicks clear only the highlight.
+    Binding(
+      get: {
+        sidebarSelectionState.highlightedEntryID
+      },
+      set: { newHighlight in
+        if let newHighlight {
+          sidebarSelectionState.selectSidebarEntry(newHighlight)
+          selectedEntryID = newHighlight
+        } else {
+          sidebarSelectionState.clearHighlightForEmptyAreaClick()
+        }
+      }
+    )
+  }
+
   private var selectedEntry: WorkspaceEntry? {
     guard let selectedEntryID else {
       return nil
@@ -984,6 +1015,7 @@ private struct WorkspaceBrowserView: View {
 
   private func selectDocumentTab(_ tab: WorkspaceDocumentTab) {
     selectedEntryID = tab.id
+    sidebarSelectionState.setActiveEntryID(tab.id)
   }
 
   private func closeDocumentTab(_ tab: WorkspaceDocumentTab) {
@@ -1015,6 +1047,7 @@ private struct WorkspaceBrowserView: View {
 
   private func updateSidebarVisibleEntries(_ entries: [WorkspaceEntry]) {
     sidebarVisibleEntries = entries
+    sidebarSelectionState.setVisibleEntryIDs(Set(entries.map(\.id)))
 
     guard let selectedEntryID,
       !entries.contains(where: { $0.id == selectedEntryID }),

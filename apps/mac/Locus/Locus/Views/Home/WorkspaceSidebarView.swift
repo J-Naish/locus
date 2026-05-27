@@ -5,7 +5,7 @@ struct WorkspaceSidebarView: View {
   let entries: [WorkspaceEntry]
   let recentFolders: [RecentFolder]
   private let rootEntry: WorkspaceEntry
-  @Binding var selectedEntryID: WorkspaceEntry.ID?
+  @Binding var highlightedEntryID: WorkspaceEntry.ID?
   let shortcutActions: FileLocationShortcutActions
   let actions: WorkspaceActions
   let onVisibleEntriesChange: ([WorkspaceEntry]) -> Void
@@ -29,7 +29,7 @@ struct WorkspaceSidebarView: View {
     folderURL: URL,
     entries: [WorkspaceEntry],
     recentFolders: [RecentFolder],
-    selectedEntryID: Binding<WorkspaceEntry.ID?>,
+    highlightedEntryID: Binding<WorkspaceEntry.ID?>,
     shortcutActions: FileLocationShortcutActions,
     actions: WorkspaceActions,
     onVisibleEntriesChange: @escaping ([WorkspaceEntry]) -> Void
@@ -38,7 +38,7 @@ struct WorkspaceSidebarView: View {
     self.entries = entries
     self.recentFolders = recentFolders
     self.rootEntry = WorkspaceEntry.workspaceRoot(at: folderURL)
-    self._selectedEntryID = selectedEntryID
+    self._highlightedEntryID = highlightedEntryID
     self.shortcutActions = shortcutActions
     self.actions = actions
     self.onVisibleEntriesChange = onVisibleEntriesChange
@@ -46,7 +46,7 @@ struct WorkspaceSidebarView: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      List(selection: $selectedEntryID) {
+      List(selection: $highlightedEntryID) {
         ForEach(visibleRows) { row in
           switch row.content {
           case .entry(let entry):
@@ -102,6 +102,12 @@ struct WorkspaceSidebarView: View {
         // Keep row double-click, Return, and VoiceOver default actions on the
         // native List path; folder expansion belongs to the disclosure Button.
         performPrimaryAction(for: selection)
+      }
+      .accessibilityIdentifier("workspace-sidebar-list")
+      .overlay {
+        WorkspaceSidebarEmptyAreaSelectionClearer {
+          highlightedEntryID = nil
+        }
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -408,7 +414,7 @@ struct WorkspaceSidebarView: View {
     creationName = ""
     creationErrorMessage = nil
     isCreatingItem = false
-    selectedEntryID = nil
+    highlightedEntryID = nil
     publishVisibleEntries()
   }
 
@@ -581,6 +587,164 @@ private struct WorkspaceSidebarRecentFolderRow: View {
     .accessibilityLabel(Text("Open \(folder.displayName)"))
     .accessibilityIdentifier("workspace-sidebar-recent-folder-row")
     .help(Text(verbatim: folder.path))
+  }
+}
+
+private struct WorkspaceSidebarEmptyAreaSelectionClearer: NSViewRepresentable {
+  let clearSelection: () -> Void
+
+  func makeNSView(context: Context) -> WorkspaceSidebarEmptyAreaSelectionClearerView {
+    let view = WorkspaceSidebarEmptyAreaSelectionClearerView()
+    view.clearSelection = clearSelection
+    return view
+  }
+
+  func updateNSView(
+    _ nsView: WorkspaceSidebarEmptyAreaSelectionClearerView,
+    context: Context
+  ) {
+    nsView.clearSelection = clearSelection
+    nsView.resolveTableViewSoon()
+  }
+
+  static func dismantleNSView(
+    _ nsView: WorkspaceSidebarEmptyAreaSelectionClearerView,
+    coordinator: ()
+  ) {
+    nsView.invalidate()
+  }
+}
+
+private final class WorkspaceSidebarEmptyAreaSelectionClearerView: NSView {
+  var clearSelection: () -> Void = {}
+  private weak var tableView: NSTableView?
+  private var eventMonitor: Any?
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+
+    if window == nil {
+      removeEventMonitor()
+    } else {
+      installEventMonitorIfNeeded()
+      resolveTableViewSoon()
+    }
+  }
+
+  override func viewDidMoveToSuperview() {
+    super.viewDidMoveToSuperview()
+    resolveTableViewSoon()
+  }
+
+  override func hitTest(_ point: NSPoint) -> NSView? {
+    nil
+  }
+
+  func invalidate() {
+    removeEventMonitor()
+    tableView = nil
+  }
+
+  func resolveTableViewSoon() {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else {
+        return
+      }
+
+      tableView = findSidebarTableView()
+    }
+  }
+
+  private func installEventMonitorIfNeeded() {
+    guard eventMonitor == nil else {
+      return
+    }
+
+    eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) {
+      [weak self] event in
+      self?.clearSelectionIfClickIsInEmptyListArea(event)
+      return event
+    }
+  }
+
+  private func removeEventMonitor() {
+    guard let eventMonitor else {
+      return
+    }
+
+    NSEvent.removeMonitor(eventMonitor)
+    self.eventMonitor = nil
+  }
+
+  private func clearSelectionIfClickIsInEmptyListArea(_ event: NSEvent) {
+    guard let window, event.window === window else {
+      return
+    }
+
+    let pointInSelf = convert(event.locationInWindow, from: nil)
+    guard bounds.contains(pointInSelf) else {
+      return
+    }
+
+    guard let tableView = tableView ?? findSidebarTableView() else {
+      return
+    }
+
+    self.tableView = tableView
+    let pointInTable = tableView.convert(event.locationInWindow, from: nil)
+    if tableView.bounds.contains(pointInTable), tableView.row(at: pointInTable) != -1 {
+      return
+    }
+
+    clearSelection()
+  }
+
+  private func findSidebarTableView() -> NSTableView? {
+    guard let window, let contentView = window.contentView else {
+      return nil
+    }
+
+    let markerFrame = convert(bounds, to: nil)
+    return contentView.descendantTableViews()
+      .filter { tableView in
+        guard tableView.window === window else {
+          return false
+        }
+
+        let tableFrame =
+          tableView.enclosingScrollView?.convert(
+            tableView.enclosingScrollView?.bounds ?? tableView.bounds,
+            to: nil
+          ) ?? tableView.convert(tableView.bounds, to: nil)
+
+        return tableFrame.intersects(markerFrame)
+      }
+      .min { lhs, rhs in
+        lhs.convert(lhs.bounds, to: nil).area < rhs.convert(rhs.bounds, to: nil).area
+      }
+  }
+}
+
+extension NSView {
+  fileprivate func descendantTableViews() -> [NSTableView] {
+    var result: [NSTableView] = []
+    var stack = subviews
+
+    while let view = stack.popLast() {
+      if let tableView = view as? NSTableView {
+        result.append(tableView)
+      }
+
+      stack.append(contentsOf: view.subviews)
+    }
+
+    return result
+  }
+}
+
+extension NSRect {
+  fileprivate var area: CGFloat {
+    width * height
   }
 }
 
