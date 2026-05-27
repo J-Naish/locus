@@ -802,7 +802,6 @@ private struct WorkspaceBrowserView: View {
   @State private var sidebarVisibleEntries: [WorkspaceEntry]
   @State private var sidebarSelectionState: WorkspaceSidebarSelectionState
   @State private var isDocumentTextInputFocused = false
-  @State private var documentTabs: [WorkspaceDocumentTab] = []
   @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
   init(
@@ -891,7 +890,6 @@ private struct WorkspaceBrowserView: View {
       searchQuery = ""
       isDocumentTextInputFocused = false
       sidebarSelectionState.reset()
-      documentTabs.removeAll()
       refreshSearchResults()
     }
     .onChange(of: selectedEntryID) { _, newSelection in
@@ -988,61 +986,10 @@ private struct WorkspaceBrowserView: View {
     }
 
     return sidebarVisibleEntries.first { $0.id == selectedEntryID }
-      ?? documentTabs.first { $0.id == selectedEntryID }?.entry
   }
 
   private func performWorkspaceOpenAction(_ openAction: WorkspaceEntryOpenAction) {
-    if case .openInPlace(let url) = openAction,
-      let entry = sidebarVisibleEntries.first(where: {
-        $0.url.locusStandardizedPath == url.locusStandardizedPath
-      })
-    {
-      trackDocumentTab(for: entry)
-    }
-
     actions.performOpenAction(openAction)
-  }
-
-  private func trackDocumentTab(for entry: WorkspaceEntry) {
-    guard let tab = WorkspaceDocumentTab(entry: entry),
-      !documentTabs.contains(where: { $0.id == tab.id })
-    else {
-      return
-    }
-
-    documentTabs.append(tab)
-  }
-
-  private func selectDocumentTab(_ tab: WorkspaceDocumentTab) {
-    selectedEntryID = tab.id
-    sidebarSelectionState.setActiveEntryID(tab.id)
-  }
-
-  private func closeDocumentTab(_ tab: WorkspaceDocumentTab) {
-    guard let closedIndex = documentTabs.firstIndex(where: { $0.id == tab.id }) else {
-      return
-    }
-
-    let wasSelected = selectedEntryID == tab.id
-    documentTabs.remove(at: closedIndex)
-
-    guard wasSelected else {
-      return
-    }
-
-    if let replacement = replacementTab(afterClosingIndex: closedIndex) {
-      selectDocumentTab(replacement)
-    } else {
-      selectedEntryID = nil
-    }
-  }
-
-  private func replacementTab(afterClosingIndex closedIndex: Int) -> WorkspaceDocumentTab? {
-    if closedIndex < documentTabs.count {
-      return documentTabs[closedIndex]
-    }
-
-    return documentTabs.last
   }
 
   private func updateSidebarVisibleEntries(_ entries: [WorkspaceEntry]) {
@@ -1050,8 +997,7 @@ private struct WorkspaceBrowserView: View {
     sidebarSelectionState.setVisibleEntryIDs(Set(entries.map(\.id)))
 
     guard let selectedEntryID,
-      !entries.contains(where: { $0.id == selectedEntryID }),
-      !documentTabs.contains(where: { $0.id == selectedEntryID })
+      !entries.contains(where: { $0.id == selectedEntryID })
     else {
       return
     }
@@ -1069,29 +1015,17 @@ private struct WorkspaceBrowserView: View {
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
-        VStack(spacing: 0) {
-          WorkspaceDocumentTabsHeader(
-            tabs: documentTabs,
-            selectedTabID: selectedEntryID,
-            select: selectDocumentTab,
-            close: closeDocumentTab
-          )
-          .frame(height: documentTabs.isEmpty ? 0 : WorkspaceDocumentTabMetrics.height)
-          .clipped()
-
-          WorkspaceDocumentSurface(
-            entry: selectedEntry,
-            showsTopDivider: documentTabs.isEmpty,
-            textDocumentStore: textDocumentStore,
-            imageDocumentStore: imageDocumentStore,
-            pdfDocumentStore: pdfDocumentStore,
-            mediaDocumentStore: mediaDocumentStore,
-            quickLookDocumentStore: quickLookDocumentStore,
-            onTextInputFocusChange: { isFocused in
-              isDocumentTextInputFocused = isFocused
-            }
-          )
-        }
+        WorkspaceDocumentSurface(
+          entry: selectedEntry,
+          textDocumentStore: textDocumentStore,
+          imageDocumentStore: imageDocumentStore,
+          pdfDocumentStore: pdfDocumentStore,
+          mediaDocumentStore: mediaDocumentStore,
+          quickLookDocumentStore: quickLookDocumentStore,
+          onTextInputFocusChange: { isFocused in
+            isDocumentTextInputFocused = isFocused
+          }
+        )
         .navigationSplitViewColumnWidth(
           min: LocusWindowMetrics.documentSurfaceMinimumWidth,
           ideal: LocusWindowMetrics.documentSurfaceIdealWidth

@@ -6,7 +6,6 @@ import SwiftUI
 
 struct WorkspaceDocumentSurface: View {
   let entry: WorkspaceEntry?
-  let showsTopDivider: Bool
   let textDocumentStore: any TextDocumentStoring
   let imageDocumentStore: any ImageDocumentStoring
   let pdfDocumentStore: any PDFDocumentStoring
@@ -28,9 +27,7 @@ struct WorkspaceDocumentSurface: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      if showsTopDivider {
-        Divider()
-      }
+      Divider()
 
       Group {
         if let entry {

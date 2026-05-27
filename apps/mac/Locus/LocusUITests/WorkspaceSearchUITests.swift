@@ -26,6 +26,16 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testInitialWorkspaceShowsEmptyDocumentSurface() throws {
+    let app = try launchAppWithBasicWorkspace()
+
+    XCTAssertTrue(
+      app.staticTexts["Project Brief.md"].waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Select a File"].waitForExistence(timeout: 5), app.debugDescription)
+  }
+
+  @MainActor
   func testDoubleClickDirectoryRowNavigatesIntoFolder() throws {
     let app = try launchAppWithBasicWorkspace()
 
@@ -583,49 +593,6 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testDocumentTabsTrackOpenedFilesAndCloseBackToAnotherTab() throws {
-    let workspacePath = try fixtureWorkspacePath("basic")
-    let app = try launchApp(workspacePath: workspacePath)
-
-    let projectBriefRowText = app.staticTexts["Project Brief.md"]
-    XCTAssertTrue(projectBriefRowText.waitForExistence(timeout: 5), app.debugDescription)
-    projectBriefRowText.click()
-    XCTAssertEqual(documentTabs(in: app).count, 0, app.debugDescription)
-
-    projectBriefRowText.doubleClick()
-    let projectBriefTab = documentTab(named: "Project Brief.md", in: app)
-    XCTAssertTrue(projectBriefTab.waitForExistence(timeout: 5), app.debugDescription)
-
-    let notesRowText = app.staticTexts["Notes.txt"]
-    XCTAssertTrue(notesRowText.waitForExistence(timeout: 5), app.debugDescription)
-    notesRowText.doubleClick()
-
-    let notesTab = documentTab(named: "Notes.txt", in: app)
-    XCTAssertTrue(notesTab.waitForExistence(timeout: 5), app.debugDescription)
-
-    projectBriefTab.click()
-    assertTableRow(named: "Project Brief.md", isSelectedIn: app)
-
-    documentTabCloseButton(named: "Project Brief.md", in: app).click()
-
-    XCTAssertFalse(projectBriefTab.exists, app.debugDescription)
-    XCTAssertTrue(notesTab.waitForExistence(timeout: 5), app.debugDescription)
-    assertTableRow(named: "Notes.txt", isSelectedIn: app)
-
-    notesRowText.click()
-    XCTAssertEqual(documentTabs(in: app).count, 1, app.debugDescription)
-
-    app.staticTexts["Reports"].click()
-    XCTAssertFalse(documentTab(named: "Reports", in: app).exists, app.debugDescription)
-    XCTAssertEqual(documentTabs(in: app).count, 1, app.debugDescription)
-
-    documentTab(named: "Notes.txt", in: app).click()
-    documentTabCloseButton(named: "Notes.txt", in: app).click()
-    XCTAssertEqual(documentTabs(in: app).count, 0, app.debugDescription)
-    XCTAssertTrue(app.staticTexts["Select a File"].waitForExistence(timeout: 5))
-  }
-
-  @MainActor
   func testDoubleClickImageFileViewsImageInLocus() throws {
     let workspacePath = try fixtureWorkspacePath("file-types")
     let app = try launchApp(workspacePath: workspacePath)
@@ -1098,22 +1065,6 @@ final class WorkspaceSearchUITests: XCTestCase {
     let path = directoryURL.path(percentEncoded: false)
     let identifier = "workspace-sidebar-disclosure-\(stableHash(for: path))"
     return app.buttons.matching(identifier: identifier).firstMatch
-  }
-
-  private func documentTab(named name: String, in app: XCUIApplication) -> XCUIElement {
-    app.buttons.matching(identifier: "document-tab-item")
-      .matching(NSPredicate(format: "label == %@", name))
-      .firstMatch
-  }
-
-  private func documentTabs(in app: XCUIApplication) -> XCUIElementQuery {
-    app.buttons.matching(identifier: "document-tab-item")
-  }
-
-  private func documentTabCloseButton(named name: String, in app: XCUIApplication) -> XCUIElement {
-    app.buttons.matching(identifier: "document-tab-close-button")
-      .matching(NSPredicate(format: "label == %@", "Close \(name)"))
-      .firstMatch
   }
 
   @MainActor

@@ -53,7 +53,7 @@ Responsibilities:
 
 - `App/`: app entry point, window setup, menus, command routing.
 - `CoreBridge/`: Swift wrapper around the C ABI. Owns unsafe calls, memory release, status conversion, and background dispatch.
-- `Views/Home/`: current folder browsing, inline folder expansion, recent items, search ranking support, document tabs, preview surfaces, and text editor bridge.
+- `Views/Home/`: current folder browsing, inline folder expansion, recent items, search ranking support, preview surfaces, and text editor bridge.
 - `Services/`: in-app location navigation helpers, file dialogs, file watching, and recents storage if still app-owned.
 
 Use SwiftUI for app structure and normal controls, with AppKit bridges where native document behavior matters:

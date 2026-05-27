@@ -23,9 +23,7 @@ Must support:
   should be loaded only when a contextual surface explicitly needs it
 - create new files and folders in the current workspace folder from the
   sidebar, without overwriting existing items
-- open files
-- keep explicitly opened files available as document-surface tabs that can be
-  selected or closed during the current workspace session
+- open one selected file or folder in the document surface
 - navigate to an item's containing folder inside Locus and select the item
 - show recent files and folders
 - detect file changes
