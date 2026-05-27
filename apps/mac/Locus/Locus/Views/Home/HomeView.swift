@@ -123,6 +123,7 @@ struct HomeView: View {
         goForward: restoreNextWorkspaceFolder,
         retryCurrentFolder: retryCurrentFolder,
         copyPaths: copyPaths,
+        createItem: createWorkspaceItem,
         loadFolderChildren: loadSidebarFolderChildren,
         performOpenAction: performOpenAction
       )
@@ -560,6 +561,34 @@ struct HomeView: View {
   }
 
   @MainActor
+  private func createWorkspaceItem(
+    _ kind: WorkspaceItemCreationKind,
+    named name: String
+  ) async throws -> URL {
+    guard let folderURL = workspaceState.folderURL else {
+      assertionFailure("createWorkspaceItem invoked without an active workspace")
+      throw WorkspaceItemCreationError.noActiveWorkspace
+    }
+
+    let didStartAccess = folderURL.startAccessingSecurityScopedResource()
+    defer {
+      if didStartAccess {
+        folderURL.stopAccessingSecurityScopedResource()
+      }
+    }
+
+    let createdURL = try WorkspaceItemCreation.create(kind, named: name, in: folderURL)
+    startWorkspaceLoad(
+      WorkspaceLoadRequest(
+        folderURL: folderURL,
+        showsLoading: false,
+        selectedURL: createdURL
+      )
+    )
+    return createdURL
+  }
+
+  @MainActor
   private func loadSidebarFolderChildren(_ folderURL: URL) async throws -> WorkspaceSnapshot {
     let didStartAccess = folderURL.startAccessingSecurityScopedResource()
     defer {
@@ -727,6 +756,7 @@ private struct WorkspaceActions {
   let goForward: () -> Void
   let retryCurrentFolder: () -> Void
   let copyPaths: ([WorkspaceEntry]) -> Void
+  let createItem: (WorkspaceItemCreationKind, String) async throws -> URL
   let loadFolderChildren: (URL) async throws -> WorkspaceSnapshot
   let performOpenAction: (WorkspaceEntryOpenAction) -> Void
 }
@@ -764,6 +794,9 @@ private struct WorkspaceBrowserView: View {
   @State private var isDocumentTextInputFocused = false
   @State private var documentTabs: [WorkspaceDocumentTab] = []
   @State private var columnVisibility: NavigationSplitViewVisibility = .all
+  @State private var creationAlert: WorkspaceCreationAlert?
+  @State private var creationName = ""
+  @State private var creationTask: Task<Void, Never>?
 
   init(
     folderURL: URL,
@@ -816,6 +849,7 @@ private struct WorkspaceBrowserView: View {
         selectedEntryID: $selectedEntryID,
         shortcutActions: shortcutActions,
         actions: sidebarActions,
+        requestCreation: beginCreation,
         onVisibleEntriesChange: updateSidebarVisibleEntries
       )
       .navigationSplitViewColumnWidth(
@@ -843,9 +877,34 @@ private struct WorkspaceBrowserView: View {
       searchQuery = ""
       isDocumentTextInputFocused = false
       documentTabs.removeAll()
+      cancelCreationTask()
+      resetCreationDialog()
       refreshSearchResults()
     }
+    .onDisappear {
+      cancelCreationTask()
+    }
     .focusedSceneValue(\.workspaceNavigationCommands, workspaceNavigationCommands)
+    .alert(creationAlertTitle, isPresented: isCreationAlertPresented) {
+      if isShowingCreationDialog {
+        TextField("Name", text: $creationName)
+
+        Button("Create") {
+          createPendingItem()
+        }
+        .disabled(!canSubmitCreationName)
+
+        Button("Cancel", role: .cancel) {
+          resetCreationDialog()
+        }
+      } else {
+        Button("OK", role: .cancel) {
+          creationAlert = nil
+        }
+      }
+    } message: {
+      Text(creationAlertMessage)
+    }
   }
 
   private func refreshSearchResults() {
@@ -906,9 +965,104 @@ private struct WorkspaceBrowserView: View {
       goForward: actions.goForward,
       retryCurrentFolder: actions.retryCurrentFolder,
       copyPaths: actions.copyPaths,
+      createItem: actions.createItem,
       loadFolderChildren: actions.loadFolderChildren,
       performOpenAction: performWorkspaceOpenAction
     )
+  }
+
+  private var isCreationAlertPresented: Binding<Bool> {
+    Binding(
+      get: {
+        creationAlert != nil
+      },
+      set: { isPresented in
+        if !isPresented {
+          creationAlert = nil
+          creationName = ""
+        }
+      }
+    )
+  }
+
+  private var isShowingCreationDialog: Bool {
+    if case .naming = creationAlert {
+      return true
+    }
+
+    return false
+  }
+
+  private var canSubmitCreationName: Bool {
+    !creationName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  private var creationAlertTitle: String {
+    switch creationAlert {
+    case .naming(.file):
+      return "New File"
+    case .naming(.folder):
+      return "New Folder"
+    case .error:
+      return "Couldn't Create Item"
+    case nil:
+      return "New Item"
+    }
+  }
+
+  private var creationAlertMessage: String {
+    switch creationAlert {
+    case .naming(.file):
+      return "Create the new file in \(folderURL.lastPathComponent). Use a single name."
+    case .naming(.folder):
+      return "Create the new folder in \(folderURL.lastPathComponent). Use a single name."
+    case .error(let message):
+      return message
+    case nil:
+      return ""
+    }
+  }
+
+  private func beginCreation(_ kind: WorkspaceItemCreationKind) {
+    cancelCreationTask()
+    creationAlert = .naming(kind)
+    creationName = ""
+  }
+
+  private func createPendingItem() {
+    guard case .naming(let kind) = creationAlert else {
+      return
+    }
+
+    cancelCreationTask()
+    let name = creationName
+    creationTask = Task { @MainActor in
+      defer {
+        creationTask = nil
+      }
+
+      do {
+        _ = try await actions.createItem(kind, name)
+        resetCreationDialog()
+      } catch {
+        guard !Task.isCancelled else {
+          return
+        }
+
+        resetCreationDialog()
+        creationAlert = .error(error.localizedDescription)
+      }
+    }
+  }
+
+  private func resetCreationDialog() {
+    creationAlert = nil
+    creationName = ""
+  }
+
+  private func cancelCreationTask() {
+    creationTask?.cancel()
+    creationTask = nil
   }
 
   private var selectedEntry: WorkspaceEntry? {
@@ -1198,6 +1352,11 @@ private enum WorkspaceDocumentTabMetrics {
   static let closeButtonSize: CGFloat = 24
 }
 
+private enum WorkspaceCreationAlert: Equatable {
+  case naming(WorkspaceItemCreationKind)
+  case error(String)
+}
+
 /// Search-backed browser content kept while the prototype hides search chrome.
 /// With an empty query this is just the folder entries; when search returns it
 /// also carries matching recent shortcuts without reworking selection logic.
@@ -1246,6 +1405,7 @@ private struct WorkspaceSidebarView: View {
   @Binding var selectedEntryID: WorkspaceEntry.ID?
   let shortcutActions: FileLocationShortcutActions
   let actions: WorkspaceActions
+  let requestCreation: (WorkspaceItemCreationKind) -> Void
   let onVisibleEntriesChange: ([WorkspaceEntry]) -> Void
   @State private var expandedFolderIDs: Set<WorkspaceEntry.ID> = []
   @State private var childStates: [WorkspaceEntry.ID: WorkspaceSidebarChildState] = [:]
@@ -1264,6 +1424,7 @@ private struct WorkspaceSidebarView: View {
     selectedEntryID: Binding<WorkspaceEntry.ID?>,
     shortcutActions: FileLocationShortcutActions,
     actions: WorkspaceActions,
+    requestCreation: @escaping (WorkspaceItemCreationKind) -> Void,
     onVisibleEntriesChange: @escaping ([WorkspaceEntry]) -> Void
   ) {
     self.folderURL = folderURL
@@ -1273,6 +1434,7 @@ private struct WorkspaceSidebarView: View {
     self._selectedEntryID = selectedEntryID
     self.shortcutActions = shortcutActions
     self.actions = actions
+    self.requestCreation = requestCreation
     self.onVisibleEntriesChange = onVisibleEntriesChange
   }
 
@@ -1300,6 +1462,20 @@ private struct WorkspaceSidebarView: View {
       .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
         let selectedEntries = entries(for: selection)
         let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
+
+        Button {
+          requestCreation(.file)
+        } label: {
+          Label("New File", systemImage: "doc")
+        }
+
+        Button {
+          requestCreation(.folder)
+        } label: {
+          Label("New Folder", systemImage: "folder")
+        }
+
+        Divider()
 
         Button("Open") {
           if let openAction {

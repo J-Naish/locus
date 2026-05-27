@@ -401,7 +401,7 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testContextMenuOnlyIncludesOpenAndCopyPath() throws {
+  func testContextMenuIncludesCreationOpenAndCopyPath() throws {
     let workspacePath = try fixtureWorkspacePath("basic")
     let app = try launchApp(workspacePath: workspacePath)
 
@@ -410,10 +410,42 @@ final class WorkspaceSearchUITests: XCTestCase {
 
     projectBriefRowText.rightClick()
 
+    XCTAssertTrue(app.menuItems["New File"].waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(app.menuItems["New Folder"].exists, app.debugDescription)
     XCTAssertTrue(app.menuItems["Open"].waitForExistence(timeout: 2), app.debugDescription)
     XCTAssertTrue(app.menuItems["Copy Path"].exists, app.debugDescription)
     XCTAssertFalse(app.menuItems["Preview"].exists, app.debugDescription)
     XCTAssertFalse(app.menuItems["Show in Locus"].exists, app.debugDescription)
+  }
+
+  @MainActor
+  func testContextMenuCreatesNewFileInWorkspace() throws {
+    let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    let projectBriefRowText = app.staticTexts["Project Brief.md"]
+    XCTAssertTrue(projectBriefRowText.waitForExistence(timeout: 5), app.debugDescription)
+
+    projectBriefRowText.rightClick()
+    let newFileMenuItem = app.menuItems["New File"]
+    XCTAssertTrue(newFileMenuItem.waitForExistence(timeout: 2), app.debugDescription)
+    newFileMenuItem.click()
+
+    let nameField = app.textFields["Name"]
+    XCTAssertTrue(nameField.waitForExistence(timeout: 2), app.debugDescription)
+    nameField.click()
+    app.typeText("Created From Menu.md")
+    app.sheets.firstMatch.buttons["Create"].click()
+
+    let createdURL = workspaceURL.appending(path: "Created From Menu.md")
+    XCTAssertTrue(
+      FileManager.default.fileExists(atPath: createdURL.path(percentEncoded: false))
+    )
+    XCTAssertTrue(
+      app.staticTexts["Created From Menu.md"].waitForExistence(timeout: 5),
+      app.debugDescription
+    )
+    assertTableRow(named: "Created From Menu.md", isSelectedIn: app)
   }
 
   @MainActor

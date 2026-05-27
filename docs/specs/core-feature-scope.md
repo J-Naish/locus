@@ -21,6 +21,8 @@ Must support:
   and Modified columns are intentionally not part of the default browser
 - keep default folder listing lightweight; size and modified-time metadata
   should be loaded only when a contextual surface explicitly needs it
+- create new files and folders in the current workspace folder from the
+  sidebar, without overwriting existing items
 - open files
 - keep explicitly opened files available as document-surface tabs that can be
   selected or closed during the current workspace session
