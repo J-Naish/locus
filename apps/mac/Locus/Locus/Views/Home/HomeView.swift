@@ -1357,7 +1357,6 @@ private struct WorkspaceSidebarView: View {
       .listStyle(.sidebar)
       .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
         let selectedEntries = entries(for: selection)
-        let openAction = WorkspaceEntryOpenActionResolver.action(for: selectedEntries)
         let creationParent = creationParent(for: selectedEntries)
 
         Button {
@@ -1373,13 +1372,6 @@ private struct WorkspaceSidebarView: View {
         }
 
         Divider()
-
-        Button("Open") {
-          if let openAction {
-            actions.performOpenAction(openAction)
-          }
-        }
-        .disabled(openAction == nil)
 
         Button(WorkspaceEntryPathCopy.menuTitle(for: selectedEntries)) {
           actions.copyPaths(selectedEntries)

@@ -401,7 +401,7 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testContextMenuIncludesCreationOpenAndCopyPath() throws {
+  func testContextMenuIncludesCreationAndCopyPath() throws {
     let workspacePath = try fixtureWorkspacePath("basic")
     let app = try launchApp(workspacePath: workspacePath)
 
@@ -412,8 +412,8 @@ final class WorkspaceSearchUITests: XCTestCase {
 
     XCTAssertTrue(app.menuItems["New File"].waitForExistence(timeout: 2), app.debugDescription)
     XCTAssertTrue(app.menuItems["New Folder"].exists, app.debugDescription)
-    XCTAssertTrue(app.menuItems["Open"].waitForExistence(timeout: 2), app.debugDescription)
     XCTAssertTrue(app.menuItems["Copy Path"].exists, app.debugDescription)
+    XCTAssertFalse(app.menuItems["Open"].exists, app.debugDescription)
     XCTAssertFalse(app.menuItems["Preview"].exists, app.debugDescription)
     XCTAssertFalse(app.menuItems["Show in Locus"].exists, app.debugDescription)
   }
