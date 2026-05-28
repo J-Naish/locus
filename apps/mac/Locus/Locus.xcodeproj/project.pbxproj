@@ -32,6 +32,8 @@
 		1A00000100000000000000C2 /* DocumentChangeMonitorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000C3 /* DocumentChangeMonitorTests.swift */; };
 		1A00000100000000000000C4 /* WorkspaceItemCreation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000C5 /* WorkspaceItemCreation.swift */; };
 		1A00000100000000000000C6 /* WorkspaceItemCreationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000C7 /* WorkspaceItemCreationTests.swift */; };
+		1A00000100000000000000D6 /* WorkspaceItemDeletion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000D7 /* WorkspaceItemDeletion.swift */; };
+		1A00000100000000000000D8 /* WorkspaceItemDeletionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000D9 /* WorkspaceItemDeletionTests.swift */; };
 		1A00000100000000000000CA /* WorkspaceEntryPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000CB /* WorkspaceEntryPresentation.swift */; };
 		1A00000100000000000000CC /* WorkspaceSidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000CD /* WorkspaceSidebarView.swift */; };
 		1A00000100000000000000CE /* WorkspaceSidebarSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000CF /* WorkspaceSidebarSelection.swift */; };
@@ -113,6 +115,8 @@
 		1A00000100000000000000C3 /* DocumentChangeMonitorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentChangeMonitorTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000C5 /* WorkspaceItemCreation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceItemCreation.swift; sourceTree = "<group>"; };
 		1A00000100000000000000C7 /* WorkspaceItemCreationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceItemCreationTests.swift; sourceTree = "<group>"; };
+		1A00000100000000000000D7 /* WorkspaceItemDeletion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceItemDeletion.swift; sourceTree = "<group>"; };
+		1A00000100000000000000D9 /* WorkspaceItemDeletionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceItemDeletionTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000CB /* WorkspaceEntryPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryPresentation.swift; sourceTree = "<group>"; };
 		1A00000100000000000000CD /* WorkspaceSidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSidebarView.swift; sourceTree = "<group>"; };
 		1A00000100000000000000CF /* WorkspaceSidebarSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSidebarSelection.swift; sourceTree = "<group>"; };
@@ -211,6 +215,7 @@
 				1A0000010000000000000067 /* WorkspaceEntryOpenActionTests.swift */,
 				1A0000010000000000000071 /* WorkspaceEntryPathCopyTests.swift */,
 				1A00000100000000000000C7 /* WorkspaceItemCreationTests.swift */,
+				1A00000100000000000000D9 /* WorkspaceItemDeletionTests.swift */,
 				1A00000100000000000000A7 /* WorkspaceDocumentSurfaceSupportTests.swift */,
 				1A00000100000000000000AF /* WorkspaceHomeVisibilityTests.swift */,
 				1A000001000000000000006B /* WorkspaceNavigationTests.swift */,
@@ -299,6 +304,7 @@
 				1A0000010000000000000065 /* WorkspaceEntryOpenAction.swift */,
 				1A000001000000000000006F /* WorkspaceEntryPathCopy.swift */,
 				1A00000100000000000000C5 /* WorkspaceItemCreation.swift */,
+				1A00000100000000000000D7 /* WorkspaceItemDeletion.swift */,
 				1A00000100000000000000CF /* WorkspaceSidebarSelection.swift */,
 				1A00000100000000000000CD /* WorkspaceSidebarView.swift */,
 				1A00000100000000000000A5 /* WorkspaceDocumentSurfaceSupport.swift */,
@@ -489,6 +495,7 @@
 				1A0000010000000000000064 /* WorkspaceEntryOpenAction.swift in Sources */,
 				1A000001000000000000006E /* WorkspaceEntryPathCopy.swift in Sources */,
 				1A00000100000000000000C4 /* WorkspaceItemCreation.swift in Sources */,
+				1A00000100000000000000D6 /* WorkspaceItemDeletion.swift in Sources */,
 				1A00000100000000000000CA /* WorkspaceEntryPresentation.swift in Sources */,
 				1A00000100000000000000CE /* WorkspaceSidebarSelection.swift in Sources */,
 				1A00000100000000000000CC /* WorkspaceSidebarView.swift in Sources */,
@@ -520,6 +527,7 @@
 				1A0000010000000000000066 /* WorkspaceEntryOpenActionTests.swift in Sources */,
 				1A0000010000000000000070 /* WorkspaceEntryPathCopyTests.swift in Sources */,
 				1A00000100000000000000C6 /* WorkspaceItemCreationTests.swift in Sources */,
+				1A00000100000000000000D8 /* WorkspaceItemDeletionTests.swift in Sources */,
 				1A00000100000000000000A6 /* WorkspaceDocumentSurfaceSupportTests.swift in Sources */,
 				1A00000100000000000000AE /* WorkspaceHomeVisibilityTests.swift in Sources */,
 				1A000001000000000000006A /* WorkspaceNavigationTests.swift in Sources */,

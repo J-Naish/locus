@@ -46,6 +46,8 @@ struct HomeView: View {
   // quickly; only the latest generation is allowed to update visible state.
   @State private var workspaceLoadGeneration: UInt64 = 0
   @State private var workspaceLoadingIndicatorTask: Task<Void, Never>?
+  @State private var workspaceDeletionErrorMessage: String?
+  @State private var isWorkspaceDeletionErrorPresented = false
 
   private let coreBridge: CoreBridge
   private let textDocumentStore: any TextDocumentStoring
@@ -127,6 +129,7 @@ struct HomeView: View {
         retryCurrentFolder: retryCurrentFolder,
         copyPaths: copyPaths,
         createItem: createWorkspaceItem,
+        deleteItems: deleteWorkspaceItems,
         loadFolderChildren: loadSidebarFolderChildren,
         performOpenAction: performOpenAction
       )
@@ -148,6 +151,11 @@ struct HomeView: View {
     }
     .fileDialogMessage("Choose a folder to browse in Locus.")
     .fileDialogConfirmationLabel("Choose Folder")
+    .alert("Couldn't Delete Item", isPresented: $isWorkspaceDeletionErrorPresented) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(workspaceDeletionErrorMessage ?? "Locus couldn't move the item to the Trash.")
+    }
   }
 
   @MainActor
@@ -602,6 +610,72 @@ struct HomeView: View {
   }
 
   @MainActor
+  private func deleteWorkspaceItems(_ entries: [WorkspaceEntry]) -> [URL] {
+    do {
+      return try deleteWorkspaceItemsNow(entries)
+    } catch let error as WorkspaceItemDeletionError {
+      if case .partiallyDeleted(let succeededURLs, _, _) = error {
+        finishWorkspaceItemDeletion(succeededURLs, attemptedEntries: entries)
+        workspaceDeletionErrorMessage = error.localizedDescription
+        isWorkspaceDeletionErrorPresented = true
+        return succeededURLs
+      }
+
+      workspaceDeletionErrorMessage = error.localizedDescription
+      isWorkspaceDeletionErrorPresented = true
+      return []
+    } catch {
+      workspaceDeletionErrorMessage = error.localizedDescription
+      isWorkspaceDeletionErrorPresented = true
+      return []
+    }
+  }
+
+  @MainActor
+  private func deleteWorkspaceItemsNow(_ entries: [WorkspaceEntry]) throws -> [URL] {
+    guard let folderURL = workspaceState.folderURL else {
+      throw WorkspaceItemDeletionError.noActiveWorkspace
+    }
+
+    let didStartAccess = folderURL.startAccessingSecurityScopedResource()
+    defer {
+      if didStartAccess {
+        folderURL.stopAccessingSecurityScopedResource()
+      }
+    }
+
+    let deletedURLs = try WorkspaceItemDeletion.delete(entries, in: folderURL)
+    finishWorkspaceItemDeletion(deletedURLs, attemptedEntries: entries)
+    return deletedURLs
+  }
+
+  @MainActor
+  private func finishWorkspaceItemDeletion(
+    _ deletedURLs: [URL],
+    attemptedEntries entries: [WorkspaceEntry]
+  ) {
+    guard let folderURL = workspaceState.folderURL else {
+      return
+    }
+
+    let deletedPaths = Set(deletedURLs.map(\.locusStandardizedPath))
+    if let selectedEntryID,
+      entries.contains(where: {
+        $0.id == selectedEntryID && deletedPaths.contains($0.url.locusStandardizedPath)
+      })
+    {
+      self.selectedEntryID = nil
+    }
+
+    startWorkspaceLoad(
+      WorkspaceLoadRequest(
+        folderURL: folderURL,
+        showsLoading: false
+      )
+    )
+  }
+
+  @MainActor
   private func loadSidebarFolderChildren(_ folderURL: URL) async throws -> WorkspaceSnapshot {
     let didStartAccess = folderURL.startAccessingSecurityScopedResource()
     defer {
@@ -772,6 +846,7 @@ struct WorkspaceActions {
   let retryCurrentFolder: () -> Void
   let copyPaths: ([WorkspaceEntry]) -> Void
   let createItem: (WorkspaceItemCreationKind, String, URL) async throws -> URL
+  let deleteItems: ([WorkspaceEntry]) -> [URL]
   let loadFolderChildren: (URL) async throws -> WorkspaceSnapshot
   let performOpenAction: (WorkspaceEntryOpenAction) -> Void
 }
@@ -949,6 +1024,7 @@ private struct WorkspaceBrowserView: View {
       gitMetadataMonitor.stopMonitoring()
     }
     .focusedSceneValue(\.workspaceNavigationCommands, workspaceNavigationCommands)
+    .focusedSceneValue(\.workspaceDeletionCommand, workspaceDeletionCommand)
   }
 
   private func refreshSearchResults() {
@@ -1001,6 +1077,34 @@ private struct WorkspaceBrowserView: View {
     )
   }
 
+  private var workspaceDeletionCommand: WorkspaceDeletionCommand {
+    let entries = deletableHighlightedEntries
+    return WorkspaceDeletionCommand(
+      canDelete: !isTextInputFocused && !entries.isEmpty,
+      delete: {
+        guard !entries.isEmpty else {
+          return
+        }
+
+        deleteEntries(entries)
+      }
+    )
+  }
+
+  private var deletableHighlightedEntries: [WorkspaceEntry] {
+    guard let highlightedEntryID = sidebarSelectionState.highlightedEntryID else {
+      return []
+    }
+
+    guard let entry = sidebarVisibleEntries.first(where: { $0.id == highlightedEntryID }),
+      isDeletable(entry)
+    else {
+      return []
+    }
+
+    return [entry]
+  }
+
   private var sidebarActions: WorkspaceActions {
     WorkspaceActions(
       canGoBack: actions.canGoBack,
@@ -1010,9 +1114,38 @@ private struct WorkspaceBrowserView: View {
       retryCurrentFolder: actions.retryCurrentFolder,
       copyPaths: actions.copyPaths,
       createItem: actions.createItem,
+      deleteItems: deleteEntries,
       loadFolderChildren: actions.loadFolderChildren,
       performOpenAction: performWorkspaceOpenAction
     )
+  }
+
+  private func isDeletable(_ entry: WorkspaceEntry) -> Bool {
+    entry.id != folderURL.locusStandardizedPath
+  }
+
+  private func deleteEntries(_ entries: [WorkspaceEntry]) -> [URL] {
+    let deletableEntries = entries.filter(isDeletable)
+    guard !deletableEntries.isEmpty else {
+      return []
+    }
+
+    let deletedURLs = actions.deleteItems(deletableEntries)
+    let deletedPaths = Set(deletedURLs.map(\.locusStandardizedPath))
+    guard !deletedPaths.isEmpty else {
+      return []
+    }
+
+    if let selectedEntryID,
+      deletableEntries.contains(where: {
+        $0.id == selectedEntryID && deletedPaths.contains($0.url.locusStandardizedPath)
+      })
+    {
+      self.selectedEntryID = nil
+      sidebarSelectionState.setActiveEntryID(nil)
+    }
+    requestGitStatusRefresh()
+    return deletedURLs
   }
 
   private var gitStatusRefreshKey: GitStatusRefreshKey {

@@ -37,6 +37,11 @@ struct DocumentSaveCommand {
   let save: () -> Void
 }
 
+struct WorkspaceDeletionCommand {
+  let canDelete: Bool
+  let delete: () -> Void
+}
+
 enum LocusPersistedDefaults {
   static let recentFoldersExpanded = "workspace.sidebar.recentFoldersExpanded"
   static let uiTestResetKeys = [
@@ -52,6 +57,10 @@ private struct DocumentSaveCommandKey: FocusedValueKey {
   typealias Value = DocumentSaveCommand
 }
 
+private struct WorkspaceDeletionCommandKey: FocusedValueKey {
+  typealias Value = WorkspaceDeletionCommand
+}
+
 extension FocusedValues {
   var workspaceNavigationCommands: WorkspaceNavigationCommands? {
     get { self[WorkspaceNavigationCommandsKey.self] }
@@ -61,6 +70,11 @@ extension FocusedValues {
   var documentSaveCommand: DocumentSaveCommand? {
     get { self[DocumentSaveCommandKey.self] }
     set { self[DocumentSaveCommandKey.self] = newValue }
+  }
+
+  var workspaceDeletionCommand: WorkspaceDeletionCommand? {
+    get { self[WorkspaceDeletionCommandKey.self] }
+    set { self[WorkspaceDeletionCommandKey.self] = newValue }
   }
 }
 
@@ -98,6 +112,20 @@ private struct DocumentSaveCommandMenu: Commands {
   }
 }
 
+private struct WorkspaceDeletionCommandMenu: Commands {
+  @FocusedValue(\.workspaceDeletionCommand) private var deletionCommand
+
+  var body: some Commands {
+    CommandGroup(after: .pasteboard) {
+      Button("Delete") {
+        deletionCommand?.delete()
+      }
+      .keyboardShortcut(.delete, modifiers: [.command])
+      .disabled(deletionCommand?.canDelete != true)
+    }
+  }
+}
+
 @main
 struct LocusApp: App {
   init() {
@@ -121,6 +149,7 @@ struct LocusApp: App {
     )
     .commands {
       DocumentSaveCommandMenu()
+      WorkspaceDeletionCommandMenu()
       WorkspaceNavigationCommandMenu()
     }
   }

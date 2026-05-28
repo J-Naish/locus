@@ -106,6 +106,7 @@ struct WorkspaceSidebarView: View {
       .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
         let selectedEntries = entries(for: selection)
         let creationParent = creationParent(for: selectedEntries)
+        let deletableEntries = selectedEntries.filter(isDeletable)
 
         Button {
           beginCreation(.file, in: creationParent)
@@ -118,6 +119,15 @@ struct WorkspaceSidebarView: View {
         } label: {
           Label("New Folder", systemImage: "folder")
         }
+
+        Divider()
+
+        Button(role: .destructive) {
+          deleteEntries(deletableEntries)
+        } label: {
+          Label("Delete", systemImage: "trash")
+        }
+        .disabled(deletableEntries.isEmpty)
 
         Divider()
 
@@ -211,6 +221,20 @@ struct WorkspaceSidebarView: View {
     }
 
     return selectedEntry
+  }
+
+  private func isDeletable(_ entry: WorkspaceEntry) -> Bool {
+    entry.id != rootEntry.id
+  }
+
+  private func deleteEntries(_ entries: [WorkspaceEntry]) {
+    let deletableEntries = entries.filter(isDeletable)
+    guard !deletableEntries.isEmpty else {
+      return
+    }
+
+    cancelCreation()
+    _ = actions.deleteItems(deletableEntries)
   }
 
   private func isExpanded(_ entry: WorkspaceEntry) -> Bool {
