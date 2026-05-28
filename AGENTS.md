@@ -95,6 +95,11 @@ Avoid adding:
 - Git, LSP, debugger, or other IDE-oriented features
 - heavy parsing or thumbnail generation on startup
 
+Exception: passive, read-only Git status indicators may be used to make changed
+or newly created local files easier to notice in the sidebar. Do not add commit,
+branch, diff, merge, blame, staging, or other Git workflow surfaces unless the
+product direction explicitly changes.
+
 ## Performance, Weight, and Polish Rules
 
 Performance, lightweight behavior, and refined UX/UI are top-priority product qualities. Treat them as core requirements, not later polish.

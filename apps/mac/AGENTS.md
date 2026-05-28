@@ -38,6 +38,9 @@ scripts/perf-smoke.sh
 ## SwiftUI and macOS UX
 
 - Favor Finder-like and Preview-like behavior over developer-tool behavior.
+- Passive, read-only Git change coloring is allowed as a local file-status
+  cue. Do not introduce Git workflow controls such as commits, branches,
+  staging, blame, or merge tools.
 - Keep UI as close as practical to native SwiftUI/AppKit patterns. Prefer
   system containers, controls, materials, menus, and platform behaviors before
   building custom chrome.

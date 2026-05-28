@@ -55,6 +55,7 @@ struct HomeView: View {
   private let quickLookDocumentStore: any QuickLookDocumentStoring
   private let clipboardService: ClipboardService
   private let workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring
+  private let gitWorkspaceStatusProvider: any GitWorkspaceStatusProviding
   private let recentFileStore: RecentFileStore
   private let recentFolderStore: RecentFolderStore
   private let initialFolderResolution: InitialFolderResolution
@@ -69,6 +70,7 @@ struct HomeView: View {
     quickLookDocumentStore: any QuickLookDocumentStoring = QuickLookDocumentStore(),
     clipboardService: ClipboardService = ClipboardService(),
     workspaceDirectoryMonitor: any WorkspaceDirectoryMonitoring = WorkspaceDirectoryMonitor(),
+    gitWorkspaceStatusProvider: any GitWorkspaceStatusProviding = GitWorkspaceStatusProvider(),
     recentFileStore: RecentFileStore = RecentFileStore(),
     recentFolderStore: RecentFolderStore = RecentFolderStore(),
     initialFolderResolution: InitialFolderResolution = .empty,
@@ -82,6 +84,7 @@ struct HomeView: View {
     self.quickLookDocumentStore = quickLookDocumentStore
     self.clipboardService = clipboardService
     self.workspaceDirectoryMonitor = workspaceDirectoryMonitor
+    self.gitWorkspaceStatusProvider = gitWorkspaceStatusProvider
     self.recentFileStore = recentFileStore
     self.recentFolderStore = recentFolderStore
     self.initialFolderResolution = initialFolderResolution
@@ -109,6 +112,7 @@ struct HomeView: View {
       pdfDocumentStore: pdfDocumentStore,
       mediaDocumentStore: mediaDocumentStore,
       quickLookDocumentStore: quickLookDocumentStore,
+      gitWorkspaceStatusProvider: gitWorkspaceStatusProvider,
       selectedEntryID: $selectedEntryID,
       emptyActions: EmptyWorkspaceActions(
         openFolder: openFolder,
@@ -709,6 +713,7 @@ private struct WorkspaceContentView: View {
   let pdfDocumentStore: any PDFDocumentStoring
   let mediaDocumentStore: any MediaDocumentStoring
   let quickLookDocumentStore: any QuickLookDocumentStoring
+  let gitWorkspaceStatusProvider: any GitWorkspaceStatusProviding
   @Binding var selectedEntryID: WorkspaceEntry.ID?
   let emptyActions: EmptyWorkspaceActions
   let shortcutActions: FileLocationShortcutActions
@@ -741,6 +746,7 @@ private struct WorkspaceContentView: View {
           pdfDocumentStore: pdfDocumentStore,
           mediaDocumentStore: mediaDocumentStore,
           quickLookDocumentStore: quickLookDocumentStore,
+          gitWorkspaceStatusProvider: gitWorkspaceStatusProvider,
           selectedEntryID: $selectedEntryID,
           shortcutActions: shortcutActions,
           actions: actions
@@ -783,6 +789,16 @@ private struct LoadingWorkspaceView: View {
 }
 
 private struct WorkspaceBrowserView: View {
+  private struct GitStatusRefreshKey: Hashable {
+    let folderPath: String
+    let loadedAt: Date
+    let generation: UInt64
+  }
+
+  private enum GitStatusRefresh {
+    static let debounceDuration: Duration = .milliseconds(250)
+  }
+
   let folderURL: URL
   let snapshot: WorkspaceSnapshot
   let loadedAt: Date
@@ -794,6 +810,7 @@ private struct WorkspaceBrowserView: View {
   let pdfDocumentStore: any PDFDocumentStoring
   let mediaDocumentStore: any MediaDocumentStoring
   let quickLookDocumentStore: any QuickLookDocumentStoring
+  let gitWorkspaceStatusProvider: any GitWorkspaceStatusProviding
   @Binding var selectedEntryID: WorkspaceEntry.ID?
   let shortcutActions: FileLocationShortcutActions
   let actions: WorkspaceActions
@@ -803,6 +820,8 @@ private struct WorkspaceBrowserView: View {
   @State private var sidebarSelectionState: WorkspaceSidebarSelectionState
   @State private var isDocumentTextInputFocused = false
   @State private var columnVisibility: NavigationSplitViewVisibility = .all
+  @State private var gitStatusesByPath: [String: GitWorkspaceChangeKind] = [:]
+  @State private var gitStatusRefreshGeneration: UInt64 = 0
 
   init(
     folderURL: URL,
@@ -816,6 +835,7 @@ private struct WorkspaceBrowserView: View {
     pdfDocumentStore: any PDFDocumentStoring,
     mediaDocumentStore: any MediaDocumentStoring,
     quickLookDocumentStore: any QuickLookDocumentStoring,
+    gitWorkspaceStatusProvider: any GitWorkspaceStatusProviding,
     selectedEntryID: Binding<WorkspaceEntry.ID?>,
     shortcutActions: FileLocationShortcutActions,
     actions: WorkspaceActions
@@ -831,6 +851,7 @@ private struct WorkspaceBrowserView: View {
     self.pdfDocumentStore = pdfDocumentStore
     self.mediaDocumentStore = mediaDocumentStore
     self.quickLookDocumentStore = quickLookDocumentStore
+    self.gitWorkspaceStatusProvider = gitWorkspaceStatusProvider
     self._selectedEntryID = selectedEntryID
     self.shortcutActions = shortcutActions
     self.actions = actions
@@ -860,9 +881,11 @@ private struct WorkspaceBrowserView: View {
         folderURL: folderURL,
         entries: searchResults.visibleEntries,
         recentFolders: recentFolders,
+        gitStatusesByPath: gitStatusesByPath,
         highlightedEntryID: sidebarHighlight,
         shortcutActions: shortcutActions,
         actions: sidebarActions,
+        onItemCreated: requestGitStatusRefresh,
         onVisibleEntriesChange: updateSidebarVisibleEntries
       )
       .navigationSplitViewColumnWidth(
@@ -889,11 +912,16 @@ private struct WorkspaceBrowserView: View {
     .onChange(of: folderURL) {
       searchQuery = ""
       isDocumentTextInputFocused = false
+      gitStatusesByPath = [:]
+      gitStatusRefreshGeneration &+= 1
       sidebarSelectionState.reset()
       refreshSearchResults()
     }
     .onChange(of: selectedEntryID) { _, newSelection in
       sidebarSelectionState.setActiveEntryID(newSelection)
+    }
+    .task(id: gitStatusRefreshKey) {
+      await refreshGitStatuses()
     }
     .focusedSceneValue(\.workspaceNavigationCommands, workspaceNavigationCommands)
   }
@@ -960,6 +988,37 @@ private struct WorkspaceBrowserView: View {
       loadFolderChildren: actions.loadFolderChildren,
       performOpenAction: performWorkspaceOpenAction
     )
+  }
+
+  private var gitStatusRefreshKey: GitStatusRefreshKey {
+    GitStatusRefreshKey(
+      folderPath: folderURL.locusStandardizedPath,
+      loadedAt: loadedAt,
+      generation: gitStatusRefreshGeneration
+    )
+  }
+
+  private func refreshGitStatuses() async {
+    do {
+      try await Task.sleep(for: GitStatusRefresh.debounceDuration)
+    } catch {
+      return
+    }
+
+    guard !Task.isCancelled else {
+      return
+    }
+
+    let statuses = await gitWorkspaceStatusProvider.sidebarStatuses(for: folderURL)
+    guard !Task.isCancelled else {
+      return
+    }
+
+    gitStatusesByPath = statuses
+  }
+
+  private func requestGitStatusRefresh() {
+    gitStatusRefreshGeneration &+= 1
   }
 
   private var sidebarHighlight: Binding<WorkspaceEntry.ID?> {

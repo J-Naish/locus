@@ -36,6 +36,8 @@
 		1A00000100000000000000CC /* WorkspaceSidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000CD /* WorkspaceSidebarView.swift */; };
 		1A00000100000000000000CE /* WorkspaceSidebarSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000CF /* WorkspaceSidebarSelection.swift */; };
 		1A00000100000000000000D0 /* WorkspaceSidebarSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000D1 /* WorkspaceSidebarSelectionTests.swift */; };
+		1A00000100000000000000D2 /* GitWorkspaceStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000D3 /* GitWorkspaceStatus.swift */; };
+		1A00000100000000000000D4 /* GitWorkspaceStatusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000D5 /* GitWorkspaceStatusTests.swift */; };
 		1A00000100000000000000BE /* TextDocumentSyntaxHighlighter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */; };
 		1A0000010000000000000096 /* TextDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000097 /* TextDocumentStore.swift */; };
 		1A000001000000000000009C /* TextDocumentStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000009D /* TextDocumentStoreTests.swift */; };
@@ -115,6 +117,8 @@
 		1A00000100000000000000CD /* WorkspaceSidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSidebarView.swift; sourceTree = "<group>"; };
 		1A00000100000000000000CF /* WorkspaceSidebarSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSidebarSelection.swift; sourceTree = "<group>"; };
 		1A00000100000000000000D1 /* WorkspaceSidebarSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSidebarSelectionTests.swift; sourceTree = "<group>"; };
+		1A00000100000000000000D3 /* GitWorkspaceStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitWorkspaceStatus.swift; sourceTree = "<group>"; };
+		1A00000100000000000000D5 /* GitWorkspaceStatusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitWorkspaceStatusTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentSyntaxHighlighter.swift; sourceTree = "<group>"; };
 		1A0000010000000000000097 /* TextDocumentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentStore.swift; sourceTree = "<group>"; };
 		1A000001000000000000009D /* TextDocumentStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentStoreTests.swift; sourceTree = "<group>"; };
@@ -193,6 +197,7 @@
 			isa = PBXGroup;
 			children = (
 				1A0000010000000000000014 /* CoreBridgeTests.swift */,
+				1A00000100000000000000D5 /* GitWorkspaceStatusTests.swift */,
 				1A00000100000000000000A3 /* ImageDocumentStoreTests.swift */,
 				1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */,
 				1A00000100000000000000B7 /* MediaDocumentStoreTests.swift */,
@@ -284,6 +289,7 @@
 				1A0000010000000000000079 /* EmptyWorkspaceView.swift */,
 				1A0000010000000000000091 /* FileLocationShortcut.swift */,
 				1A0000010000000000000093 /* FuzzyMatching.swift */,
+				1A00000100000000000000D3 /* GitWorkspaceStatus.swift */,
 				1A0000010000000000000013 /* HomeView.swift */,
 				1A00000100000000000000BD /* TextDocumentEditorView.swift */,
 				1A00000100000000000000C1 /* DocumentChangeMonitor.swift */,
@@ -466,6 +472,7 @@
 				1A0000010000000000000090 /* FileLocationShortcut.swift in Sources */,
 				1A000001000000000000007E /* FileLocationBookmarkStore.swift in Sources */,
 				1A0000010000000000000092 /* FuzzyMatching.swift in Sources */,
+				1A00000100000000000000D2 /* GitWorkspaceStatus.swift in Sources */,
 				1A0000010000000000000003 /* HomeView.swift in Sources */,
 				1A00000100000000000000A0 /* ImageDocumentStore.swift in Sources */,
 				1A00000100000000000000B4 /* MediaDocumentStore.swift in Sources */,
@@ -499,6 +506,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1A0000010000000000000004 /* CoreBridgeTests.swift in Sources */,
+				1A00000100000000000000D4 /* GitWorkspaceStatusTests.swift in Sources */,
 				1A00000100000000000000A2 /* ImageDocumentStoreTests.swift in Sources */,
 				1A00000100000000000000AA /* InitialFolderURLResolverTests.swift in Sources */,
 				1A00000100000000000000B6 /* MediaDocumentStoreTests.swift in Sources */,

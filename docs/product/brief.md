@@ -46,7 +46,9 @@ Out of scope:
 - No built-in AI chat
 - No extension or plugin system
 - No always-on terminal
-- No developer-centric features such as Git, LSP, or debuggers
+- No developer-centric workflow features such as commits, branches, LSP, or debuggers.
+  Passive read-only Git status coloring is allowed only as a quiet local-change
+  indicator for users reviewing files touched by external tools.
 - Clear file ownership and predictable behavior
 
 ## Positioning

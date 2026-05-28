@@ -1,13 +1,44 @@
 import SwiftUI
 
+extension GitWorkspaceChangeKind {
+  fileprivate var sidebarTextColor: Color {
+    switch self {
+    case .modified:
+      return Color(nsColor: .systemYellow)
+    case .added:
+      return Color(nsColor: .systemGreen)
+    }
+  }
+
+  fileprivate var sidebarSymbolName: String {
+    switch self {
+    case .modified:
+      return "circle.fill"
+    case .added:
+      return "plus.circle.fill"
+    }
+  }
+
+  fileprivate var accessibilityDescription: String {
+    switch self {
+    case .modified:
+      return "modified"
+    case .added:
+      return "added"
+    }
+  }
+}
+
 struct WorkspaceSidebarView: View {
   let folderURL: URL
   let entries: [WorkspaceEntry]
   let recentFolders: [RecentFolder]
+  let gitStatusesByPath: [String: GitWorkspaceChangeKind]
   private let rootEntry: WorkspaceEntry
   @Binding var highlightedEntryID: WorkspaceEntry.ID?
   let shortcutActions: FileLocationShortcutActions
   let actions: WorkspaceActions
+  let onItemCreated: () -> Void
   let onVisibleEntriesChange: ([WorkspaceEntry]) -> Void
   @State private var expandedFolderIDs: Set<WorkspaceEntry.ID> = []
   @State private var childStates: [WorkspaceEntry.ID: WorkspaceSidebarChildState] = [:]
@@ -29,18 +60,22 @@ struct WorkspaceSidebarView: View {
     folderURL: URL,
     entries: [WorkspaceEntry],
     recentFolders: [RecentFolder],
+    gitStatusesByPath: [String: GitWorkspaceChangeKind],
     highlightedEntryID: Binding<WorkspaceEntry.ID?>,
     shortcutActions: FileLocationShortcutActions,
     actions: WorkspaceActions,
+    onItemCreated: @escaping () -> Void,
     onVisibleEntriesChange: @escaping ([WorkspaceEntry]) -> Void
   ) {
     self.folderURL = folderURL
     self.entries = entries
     self.recentFolders = recentFolders
+    self.gitStatusesByPath = gitStatusesByPath
     self.rootEntry = WorkspaceEntry.workspaceRoot(at: folderURL)
     self._highlightedEntryID = highlightedEntryID
     self.shortcutActions = shortcutActions
     self.actions = actions
+    self.onItemCreated = onItemCreated
     self.onVisibleEntriesChange = onVisibleEntriesChange
   }
 
@@ -53,6 +88,7 @@ struct WorkspaceSidebarView: View {
             WorkspaceSidebarEntryRow(
               entry: entry,
               depth: row.depth,
+              gitStatus: gitStatus(for: entry),
               isExpanded: isExpanded(entry),
               toggleExpansion: {
                 toggleExpansion(for: entry)
@@ -188,6 +224,10 @@ struct WorkspaceSidebarView: View {
 
   private func isExpanded(_ entry: WorkspaceEntry) -> Bool {
     entry.id == rootEntry.id ? isRootExpanded : expandedFolderIDs.contains(entry.id)
+  }
+
+  private func gitStatus(for entry: WorkspaceEntry) -> GitWorkspaceChangeKind? {
+    gitStatusesByPath[entry.id]
   }
 
   private func rows(for entries: [WorkspaceEntry], depth: Int) -> [WorkspaceSidebarRow] {
@@ -435,6 +475,7 @@ struct WorkspaceSidebarView: View {
 
       do {
         _ = try await actions.createItem(creationKind, name, creationParent.url)
+        onItemCreated()
         refreshCreationParentIfNeeded(creationParent)
         clearCreationState()
       } catch {
@@ -968,6 +1009,7 @@ private struct WorkspaceSidebarCreationRow: View {
 private struct WorkspaceSidebarEntryRow: View {
   let entry: WorkspaceEntry
   let depth: Int
+  let gitStatus: GitWorkspaceChangeKind?
   let isExpanded: Bool
   let toggleExpansion: () -> Void
 
@@ -998,7 +1040,7 @@ private struct WorkspaceSidebarEntryRow: View {
     .padding(.leading, CGFloat(depth) * WorkspaceSidebarMetrics.depthIndent)
     .frame(maxWidth: .infinity, alignment: .leading)
     .contentShape(Rectangle())
-    .help(Text(verbatim: entry.name))
+    .help(Text(verbatim: rowHelpText))
   }
 
   private var rowContent: some View {
@@ -1009,16 +1051,42 @@ private struct WorkspaceSidebarEntryRow: View {
       Text(entry.name)
         .lineLimit(1)
         .truncationMode(.middle)
+        .foregroundStyle(gitStatus?.sidebarTextColor ?? .primary)
+
+      if let gitStatus {
+        Image(systemName: gitStatus.sidebarSymbolName)
+          .font(.system(size: 7, weight: .semibold))
+          .foregroundStyle(gitStatus.sidebarTextColor)
+          .accessibilityHidden(true)
+      }
 
       Spacer(minLength: 0)
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .contentShape(Rectangle())
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(Text(verbatim: rowAccessibilityLabel))
   }
 
   private var disclosureAccessibilityLabel: Text {
     let action = isExpanded ? "Collapse" : "Expand"
     return Text(verbatim: "\(action) \(entry.name)")
+  }
+
+  private var rowAccessibilityLabel: String {
+    guard let gitStatus else {
+      return entry.name
+    }
+
+    return "\(entry.name), \(gitStatus.accessibilityDescription)"
+  }
+
+  private var rowHelpText: String {
+    guard let gitStatus else {
+      return entry.name
+    }
+
+    return "\(entry.name) (\(gitStatus.accessibilityDescription))"
   }
 }
 

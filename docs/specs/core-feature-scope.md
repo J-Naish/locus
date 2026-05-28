@@ -35,6 +35,9 @@ Should support:
 - delay expensive loading and thumbnails
 - expose basic metadata contextually when it helps a concrete task, without
   turning the main file list into a metadata table
+- show passive, read-only Git change indicators in the sidebar when the opened
+  folder is inside a Git worktree, without exposing commit, branch, staging, or
+  other Git workflow controls
 
 ## Search
 

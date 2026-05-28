@@ -4,12 +4,12 @@
 
 Build the first usable native macOS version of Locus: a quiet local document workspace that can open a folder, browse files, preview common document/media formats, and lightly edit Markdown and structured text.
 
-The implementation should keep the product native, local-first, fast, and document-oriented. It should not introduce Electron, a built-in AI chat surface, plugin execution, IDE workflows, or heavy startup indexing.
+The implementation should keep the product native, local-first, fast, and document-oriented. It should not introduce Electron, a built-in AI chat surface, plugin execution, IDE workflows, or heavy startup indexing. Passive, read-only Git status coloring is allowed as a local-change indicator, but Git workflow surfaces such as branches, commits, staging, merge tools, and blame remain out of scope.
 
 ## Current Implementation Baseline
 
 - `apps/mac/Locus/` contains the active native macOS prototype.
-- The app launches into the home folder when available, supports explicit folder opening, shows a name-first sidebar file browser, expands folders inline, keeps session folder history, and tracks recent files/folders.
+- The app launches into the home folder when available, supports explicit folder opening, shows a name-first sidebar file browser, expands folders inline, colors Git-changed entries passively when available, keeps session folder history, and tracks recent files/folders.
 - The document surface supports editable Markdown, structured text, plain text, and common source files, plus native previews for images, PDFs, media, and Office files through Quick Look where macOS can render them.
 - `core/` contains the Rust workspace with `app-core`, `app-ffi`, and `app-cli`; the current core covers file type classification, shallow folder listing, lightweight listing metadata, ignored-name policy, FFI snapshots, and a performance-listing CLI.
 - The Rust FFI surface exposes ABI/version checks, folder listing with explicit options, stable status codes, partial listing errors, and Rust-owned snapshot release functions.
@@ -53,7 +53,7 @@ Responsibilities:
 
 - `App/`: app entry point, window setup, menus, command routing.
 - `CoreBridge/`: Swift wrapper around the C ABI. Owns unsafe calls, memory release, status conversion, and background dispatch.
-- `Views/Home/`: current folder browsing, inline folder expansion, recent items, search ranking support, preview surfaces, and text editor bridge.
+- `Views/Home/`: current folder browsing, inline folder expansion, passive Git change coloring, recent items, search ranking support, preview surfaces, and text editor bridge.
 - `Services/`: in-app location navigation helpers, file dialogs, file watching, and recents storage if still app-owned.
 
 Use SwiftUI for app structure and normal controls, with AppKit bridges where native document behavior matters:
