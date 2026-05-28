@@ -9,7 +9,8 @@ extension WorkspaceEntry {
     let standardizedURL = folderURL.standardizedFileURL
     let folderName = standardizedURL.lastPathComponent
     return WorkspaceEntry(
-      id: standardizedURL.path(percentEncoded: false),
+      // Keep the synthesized root id aligned with Git status path keys.
+      id: standardizedURL.locusStandardizedPath,
       url: standardizedURL,
       name: folderName.isEmpty ? "Workspace" : folderName,
       kind: .directory,

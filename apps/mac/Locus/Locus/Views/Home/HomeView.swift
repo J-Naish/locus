@@ -1065,7 +1065,15 @@ private struct WorkspaceBrowserView: View {
       return
     }
 
+    let previousRepositoryRootURL = gitRepositoryRootURL
     gitRepositoryRootURL = metadata.workTreeURL
+    // Compare normalized path keys, not URL identity, so directory hints and
+    // trailing slash differences do not trigger redundant refreshes.
+    if previousRepositoryRootURL?.locusStandardizedPath
+      != metadata.workTreeURL.locusStandardizedPath
+    {
+      requestGitStatusRefresh()
+    }
     gitMetadataMonitor.startMonitoring(metadata) { change in
       requestGitStatusRefresh()
       if change == .metadataChanged {

@@ -504,6 +504,7 @@ enum GitSidebarStatusAggregator {
     }
 
     var statuses: [String: GitWorkspaceChangeKind] = [:]
+    var workspaceRootKind: GitWorkspaceChangeKind?
 
     for change in changes {
       guard
@@ -515,14 +516,37 @@ enum GitSidebarStatusAggregator {
         continue
       }
 
+      // Only subdirectory workspaces color their synthesized root row. When the
+      // repository root itself is open, child rows already carry the useful signal.
+      if !workspacePrefixComponents.isEmpty {
+        merge(change.kind, into: &workspaceRootKind)
+      }
+
       var accumulated = workspacePath
       for component in components {
         accumulated = appending(component, to: accumulated)
         merge(change.kind, into: &statuses, at: accumulated)
       }
     }
+    if let workspaceRootKind {
+      statuses[workspacePath] = workspaceRootKind
+    }
 
     return statuses
+  }
+
+  private static func merge(
+    _ kind: GitWorkspaceChangeKind,
+    into current: inout GitWorkspaceChangeKind?
+  ) {
+    guard let existing = current else {
+      current = kind
+      return
+    }
+
+    if priority(of: kind) > priority(of: existing) {
+      current = kind
+    }
   }
 
   private static func merge(

@@ -79,7 +79,25 @@ final class GitWorkspaceStatusTests: XCTestCase {
     XCTAssertEqual(statuses["/tmp/locus/apps/mac/Locus"], .modified)
     XCTAssertEqual(statuses["/tmp/locus/apps/mac/Locus/App.swift"], .modified)
     XCTAssertEqual(statuses["/tmp/locus/apps/mac/New.md"], .added)
+    XCTAssertEqual(statuses["/tmp/locus/apps/mac"], .modified)
     XCTAssertNil(statuses["/tmp/locus/README.md"])
+  }
+
+  func testRepositoryRootWorkspaceDoesNotMarkRootItself() {
+    let workspaceURL = URL(filePath: "/tmp/locus")
+    let changes = [
+      GitStatusChange(path: "docs/edited.md", kind: .modified)
+    ]
+
+    let statuses = GitSidebarStatusAggregator.statuses(
+      for: changes,
+      workspaceURL: workspaceURL,
+      repositoryRootURL: workspaceURL
+    )
+
+    XCTAssertNil(statuses["/tmp/locus"])
+    XCTAssertEqual(statuses["/tmp/locus/docs"], .modified)
+    XCTAssertEqual(statuses["/tmp/locus/docs/edited.md"], .modified)
   }
 
   func testModifiedStatusWinsForContainingFolder() {
@@ -174,6 +192,7 @@ final class GitWorkspaceStatusTests: XCTestCase {
 
     XCTAssertEqual(statuses["/tmp/locus/apps/mac/README.md"], .modified)
     XCTAssertEqual(statuses["/tmp/locus/apps/mac/New.md"], .added)
+    XCTAssertEqual(statuses["/tmp/locus/apps/mac"], .modified)
     XCTAssertNil(statuses["/tmp/locus/README.md"])
   }
 
