@@ -9,6 +9,13 @@ enum GitWorkspaceChangeKind: Equatable, Sendable {
 
 protocol GitWorkspaceStatusProviding: Sendable {
   func sidebarStatuses(for workspaceURL: URL) async -> [String: GitWorkspaceChangeKind]
+
+  func repositoryMetadata(for workspaceURL: URL) async -> GitRepositoryMetadata?
+}
+
+struct GitRepositoryMetadata: Equatable, Sendable {
+  let gitDirectoryURL: URL
+  let commonDirectoryURL: URL
 }
 
 struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
@@ -31,7 +38,19 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
 
   func sidebarStatuses(for workspaceURL: URL) async -> [String: GitWorkspaceChangeKind] {
     do {
-      let output = try await gitStatusOutput(for: workspaceURL)
+      let output = try await gitOutput(
+        for: workspaceURL,
+        arguments: [
+          "-C",
+          workspaceURL.locusStandardizedPath,
+          "status",
+          "--porcelain=v1",
+          "-z",
+          "--untracked-files=all",
+          "--",
+          ".",
+        ]
+      )
       let changes = GitStatusParser.parsePorcelainZ(output)
       return GitSidebarStatusAggregator.statuses(for: changes, workspaceURL: workspaceURL)
     } catch is CancellationError {
@@ -44,12 +63,35 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
     }
   }
 
-  private func gitStatusOutput(for workspaceURL: URL) async throws -> Data {
+  func repositoryMetadata(for workspaceURL: URL) async -> GitRepositoryMetadata? {
+    do {
+      let output = try await gitOutput(
+        for: workspaceURL,
+        arguments: [
+          "-C",
+          workspaceURL.locusStandardizedPath,
+          "rev-parse",
+          "--absolute-git-dir",
+          "--git-common-dir",
+        ]
+      )
+      return GitRepositoryMetadataParser.parse(output, workspaceURL: workspaceURL)
+    } catch is CancellationError {
+      return nil
+    } catch {
+      Self.logger.debug(
+        "Skipping Git metadata monitor for '\(workspaceURL.locusStandardizedPath, privacy: .private)': \(String(describing: error), privacy: .public)"
+      )
+      return nil
+    }
+  }
+
+  private func gitOutput(for workspaceURL: URL, arguments: [String]) async throws -> Data {
     try await withThrowingTaskGroup(of: Data.self) { group in
       group.addTask(priority: .utility) {
-        try Self.gitStatusOutputSync(
-          for: workspaceURL,
+        try Self.gitOutputSync(
           gitExecutableURL: gitExecutableURL,
+          arguments: arguments,
           timeout: statusTimeout,
           isCancelled: { Task.isCancelled }
         )
@@ -63,9 +105,9 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
     }
   }
 
-  private static func gitStatusOutputSync(
-    for workspaceURL: URL,
+  private static func gitOutputSync(
     gitExecutableURL: URL,
+    arguments: [String],
     timeout: TimeInterval,
     isCancelled: () -> Bool
   ) throws -> Data {
@@ -91,16 +133,7 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
 
     let process = Process()
     process.executableURL = gitExecutableURL
-    process.arguments = [
-      "-C",
-      workspaceURL.locusStandardizedPath,
-      "status",
-      "--porcelain=v1",
-      "-z",
-      "--untracked-files=all",
-      "--",
-      ".",
-    ]
+    process.arguments = arguments
 
     process.standardOutput = outputHandle
     process.standardError = errorHandle
@@ -145,6 +178,244 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
     }
 
     process.waitUntilExit()
+  }
+}
+
+enum GitRepositoryMetadataParser {
+  static func parse(_ data: Data, workspaceURL: URL) -> GitRepositoryMetadata? {
+    guard let output = String(data: data, encoding: .utf8) else {
+      return nil
+    }
+    let lines = output.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+    guard lines.count >= 2 else {
+      return nil
+    }
+
+    let gitDirectoryURL = resolveGitPath(lines[0], relativeTo: workspaceURL)
+    let commonDirectoryURL = resolveGitPath(lines[1], relativeTo: workspaceURL)
+    return GitRepositoryMetadata(
+      gitDirectoryURL: gitDirectoryURL,
+      commonDirectoryURL: commonDirectoryURL
+    )
+  }
+
+  private static func resolveGitPath(_ path: String, relativeTo workspaceURL: URL) -> URL {
+    if path.hasPrefix("/") {
+      return URL(filePath: path).standardizedFileURL
+    }
+
+    return workspaceURL.appending(path: path).standardizedFileURL
+  }
+}
+
+enum GitRepositoryMetadataChange: Equatable, Sendable {
+  case statusOnly
+  case metadataChanged
+}
+
+@MainActor
+final class GitRepositoryMetadataMonitor {
+  private let debounceDuration: Duration
+  private var eventSources: [DispatchSourceFileSystemObject] = []
+  private var pendingRefreshTask: Task<Void, Never>?
+  private var pendingChange: GitRepositoryMetadataChange?
+  private var monitorGeneration: UInt64 = 0
+  private var currentMetadata: GitRepositoryMetadata?
+  private var currentMonitoredPaths: Set<String> = []
+
+  init(debounceDuration: Duration = .milliseconds(250)) {
+    self.debounceDuration = debounceDuration
+  }
+
+  func startMonitoring(
+    _ metadata: GitRepositoryMetadata,
+    onChange: @escaping @MainActor (GitRepositoryMetadataChange) -> Void
+  ) {
+    let urls = monitoredURLs(for: metadata)
+    let monitoredPaths = Set(urls.map(\.locusStandardizedPath))
+    guard metadata != currentMetadata || monitoredPaths != currentMonitoredPaths else {
+      return
+    }
+
+    stopMonitoring()
+    monitorGeneration &+= 1
+    let generation = monitorGeneration
+    currentMetadata = metadata
+    currentMonitoredPaths = monitoredPaths
+
+    for url in urls {
+      startMonitoring(
+        url,
+        generation: generation,
+        changeKind: changeKind(for: url, metadata: metadata),
+        onChange: onChange
+      )
+    }
+  }
+
+  func stopMonitoring() {
+    monitorGeneration &+= 1
+    pendingRefreshTask?.cancel()
+    pendingRefreshTask = nil
+    pendingChange = nil
+    currentMetadata = nil
+    currentMonitoredPaths = []
+    for eventSource in eventSources {
+      eventSource.cancel()
+    }
+    eventSources = []
+  }
+
+  private func startMonitoring(
+    _ url: URL,
+    generation: UInt64,
+    changeKind: GitRepositoryMetadataChange,
+    onChange: @escaping @MainActor (GitRepositoryMetadataChange) -> Void
+  ) {
+    let descriptor = open(url.path(percentEncoded: false), O_EVTONLY | O_CLOEXEC)
+    guard descriptor >= 0 else {
+      return
+    }
+
+    let source = DispatchSource.makeFileSystemObjectSource(
+      fileDescriptor: descriptor,
+      eventMask: [.write, .delete, .rename],
+      queue: .main
+    )
+    source.setEventHandler { [weak self] in
+      Task { @MainActor [weak self] in
+        self?.scheduleChange(changeKind, onChange: onChange, generation: generation)
+      }
+    }
+    source.setCancelHandler {
+      close(descriptor)
+    }
+
+    eventSources.append(source)
+    source.resume()
+  }
+
+  private func scheduleChange(
+    _ changeKind: GitRepositoryMetadataChange,
+    onChange: @escaping @MainActor (GitRepositoryMetadataChange) -> Void,
+    generation: UInt64
+  ) {
+    guard generation == monitorGeneration else {
+      return
+    }
+
+    pendingChange = pendingChange?.merged(with: changeKind) ?? changeKind
+    pendingRefreshTask?.cancel()
+    let delay = debounceDuration
+    pendingRefreshTask = Task { @MainActor [weak self] in
+      do {
+        try await Task.sleep(for: delay)
+      } catch {
+        return
+      }
+
+      guard let self, self.monitorGeneration == generation else {
+        return
+      }
+
+      let change = self.pendingChange ?? .statusOnly
+      self.pendingChange = nil
+      onChange(change)
+    }
+  }
+
+  private func monitoredURLs(for metadata: GitRepositoryMetadata) -> [URL] {
+    var candidateURLs = [
+      metadata.gitDirectoryURL,
+      metadata.commonDirectoryURL,
+      metadata.gitDirectoryURL.appending(path: "HEAD"),
+      metadata.gitDirectoryURL.appending(path: "index"),
+      metadata.gitDirectoryURL.appending(path: "refs", directoryHint: .isDirectory),
+      metadata.gitDirectoryURL.appending(path: "refs/heads", directoryHint: .isDirectory),
+      metadata.gitDirectoryURL.appending(path: "refs/tags", directoryHint: .isDirectory),
+      metadata.commonDirectoryURL.appending(path: "HEAD"),
+      metadata.commonDirectoryURL.appending(path: "index"),
+      metadata.commonDirectoryURL.appending(path: "packed-refs"),
+      metadata.commonDirectoryURL.appending(path: "refs", directoryHint: .isDirectory),
+      metadata.commonDirectoryURL.appending(path: "refs/heads", directoryHint: .isDirectory),
+      metadata.commonDirectoryURL.appending(path: "refs/tags", directoryHint: .isDirectory),
+    ]
+
+    if let headReferenceURL = currentHeadReferenceURL(for: metadata) {
+      candidateURLs.append(headReferenceURL)
+    }
+
+    var seen: Set<String> = []
+    var urls: [URL] = []
+    for url in candidateURLs {
+      let path = url.locusStandardizedPath
+      guard seen.insert(path).inserted else {
+        continue
+      }
+      guard FileManager.default.fileExists(atPath: path) else {
+        continue
+      }
+      urls.append(url)
+    }
+
+    return urls
+  }
+
+  private func currentHeadReferenceURL(for metadata: GitRepositoryMetadata) -> URL? {
+    let headURL = metadata.gitDirectoryURL.appending(path: "HEAD")
+    guard let head = try? String(contentsOf: headURL, encoding: .utf8) else {
+      return nil
+    }
+
+    let prefix = "ref: "
+    guard head.hasPrefix(prefix) else {
+      return nil
+    }
+
+    let referencePath = head.dropFirst(prefix.count)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard referencePath.hasPrefix("refs/"), !referencePath.contains("..") else {
+      return nil
+    }
+
+    return metadata.commonDirectoryURL.appending(path: referencePath)
+  }
+
+  private func changeKind(
+    for url: URL,
+    metadata: GitRepositoryMetadata
+  ) -> GitRepositoryMetadataChange {
+    let path = url.locusStandardizedPath
+    let metadataPaths: Set<String> = [
+      metadata.gitDirectoryURL.locusStandardizedPath,
+      metadata.commonDirectoryURL.locusStandardizedPath,
+      metadata.gitDirectoryURL.appending(path: "HEAD").locusStandardizedPath,
+      metadata.gitDirectoryURL.appending(path: "refs", directoryHint: .isDirectory)
+        .locusStandardizedPath,
+      metadata.gitDirectoryURL.appending(path: "refs/heads", directoryHint: .isDirectory)
+        .locusStandardizedPath,
+      metadata.gitDirectoryURL.appending(path: "refs/tags", directoryHint: .isDirectory)
+        .locusStandardizedPath,
+      metadata.commonDirectoryURL.appending(path: "refs", directoryHint: .isDirectory)
+        .locusStandardizedPath,
+      metadata.commonDirectoryURL.appending(path: "refs/heads", directoryHint: .isDirectory)
+        .locusStandardizedPath,
+      metadata.commonDirectoryURL.appending(path: "refs/tags", directoryHint: .isDirectory)
+        .locusStandardizedPath,
+    ]
+
+    return metadataPaths.contains(path) ? .metadataChanged : .statusOnly
+  }
+}
+
+extension GitRepositoryMetadataChange {
+  fileprivate func merged(with other: GitRepositoryMetadataChange) -> GitRepositoryMetadataChange {
+    switch (self, other) {
+    case (.metadataChanged, _), (_, .metadataChanged):
+      return .metadataChanged
+    case (.statusOnly, .statusOnly):
+      return .statusOnly
+    }
   }
 }
 

@@ -795,6 +795,11 @@ private struct WorkspaceBrowserView: View {
     let generation: UInt64
   }
 
+  private struct GitMetadataMonitorKey: Hashable {
+    let folderPath: String
+    let generation: UInt64
+  }
+
   private enum GitStatusRefresh {
     static let debounceDuration: Duration = .milliseconds(250)
   }
@@ -822,6 +827,9 @@ private struct WorkspaceBrowserView: View {
   @State private var columnVisibility: NavigationSplitViewVisibility = .all
   @State private var gitStatusesByPath: [String: GitWorkspaceChangeKind] = [:]
   @State private var gitStatusRefreshGeneration: UInt64 = 0
+  @State private var gitMetadataMonitor = GitRepositoryMetadataMonitor()
+  @State private var gitMetadataMonitorGeneration: UInt64 = 0
+  @Environment(\.scenePhase) private var scenePhase
 
   init(
     folderURL: URL,
@@ -914,6 +922,7 @@ private struct WorkspaceBrowserView: View {
       isDocumentTextInputFocused = false
       gitStatusesByPath = [:]
       gitStatusRefreshGeneration &+= 1
+      gitMetadataMonitorGeneration &+= 1
       sidebarSelectionState.reset()
       refreshSearchResults()
     }
@@ -922,6 +931,20 @@ private struct WorkspaceBrowserView: View {
     }
     .task(id: gitStatusRefreshKey) {
       await refreshGitStatuses()
+    }
+    .task(id: gitMetadataMonitorKey) {
+      await refreshGitMetadataMonitoring()
+    }
+    .onChange(of: scenePhase) { _, newPhase in
+      guard newPhase == .active else {
+        return
+      }
+
+      requestGitStatusRefresh()
+      requestGitMetadataMonitorRefresh()
+    }
+    .onDisappear {
+      gitMetadataMonitor.stopMonitoring()
     }
     .focusedSceneValue(\.workspaceNavigationCommands, workspaceNavigationCommands)
   }
@@ -998,6 +1021,13 @@ private struct WorkspaceBrowserView: View {
     )
   }
 
+  private var gitMetadataMonitorKey: GitMetadataMonitorKey {
+    GitMetadataMonitorKey(
+      folderPath: folderURL.locusStandardizedPath,
+      generation: gitMetadataMonitorGeneration
+    )
+  }
+
   private func refreshGitStatuses() async {
     do {
       try await Task.sleep(for: GitStatusRefresh.debounceDuration)
@@ -1017,8 +1047,31 @@ private struct WorkspaceBrowserView: View {
     gitStatusesByPath = statuses
   }
 
+  @MainActor
+  private func refreshGitMetadataMonitoring() async {
+    guard let metadata = await gitWorkspaceStatusProvider.repositoryMetadata(for: folderURL) else {
+      gitMetadataMonitor.stopMonitoring()
+      return
+    }
+
+    guard !Task.isCancelled else {
+      return
+    }
+
+    gitMetadataMonitor.startMonitoring(metadata) { change in
+      requestGitStatusRefresh()
+      if change == .metadataChanged {
+        requestGitMetadataMonitorRefresh()
+      }
+    }
+  }
+
   private func requestGitStatusRefresh() {
     gitStatusRefreshGeneration &+= 1
+  }
+
+  private func requestGitMetadataMonitorRefresh() {
+    gitMetadataMonitorGeneration &+= 1
   }
 
   private var sidebarHighlight: Binding<WorkspaceEntry.ID?> {

@@ -144,6 +144,102 @@ final class GitWorkspaceStatusTests: XCTestCase {
     XCTAssertLessThan(Date().timeIntervalSince(start), 0.5)
   }
 
+  func testRepositoryMetadataParserResolvesRelativeCommonDirectoryFromWorkspace() {
+    let workspaceURL = URL(filePath: "/tmp/locus/apps/mac")
+    let data = Data("/tmp/locus/.git\n../../.git\n".utf8)
+
+    XCTAssertEqual(
+      GitRepositoryMetadataParser.parse(data, workspaceURL: workspaceURL),
+      GitRepositoryMetadata(
+        gitDirectoryURL: URL(filePath: "/tmp/locus/.git"),
+        commonDirectoryURL: URL(filePath: "/tmp/locus/.git")
+      )
+    )
+  }
+
+  func testProviderReturnsRepositoryMetadataFromGitExecutable() async throws {
+    let scriptURL = try makeExecutableScript(
+      """
+      printf '/tmp/locus/.git\\n.git\\n'
+      """
+    )
+    let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 1)
+
+    let metadata = await provider.repositoryMetadata(for: URL(filePath: "/tmp/locus"))
+
+    XCTAssertEqual(
+      metadata,
+      GitRepositoryMetadata(
+        gitDirectoryURL: URL(filePath: "/tmp/locus/.git"),
+        commonDirectoryURL: URL(filePath: "/tmp/locus/.git")
+      )
+    )
+  }
+
+  @MainActor
+  func testRepositoryMetadataMonitorNotifiesWhenHeadChanges() async throws {
+    let directoryURL = FileManager.default.temporaryDirectory
+      .appending(
+        path: "GitRepositoryMetadataMonitorTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    let gitDirectoryURL = directoryURL.appending(path: ".git", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: gitDirectoryURL, withIntermediateDirectories: true)
+    addTeardownBlock {
+      try? FileManager.default.removeItem(at: directoryURL)
+    }
+
+    let headURL = gitDirectoryURL.appending(path: "HEAD")
+    try Data("ref: refs/heads/main\n".utf8).write(to: headURL, options: .withoutOverwriting)
+
+    let expectation = expectation(description: "Git metadata change is observed")
+    let monitor = GitRepositoryMetadataMonitor(debounceDuration: .milliseconds(20))
+    monitor.startMonitoring(
+      GitRepositoryMetadata(gitDirectoryURL: gitDirectoryURL, commonDirectoryURL: gitDirectoryURL)
+    ) { change in
+      XCTAssertEqual(change, .metadataChanged)
+      expectation.fulfill()
+    }
+
+    try await Task.sleep(for: .milliseconds(50))
+    try Data("ref: refs/heads/main-updated\n".utf8).write(to: headURL)
+
+    await fulfillment(of: [expectation], timeout: 1)
+    monitor.stopMonitoring()
+  }
+
+  @MainActor
+  func testRepositoryMetadataMonitorNotifiesWhenCurrentHeadReferenceChanges() async throws {
+    let directoryURL = FileManager.default.temporaryDirectory
+      .appending(
+        path: "GitRepositoryMetadataMonitorTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    let gitDirectoryURL = directoryURL.appending(path: ".git", directoryHint: .isDirectory)
+    let headsURL = gitDirectoryURL.appending(path: "refs/heads", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: headsURL, withIntermediateDirectories: true)
+    addTeardownBlock {
+      try? FileManager.default.removeItem(at: directoryURL)
+    }
+
+    let headURL = gitDirectoryURL.appending(path: "HEAD")
+    let mainRefURL = headsURL.appending(path: "main")
+    try Data("ref: refs/heads/main\n".utf8).write(to: headURL, options: .withoutOverwriting)
+    try Data("0000000000000000000000000000000000000000\n".utf8)
+      .write(to: mainRefURL, options: .withoutOverwriting)
+
+    let expectation = expectation(description: "Current Git branch ref change is observed")
+    let monitor = GitRepositoryMetadataMonitor(debounceDuration: .milliseconds(20))
+    monitor.startMonitoring(
+      GitRepositoryMetadata(gitDirectoryURL: gitDirectoryURL, commonDirectoryURL: gitDirectoryURL)
+    ) { change in
+      XCTAssertEqual(change, .statusOnly)
+      expectation.fulfill()
+    }
+
+    try await Task.sleep(for: .milliseconds(50))
+    try Data("1111111111111111111111111111111111111111\n".utf8).write(to: mainRefURL)
+
+    await fulfillment(of: [expectation], timeout: 1)
+    monitor.stopMonitoring()
+  }
+
   private func makeExecutableScript(_ body: String) throws -> URL {
     let directoryURL = FileManager.default.temporaryDirectory
       .appending(path: "GitWorkspaceStatusTests-\(UUID().uuidString)", directoryHint: .isDirectory)
