@@ -612,7 +612,41 @@ final class WorkspaceSearchUITests: XCTestCase {
     emptyAreaCoordinate(in: sidebarList, app: app).click()
 
     assertTableRow(named: "Project Brief.md", isNotSelectedIn: app)
+    XCTAssertFalse(
+      app.textFields["workspace-sidebar-creation-name-field"].exists,
+      app.debugDescription
+    )
     XCTAssertTrue(app.textViews["document-text-editor"].exists, app.debugDescription)
+  }
+
+  @MainActor
+  func testDoubleClickingEmptySidebarAreaStartsNewFileCreation() throws {
+    let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    XCTAssertTrue(
+      workspaceSidebarLabel(named: "Project Brief.md", in: app).waitForExistence(timeout: 5),
+      app.debugDescription)
+
+    let sidebarList = workspaceSidebarList(in: app)
+    XCTAssertTrue(sidebarList.waitForExistence(timeout: 2), app.debugDescription)
+    emptyAreaCoordinate(in: sidebarList, app: app).doubleClick()
+
+    let nameField = app.textFields["workspace-sidebar-creation-name-field"]
+    XCTAssertTrue(nameField.waitForExistence(timeout: 2), app.debugDescription)
+    nameField.click()
+    app.typeText("Created From Double Click.md")
+    app.typeKey(XCUIKeyboardKey.return, modifierFlags: [])
+
+    let createdURL = workspaceURL.appending(path: "Created From Double Click.md")
+    XCTAssertTrue(
+      FileManager.default.fileExists(atPath: createdURL.path(percentEncoded: false))
+    )
+    XCTAssertTrue(
+      workspaceSidebarLabel(named: "Created From Double Click.md", in: app)
+        .waitForExistence(timeout: 5),
+      app.debugDescription
+    )
   }
 
   @MainActor

@@ -142,9 +142,16 @@ struct WorkspaceSidebarView: View {
       }
       .accessibilityIdentifier("workspace-sidebar-list")
       .overlay {
-        WorkspaceSidebarEmptyAreaSelectionClearer {
-          highlightedEntryID = nil
-        }
+        WorkspaceSidebarEmptyAreaClickHandler(
+          clearSelection: {
+            highlightedEntryID = nil
+          },
+          beginNewFile: {
+            // Empty-area creation is not associated with a specific row, so it
+            // always starts at the workspace root.
+            beginCreation(.file, in: rootEntry)
+          }
+        )
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -646,33 +653,37 @@ private struct WorkspaceSidebarRecentFolderRow: View {
   }
 }
 
-private struct WorkspaceSidebarEmptyAreaSelectionClearer: NSViewRepresentable {
+private struct WorkspaceSidebarEmptyAreaClickHandler: NSViewRepresentable {
   let clearSelection: () -> Void
+  let beginNewFile: () -> Void
 
-  func makeNSView(context: Context) -> WorkspaceSidebarEmptyAreaSelectionClearerView {
-    let view = WorkspaceSidebarEmptyAreaSelectionClearerView()
+  func makeNSView(context: Context) -> WorkspaceSidebarEmptyAreaClickHandlerView {
+    let view = WorkspaceSidebarEmptyAreaClickHandlerView()
     view.clearSelection = clearSelection
+    view.beginNewFile = beginNewFile
     return view
   }
 
   func updateNSView(
-    _ nsView: WorkspaceSidebarEmptyAreaSelectionClearerView,
+    _ nsView: WorkspaceSidebarEmptyAreaClickHandlerView,
     context: Context
   ) {
     nsView.clearSelection = clearSelection
+    nsView.beginNewFile = beginNewFile
     nsView.resolveTableViewSoon()
   }
 
   static func dismantleNSView(
-    _ nsView: WorkspaceSidebarEmptyAreaSelectionClearerView,
+    _ nsView: WorkspaceSidebarEmptyAreaClickHandlerView,
     coordinator: ()
   ) {
     nsView.invalidate()
   }
 }
 
-private final class WorkspaceSidebarEmptyAreaSelectionClearerView: NSView {
+private final class WorkspaceSidebarEmptyAreaClickHandlerView: NSView {
   var clearSelection: () -> Void = {}
+  var beginNewFile: () -> Void = {}
   private weak var tableView: NSTableView?
   private var eventMonitor: Any?
 
@@ -718,7 +729,7 @@ private final class WorkspaceSidebarEmptyAreaSelectionClearerView: NSView {
 
     eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) {
       [weak self] event in
-      self?.clearSelectionIfClickIsInEmptyListArea(event)
+      self?.handleClickIfInEmptyListArea(event)
       return event
     }
   }
@@ -732,7 +743,7 @@ private final class WorkspaceSidebarEmptyAreaSelectionClearerView: NSView {
     self.eventMonitor = nil
   }
 
-  private func clearSelectionIfClickIsInEmptyListArea(_ event: NSEvent) {
+  private func handleClickIfInEmptyListArea(_ event: NSEvent) {
     guard let window, event.window === window else {
       return
     }
@@ -748,11 +759,22 @@ private final class WorkspaceSidebarEmptyAreaSelectionClearerView: NSView {
 
     self.tableView = tableView
     let pointInTable = tableView.convert(event.locationInWindow, from: nil)
-    if tableView.bounds.contains(pointInTable), tableView.row(at: pointInTable) != -1 {
+    guard tableView.bounds.contains(pointInTable) else {
       return
     }
 
-    clearSelection()
+    guard tableView.row(at: pointInTable) == -1 else {
+      return
+    }
+
+    guard event.clickCount == 2 else {
+      if event.clickCount == 1 {
+        clearSelection()
+      }
+      return
+    }
+
+    beginNewFile()
   }
 
   private func findSidebarTableView() -> NSTableView? {
