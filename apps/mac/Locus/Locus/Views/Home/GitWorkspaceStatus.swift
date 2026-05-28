@@ -5,6 +5,7 @@ import OSLog
 enum GitWorkspaceChangeKind: Equatable, Sendable {
   case modified
   case added
+  case ignored
 }
 
 protocol GitWorkspaceStatusProviding: Sendable {
@@ -54,6 +55,7 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
           "--porcelain=v1",
           "-z",
           "--untracked-files=all",
+          "--ignored=matching",
           "--",
           ".",
         ]
@@ -445,6 +447,58 @@ struct GitStatusChange: Equatable, Sendable {
   let kind: GitWorkspaceChangeKind
 }
 
+struct GitSidebarStatusLookup: Equatable, Sendable {
+  private let statusesByPath: [String: GitWorkspaceChangeKind]
+  private let walkLimitPath: String?
+
+  init(_ statusesByPath: [String: GitWorkspaceChangeKind], walkLimitPath: String? = nil) {
+    self.statusesByPath = statusesByPath
+    self.walkLimitPath = walkLimitPath.map(Self.normalizedPath)
+  }
+
+  func status(for path: String) -> GitWorkspaceChangeKind? {
+    let standardizedPath = Self.normalizedPath(path)
+    if let status = statusesByPath[standardizedPath] {
+      return status
+    }
+
+    var ancestor = standardizedPath
+    while let parent = Self.parentPath(of: ancestor) {
+      if statusesByPath[parent] == .ignored {
+        return .ignored
+      }
+      if let walkLimitPath, parent == walkLimitPath {
+        break
+      }
+      ancestor = parent
+    }
+
+    return nil
+  }
+
+  private static func normalizedPath(_ path: String) -> String {
+    var path = path
+    while path.count > 1, path.hasSuffix("/") {
+      path.removeLast()
+    }
+    return path
+  }
+
+  private static func parentPath(of path: String) -> String? {
+    let path = normalizedPath(path)
+    guard path != "/" else {
+      return nil
+    }
+    guard let slashIndex = path.lastIndex(of: "/") else {
+      return nil
+    }
+    if slashIndex == path.startIndex {
+      return "/"
+    }
+    return String(path[..<slashIndex])
+  }
+}
+
 enum GitStatusParser {
   static func parsePorcelainZ(_ data: Data) -> [GitStatusChange] {
     let fields = data.split(separator: 0, omittingEmptySubsequences: true)
@@ -478,6 +532,10 @@ enum GitStatusParser {
   }
 
   private static func changeKind(for status: String) -> GitWorkspaceChangeKind {
+    if status == "!!" {
+      return .ignored
+    }
+
     if status == "??" || status.contains("A") {
       return .added
     }
@@ -520,6 +578,10 @@ enum GitSidebarStatusAggregator {
       // repository root itself is open, child rows already carry the useful signal.
       if !workspacePrefixComponents.isEmpty {
         merge(change.kind, into: &workspaceRootKind)
+      }
+
+      guard !components.isEmpty else {
+        continue
       }
 
       var accumulated = workspacePath
@@ -569,8 +631,10 @@ enum GitSidebarStatusAggregator {
   private static func priority(of kind: GitWorkspaceChangeKind) -> Int {
     switch kind {
     case .modified:
-      return 2
+      return 3
     case .added:
+      return 2
+    case .ignored:
       return 1
     }
   }
@@ -595,7 +659,7 @@ enum GitSidebarStatusAggregator {
     guard !components.contains(where: { $0 == "." || $0 == ".." }) else {
       return nil
     }
-    guard components.count > workspacePrefixComponents.count else {
+    guard components.count >= workspacePrefixComponents.count else {
       return nil
     }
 
@@ -606,7 +670,7 @@ enum GitSidebarStatusAggregator {
     }
 
     let workspaceComponents = components.dropFirst(workspacePrefixComponents.count)
-    return workspaceComponents.isEmpty ? nil : Array(workspaceComponents)
+    return Array(workspaceComponents)
   }
 
   private static func workspacePrefixComponents(

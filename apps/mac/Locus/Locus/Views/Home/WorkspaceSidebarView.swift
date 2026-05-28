@@ -7,7 +7,13 @@ extension GitWorkspaceChangeKind {
       return Color(nsColor: .systemYellow)
     case .added:
       return Color(nsColor: .systemGreen)
+    case .ignored:
+      return .secondary
     }
+  }
+
+  fileprivate var dimsSidebarSymbol: Bool {
+    self == .ignored
   }
 
   fileprivate var accessibilityDescription: String {
@@ -16,6 +22,8 @@ extension GitWorkspaceChangeKind {
       return "modified"
     case .added:
       return "added"
+    case .ignored:
+      return "ignored"
     }
   }
 }
@@ -24,7 +32,7 @@ struct WorkspaceSidebarView: View {
   let folderURL: URL
   let entries: [WorkspaceEntry]
   let recentFolders: [RecentFolder]
-  let gitStatusesByPath: [String: GitWorkspaceChangeKind]
+  private let gitStatusLookup: GitSidebarStatusLookup
   private let rootEntry: WorkspaceEntry
   @Binding var highlightedEntryID: WorkspaceEntry.ID?
   let shortcutActions: FileLocationShortcutActions
@@ -61,7 +69,10 @@ struct WorkspaceSidebarView: View {
     self.folderURL = folderURL
     self.entries = entries
     self.recentFolders = recentFolders
-    self.gitStatusesByPath = gitStatusesByPath
+    self.gitStatusLookup = GitSidebarStatusLookup(
+      gitStatusesByPath,
+      walkLimitPath: folderURL.locusStandardizedPath
+    )
     self.rootEntry = WorkspaceEntry.workspaceRoot(at: folderURL)
     self._highlightedEntryID = highlightedEntryID
     self.shortcutActions = shortcutActions
@@ -249,7 +260,7 @@ struct WorkspaceSidebarView: View {
   }
 
   private func gitStatus(for entry: WorkspaceEntry) -> GitWorkspaceChangeKind? {
-    gitStatusesByPath[entry.id]
+    gitStatusLookup.status(for: entry.id)
   }
 
   private func rows(for entries: [WorkspaceEntry], depth: Int) -> [WorkspaceSidebarRow] {
@@ -1083,7 +1094,7 @@ private struct WorkspaceSidebarEntryRow: View {
   private var rowContent: some View {
     HStack(spacing: 6) {
       Image(systemName: entry.symbolName)
-        .foregroundStyle(entry.symbolColor)
+        .foregroundStyle(gitStatus?.dimsSidebarSymbol == true ? .secondary : entry.symbolColor)
 
       Text(entry.name)
         .lineLimit(1)

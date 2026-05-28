@@ -41,6 +41,18 @@ final class GitWorkspaceStatusTests: XCTestCase {
     )
   }
 
+  func testParsesIgnoredPorcelainRecords() {
+    let data = Data("!! build/\u{0}!! .env.local\u{0}".utf8)
+
+    XCTAssertEqual(
+      GitStatusParser.parsePorcelainZ(data),
+      [
+        GitStatusChange(path: "build/", kind: .ignored),
+        GitStatusChange(path: ".env.local", kind: .ignored),
+      ]
+    )
+  }
+
   func testAggregatesFileStatusToContainingFolders() {
     let workspaceURL = URL(filePath: "/tmp/locus")
     let changes = [
@@ -98,6 +110,68 @@ final class GitWorkspaceStatusTests: XCTestCase {
     XCTAssertNil(statuses["/tmp/locus"])
     XCTAssertEqual(statuses["/tmp/locus/docs"], .modified)
     XCTAssertEqual(statuses["/tmp/locus/docs/edited.md"], .modified)
+  }
+
+  func testIgnoredStatusAppliesToIgnoredFolderWithoutMarkingRepositoryRoot() {
+    let workspaceURL = URL(filePath: "/tmp/locus")
+    let changes = [
+      GitStatusChange(path: "build/", kind: .ignored)
+    ]
+
+    let statuses = GitSidebarStatusAggregator.statuses(
+      for: changes,
+      workspaceURL: workspaceURL,
+      repositoryRootURL: workspaceURL
+    )
+
+    XCTAssertNil(statuses["/tmp/locus"])
+    XCTAssertEqual(statuses["/tmp/locus/build"], .ignored)
+  }
+
+  func testIgnoredWorkspaceRootIsMarkedWhenWorkspaceIsIgnoredSubdirectory() {
+    let repositoryRootURL = URL(filePath: "/tmp/locus")
+    let workspaceURL = URL(filePath: "/tmp/locus/build")
+    let changes = [
+      GitStatusChange(path: "build/", kind: .ignored)
+    ]
+
+    let statuses = GitSidebarStatusAggregator.statuses(
+      for: changes,
+      workspaceURL: workspaceURL,
+      repositoryRootURL: repositoryRootURL
+    )
+
+    XCTAssertEqual(statuses["/tmp/locus/build"], .ignored)
+  }
+
+  func testIgnoredAncestorStatusAppliesToDescendants() {
+    let lookup = GitSidebarStatusLookup([
+      "/tmp/locus/build": .ignored
+    ])
+
+    XCTAssertEqual(lookup.status(for: "/tmp/locus/build"), .ignored)
+    XCTAssertEqual(lookup.status(for: "/tmp/locus/build/generated/report.md"), .ignored)
+    XCTAssertNil(lookup.status(for: "/tmp/locus/build-output/report.md"))
+  }
+
+  func testExactGitStatusWinsOverIgnoredAncestor() {
+    let lookup = GitSidebarStatusLookup([
+      "/tmp/locus/build": .ignored,
+      "/tmp/locus/build/tracked.md": .modified,
+    ])
+
+    XCTAssertEqual(lookup.status(for: "/tmp/locus/build/tracked.md"), .modified)
+  }
+
+  func testIgnoredAncestorLookupStopsAtWorkspaceRoot() {
+    let lookup = GitSidebarStatusLookup(
+      [
+        "/tmp/locus": .ignored
+      ],
+      walkLimitPath: "/tmp/locus/apps"
+    )
+
+    XCTAssertNil(lookup.status(for: "/tmp/locus/apps/mac/README.md"))
   }
 
   func testModifiedStatusWinsForContainingFolder() {
@@ -171,6 +245,26 @@ final class GitWorkspaceStatusTests: XCTestCase {
 
     XCTAssertEqual(statuses["/tmp/locus/Notes"], .added)
     XCTAssertEqual(statuses["/tmp/locus/Notes/new.md"], .added)
+    XCTAssertEqual(statuses["/tmp/locus/README.md"], .modified)
+  }
+
+  func testProviderReturnsIgnoredStatusesFromGitExecutable() async throws {
+    let scriptURL = try makeExecutableScript(
+      """
+      case "$*" in
+        *rev-parse*) printf '/tmp/locus/.git\\n.git\\n/tmp/locus\\n' ;;
+        *) printf '!! build/\\0 M README.md\\0' ;;
+      esac
+      """
+    )
+    let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 1)
+
+    let statuses = await provider.sidebarStatuses(
+      for: URL(filePath: "/tmp/locus"),
+      repositoryRootURL: URL(filePath: "/tmp/locus")
+    )
+
+    XCTAssertEqual(statuses["/tmp/locus/build"], .ignored)
     XCTAssertEqual(statuses["/tmp/locus/README.md"], .modified)
   }
 
