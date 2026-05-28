@@ -92,13 +92,15 @@ Avoid adding:
 - built-in AI chat
 - plugin or extension execution
 - always-on terminal UI
-- Git, LSP, debugger, or other IDE-oriented features
+- Git workflow surfaces such as commit, branch, diff, merge, blame, staging,
+  LSP, debugger, or other IDE-oriented features
 - heavy parsing or thumbnail generation on startup
 
-Exception: passive, read-only Git status indicators may be used to make changed
-or newly created local files easier to notice in the sidebar. Do not add commit,
-branch, diff, merge, blame, staging, or other Git workflow surfaces unless the
-product direction explicitly changes.
+Passive, read-only Git status indicators may be used as local file-status cues
+to make changed or newly created files easier to notice in the sidebar. Keep
+this limited to lightweight status display; do not add commit, branch, diff,
+merge, blame, staging, or other Git workflow surfaces unless the product
+direction explicitly changes.
 
 ## Performance, Weight, and Polish Rules
 

@@ -10,15 +10,6 @@ extension GitWorkspaceChangeKind {
     }
   }
 
-  fileprivate var sidebarSymbolName: String {
-    switch self {
-    case .modified:
-      return "circle.fill"
-    case .added:
-      return "plus.circle.fill"
-    }
-  }
-
   fileprivate var accessibilityDescription: String {
     switch self {
     case .modified:
@@ -1052,13 +1043,6 @@ private struct WorkspaceSidebarEntryRow: View {
         .lineLimit(1)
         .truncationMode(.middle)
         .foregroundStyle(gitStatus?.sidebarTextColor ?? .primary)
-
-      if let gitStatus {
-        Image(systemName: gitStatus.sidebarSymbolName)
-          .font(.system(size: 7, weight: .semibold))
-          .foregroundStyle(gitStatus.sidebarTextColor)
-          .accessibilityHidden(true)
-      }
 
       Spacer(minLength: 0)
     }

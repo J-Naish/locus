@@ -57,7 +57,7 @@ final class GitWorkspaceStatusTests: XCTestCase {
     )
   }
 
-  func testAddedStatusWinsForContainingFolder() {
+  func testModifiedStatusWinsForContainingFolder() {
     let workspaceURL = URL(filePath: "/tmp/locus")
     let changes = [
       GitStatusChange(path: "docs/edited.md", kind: .modified),
@@ -67,11 +67,11 @@ final class GitWorkspaceStatusTests: XCTestCase {
     XCTAssertEqual(
       GitSidebarStatusAggregator.statuses(for: changes, workspaceURL: workspaceURL)[
         "/tmp/locus/docs"],
-      .added
+      .modified
     )
   }
 
-  func testAddedStatusStillWinsWhenItArrivesBeforeModifiedStatus() {
+  func testModifiedStatusStillWinsWhenItArrivesAfterAddedStatus() {
     let workspaceURL = URL(filePath: "/tmp/locus")
     let changes = [
       GitStatusChange(path: "docs/new.md", kind: .added),
@@ -81,7 +81,7 @@ final class GitWorkspaceStatusTests: XCTestCase {
     XCTAssertEqual(
       GitSidebarStatusAggregator.statuses(for: changes, workspaceURL: workspaceURL)[
         "/tmp/locus/docs"],
-      .added
+      .modified
     )
   }
 

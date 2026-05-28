@@ -507,11 +507,25 @@ enum GitSidebarStatusAggregator {
     into statuses: inout [String: GitWorkspaceChangeKind],
     at path: String
   ) {
-    guard statuses[path] != .added else {
+    guard let current = statuses[path] else {
+      statuses[path] = kind
       return
     }
 
-    statuses[path] = kind
+    // Folder aggregation follows VS Code's visual priority: a tracked-file edit
+    // is more salient than a newly introduced sibling, so modified wins over added.
+    if priority(of: kind) > priority(of: current) {
+      statuses[path] = kind
+    }
+  }
+
+  private static func priority(of kind: GitWorkspaceChangeKind) -> Int {
+    switch kind {
+    case .modified:
+      return 2
+    case .added:
+      return 1
+    }
   }
 
   private static func appending(_ component: String, to path: String) -> String {
