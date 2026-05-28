@@ -40,6 +40,7 @@
 		1A00000100000000000000D0 /* WorkspaceSidebarSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000D1 /* WorkspaceSidebarSelectionTests.swift */; };
 		1A00000100000000000000D2 /* GitWorkspaceStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000D3 /* GitWorkspaceStatus.swift */; };
 		1A00000100000000000000D4 /* GitWorkspaceStatusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000D5 /* GitWorkspaceStatusTests.swift */; };
+		1A00000100000000000000DA /* NativeSidebarToggle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000DB /* NativeSidebarToggle.swift */; };
 		1A00000100000000000000BE /* TextDocumentSyntaxHighlighter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */; };
 		1A0000010000000000000096 /* TextDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000097 /* TextDocumentStore.swift */; };
 		1A000001000000000000009C /* TextDocumentStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000009D /* TextDocumentStoreTests.swift */; };
@@ -123,6 +124,7 @@
 		1A00000100000000000000D1 /* WorkspaceSidebarSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSidebarSelectionTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000D3 /* GitWorkspaceStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitWorkspaceStatus.swift; sourceTree = "<group>"; };
 		1A00000100000000000000D5 /* GitWorkspaceStatusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitWorkspaceStatusTests.swift; sourceTree = "<group>"; };
+		1A00000100000000000000DB /* NativeSidebarToggle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSidebarToggle.swift; sourceTree = "<group>"; };
 		1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentSyntaxHighlighter.swift; sourceTree = "<group>"; };
 		1A0000010000000000000097 /* TextDocumentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentStore.swift; sourceTree = "<group>"; };
 		1A000001000000000000009D /* TextDocumentStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentStoreTests.swift; sourceTree = "<group>"; };
@@ -296,6 +298,7 @@
 				1A0000010000000000000093 /* FuzzyMatching.swift */,
 				1A00000100000000000000D3 /* GitWorkspaceStatus.swift */,
 				1A0000010000000000000013 /* HomeView.swift */,
+				1A00000100000000000000DB /* NativeSidebarToggle.swift */,
 				1A00000100000000000000BD /* TextDocumentEditorView.swift */,
 				1A00000100000000000000C1 /* DocumentChangeMonitor.swift */,
 				1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */,
@@ -480,6 +483,7 @@
 				1A0000010000000000000092 /* FuzzyMatching.swift in Sources */,
 				1A00000100000000000000D2 /* GitWorkspaceStatus.swift in Sources */,
 				1A0000010000000000000003 /* HomeView.swift in Sources */,
+				1A00000100000000000000DA /* NativeSidebarToggle.swift in Sources */,
 				1A00000100000000000000A0 /* ImageDocumentStore.swift in Sources */,
 				1A00000100000000000000B4 /* MediaDocumentStore.swift in Sources */,
 				1A00000100000000000000B0 /* PDFDocumentStore.swift in Sources */,

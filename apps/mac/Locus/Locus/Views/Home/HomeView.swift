@@ -1034,6 +1034,7 @@ private struct WorkspaceBrowserView: View {
     }
     .focusedSceneValue(\.workspaceNavigationCommands, workspaceNavigationCommands)
     .focusedSceneValue(\.workspaceDeletionCommand, workspaceDeletionCommand)
+    .focusedSceneValue(\.workspaceSidebarVisibilityCommand, workspaceSidebarVisibilityCommand)
   }
 
   private func refreshSearchResults() {
@@ -1096,9 +1097,19 @@ private struct WorkspaceBrowserView: View {
           return
         }
 
-        deleteEntries(entries)
+        _ = deleteEntries(entries)
       }
     )
+  }
+
+  private var workspaceSidebarVisibilityCommand: WorkspaceSidebarVisibilityCommand {
+    WorkspaceSidebarVisibilityCommand(
+      toggle: toggleSidebarVisibility
+    )
+  }
+
+  private func toggleSidebarVisibility() {
+    NativeSidebarToggle.toggle()
   }
 
   private var deletableHighlightedEntries: [WorkspaceEntry] {

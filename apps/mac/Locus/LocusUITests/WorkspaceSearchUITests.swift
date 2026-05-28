@@ -264,6 +264,29 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testCommandBTogglesWorkspaceSidebar() throws {
+    let app = try launchAppWithBasicWorkspace()
+
+    XCTAssertTrue(
+      workspaceSidebarLabel(named: "Reports", in: app).waitForExistence(timeout: 5),
+      app.debugDescription)
+
+    app.typeKey("b", modifierFlags: [.command])
+
+    XCTAssertFalse(
+      workspaceSidebarLabel(named: "Reports", in: app).waitForExistence(timeout: 2),
+      app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Select a File"].waitForExistence(timeout: 2), app.debugDescription)
+
+    app.typeKey("b", modifierFlags: [.command])
+
+    XCTAssertTrue(
+      workspaceSidebarLabel(named: "Reports", in: app).waitForExistence(timeout: 5),
+      app.debugDescription)
+  }
+
+  @MainActor
   func testWorkspaceRootRowIsExpandedByDefaultAndTogglesViaDisclosure() throws {
     let workspaceURL = URL(filePath: try fixtureWorkspacePath("basic"), directoryHint: .isDirectory)
     let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))

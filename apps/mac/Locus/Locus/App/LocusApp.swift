@@ -42,6 +42,10 @@ struct WorkspaceDeletionCommand {
   let delete: () -> Void
 }
 
+struct WorkspaceSidebarVisibilityCommand {
+  let toggle: () -> Void
+}
+
 enum LocusPersistedDefaults {
   static let recentFoldersExpanded = "workspace.sidebar.recentFoldersExpanded"
   static let uiTestResetKeys = [
@@ -61,6 +65,10 @@ private struct WorkspaceDeletionCommandKey: FocusedValueKey {
   typealias Value = WorkspaceDeletionCommand
 }
 
+private struct WorkspaceSidebarVisibilityCommandKey: FocusedValueKey {
+  typealias Value = WorkspaceSidebarVisibilityCommand
+}
+
 extension FocusedValues {
   var workspaceNavigationCommands: WorkspaceNavigationCommands? {
     get { self[WorkspaceNavigationCommandsKey.self] }
@@ -75,6 +83,11 @@ extension FocusedValues {
   var workspaceDeletionCommand: WorkspaceDeletionCommand? {
     get { self[WorkspaceDeletionCommandKey.self] }
     set { self[WorkspaceDeletionCommandKey.self] = newValue }
+  }
+
+  var workspaceSidebarVisibilityCommand: WorkspaceSidebarVisibilityCommand? {
+    get { self[WorkspaceSidebarVisibilityCommandKey.self] }
+    set { self[WorkspaceSidebarVisibilityCommandKey.self] = newValue }
   }
 }
 
@@ -126,6 +139,20 @@ private struct WorkspaceDeletionCommandMenu: Commands {
   }
 }
 
+private struct WorkspaceSidebarVisibilityCommandMenu: Commands {
+  @FocusedValue(\.workspaceSidebarVisibilityCommand) private var sidebarCommand
+
+  var body: some Commands {
+    CommandGroup(after: .toolbar) {
+      Button("Toggle Sidebar") {
+        sidebarCommand?.toggle()
+      }
+      .keyboardShortcut("b", modifiers: [.command])
+      .disabled(sidebarCommand == nil)
+    }
+  }
+}
+
 @main
 struct LocusApp: App {
   init() {
@@ -150,6 +177,7 @@ struct LocusApp: App {
     .commands {
       DocumentSaveCommandMenu()
       WorkspaceDeletionCommandMenu()
+      WorkspaceSidebarVisibilityCommandMenu()
       WorkspaceNavigationCommandMenu()
     }
   }
