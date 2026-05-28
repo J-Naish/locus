@@ -8,7 +8,10 @@ enum GitWorkspaceChangeKind: Equatable, Sendable {
 }
 
 protocol GitWorkspaceStatusProviding: Sendable {
-  func sidebarStatuses(for workspaceURL: URL) async -> [String: GitWorkspaceChangeKind]
+  func sidebarStatuses(
+    for workspaceURL: URL,
+    repositoryRootURL: URL?
+  ) async -> [String: GitWorkspaceChangeKind]
 
   func repositoryMetadata(for workspaceURL: URL) async -> GitRepositoryMetadata?
 }
@@ -16,6 +19,7 @@ protocol GitWorkspaceStatusProviding: Sendable {
 struct GitRepositoryMetadata: Equatable, Sendable {
   let gitDirectoryURL: URL
   let commonDirectoryURL: URL
+  let workTreeURL: URL
 }
 
 struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
@@ -36,7 +40,10 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
     self.statusTimeout = statusTimeout
   }
 
-  func sidebarStatuses(for workspaceURL: URL) async -> [String: GitWorkspaceChangeKind] {
+  func sidebarStatuses(
+    for workspaceURL: URL,
+    repositoryRootURL: URL? = nil
+  ) async -> [String: GitWorkspaceChangeKind] {
     do {
       let output = try await gitOutput(
         for: workspaceURL,
@@ -52,7 +59,11 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
         ]
       )
       let changes = GitStatusParser.parsePorcelainZ(output)
-      return GitSidebarStatusAggregator.statuses(for: changes, workspaceURL: workspaceURL)
+      return GitSidebarStatusAggregator.statuses(
+        for: changes,
+        workspaceURL: workspaceURL,
+        repositoryRootURL: repositoryRootURL ?? workspaceURL
+      )
     } catch is CancellationError {
       return [:]
     } catch {
@@ -71,8 +82,9 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
           "-C",
           workspaceURL.locusStandardizedPath,
           "rev-parse",
-          "--absolute-git-dir",
-          "--git-common-dir",
+          "--absolute-git-dir",  // lines[0]
+          "--git-common-dir",  // lines[1]
+          "--show-toplevel",  // lines[2]
         ]
       )
       return GitRepositoryMetadataParser.parse(output, workspaceURL: workspaceURL)
@@ -187,15 +199,17 @@ enum GitRepositoryMetadataParser {
       return nil
     }
     let lines = output.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-    guard lines.count >= 2 else {
+    guard lines.count >= 3 else {
       return nil
     }
 
     let gitDirectoryURL = resolveGitPath(lines[0], relativeTo: workspaceURL)
     let commonDirectoryURL = resolveGitPath(lines[1], relativeTo: workspaceURL)
+    let workTreeURL = resolveGitPath(lines[2], relativeTo: workspaceURL)
     return GitRepositoryMetadata(
       gitDirectoryURL: gitDirectoryURL,
-      commonDirectoryURL: commonDirectoryURL
+      commonDirectoryURL: commonDirectoryURL,
+      workTreeURL: workTreeURL
     )
   }
 
@@ -325,6 +339,8 @@ final class GitRepositoryMetadataMonitor {
   }
 
   private func monitoredURLs(for metadata: GitRepositoryMetadata) -> [URL] {
+    // Work tree file changes are handled by WorkspaceDirectoryMonitor; this
+    // monitor only tracks Git metadata that can change status meaning.
     var candidateURLs = [
       metadata.gitDirectoryURL,
       metadata.commonDirectoryURL,
@@ -473,22 +489,29 @@ enum GitStatusParser {
 enum GitSidebarStatusAggregator {
   static func statuses(
     for changes: [GitStatusChange],
-    workspaceURL: URL
+    workspaceURL: URL,
+    repositoryRootURL: URL
   ) -> [String: GitWorkspaceChangeKind] {
     let workspacePath = workspaceURL.locusStandardizedPath
+    let repositoryRootPath = repositoryRootURL.locusStandardizedPath
+    guard
+      let workspacePrefixComponents = workspacePrefixComponents(
+        repositoryRootPath: repositoryRootPath,
+        workspacePath: workspacePath
+      )
+    else {
+      return [:]
+    }
+
     var statuses: [String: GitWorkspaceChangeKind] = [:]
 
     for change in changes {
-      let relativePath = change.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-      guard !relativePath.isEmpty else {
-        continue
-      }
-
-      let components = relativePath.split(separator: "/").map(String.init)
-      guard !components.isEmpty else {
-        continue
-      }
-      guard !components.contains(where: { $0 == "." || $0 == ".." }) else {
+      guard
+        let components = workspaceRelativeComponents(
+          forRepositoryRelativePath: change.path,
+          workspacePrefixComponents: workspacePrefixComponents
+        )
+      else {
         continue
       }
 
@@ -530,5 +553,56 @@ enum GitSidebarStatusAggregator {
 
   private static func appending(_ component: String, to path: String) -> String {
     path == "/" ? "/\(component)" : "\(path)/\(component)"
+  }
+
+  private static func workspaceRelativeComponents(
+    forRepositoryRelativePath path: String,
+    workspacePrefixComponents: [String]
+  ) -> [String]? {
+    let repositoryRelativePath = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    guard !repositoryRelativePath.isEmpty else {
+      return nil
+    }
+
+    let components = repositoryRelativePath.split(separator: "/").map(String.init)
+    guard !components.isEmpty else {
+      return nil
+    }
+    guard !components.contains(where: { $0 == "." || $0 == ".." }) else {
+      return nil
+    }
+    guard components.count > workspacePrefixComponents.count else {
+      return nil
+    }
+
+    for (index, prefixComponent) in workspacePrefixComponents.enumerated() {
+      guard components[index] == prefixComponent else {
+        return nil
+      }
+    }
+
+    let workspaceComponents = components.dropFirst(workspacePrefixComponents.count)
+    return workspaceComponents.isEmpty ? nil : Array(workspaceComponents)
+  }
+
+  private static func workspacePrefixComponents(
+    repositoryRootPath: String,
+    workspacePath: String
+  ) -> [String]? {
+    guard workspacePath != repositoryRootPath else {
+      return []
+    }
+    guard workspacePath.locusHasPathPrefix(repositoryRootPath) else {
+      return nil
+    }
+
+    let prefix = repositoryRootPath == "/" ? "/" : repositoryRootPath + "/"
+    guard workspacePath.hasPrefix(prefix) else {
+      return nil
+    }
+
+    let workspaceRelativePath = String(workspacePath.dropFirst(prefix.count))
+    let components = workspaceRelativePath.split(separator: "/").map(String.init)
+    return components.isEmpty ? nil : components
   }
 }

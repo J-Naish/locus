@@ -48,13 +48,38 @@ final class GitWorkspaceStatusTests: XCTestCase {
     ]
 
     XCTAssertEqual(
-      GitSidebarStatusAggregator.statuses(for: changes, workspaceURL: workspaceURL),
+      GitSidebarStatusAggregator.statuses(
+        for: changes,
+        workspaceURL: workspaceURL,
+        repositoryRootURL: workspaceURL
+      ),
       [
         "/tmp/locus/docs": .modified,
         "/tmp/locus/docs/specs": .modified,
         "/tmp/locus/docs/specs/brief.md": .modified,
       ]
     )
+  }
+
+  func testAggregatesRepositoryRelativePathsInsideChildWorkspace() {
+    let repositoryRootURL = URL(filePath: "/tmp/locus")
+    let workspaceURL = URL(filePath: "/tmp/locus/apps/mac")
+    let changes = [
+      GitStatusChange(path: "apps/mac/Locus/App.swift", kind: .modified),
+      GitStatusChange(path: "apps/mac/New.md", kind: .added),
+      GitStatusChange(path: "README.md", kind: .modified),
+    ]
+
+    let statuses = GitSidebarStatusAggregator.statuses(
+      for: changes,
+      workspaceURL: workspaceURL,
+      repositoryRootURL: repositoryRootURL
+    )
+
+    XCTAssertEqual(statuses["/tmp/locus/apps/mac/Locus"], .modified)
+    XCTAssertEqual(statuses["/tmp/locus/apps/mac/Locus/App.swift"], .modified)
+    XCTAssertEqual(statuses["/tmp/locus/apps/mac/New.md"], .added)
+    XCTAssertNil(statuses["/tmp/locus/README.md"])
   }
 
   func testModifiedStatusWinsForContainingFolder() {
@@ -65,8 +90,11 @@ final class GitWorkspaceStatusTests: XCTestCase {
     ]
 
     XCTAssertEqual(
-      GitSidebarStatusAggregator.statuses(for: changes, workspaceURL: workspaceURL)[
-        "/tmp/locus/docs"],
+      GitSidebarStatusAggregator.statuses(
+        for: changes,
+        workspaceURL: workspaceURL,
+        repositoryRootURL: workspaceURL
+      )["/tmp/locus/docs"],
       .modified
     )
   }
@@ -79,8 +107,11 @@ final class GitWorkspaceStatusTests: XCTestCase {
     ]
 
     XCTAssertEqual(
-      GitSidebarStatusAggregator.statuses(for: changes, workspaceURL: workspaceURL)[
-        "/tmp/locus/docs"],
+      GitSidebarStatusAggregator.statuses(
+        for: changes,
+        workspaceURL: workspaceURL,
+        repositoryRootURL: workspaceURL
+      )["/tmp/locus/docs"],
       .modified
     )
   }
@@ -93,7 +124,11 @@ final class GitWorkspaceStatusTests: XCTestCase {
     ]
 
     XCTAssertEqual(
-      GitSidebarStatusAggregator.statuses(for: changes, workspaceURL: workspaceURL),
+      GitSidebarStatusAggregator.statuses(
+        for: changes,
+        workspaceURL: workspaceURL,
+        repositoryRootURL: workspaceURL
+      ),
       [
         "/tmp/locus/docs/local.md": .modified
       ]
@@ -103,31 +138,87 @@ final class GitWorkspaceStatusTests: XCTestCase {
   func testProviderReturnsParsedStatusesFromGitExecutable() async throws {
     let scriptURL = try makeExecutableScript(
       """
-      printf '?? Notes/new.md\\0 M README.md\\0'
+      case "$*" in
+        *rev-parse*) printf '/tmp/locus/.git\\n.git\\n/tmp/locus\\n' ;;
+        *) printf '?? Notes/new.md\\0 M README.md\\0' ;;
+      esac
       """
     )
     let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 1)
 
-    let statuses = await provider.sidebarStatuses(for: URL(filePath: "/tmp/locus"))
+    let statuses = await provider.sidebarStatuses(
+      for: URL(filePath: "/tmp/locus"),
+      repositoryRootURL: URL(filePath: "/tmp/locus")
+    )
 
     XCTAssertEqual(statuses["/tmp/locus/Notes"], .added)
     XCTAssertEqual(statuses["/tmp/locus/Notes/new.md"], .added)
     XCTAssertEqual(statuses["/tmp/locus/README.md"], .modified)
   }
 
+  func testProviderMapsRepositoryRelativeStatusesIntoChildWorkspace() async throws {
+    let scriptURL = try makeExecutableScript(
+      """
+      case "$*" in
+        *rev-parse*) printf '/tmp/locus/.git\\n.git\\n/tmp/locus\\n' ;;
+        *) printf ' M apps/mac/README.md\\0?? apps/mac/New.md\\0 M README.md\\0' ;;
+      esac
+      """
+    )
+    let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 1)
+
+    let statuses = await provider.sidebarStatuses(
+      for: URL(filePath: "/tmp/locus/apps/mac"),
+      repositoryRootURL: URL(filePath: "/tmp/locus")
+    )
+
+    XCTAssertEqual(statuses["/tmp/locus/apps/mac/README.md"], .modified)
+    XCTAssertEqual(statuses["/tmp/locus/apps/mac/New.md"], .added)
+    XCTAssertNil(statuses["/tmp/locus/README.md"])
+  }
+
+  func testProviderFallsBackToWorkspaceRootWhenRepositoryRootIsUnavailable() async throws {
+    let scriptURL = try makeExecutableScript(
+      """
+      case "$*" in
+        *rev-parse*) exit 128 ;;
+        *) printf ' M README.md\\0' ;;
+      esac
+      """
+    )
+    let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 1)
+
+    let statuses = await provider.sidebarStatuses(
+      for: URL(filePath: "/tmp/locus"),
+      repositoryRootURL: nil
+    )
+
+    XCTAssertEqual(statuses["/tmp/locus/README.md"], .modified)
+  }
+
   func testProviderReadsLargeStatusOutputWithoutPipeDeadlock() async throws {
     let scriptURL = try makeExecutableScript(
       """
-      i=0
-      while [ "$i" -lt 5000 ]; do
-        printf '?? file-%04d.txt\\0' "$i"
-        i=$((i + 1))
-      done
+      case "$*" in
+        *rev-parse*)
+          printf '/tmp/locus/.git\\n.git\\n/tmp/locus\\n'
+          ;;
+        *)
+          i=0
+          while [ "$i" -lt 5000 ]; do
+            printf '?? file-%04d.txt\\0' "$i"
+            i=$((i + 1))
+          done
+          ;;
+      esac
       """
     )
     let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 2)
 
-    let statuses = await provider.sidebarStatuses(for: URL(filePath: "/tmp/locus"))
+    let statuses = await provider.sidebarStatuses(
+      for: URL(filePath: "/tmp/locus"),
+      repositoryRootURL: URL(filePath: "/tmp/locus")
+    )
 
     XCTAssertEqual(statuses["/tmp/locus/file-0000.txt"], .added)
     XCTAssertEqual(statuses["/tmp/locus/file-4999.txt"], .added)
@@ -138,7 +229,10 @@ final class GitWorkspaceStatusTests: XCTestCase {
     let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 0.05)
 
     let start = Date()
-    let statuses = await provider.sidebarStatuses(for: URL(filePath: "/tmp/locus"))
+    let statuses = await provider.sidebarStatuses(
+      for: URL(filePath: "/tmp/locus"),
+      repositoryRootURL: URL(filePath: "/tmp/locus")
+    )
 
     XCTAssertTrue(statuses.isEmpty)
     XCTAssertLessThan(Date().timeIntervalSince(start), 0.5)
@@ -146,13 +240,14 @@ final class GitWorkspaceStatusTests: XCTestCase {
 
   func testRepositoryMetadataParserResolvesRelativeCommonDirectoryFromWorkspace() {
     let workspaceURL = URL(filePath: "/tmp/locus/apps/mac")
-    let data = Data("/tmp/locus/.git\n../../.git\n".utf8)
+    let data = Data("/tmp/locus/.git\n../../.git\n../..\n".utf8)
 
     XCTAssertEqual(
       GitRepositoryMetadataParser.parse(data, workspaceURL: workspaceURL),
       GitRepositoryMetadata(
         gitDirectoryURL: URL(filePath: "/tmp/locus/.git"),
-        commonDirectoryURL: URL(filePath: "/tmp/locus/.git")
+        commonDirectoryURL: URL(filePath: "/tmp/locus/.git"),
+        workTreeURL: URL(filePath: "/tmp/locus", directoryHint: .isDirectory)
       )
     )
   }
@@ -160,7 +255,7 @@ final class GitWorkspaceStatusTests: XCTestCase {
   func testProviderReturnsRepositoryMetadataFromGitExecutable() async throws {
     let scriptURL = try makeExecutableScript(
       """
-      printf '/tmp/locus/.git\\n.git\\n'
+      printf '/tmp/locus/.git\\n.git\\n/tmp/locus\\n'
       """
     )
     let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 1)
@@ -171,7 +266,8 @@ final class GitWorkspaceStatusTests: XCTestCase {
       metadata,
       GitRepositoryMetadata(
         gitDirectoryURL: URL(filePath: "/tmp/locus/.git"),
-        commonDirectoryURL: URL(filePath: "/tmp/locus/.git")
+        commonDirectoryURL: URL(filePath: "/tmp/locus/.git"),
+        workTreeURL: URL(filePath: "/tmp/locus")
       )
     )
   }
@@ -193,7 +289,11 @@ final class GitWorkspaceStatusTests: XCTestCase {
     let expectation = expectation(description: "Git metadata change is observed")
     let monitor = GitRepositoryMetadataMonitor(debounceDuration: .milliseconds(20))
     monitor.startMonitoring(
-      GitRepositoryMetadata(gitDirectoryURL: gitDirectoryURL, commonDirectoryURL: gitDirectoryURL)
+      GitRepositoryMetadata(
+        gitDirectoryURL: gitDirectoryURL,
+        commonDirectoryURL: gitDirectoryURL,
+        workTreeURL: directoryURL
+      )
     ) { change in
       XCTAssertEqual(change, .metadataChanged)
       expectation.fulfill()
@@ -227,7 +327,11 @@ final class GitWorkspaceStatusTests: XCTestCase {
     let expectation = expectation(description: "Current Git branch ref change is observed")
     let monitor = GitRepositoryMetadataMonitor(debounceDuration: .milliseconds(20))
     monitor.startMonitoring(
-      GitRepositoryMetadata(gitDirectoryURL: gitDirectoryURL, commonDirectoryURL: gitDirectoryURL)
+      GitRepositoryMetadata(
+        gitDirectoryURL: gitDirectoryURL,
+        commonDirectoryURL: gitDirectoryURL,
+        workTreeURL: directoryURL
+      )
     ) { change in
       XCTAssertEqual(change, .statusOnly)
       expectation.fulfill()

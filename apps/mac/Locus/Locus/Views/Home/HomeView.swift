@@ -829,6 +829,7 @@ private struct WorkspaceBrowserView: View {
   @State private var gitStatusRefreshGeneration: UInt64 = 0
   @State private var gitMetadataMonitor = GitRepositoryMetadataMonitor()
   @State private var gitMetadataMonitorGeneration: UInt64 = 0
+  @State private var gitRepositoryRootURL: URL?
   @Environment(\.scenePhase) private var scenePhase
 
   init(
@@ -921,6 +922,7 @@ private struct WorkspaceBrowserView: View {
       searchQuery = ""
       isDocumentTextInputFocused = false
       gitStatusesByPath = [:]
+      gitRepositoryRootURL = nil
       gitStatusRefreshGeneration &+= 1
       gitMetadataMonitorGeneration &+= 1
       sidebarSelectionState.reset()
@@ -1039,7 +1041,11 @@ private struct WorkspaceBrowserView: View {
       return
     }
 
-    let statuses = await gitWorkspaceStatusProvider.sidebarStatuses(for: folderURL)
+    let repositoryRootURL = gitRepositoryRootURL
+    let statuses = await gitWorkspaceStatusProvider.sidebarStatuses(
+      for: folderURL,
+      repositoryRootURL: repositoryRootURL
+    )
     guard !Task.isCancelled else {
       return
     }
@@ -1050,6 +1056,7 @@ private struct WorkspaceBrowserView: View {
   @MainActor
   private func refreshGitMetadataMonitoring() async {
     guard let metadata = await gitWorkspaceStatusProvider.repositoryMetadata(for: folderURL) else {
+      gitRepositoryRootURL = nil
       gitMetadataMonitor.stopMonitoring()
       return
     }
@@ -1058,6 +1065,7 @@ private struct WorkspaceBrowserView: View {
       return
     }
 
+    gitRepositoryRootURL = metadata.workTreeURL
     gitMetadataMonitor.startMonitoring(metadata) { change in
       requestGitStatusRefresh()
       if change == .metadataChanged {
