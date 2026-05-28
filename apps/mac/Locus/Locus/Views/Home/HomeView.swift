@@ -898,6 +898,7 @@ private struct WorkspaceBrowserView: View {
   @State private var searchResults: WorkspaceBrowserSearchResults
   @State private var sidebarVisibleEntries: [WorkspaceEntry]
   @State private var sidebarSelectionState: WorkspaceSidebarSelectionState
+  @State private var openDocumentEntry: WorkspaceEntry?
   @State private var isDocumentTextInputFocused = false
   @State private var columnVisibility: NavigationSplitViewVisibility = .all
   @State private var gitStatusesByPath: [String: GitWorkspaceChangeKind] = [:]
@@ -957,6 +958,12 @@ private struct WorkspaceBrowserView: View {
         visibleEntryIDs: Set(initialVisibleEntryIDs)
       )
     )
+    self._openDocumentEntry = State(
+      initialValue: Self.documentSurfaceEntry(
+        for: selectedEntryID.wrappedValue,
+        in: [WorkspaceEntry.workspaceRoot(at: folderURL)] + snapshot.entries
+      )
+    )
   }
 
   var body: some View {
@@ -996,6 +1003,7 @@ private struct WorkspaceBrowserView: View {
     .onChange(of: folderURL) {
       searchQuery = ""
       isDocumentTextInputFocused = false
+      openDocumentEntry = nil
       gitStatusesByPath = [:]
       gitRepositoryRootURL = nil
       gitStatusRefreshGeneration &+= 1
@@ -1005,6 +1013,7 @@ private struct WorkspaceBrowserView: View {
     }
     .onChange(of: selectedEntryID) { _, newSelection in
       sidebarSelectionState.setActiveEntryID(newSelection)
+      updateOpenDocumentEntry(for: newSelection, from: sidebarVisibleEntries)
     }
     .task(id: gitStatusRefreshKey) {
       await refreshGitStatuses()
@@ -1040,6 +1049,7 @@ private struct WorkspaceBrowserView: View {
     searchResults = refreshedResults
     let rootEntry = WorkspaceEntry.workspaceRoot(at: folderURL)
     sidebarVisibleEntries = [rootEntry] + refreshedResults.visibleEntries
+    updateOpenDocumentEntry(for: selectedEntryID, from: sidebarVisibleEntries)
 
     if !WorkspaceEntrySearch.shouldKeepSelection(
       selectedEntryID,
@@ -1225,15 +1235,19 @@ private struct WorkspaceBrowserView: View {
 
   private var sidebarHighlight: Binding<WorkspaceEntry.ID?> {
     // The sidebar highlight is visual focus, while selectedEntryID is the
-    // active document/folder. Empty sidebar clicks clear only the highlight.
+    // open document. Folder clicks move only the highlight so the current
+    // preview/editor stays visible.
     Binding(
       get: {
         sidebarSelectionState.highlightedEntryID
       },
       set: { newHighlight in
         if let newHighlight {
-          sidebarSelectionState.selectSidebarEntry(newHighlight)
-          selectedEntryID = newHighlight
+          sidebarSelectionState.highlightSidebarEntry(newHighlight)
+          if let entry = documentSurfaceEntry(for: newHighlight) {
+            openDocumentEntry = entry
+            selectedEntryID = newHighlight
+          }
         } else {
           sidebarSelectionState.clearHighlightForEmptyAreaClick()
         }
@@ -1241,12 +1255,45 @@ private struct WorkspaceBrowserView: View {
     )
   }
 
-  private var selectedEntry: WorkspaceEntry? {
-    guard let selectedEntryID else {
+  private func documentSurfaceEntry(for entryID: WorkspaceEntry.ID) -> WorkspaceEntry? {
+    Self.documentSurfaceEntry(for: entryID, in: sidebarVisibleEntries)
+  }
+
+  private static func documentSurfaceEntry(
+    for entryID: WorkspaceEntry.ID?,
+    in entries: [WorkspaceEntry]
+  ) -> WorkspaceEntry? {
+    guard let entryID,
+      let entry = entries.first(where: { $0.id == entryID })
+    else {
       return nil
     }
 
-    return sidebarVisibleEntries.first { $0.id == selectedEntryID }
+    // Use the open action as the source of truth for whether the document
+    // surface should change. Folders browse; only in-place entries open here.
+    guard case .openInPlace = WorkspaceEntryOpenActionResolver.action(for: [entry]) else {
+      return nil
+    }
+
+    return entry
+  }
+
+  private func updateOpenDocumentEntry(
+    for entryID: WorkspaceEntry.ID?,
+    from entries: [WorkspaceEntry]
+  ) {
+    guard let entryID else {
+      openDocumentEntry = nil
+      return
+    }
+
+    if let entry = Self.documentSurfaceEntry(for: entryID, in: entries) {
+      openDocumentEntry = entry
+    }
+  }
+
+  private var selectedEntry: WorkspaceEntry? {
+    openDocumentEntry
   }
 
   private func performWorkspaceOpenAction(_ openAction: WorkspaceEntryOpenAction) {
@@ -1256,14 +1303,7 @@ private struct WorkspaceBrowserView: View {
   private func updateSidebarVisibleEntries(_ entries: [WorkspaceEntry]) {
     sidebarVisibleEntries = entries
     sidebarSelectionState.setVisibleEntryIDs(Set(entries.map(\.id)))
-
-    guard let selectedEntryID,
-      !entries.contains(where: { $0.id == selectedEntryID })
-    else {
-      return
-    }
-
-    self.selectedEntryID = nil
+    updateOpenDocumentEntry(for: selectedEntryID, from: entries)
   }
 
   private var workspaceDetail: some View {

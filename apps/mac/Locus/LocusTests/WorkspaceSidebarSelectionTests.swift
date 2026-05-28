@@ -25,17 +25,43 @@ final class WorkspaceSidebarSelectionTests: XCTestCase {
     XCTAssertNil(state.highlightedEntryID)
   }
 
-  func testSidebarSelectionSetsActiveEntryAndRestoresHighlight() {
+  func testSidebarSelectionHighlightsSidebarEntryWithoutChangingActiveEntry() {
     var state = WorkspaceSidebarSelectionState(
       activeEntryID: "notes",
       visibleEntryIDs: ["root", "notes", "brief"]
     )
     state.clearHighlightForEmptyAreaClick()
 
-    state.selectSidebarEntry("brief")
+    state.highlightSidebarEntry("brief")
 
-    XCTAssertEqual(state.activeEntryID, "brief")
+    XCTAssertEqual(state.activeEntryID, "notes")
     XCTAssertEqual(state.highlightedEntryID, "brief")
+  }
+
+  func testSidebarSelectionFallsBackToActiveEntryWhenHighlightedEntryBecomesInvisible() {
+    var state = WorkspaceSidebarSelectionState(
+      activeEntryID: "notes",
+      visibleEntryIDs: ["root", "notes", "brief"]
+    )
+
+    state.highlightSidebarEntry("brief")
+    state.setVisibleEntryIDs(["root", "notes"])
+
+    XCTAssertEqual(state.activeEntryID, "notes")
+    XCTAssertEqual(state.highlightedEntryID, "notes")
+  }
+
+  func testEmptyAreaClickClearsFolderHighlightWithoutRestoringActiveEntryHighlight() {
+    var state = WorkspaceSidebarSelectionState(
+      activeEntryID: "notes",
+      visibleEntryIDs: ["root", "notes", "Drafts"]
+    )
+
+    state.highlightSidebarEntry("Drafts")
+    state.clearHighlightForEmptyAreaClick()
+
+    XCTAssertEqual(state.activeEntryID, "notes")
+    XCTAssertNil(state.highlightedEntryID)
   }
 
   func testClearedHighlightStaysClearedAcrossVisibleEntryUpdates() {
@@ -57,6 +83,19 @@ final class WorkspaceSidebarSelectionTests: XCTestCase {
       visibleEntryIDs: ["root", "notes", "brief"]
     )
     state.clearHighlightForEmptyAreaClick()
+
+    state.setActiveEntryID("brief")
+
+    XCTAssertEqual(state.activeEntryID, "brief")
+    XCTAssertEqual(state.highlightedEntryID, "brief")
+  }
+
+  func testActiveEntryChangeReplacesExplicitSidebarHighlight() {
+    var state = WorkspaceSidebarSelectionState(
+      activeEntryID: "notes",
+      visibleEntryIDs: ["root", "notes", "brief", "Drafts"]
+    )
+    state.highlightSidebarEntry("Drafts")
 
     state.setActiveEntryID("brief")
 

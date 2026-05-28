@@ -563,9 +563,9 @@ final class WorkspaceSearchUITests: XCTestCase {
     let workspacePath = try fixtureWorkspacePath("basic")
     let app = try launchApp(workspacePath: workspacePath)
 
-    let projectBriefRowText = app.staticTexts["Project Brief.md"]
-    XCTAssertTrue(projectBriefRowText.waitForExistence(timeout: 5), app.debugDescription)
-    projectBriefRowText.doubleClick()
+    let projectBriefRow = workspaceSidebarLabel(named: "Project Brief.md", in: app)
+    XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
+    projectBriefRow.doubleClick()
 
     XCTAssertTrue(
       app.textViews["document-text-editor"].waitForExistence(timeout: 5), app.debugDescription)
@@ -576,9 +576,9 @@ final class WorkspaceSearchUITests: XCTestCase {
     let workspacePath = try fixtureWorkspacePath("basic")
     let app = try launchApp(workspacePath: workspacePath)
 
-    let projectBriefRowText = app.staticTexts["Project Brief.md"]
-    XCTAssertTrue(projectBriefRowText.waitForExistence(timeout: 5), app.debugDescription)
-    projectBriefRowText.doubleClick()
+    let projectBriefRow = workspaceSidebarLabel(named: "Project Brief.md", in: app)
+    XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
+    projectBriefRow.click()
 
     XCTAssertTrue(
       app.textViews["document-text-editor"].waitForExistence(timeout: 5), app.debugDescription)
@@ -590,6 +590,27 @@ final class WorkspaceSearchUITests: XCTestCase {
 
     assertTableRow(named: "Project Brief.md", isNotSelectedIn: app)
     XCTAssertTrue(app.textViews["document-text-editor"].exists, app.debugDescription)
+  }
+
+  @MainActor
+  func testClickingFolderKeepsPreviouslyOpenedDocumentVisible() throws {
+    let workspacePath = try fixtureWorkspacePath("basic")
+    let app = try launchApp(workspacePath: workspacePath)
+
+    let projectBriefRow = workspaceSidebarLabel(named: "Project Brief.md", in: app)
+    XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
+    projectBriefRow.click()
+
+    XCTAssertTrue(
+      app.textViews["document-text-editor"].waitForExistence(timeout: 5), app.debugDescription)
+
+    let reportsRow = workspaceSidebarLabel(named: "Reports", in: app)
+    XCTAssertTrue(reportsRow.waitForExistence(timeout: 5), app.debugDescription)
+    reportsRow.click()
+
+    assertTableRow(named: "Reports", isSelectedIn: app)
+    XCTAssertTrue(app.textViews["document-text-editor"].exists, app.debugDescription)
+    XCTAssertFalse(app.staticTexts["Select a File"].exists, app.debugDescription)
   }
 
   @MainActor
@@ -1115,6 +1136,11 @@ final class WorkspaceSearchUITests: XCTestCase {
     return app.scrollViews["workspace-sidebar-list"].firstMatch
   }
 
+  @MainActor
+  private func workspaceSidebarLabel(named name: String, in app: XCUIApplication) -> XCUIElement {
+    app.descendants(matching: .any)[name]
+  }
+
   private func stableHash(for value: String) -> String {
     var hash: UInt64 = 0xcbf2_9ce4_8422_2325
     for byte in value.utf8 {
@@ -1131,11 +1157,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     file: StaticString = #filePath,
     line: UInt = #line
   ) {
-    let nameCell = app.cells
-      .containing(NSPredicate(format: "value == %@", name))
-      .firstMatch
-    XCTAssertTrue(
-      nameCell.waitForExistence(timeout: 2), app.debugDescription, file: file, line: line)
+    let nameCell = workspaceSidebarCellContainingLabel(named: name, in: app)
     XCTAssertTrue(nameCell.isSelected, app.debugDescription, file: file, line: line)
   }
 
@@ -1146,12 +1168,35 @@ final class WorkspaceSearchUITests: XCTestCase {
     file: StaticString = #filePath,
     line: UInt = #line
   ) {
-    let nameCell = app.cells
-      .containing(NSPredicate(format: "value == %@", name))
-      .firstMatch
-    XCTAssertTrue(
-      nameCell.waitForExistence(timeout: 2), app.debugDescription, file: file, line: line)
+    let nameCell = workspaceSidebarCellContainingLabel(named: name, in: app)
     XCTAssertFalse(nameCell.isSelected, app.debugDescription, file: file, line: line)
+  }
+
+  @MainActor
+  private func workspaceSidebarCellContainingLabel(
+    named name: String,
+    in app: XCUIApplication,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) -> XCUIElement {
+    let label = workspaceSidebarLabel(named: name, in: app)
+    XCTAssertTrue(label.waitForExistence(timeout: 2), app.debugDescription, file: file, line: line)
+
+    let labelCenter = CGPoint(x: label.frame.midX, y: label.frame.midY)
+    let matchingCell = workspaceSidebarList(in: app).cells.allElementsBoundByIndex.first { cell in
+      cell.exists && cell.frame.contains(labelCenter)
+    }
+
+    guard let matchingCell else {
+      XCTFail(
+        "Could not find sidebar cell containing '\(name)'.",
+        file: file,
+        line: line
+      )
+      return app.cells.firstMatch
+    }
+
+    return matchingCell
   }
 
   private func waitForFileContents(
