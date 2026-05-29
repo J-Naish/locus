@@ -33,6 +33,20 @@ struct HomeView: View {
       "Locus couldn't open the home folder. Choose another folder to browse in Locus."
   }
 
+  private enum WorkspaceUndoFileOperationError: LocalizedError {
+    case noActiveWorkspace
+    case outsideWorkspace
+
+    var errorDescription: String? {
+      switch self {
+      case .noActiveWorkspace:
+        return "No folder is open."
+      case .outsideWorkspace:
+        return "The item is outside the open folder."
+      }
+    }
+  }
+
   @State private var workspaceState: WorkspaceState
   @State private var selectedEntryID: WorkspaceEntry.ID?
   @State private var isFolderImporterPresented = false
@@ -130,6 +144,9 @@ struct HomeView: View {
         copyPaths: copyPaths,
         createItem: createWorkspaceItem,
         deleteItems: deleteWorkspaceItems,
+        trashCreatedItem: trashCreatedWorkspaceItem,
+        trashItemsAtURLs: trashWorkspaceItems,
+        restoreDeletedItems: restoreWorkspaceDeletedItems,
         loadFolderChildren: loadSidebarFolderChildren,
         performOpenAction: performOpenAction
       )
@@ -610,15 +627,15 @@ struct HomeView: View {
   }
 
   @MainActor
-  private func deleteWorkspaceItems(_ entries: [WorkspaceEntry]) -> [URL] {
+  private func deleteWorkspaceItems(_ entries: [WorkspaceEntry]) -> [WorkspaceDeletedItem] {
     do {
       return try deleteWorkspaceItemsNow(entries)
     } catch let error as WorkspaceItemDeletionError {
-      if case .partiallyDeleted(let succeededURLs, _, _) = error {
-        finishWorkspaceItemDeletion(succeededURLs, attemptedEntries: entries)
+      if case .partiallyDeleted(let succeededItems, _, _) = error {
+        finishWorkspaceItemDeletion(succeededItems, attemptedEntries: entries)
         workspaceDeletionErrorMessage = error.localizedDescription
         isWorkspaceDeletionErrorPresented = true
-        return succeededURLs
+        return succeededItems
       }
 
       workspaceDeletionErrorMessage = error.localizedDescription
@@ -632,7 +649,9 @@ struct HomeView: View {
   }
 
   @MainActor
-  private func deleteWorkspaceItemsNow(_ entries: [WorkspaceEntry]) throws -> [URL] {
+  private func deleteWorkspaceItemsNow(
+    _ entries: [WorkspaceEntry]
+  ) throws -> [WorkspaceDeletedItem] {
     guard let folderURL = workspaceState.folderURL else {
       throw WorkspaceItemDeletionError.noActiveWorkspace
     }
@@ -644,21 +663,21 @@ struct HomeView: View {
       }
     }
 
-    let deletedURLs = try WorkspaceItemDeletion.delete(entries, in: folderURL)
-    finishWorkspaceItemDeletion(deletedURLs, attemptedEntries: entries)
-    return deletedURLs
+    let deletedItems = try WorkspaceItemDeletion.delete(entries, in: folderURL)
+    finishWorkspaceItemDeletion(deletedItems, attemptedEntries: entries)
+    return deletedItems
   }
 
   @MainActor
   private func finishWorkspaceItemDeletion(
-    _ deletedURLs: [URL],
+    _ deletedItems: [WorkspaceDeletedItem],
     attemptedEntries entries: [WorkspaceEntry]
   ) {
     guard let folderURL = workspaceState.folderURL else {
       return
     }
 
-    let deletedPaths = Set(deletedURLs.map(\.locusStandardizedPath))
+    let deletedPaths = Set(deletedItems.map(\.originalURL.locusStandardizedPath))
     if let selectedEntryID,
       entries.contains(where: {
         $0.id == selectedEntryID && deletedPaths.contains($0.url.locusStandardizedPath)
@@ -673,6 +692,67 @@ struct HomeView: View {
         showsLoading: false
       )
     )
+  }
+
+  @MainActor
+  private func trashCreatedWorkspaceItem(_ url: URL) throws -> WorkspaceDeletedItem {
+    guard let deletedItem = try trashWorkspaceItems([url]).first else {
+      throw WorkspaceUndoFileOperationError.outsideWorkspace
+    }
+    return deletedItem
+  }
+
+  @MainActor
+  private func trashWorkspaceItems(_ urls: [URL]) throws -> [WorkspaceDeletedItem] {
+    guard let folderURL = workspaceState.folderURL else {
+      throw WorkspaceUndoFileOperationError.noActiveWorkspace
+    }
+
+    let didStartAccess = folderURL.startAccessingSecurityScopedResource()
+    defer {
+      if didStartAccess {
+        folderURL.stopAccessingSecurityScopedResource()
+      }
+    }
+
+    let deletedItems = try WorkspaceItemDeletion.deleteURLs(urls, in: folderURL)
+    let deletedPaths = Set(deletedItems.map(\.originalURL.locusStandardizedPath))
+    if let selectedEntryID, deletedPaths.contains(selectedEntryID) {
+      self.selectedEntryID = nil
+    }
+    startWorkspaceLoad(
+      WorkspaceLoadRequest(
+        folderURL: folderURL,
+        showsLoading: false
+      )
+    )
+    return deletedItems
+  }
+
+  @MainActor
+  private func restoreWorkspaceDeletedItems(
+    _ deletedItems: [WorkspaceDeletedItem]
+  ) throws -> [URL] {
+    guard let folderURL = workspaceState.folderURL else {
+      throw WorkspaceUndoFileOperationError.noActiveWorkspace
+    }
+
+    let didStartAccess = folderURL.startAccessingSecurityScopedResource()
+    defer {
+      if didStartAccess {
+        folderURL.stopAccessingSecurityScopedResource()
+      }
+    }
+
+    let restoredURLs = try WorkspaceItemRestoration.restore(deletedItems)
+    startWorkspaceLoad(
+      WorkspaceLoadRequest(
+        folderURL: folderURL,
+        showsLoading: false,
+        selectedURL: restoredURLs.first
+      )
+    )
+    return restoredURLs
   }
 
   @MainActor
@@ -846,7 +926,10 @@ struct WorkspaceActions {
   let retryCurrentFolder: () -> Void
   let copyPaths: ([WorkspaceEntry]) -> Void
   let createItem: (WorkspaceItemCreationKind, String, URL) async throws -> URL
-  let deleteItems: ([WorkspaceEntry]) -> [URL]
+  let deleteItems: ([WorkspaceEntry]) -> [WorkspaceDeletedItem]
+  let trashCreatedItem: (URL) throws -> WorkspaceDeletedItem
+  let trashItemsAtURLs: ([URL]) throws -> [WorkspaceDeletedItem]
+  let restoreDeletedItems: ([WorkspaceDeletedItem]) throws -> [URL]
   let loadFolderChildren: (URL) async throws -> WorkspaceSnapshot
   let performOpenAction: (WorkspaceEntryOpenAction) -> Void
 }
@@ -860,6 +943,31 @@ private struct LoadingWorkspaceView: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .accessibilityElement(children: .combine)
+  }
+}
+
+@MainActor
+private final class WorkspaceUndoRegistrar: NSObject {
+  private var handlers: [UUID: @MainActor () -> Void] = [:]
+
+  func store(_ handler: @escaping @MainActor () -> Void) -> UUID {
+    let id = UUID()
+    handlers[id] = handler
+    return id
+  }
+
+  nonisolated func perform(_ id: UUID) {
+    MainActor.assumeIsolated {
+      guard let handler = handlers.removeValue(forKey: id) else {
+        return
+      }
+
+      handler()
+    }
+  }
+
+  func removeAll() {
+    handlers.removeAll()
   }
 }
 
@@ -906,6 +1014,10 @@ private struct WorkspaceBrowserView: View {
   @State private var gitMetadataMonitor = GitRepositoryMetadataMonitor()
   @State private var gitMetadataMonitorGeneration: UInt64 = 0
   @State private var gitRepositoryRootURL: URL?
+  @State private var workspaceUndoErrorMessage: String?
+  @State private var isWorkspaceUndoErrorPresented = false
+  @State private var undoRegistrar = WorkspaceUndoRegistrar()
+  @Environment(\.undoManager) private var undoManager
   @Environment(\.scenePhase) private var scenePhase
 
   init(
@@ -1001,6 +1113,7 @@ private struct WorkspaceBrowserView: View {
       refreshSearchResults()
     }
     .onChange(of: folderURL) {
+      clearWorkspaceUndoActions()
       searchQuery = ""
       isDocumentTextInputFocused = false
       openDocumentEntry = nil
@@ -1031,10 +1144,16 @@ private struct WorkspaceBrowserView: View {
     }
     .onDisappear {
       gitMetadataMonitor.stopMonitoring()
+      clearWorkspaceUndoActions()
     }
     .focusedSceneValue(\.workspaceNavigationCommands, workspaceNavigationCommands)
     .focusedSceneValue(\.workspaceDeletionCommand, workspaceDeletionCommand)
     .focusedSceneValue(\.workspaceSidebarVisibilityCommand, workspaceSidebarVisibilityCommand)
+    .alert("Couldn't Undo Change", isPresented: $isWorkspaceUndoErrorPresented) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(workspaceUndoErrorMessage ?? "Locus couldn't undo the last workspace change.")
+    }
   }
 
   private func refreshSearchResults() {
@@ -1134,8 +1253,11 @@ private struct WorkspaceBrowserView: View {
       goForward: actions.goForward,
       retryCurrentFolder: actions.retryCurrentFolder,
       copyPaths: actions.copyPaths,
-      createItem: actions.createItem,
+      createItem: createItem,
       deleteItems: deleteEntries,
+      trashCreatedItem: actions.trashCreatedItem,
+      trashItemsAtURLs: actions.trashItemsAtURLs,
+      restoreDeletedItems: actions.restoreDeletedItems,
       loadFolderChildren: actions.loadFolderChildren,
       performOpenAction: performWorkspaceOpenAction
     )
@@ -1145,14 +1267,24 @@ private struct WorkspaceBrowserView: View {
     entry.id != folderURL.locusStandardizedPath
   }
 
-  private func deleteEntries(_ entries: [WorkspaceEntry]) -> [URL] {
+  private func createItem(
+    _ kind: WorkspaceItemCreationKind,
+    named name: String,
+    in targetFolderURL: URL
+  ) async throws -> URL {
+    let createdURL = try await actions.createItem(kind, name, targetFolderURL)
+    registerCreatedItemUndo(kind: kind, url: createdURL)
+    return createdURL
+  }
+
+  private func deleteEntries(_ entries: [WorkspaceEntry]) -> [WorkspaceDeletedItem] {
     let deletableEntries = entries.filter(isDeletable)
     guard !deletableEntries.isEmpty else {
       return []
     }
 
-    let deletedURLs = actions.deleteItems(deletableEntries)
-    let deletedPaths = Set(deletedURLs.map(\.locusStandardizedPath))
+    let deletedItems = actions.deleteItems(deletableEntries)
+    let deletedPaths = Set(deletedItems.map(\.originalURL.locusStandardizedPath))
     guard !deletedPaths.isEmpty else {
       return []
     }
@@ -1165,8 +1297,108 @@ private struct WorkspaceBrowserView: View {
       self.selectedEntryID = nil
       sidebarSelectionState.setActiveEntryID(nil)
     }
+    registerDeletedItemsUndo(deletedItems)
     requestGitStatusRefresh()
-    return deletedURLs
+    return deletedItems
+  }
+
+  private func registerCreatedItemUndo(kind: WorkspaceItemCreationKind, url: URL) {
+    registerUndoAction(named: kind.undoActionName) {
+      undoCreatedItem(kind: kind, url: url)
+    }
+  }
+
+  private func registerDeletedItemsUndo(_ deletedItems: [WorkspaceDeletedItem]) {
+    registerUndoAction(named: WorkspaceItemDeletion.undoActionName(for: deletedItems)) {
+      undoDeletedItems(deletedItems)
+    }
+  }
+
+  private func registerUndoAction(
+    named actionName: String,
+    handler: @escaping @MainActor () -> Void
+  ) {
+    guard let undoManager else {
+      return
+    }
+
+    let undoID = undoRegistrar.store(handler)
+    undoManager.registerUndo(withTarget: undoRegistrar) { registrar in
+      registrar.perform(undoID)
+    }
+    undoManager.setActionName(actionName)
+  }
+
+  private func clearWorkspaceUndoActions() {
+    undoManager?.removeAllActions(withTarget: undoRegistrar)
+    undoRegistrar.removeAll()
+  }
+
+  private func undoCreatedItem(kind: WorkspaceItemCreationKind, url: URL) {
+    do {
+      let deletedItem = try actions.trashCreatedItem(url)
+      if openDocumentEntry?.url.locusStandardizedPath == url.locusStandardizedPath {
+        openDocumentEntry = nil
+        selectedEntryID = nil
+        sidebarSelectionState.setActiveEntryID(nil)
+      }
+      registerUndoAction(named: kind.undoActionName) {
+        redoCreatedItem(kind: kind, deletedItem: deletedItem)
+      }
+      requestGitStatusRefresh()
+    } catch {
+      workspaceUndoErrorMessage = error.localizedDescription
+      isWorkspaceUndoErrorPresented = true
+    }
+  }
+
+  private func redoCreatedItem(kind: WorkspaceItemCreationKind, deletedItem: WorkspaceDeletedItem) {
+    do {
+      let restoredURLs = try actions.restoreDeletedItems([deletedItem])
+      guard let restoredURL = restoredURLs.first else {
+        return
+      }
+
+      registerCreatedItemUndo(kind: kind, url: restoredURL)
+      requestGitStatusRefresh()
+    } catch {
+      workspaceUndoErrorMessage = error.localizedDescription
+      isWorkspaceUndoErrorPresented = true
+    }
+  }
+
+  private func undoDeletedItems(_ deletedItems: [WorkspaceDeletedItem]) {
+    do {
+      let restoredURLs = try actions.restoreDeletedItems(deletedItems)
+      registerUndoAction(named: WorkspaceItemDeletion.undoActionName(for: deletedItems)) {
+        redoDeletedItems(restoredURLs)
+      }
+      requestGitStatusRefresh()
+    } catch {
+      workspaceUndoErrorMessage = error.localizedDescription
+      isWorkspaceUndoErrorPresented = true
+    }
+  }
+
+  private func redoDeletedItems(_ urls: [URL]) {
+    do {
+      let deletedItems = try actions.trashItemsAtURLs(urls)
+      guard !deletedItems.isEmpty else {
+        return
+      }
+
+      registerDeletedItemsUndo(deletedItems)
+      if let selectedEntryID,
+        deletedItems.contains(where: { $0.originalURL.locusStandardizedPath == selectedEntryID })
+      {
+        self.selectedEntryID = nil
+        sidebarSelectionState.setActiveEntryID(nil)
+      }
+      requestGitStatusRefresh()
+    } catch {
+      workspaceUndoErrorMessage = error.localizedDescription
+      isWorkspaceUndoErrorPresented = true
+    }
   }
 
   private var gitStatusRefreshKey: GitStatusRefreshKey {

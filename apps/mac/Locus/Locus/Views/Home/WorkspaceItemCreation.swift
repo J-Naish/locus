@@ -3,6 +3,15 @@ import Foundation
 enum WorkspaceItemCreationKind: Equatable, Sendable {
   case file
   case folder
+
+  var undoActionName: String {
+    switch self {
+    case .file:
+      return "Create File"
+    case .folder:
+      return "Create Folder"
+    }
+  }
 }
 
 enum WorkspaceItemCreationError: LocalizedError, Equatable {
