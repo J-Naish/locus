@@ -56,13 +56,15 @@ pub struct WorkspaceEntry {
 pub enum WorkspaceEntryKind {
     Directory,
     File(FileType),
+    SymlinkToDirectory,
+    SymlinkToFile(FileType),
     Symlink,
     Other,
 }
 
 impl WorkspaceEntryKind {
     pub fn is_directory(self) -> bool {
-        matches!(self, Self::Directory)
+        matches!(self, Self::Directory | Self::SymlinkToDirectory)
     }
 }
 
@@ -133,13 +135,19 @@ pub fn list_directory_with_options(
     options: WorkspaceListOptions,
 ) -> Result<WorkspaceSnapshot, WorkspaceError> {
     let path = path.as_ref();
-    list_directory_inner(path, options, |entry_path| fs::symlink_metadata(entry_path))
+    list_directory_inner(
+        path,
+        options,
+        |entry_path| fs::symlink_metadata(entry_path),
+        symlink_target_metadata,
+    )
 }
 
 fn list_directory_inner(
     path: &Path,
     options: WorkspaceListOptions,
     metadata_for: impl Fn(&Path) -> io::Result<fs::Metadata>,
+    symlink_target_for: impl Fn(&Path) -> io::Result<(PathBuf, fs::Metadata)>,
 ) -> Result<WorkspaceSnapshot, WorkspaceError> {
     let entries = fs::read_dir(path).map_err(|source| read_directory_error(path, source))?;
 
@@ -180,6 +188,7 @@ fn list_directory_inner(
             path,
             name,
             metadata,
+            &symlink_target_for,
             options.include_extended_metadata,
         ));
     }
@@ -189,6 +198,20 @@ fn list_directory_inner(
         entries: snapshot,
         partial_errors,
     })
+}
+
+fn symlink_target_metadata(path: &Path) -> io::Result<(PathBuf, fs::Metadata)> {
+    let target = fs::read_link(path)?;
+    // File type classification intentionally uses the immediate target path.
+    // Resolving every link hop with canonicalize would add more filesystem work
+    // to the shallow listing path.
+    let target_path = if target.is_absolute() {
+        target
+    } else {
+        path.parent().unwrap_or_else(|| Path::new("")).join(target)
+    };
+    let metadata = fs::metadata(path)?;
+    Ok((target_path, metadata))
 }
 
 fn read_directory_error(path: &Path, source: io::Error) -> WorkspaceError {
@@ -206,25 +229,47 @@ fn entry_from_metadata(
     path: PathBuf,
     name: String,
     metadata: fs::Metadata,
+    symlink_target_for: &impl Fn(&Path) -> io::Result<(PathBuf, fs::Metadata)>,
     include_extended_metadata: bool,
 ) -> WorkspaceEntry {
     let file_type = metadata.file_type();
+    let mut target_metadata = None;
     let kind = if file_type.is_dir() {
         WorkspaceEntryKind::Directory
     } else if file_type.is_file() {
         WorkspaceEntryKind::File(classify_path(&path))
     } else if file_type.is_symlink() {
-        WorkspaceEntryKind::Symlink
+        match symlink_target_for(&path) {
+            Ok((_, metadata)) if metadata.file_type().is_dir() => {
+                target_metadata = Some(metadata);
+                WorkspaceEntryKind::SymlinkToDirectory
+            }
+            Ok((target_path, metadata)) if metadata.file_type().is_file() => {
+                let file_type = classify_path(&target_path);
+                target_metadata = Some(metadata);
+                WorkspaceEntryKind::SymlinkToFile(file_type)
+            }
+            Ok((_, metadata)) => {
+                target_metadata = Some(metadata);
+                WorkspaceEntryKind::Symlink
+            }
+            Err(_) => WorkspaceEntryKind::Symlink,
+        }
     } else {
         WorkspaceEntryKind::Other
     };
 
-    let size_bytes = (include_extended_metadata && matches!(kind, WorkspaceEntryKind::File(_)))
-        .then_some(metadata.len());
+    let metadata_for_display = target_metadata.as_ref().unwrap_or(&metadata);
+    let size_bytes = (include_extended_metadata
+        && matches!(
+            kind,
+            WorkspaceEntryKind::File(_) | WorkspaceEntryKind::SymlinkToFile(_)
+        ))
+    .then_some(metadata_for_display.len());
     let modified = include_extended_metadata
-        .then(|| metadata.modified().ok())
+        .then(|| metadata_for_display.modified().ok())
         .flatten();
-    let readonly = metadata.permissions().readonly();
+    let readonly = metadata_for_display.permissions().readonly();
 
     WorkspaceEntry {
         path,
@@ -512,8 +557,10 @@ mod tests {
         workspace.create_file("readable.md");
         workspace.create_file("unreadable.md");
 
-        let snapshot =
-            super::list_directory_inner(workspace.path(), WorkspaceListOptions::new(), |path| {
+        let snapshot = super::list_directory_inner(
+            workspace.path(),
+            WorkspaceListOptions::new(),
+            |path| {
                 if path
                     .file_name()
                     .is_some_and(|name| name == std::ffi::OsStr::new("unreadable.md"))
@@ -525,8 +572,10 @@ mod tests {
                 } else {
                     fs::symlink_metadata(path)
                 }
-            })
-            .unwrap();
+            },
+            super::symlink_target_metadata,
+        )
+        .unwrap();
 
         assert_eq!(snapshot.entries.len(), 1);
         assert_eq!(snapshot.entries[0].name, "readable.md");
@@ -570,7 +619,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn list_directory_reports_symlink_without_following_it() {
+    fn list_directory_reports_directory_symlink_with_target_kind() {
         use std::os::unix::fs::symlink;
 
         let workspace = TestWorkspace::new();
@@ -583,7 +632,92 @@ mod tests {
             .find(|entry| entry.name == "linked-target")
             .unwrap();
 
+        assert_eq!(link_entry.kind, WorkspaceEntryKind::SymlinkToDirectory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_directory_reports_file_symlink_with_target_file_type() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = TestWorkspace::new();
+        let target = workspace.create_file("notes.md");
+        symlink(target, workspace.path().join("latest")).unwrap();
+
+        let entries = list_directory(workspace.path()).unwrap().entries;
+        let link_entry = entries.iter().find(|entry| entry.name == "latest").unwrap();
+
+        assert_eq!(
+            link_entry.kind,
+            WorkspaceEntryKind::SymlinkToFile(FileType::Markdown)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_directory_reports_file_symlink_readonly_from_target() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = TestWorkspace::new();
+        let target = workspace.create_file("locked.md");
+        let mut permissions = fs::metadata(&target).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&target, permissions).unwrap();
+        symlink(target, workspace.path().join("locked-link.md")).unwrap();
+
+        let entries = list_directory(workspace.path()).unwrap().entries;
+        let link_entry = entries
+            .iter()
+            .find(|entry| entry.name == "locked-link.md")
+            .unwrap();
+
+        assert!(link_entry.readonly);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_directory_keeps_broken_symlink_as_unknown_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = TestWorkspace::new();
+        symlink("missing-target", workspace.path().join("broken-link")).unwrap();
+
+        let entries = list_directory(workspace.path()).unwrap().entries;
+        let link_entry = entries
+            .iter()
+            .find(|entry| entry.name == "broken-link")
+            .unwrap();
+
         assert_eq!(link_entry.kind, WorkspaceEntryKind::Symlink);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_directory_keeps_symlink_loop_as_unknown_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = TestWorkspace::new();
+        symlink("loop", workspace.path().join("loop")).unwrap();
+
+        let entries = list_directory(workspace.path()).unwrap().entries;
+        let link_entry = entries.iter().find(|entry| entry.name == "loop").unwrap();
+
+        assert_eq!(link_entry.kind, WorkspaceEntryKind::Symlink);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_directory_sorts_directory_symlinks_with_directories() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = TestWorkspace::new();
+        let target = workspace.create_dir("Target");
+        workspace.create_file("alpha.md");
+        symlink(target, workspace.path().join("linked-target")).unwrap();
+
+        let names = entry_names(list_directory(workspace.path()).unwrap());
+
+        assert_eq!(names, ["linked-target", "Target", "alpha.md"]);
     }
 
     fn entry_names(snapshot: super::WorkspaceSnapshot) -> Vec<String> {

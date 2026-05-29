@@ -81,6 +81,45 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
     )
   }
 
+  func testDirectorySymlinksUseFolderSurface() {
+    XCTAssertEqual(
+      WorkspaceDocumentSurfaceSupport.surfaceKind(
+        for: makeEntry(name: "Reports Link", kind: .symlinkToDirectory, fileType: .unknown)
+      ),
+      .folder
+    )
+  }
+
+  func testFileSymlinksUseTargetFileTypeSurface() {
+    XCTAssertEqual(
+      WorkspaceDocumentSurfaceSupport.surfaceKind(
+        for: makeEntry(name: "latest", kind: .symlinkToFile, fileType: .markdown)
+      ),
+      .editableText
+    )
+    XCTAssertEqual(
+      WorkspaceDocumentSurfaceSupport.surfaceKind(
+        for: makeEntry(name: "linked-photo", kind: .symlinkToFile, fileType: .image)
+      ),
+      .unsupported
+    )
+    XCTAssertEqual(
+      WorkspaceDocumentSurfaceSupport.surfaceKind(
+        for: makeEntry(name: "linked-photo.png", kind: .symlinkToFile, fileType: .image)
+      ),
+      .image
+    )
+  }
+
+  func testUnknownSymlinksUseUnsupportedSurface() {
+    XCTAssertEqual(
+      WorkspaceDocumentSurfaceSupport.surfaceKind(
+        for: makeEntry(name: "broken", kind: .symlink, fileType: .unknown)
+      ),
+      .unsupported
+    )
+  }
+
   func testOtherEntriesUseUnsupportedSurface() {
     XCTAssertEqual(
       WorkspaceDocumentSurfaceSupport.surfaceKind(

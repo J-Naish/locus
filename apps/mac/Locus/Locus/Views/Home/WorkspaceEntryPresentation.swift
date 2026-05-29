@@ -23,9 +23,9 @@ extension WorkspaceEntry {
 
   var symbolName: String {
     switch kind {
-    case .directory:
+    case .directory, .symlinkToDirectory:
       return "folder"
-    case .file:
+    case .file, .symlinkToFile:
       return fileType.symbolName
     case .symlink:
       return "arrowshape.turn.up.right"
@@ -36,9 +36,9 @@ extension WorkspaceEntry {
 
   var symbolColor: Color {
     switch kind {
-    case .directory:
+    case .directory, .symlinkToDirectory:
       return .blue
-    case .file:
+    case .file, .symlinkToFile:
       return .secondary
     case .symlink:
       return .purple

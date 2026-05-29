@@ -18,7 +18,7 @@ final class CoreBridgeTests: XCTestCase {
     XCTAssertFalse(locus_core_is_abi_compatible(CoreBridge.expectedABIVersion + 1))
   }
 
-  func testWorkspaceFFILayoutMatchesABIv1() {
+  func testWorkspaceFFILayoutMatchesCurrentABI() {
     XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.size, 64)
     XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.stride, 64)
     XCTAssertEqual(MemoryLayout<LocusWorkspaceEntry>.offset(of: \.path), 0)
@@ -78,6 +78,44 @@ final class CoreBridgeTests: XCTestCase {
     XCTAssertNotNil(snapshot.entries[0].modified)
   }
 
+  func testListDirectoryReportsDirectorySymlinkTargetKind() async throws {
+    let workspace = try TestWorkspace()
+    let targetURL = try workspace.createDirectory(named: "Hooks")
+    try workspace.createSymbolicLink(named: "hooks-link", destination: targetURL)
+
+    let snapshot = try await CoreBridge().listDirectory(at: workspace.url)
+    let linkEntry = try XCTUnwrap(snapshot.entries.first { $0.name == "hooks-link" })
+
+    XCTAssertEqual(linkEntry.kind, .symlinkToDirectory)
+    XCTAssertEqual(linkEntry.fileType, .unknown)
+  }
+
+  func testListDirectoryReportsFileSymlinkTargetType() async throws {
+    let workspace = try TestWorkspace()
+    let targetURL = try workspace.createFile(named: "notes.md", contents: "# Notes")
+    try workspace.createSymbolicLink(named: "latest", destination: targetURL)
+
+    let snapshot = try await CoreBridge().listDirectory(at: workspace.url)
+    let linkEntry = try XCTUnwrap(snapshot.entries.first { $0.name == "latest" })
+
+    XCTAssertEqual(linkEntry.kind, .symlinkToFile)
+    XCTAssertEqual(linkEntry.fileType, .markdown)
+  }
+
+  func testListDirectoryKeepsBrokenSymlinkUnknown() async throws {
+    let workspace = try TestWorkspace()
+    try workspace.createSymbolicLink(
+      named: "broken-link",
+      destination: workspace.url.appendingPathComponent("missing")
+    )
+
+    let snapshot = try await CoreBridge().listDirectory(at: workspace.url)
+    let linkEntry = try XCTUnwrap(snapshot.entries.first { $0.name == "broken-link" })
+
+    XCTAssertEqual(linkEntry.kind, .symlink)
+    XCTAssertEqual(linkEntry.fileType, .unknown)
+  }
+
   func testListDirectoryKeepsUsefulDotfilesAndSkipsNoiseByDefault() async throws {
     let workspace = try TestWorkspace()
     try workspace.createDirectory(named: ".agents")
@@ -132,11 +170,14 @@ private final class TestWorkspace {
     try? FileManager.default.removeItem(at: url)
   }
 
-  func createDirectory(named name: String) throws {
+  @discardableResult
+  func createDirectory(named name: String) throws -> URL {
+    let directoryURL = url.appendingPathComponent(name, isDirectory: true)
     try FileManager.default.createDirectory(
-      at: url.appendingPathComponent(name, isDirectory: true),
+      at: directoryURL,
       withIntermediateDirectories: false
     )
+    return directoryURL
   }
 
   @discardableResult
@@ -144,5 +185,12 @@ private final class TestWorkspace {
     let fileURL = url.appendingPathComponent(name, isDirectory: false)
     try contents.write(to: fileURL, atomically: true, encoding: .utf8)
     return fileURL
+  }
+
+  func createSymbolicLink(named name: String, destination: URL) throws {
+    try FileManager.default.createSymbolicLink(
+      at: url.appendingPathComponent(name),
+      withDestinationURL: destination
+    )
   }
 }

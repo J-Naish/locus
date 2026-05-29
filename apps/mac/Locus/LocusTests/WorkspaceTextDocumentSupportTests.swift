@@ -43,6 +43,27 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     )
   }
 
+  func testFileSymlinksUseTargetFileTypeForEditability() {
+    XCTAssertTrue(
+      WorkspaceTextDocumentSupport.canEdit(
+        makeEntry(name: "linked-notes", kind: .symlinkToFile, fileType: .markdown)
+      )
+    )
+    XCTAssertFalse(
+      WorkspaceTextDocumentSupport.canEdit(
+        makeEntry(name: "linked-photo", kind: .symlinkToFile, fileType: .image)
+      )
+    )
+  }
+
+  func testUnknownSymlinksAreNotEditableTextDocuments() {
+    XCTAssertFalse(
+      WorkspaceTextDocumentSupport.canEdit(
+        makeEntry(name: "broken", kind: .symlink, fileType: .unknown)
+      )
+    )
+  }
+
   func testSyntaxMatchesEditableFileTypes() {
     XCTAssertEqual(
       WorkspaceTextDocumentSupport.syntax(for: makeEntry(name: "draft.md", fileType: .markdown)),
@@ -262,7 +283,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
   ) -> WorkspaceEntry {
     let url = URL(
       filePath: "/tmp/locus-test/\(name)",
-      directoryHint: kind == .directory ? .isDirectory : .notDirectory
+      directoryHint: kind.isDirectoryLike ? .isDirectory : .notDirectory
     )
     return WorkspaceEntry(
       id: url.path(percentEncoded: false),

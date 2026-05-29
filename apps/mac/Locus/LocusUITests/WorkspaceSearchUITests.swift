@@ -49,6 +49,57 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testDirectorySymlinkDisclosureExpandsTargetChildren() throws {
+    let workspaceURL = try makeSymlinkWorkspace()
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    XCTAssertTrue(
+      workspaceSidebarLabel(named: "linked-folder", in: app).waitForExistence(timeout: 5),
+      app.debugDescription)
+
+    let linkedFolderDisclosure = disclosureButton(
+      for: workspaceURL.appending(path: "linked-folder"),
+      in: app
+    )
+    XCTAssertTrue(linkedFolderDisclosure.waitForExistence(timeout: 5), app.debugDescription)
+    linkedFolderDisclosure.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+
+    XCTAssertTrue(
+      workspaceSidebarLabel(named: "Child.md", in: app).waitForExistence(timeout: 5),
+      app.debugDescription)
+  }
+
+  @MainActor
+  func testFileSymlinkCanBeEditedThroughLinkPath() throws {
+    let workspaceURL = try makeSymlinkWorkspace()
+    let targetURL = workspaceURL.appending(path: "Target.md")
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    let linkedFileRow = workspaceSidebarCellContainingLabel(named: "Linked.md", in: app)
+    XCTAssertTrue(linkedFileRow.waitForExistence(timeout: 5), app.debugDescription)
+    linkedFileRow.click()
+
+    let editor = app.textViews["document-text-editor"]
+    XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+    editor.click()
+
+    let updatedText = "# Updated Via Symlink\n\nSaved through the link path.\n"
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(updatedText, forType: .string)
+    app.typeKey("a", modifierFlags: [.command])
+    app.typeKey("v", modifierFlags: [.command])
+    XCTAssertTrue(waitForEditorContents(updatedText, in: app, timeout: 5), app.debugDescription)
+
+    app.menuBars.menuBarItems["File"].click()
+    let saveMenuItem = app.menuBars.menuItems["Save"]
+    XCTAssertTrue(saveMenuItem.waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(saveMenuItem.isEnabled, app.debugDescription)
+    saveMenuItem.click()
+
+    XCTAssertTrue(waitForFileContents(updatedText, at: targetURL), app.debugDescription)
+  }
+
+  @MainActor
   func testClickDirectoryRowSelectsWithoutExpanding() throws {
     let workspaceURL = try makeNavigationHistoryWorkspace()
     let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
@@ -1334,6 +1385,32 @@ final class WorkspaceSearchUITests: XCTestCase {
       to: otherURL.appending(path: "Other Note.md"),
       atomically: true,
       encoding: .utf8
+    )
+
+    filesToRemove.insert(workspaceURL.path(percentEncoded: false))
+    return workspaceURL
+  }
+
+  private func makeSymlinkWorkspace() throws -> URL {
+    let workspaceURL = FileManager.default.temporaryDirectory
+      .appending(path: "locus-symlink-workspace-\(UUID().uuidString)", directoryHint: .isDirectory)
+    let targetFolderURL = workspaceURL.appending(path: "Target Folder", directoryHint: .isDirectory)
+    let targetFileURL = workspaceURL.appending(path: "Target.md", directoryHint: .notDirectory)
+
+    try FileManager.default.createDirectory(at: targetFolderURL, withIntermediateDirectories: true)
+    try "# Child\n".write(
+      to: targetFolderURL.appending(path: "Child.md"),
+      atomically: true,
+      encoding: .utf8
+    )
+    try "# Target\n".write(to: targetFileURL, atomically: true, encoding: .utf8)
+    try FileManager.default.createSymbolicLink(
+      at: workspaceURL.appending(path: "linked-folder", directoryHint: .isDirectory),
+      withDestinationURL: targetFolderURL
+    )
+    try FileManager.default.createSymbolicLink(
+      at: workspaceURL.appending(path: "Linked.md", directoryHint: .notDirectory),
+      withDestinationURL: targetFileURL
     )
 
     filesToRemove.insert(workspaceURL.path(percentEncoded: false))

@@ -361,7 +361,7 @@ private func makeWorkspaceEntry(
 ) -> WorkspaceEntry {
   let url = URL(
     filePath: "/tmp/locus-test/\(name)",
-    directoryHint: kind == .directory ? .isDirectory : .notDirectory
+    directoryHint: kind.isDirectoryLike ? .isDirectory : .notDirectory
   )
   return WorkspaceEntry(
     id: url.path(percentEncoded: false),

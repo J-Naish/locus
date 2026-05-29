@@ -155,7 +155,7 @@ final class WorkspaceHomeVisibilityTests: XCTestCase {
     kind: WorkspaceEntryKind
   ) -> WorkspaceEntry {
     let url = folderURL.appending(
-      path: name, directoryHint: kind == .directory ? .isDirectory : .notDirectory)
+      path: name, directoryHint: kind.isDirectoryLike ? .isDirectory : .notDirectory)
     return WorkspaceEntry(
       id: url.path(percentEncoded: false),
       url: url,

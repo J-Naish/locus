@@ -12,16 +12,16 @@ enum WorkspaceEntryOpenActionResolver {
     }
 
     switch entry.kind {
-    case .directory:
+    case .directory, .symlinkToDirectory:
       return .browseFolder(entry.url)
-    case .file, .symlink:
+    case .file, .symlinkToFile:
       let surfaceKind = WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry)
       if surfaceKind.supportsInPlaceOpen {
         return .openInPlace(entry.url)
       }
 
       return nil
-    case .other:
+    case .symlink, .other:
       return nil
     }
   }

@@ -2,7 +2,7 @@ import Foundation
 
 enum WorkspaceTextDocumentSupport {
   static func canEdit(_ entry: WorkspaceEntry) -> Bool {
-    guard entry.kind == .file || entry.kind == .symlink else {
+    guard entry.kind.isFileLike else {
       return false
     }
 

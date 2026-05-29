@@ -30,7 +30,7 @@ enum WorkspaceDocumentSurfaceKind: Equatable {
 enum WorkspaceDocumentSurfaceSupport {
   static func surfaceKind(for entry: WorkspaceEntry) -> WorkspaceDocumentSurfaceKind {
     switch entry.kind {
-    case .file, .symlink:
+    case .file, .symlinkToFile:
       if WorkspaceTextDocumentSupport.canEdit(entry) {
         return .editableText
       }
@@ -50,9 +50,9 @@ enum WorkspaceDocumentSurfaceSupport {
         return .quickLookPreview
       }
       return .unsupported
-    case .directory:
+    case .directory, .symlinkToDirectory:
       return .folder
-    case .other:
+    case .symlink, .other:
       return .unsupported
     }
   }

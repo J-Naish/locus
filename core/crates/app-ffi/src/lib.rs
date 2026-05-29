@@ -11,7 +11,7 @@ use app_core::workspace::{
     WorkspaceListOptions,
 };
 
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
@@ -32,6 +32,8 @@ pub const LOCUS_WORKSPACE_ENTRY_DIRECTORY: u32 = 1;
 pub const LOCUS_WORKSPACE_ENTRY_FILE: u32 = 2;
 pub const LOCUS_WORKSPACE_ENTRY_SYMLINK: u32 = 3;
 pub const LOCUS_WORKSPACE_ENTRY_OTHER: u32 = 4;
+pub const LOCUS_WORKSPACE_ENTRY_SYMLINK_DIRECTORY: u32 = 5;
+pub const LOCUS_WORKSPACE_ENTRY_SYMLINK_FILE: u32 = 6;
 
 pub const LOCUS_FILE_TYPE_MARKDOWN: u32 = 1;
 pub const LOCUS_FILE_TYPE_STRUCTURED_TEXT: u32 = 2;
@@ -329,7 +331,9 @@ fn set_last_error_message(message: impl AsRef<str>) {
 fn ffi_entry(entry: WorkspaceEntry, strings: &mut Vec<CString>) -> LocusWorkspaceEntry {
     let kind = entry_kind_code(entry.kind);
     let file_type = match entry.kind {
-        WorkspaceEntryKind::File(file_type) => file_type_code(file_type),
+        WorkspaceEntryKind::File(file_type) | WorkspaceEntryKind::SymlinkToFile(file_type) => {
+            file_type_code(file_type)
+        }
         _ => LOCUS_FILE_TYPE_UNKNOWN,
     };
     let path = push_string(strings, entry.path.to_string_lossy());
@@ -389,6 +393,8 @@ fn entry_kind_code(kind: WorkspaceEntryKind) -> u32 {
         WorkspaceEntryKind::Directory => LOCUS_WORKSPACE_ENTRY_DIRECTORY,
         WorkspaceEntryKind::File(_) => LOCUS_WORKSPACE_ENTRY_FILE,
         WorkspaceEntryKind::Symlink => LOCUS_WORKSPACE_ENTRY_SYMLINK,
+        WorkspaceEntryKind::SymlinkToDirectory => LOCUS_WORKSPACE_ENTRY_SYMLINK_DIRECTORY,
+        WorkspaceEntryKind::SymlinkToFile(_) => LOCUS_WORKSPACE_ENTRY_SYMLINK_FILE,
         WorkspaceEntryKind::Other => LOCUS_WORKSPACE_ENTRY_OTHER,
     }
 }

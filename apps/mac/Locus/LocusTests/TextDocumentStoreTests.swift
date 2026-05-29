@@ -25,6 +25,25 @@ final class TextDocumentStoreTests: XCTestCase {
     )
   }
 
+  func testSavesThroughFileSymlinkWithoutReplacingLink() async throws {
+    let directory = try temporaryDirectory()
+    let targetURL = directory.appending(path: "Target.md")
+    let linkURL = directory.appending(path: "Linked.md")
+    try "# Target\n".write(to: targetURL, atomically: true, encoding: .utf8)
+    try FileManager.default.createSymbolicLink(at: linkURL, withDestinationURL: targetURL)
+    let store = TextDocumentStore()
+
+    try await store.saveText("# Updated\n", to: linkURL, encoding: .utf8)
+
+    XCTAssertEqual(try String(contentsOf: targetURL, encoding: .utf8), "# Updated\n")
+    XCTAssertEqual(
+      try FileManager.default.destinationOfSymbolicLink(
+        atPath: linkURL.path(percentEncoded: false)
+      ),
+      targetURL.path(percentEncoded: false)
+    )
+  }
+
   func testLoadEditSaveReloadRoundTrip() async throws {
     let url = try temporaryFile(named: "draft.md", contents: "# Draft\n\nOriginal\n")
     let store = TextDocumentStore()
@@ -153,12 +172,17 @@ final class TextDocumentStoreTests: XCTestCase {
   }
 
   private func temporaryURL(named name: String) throws -> URL {
+    let directory = try temporaryDirectory()
+    return directory.appending(path: name)
+  }
+
+  private func temporaryDirectory() throws -> URL {
     let directory = FileManager.default.temporaryDirectory
       .appending(path: "locus-text-store-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     addTeardownBlock {
       try? FileManager.default.removeItem(at: directory)
     }
-    return directory.appending(path: name)
+    return directory
   }
 }

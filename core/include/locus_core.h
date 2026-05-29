@@ -33,6 +33,8 @@ typedef uint32_t LocusWorkspaceEntryKind;
 #define LOCUS_WORKSPACE_ENTRY_FILE ((LocusWorkspaceEntryKind)2u)
 #define LOCUS_WORKSPACE_ENTRY_SYMLINK ((LocusWorkspaceEntryKind)3u)
 #define LOCUS_WORKSPACE_ENTRY_OTHER ((LocusWorkspaceEntryKind)4u)
+#define LOCUS_WORKSPACE_ENTRY_SYMLINK_DIRECTORY ((LocusWorkspaceEntryKind)5u)
+#define LOCUS_WORKSPACE_ENTRY_SYMLINK_FILE ((LocusWorkspaceEntryKind)6u)
 
 typedef uint32_t LocusFileType;
 
@@ -53,7 +55,8 @@ typedef struct LocusWorkspaceEntry {
     const char *name;
     LocusWorkspaceEntryKind kind;
     /*
-     * Valid only when kind == LOCUS_WORKSPACE_ENTRY_FILE. Other entry kinds use
+     * Valid only when kind == LOCUS_WORKSPACE_ENTRY_FILE or
+     * LOCUS_WORKSPACE_ENTRY_SYMLINK_FILE. Other entry kinds use
      * LOCUS_FILE_TYPE_UNKNOWN and callers should ignore this field.
      */
     LocusFileType file_type;
@@ -110,7 +113,7 @@ uint32_t locus_core_abi_version(void);
  * Returns whether the caller's expected ABI version is compatible with this
  * Rust FFI library.
  *
- * Compatibility policy for ABI version 1 is exact match. Callers should treat a
+ * Compatibility policy for the current ABI version is exact match. Callers should treat a
  * false result as a startup integration failure and avoid calling broader FFI
  * APIs.
  *

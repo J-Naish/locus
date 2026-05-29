@@ -26,7 +26,26 @@ enum WorkspaceEntryKind: Equatable, Sendable {
   case directory
   case file
   case symlink
+  case symlinkToDirectory
+  case symlinkToFile
   case other
+
+  var isDirectoryLike: Bool {
+    self == .directory || self == .symlinkToDirectory
+  }
+
+  var isFileLike: Bool {
+    self == .file || self == .symlinkToFile
+  }
+
+  var isSymlink: Bool {
+    switch self {
+    case .symlink, .symlinkToDirectory, .symlinkToFile:
+      return true
+    case .directory, .file, .other:
+      return false
+    }
+  }
 }
 
 enum WorkspaceFileType: Equatable, Sendable {
@@ -78,7 +97,7 @@ struct WorkspacePartialError: Equatable, Identifiable, Sendable {
 }
 
 struct CoreBridge: Sendable {
-  static let expectedABIVersion: UInt32 = 1
+  static let expectedABIVersion: UInt32 = 2
   private static let logger = Logger(subsystem: "Locus", category: "CoreBridge")
 
   func runtimeSummary() async throws -> CoreRuntimeSummary {
@@ -186,7 +205,7 @@ struct CoreBridge: Sendable {
         id: path,
         url: URL(
           filePath: path,
-          directoryHint: kind == .directory ? .isDirectory : .notDirectory
+          directoryHint: kind.isDirectoryLike ? .isDirectory : .notDirectory
         ),
         name: String(cString: entry.name),
         kind: kind,
@@ -234,6 +253,10 @@ struct CoreBridge: Sendable {
       return .file
     case LOCUS_WORKSPACE_ENTRY_SYMLINK:
       return .symlink
+    case LOCUS_WORKSPACE_ENTRY_SYMLINK_DIRECTORY:
+      return .symlinkToDirectory
+    case LOCUS_WORKSPACE_ENTRY_SYMLINK_FILE:
+      return .symlinkToFile
     case LOCUS_WORKSPACE_ENTRY_OTHER:
       return .other
     default:

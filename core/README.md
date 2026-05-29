@@ -23,6 +23,9 @@ surface needs them.
 This policy primarily keeps the snapshot contract and Swift-side conversion
 costs lean. The current implementation still performs per-entry metadata reads
 for kind and readonly state; reducing those syscalls is a separate optimization.
+Symbolic links are the main exception to the shallow fast path: listing resolves
+the immediate target once so the UI can treat directory links like folders and
+file links like files.
 
 ## Performance Smoke
 

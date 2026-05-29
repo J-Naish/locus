@@ -127,3 +127,19 @@ Raw machine-local run data belongs in `target/perf-runs/` and is not committed.
   document surface and returned PDFs to a plain PDFKit preview. The app bundle
   size dropped because the PDF controller/search UI and related UI-test fixture
   helpers were removed.
+
+## 2026-05-29T13:29:42+09:00 symlink-target-listing
+
+- commit: `7627a28`
+- branch: `main`
+- dirty tree: `true`
+- status: `0`
+- generated folder listing: entries `1010`, avg `5.084 ms`, max `5.569 ms`
+- symlink-heavy folder listing: entries `200`, avg `0.988 ms`, max `1.016 ms`
+- Rust FFI static library: `17695048 bytes`
+- macOS app bundle: `3352 KiB`
+- notes: Added target-aware symlink listing so directory links can expand like
+  folders and file links can open like their targets. The symlink-heavy smoke
+  fixture alternates file and directory links that point outside the listed
+  folder, covering the extra target metadata resolution work in the listing
+  path.

@@ -233,7 +233,7 @@ struct WorkspaceSidebarView: View {
 
   private func creationParent(for selectedEntries: [WorkspaceEntry]) -> WorkspaceEntry {
     guard selectedEntries.count == 1, let selectedEntry = selectedEntries.first,
-      selectedEntry.kind == .directory
+      selectedEntry.kind.isDirectoryLike
     else {
       return rootEntry
     }
@@ -267,7 +267,7 @@ struct WorkspaceSidebarView: View {
     entries.flatMap { entry -> [WorkspaceSidebarRow] in
       var result = [WorkspaceSidebarRow(entry: entry, depth: depth)]
 
-      guard entry.kind == .directory, expandedFolderIDs.contains(entry.id) else {
+      guard entry.kind.isDirectoryLike, expandedFolderIDs.contains(entry.id) else {
         return result
       }
 
@@ -365,7 +365,7 @@ struct WorkspaceSidebarView: View {
   }
 
   private func toggleFolderExpansion(for entry: WorkspaceEntry) {
-    guard entry.kind == .directory else {
+    guard entry.kind.isDirectoryLike else {
       return
     }
 
@@ -847,9 +847,12 @@ private enum WorkspaceSidebarChildState: Equatable {
 private enum WorkspaceSidebarMetrics {
   static let depthIndent: CGFloat = 14
   static let chevronColumnWidth: CGFloat = 10
+  static let iconColumnWidth: CGFloat = 18
   static let recentFoldersHeaderHeight: CGFloat = 28
   static let recentFolderRowHeight: CGFloat = 28
   static let recentFoldersMaximumHeight: CGFloat = 224
+  static let symlinkBadgeSize: CGFloat = 7
+  static let symlinkBadgeOffset = CGSize(width: 4, height: 3)
 
   // Fast child listings should appear directly. Show "Loading..." only when a
   // real read stays in flight long enough that silent waiting would feel stuck.
@@ -1063,7 +1066,7 @@ private struct WorkspaceSidebarEntryRow: View {
 
   var body: some View {
     HStack(spacing: 6) {
-      if entry.kind == .directory {
+      if entry.kind.isDirectoryLike {
         Button(action: toggleExpansion) {
           Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
             .font(.caption2)
@@ -1093,8 +1096,7 @@ private struct WorkspaceSidebarEntryRow: View {
 
   private var rowContent: some View {
     HStack(spacing: 6) {
-      Image(systemName: entry.symbolName)
-        .foregroundStyle(gitStatus?.dimsSidebarSymbol == true ? .secondary : entry.symbolColor)
+      entryIcon
 
       Text(entry.name)
         .lineLimit(1)
@@ -1109,25 +1111,58 @@ private struct WorkspaceSidebarEntryRow: View {
     .accessibilityLabel(Text(verbatim: rowAccessibilityLabel))
   }
 
+  private var entryIcon: some View {
+    ZStack(alignment: .bottomTrailing) {
+      Image(systemName: entry.symbolName)
+        .foregroundStyle(gitStatus?.dimsSidebarSymbol == true ? .secondary : entry.symbolColor)
+
+      if entry.kind.isSymlink {
+        Image(systemName: "arrowshape.turn.up.right.fill")
+          .font(.system(size: WorkspaceSidebarMetrics.symlinkBadgeSize, weight: .semibold))
+          .foregroundStyle(.secondary)
+          .offset(
+            x: WorkspaceSidebarMetrics.symlinkBadgeOffset.width,
+            y: WorkspaceSidebarMetrics.symlinkBadgeOffset.height
+          )
+          .accessibilityHidden(true)
+      }
+    }
+    .frame(width: WorkspaceSidebarMetrics.iconColumnWidth, alignment: .center)
+  }
+
   private var disclosureAccessibilityLabel: Text {
     let action = isExpanded ? "Collapse" : "Expand"
     return Text(verbatim: "\(action) \(entry.name)")
   }
 
   private var rowAccessibilityLabel: String {
-    guard let gitStatus else {
-      return entry.name
+    var components = [entry.name]
+    if entry.kind.isSymlink {
+      components.append("alias")
     }
+    if let gitStatus {
+      components.append(gitStatus.accessibilityDescription)
+    }
+    return components.joined(separator: ", ")
+  }
 
-    return "\(entry.name), \(gitStatus.accessibilityDescription)"
+  private var rowMetadataDescription: String? {
+    var components: [String] = []
+    if entry.kind.isSymlink {
+      components.append("alias")
+    }
+    if let gitStatus {
+      components.append(gitStatus.accessibilityDescription)
+    }
+    return components.isEmpty ? nil : components.joined(separator: ", ")
   }
 
   private var rowHelpText: String {
-    guard let gitStatus else {
+    guard let rowMetadataDescription else {
       return entry.name
     }
 
-    return "\(entry.name) (\(gitStatus.accessibilityDescription))"
+    return "\(entry.name) (\(rowMetadataDescription))"
   }
 }
 

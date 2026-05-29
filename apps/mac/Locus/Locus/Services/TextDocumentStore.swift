@@ -45,8 +45,18 @@ struct TextDocumentStore: TextDocumentStoring {
         }
       }
 
-      try text.write(to: url, atomically: true, encoding: encoding)
+      try text.write(
+        to: url,
+        atomically: !TextDocumentStore.isSymbolicLink(at: url),
+        encoding: encoding
+      )
     }.value
+  }
+
+  private static func isSymbolicLink(at url: URL) -> Bool {
+    (try? FileManager.default.destinationOfSymbolicLink(
+      atPath: url.path(percentEncoded: false)
+    )) != nil
   }
 
   private static func decodeText(from data: Data) -> TextDocument? {

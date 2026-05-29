@@ -8,9 +8,12 @@ WORKSPACE_DIR="${LOCUS_PERF_WORKSPACE:-}"
 PERF_FIXTURE_ROOT="${LOCUS_PERF_FIXTURE_ROOT:-$ROOT_DIR/target/perf-fixtures}"
 
 ENTRY_COUNT="${LOCUS_PERF_ENTRY_COUNT:-1000}"
+SYMLINK_ENTRY_COUNT="${LOCUS_PERF_SYMLINK_ENTRY_COUNT:-200}"
 ITERATIONS="${LOCUS_PERF_ITERATIONS:-5}"
 LIST_BUDGET_MS="${LOCUS_PERF_LIST_BUDGET_MS:-50}"
 LIST_MAX_BUDGET_MS="${LOCUS_PERF_LIST_MAX_BUDGET_MS:-150}"
+SYMLINK_LIST_BUDGET_MS="${LOCUS_PERF_SYMLINK_LIST_BUDGET_MS:-50}"
+SYMLINK_LIST_MAX_BUDGET_MS="${LOCUS_PERF_SYMLINK_LIST_MAX_BUDGET_MS:-150}"
 STATICLIB_BUDGET_BYTES="${LOCUS_PERF_STATICLIB_BUDGET_BYTES:-25000000}"
 APP_BUDGET_KB="${LOCUS_PERF_APP_BUDGET_KB:-10240}"
 SKIP_MAC_BUILD="${LOCUS_PERF_SKIP_MAC_BUILD:-0}"
@@ -30,6 +33,20 @@ if [ -z "$WORKSPACE_DIR" ]; then
     echo
 fi
 
+case "$SYMLINK_ENTRY_COUNT" in
+    ''|*[!0-9]*)
+        echo "error: LOCUS_PERF_SYMLINK_ENTRY_COUNT must be a positive integer" >&2
+        exit 2
+        ;;
+    0)
+        echo "error: LOCUS_PERF_SYMLINK_ENTRY_COUNT must be greater than zero" >&2
+        exit 2
+        ;;
+esac
+
+SYMLINK_WORKSPACE_DIR="$PERF_FIXTURE_ROOT/symlink-listing-$SYMLINK_ENTRY_COUNT"
+SYMLINK_TARGET_DIR="$PERF_FIXTURE_ROOT/symlink-targets-$SYMLINK_ENTRY_COUNT"
+
 echo "== Rust release build =="
 cargo build --manifest-path "$CORE_DIR/Cargo.toml" -p app-cli -p app-ffi --release
 
@@ -39,6 +56,40 @@ echo "== Folder listing smoke =="
     --iterations "$ITERATIONS" \
     --budget-ms "$LIST_BUDGET_MS" \
     --max-budget-ms "$LIST_MAX_BUDGET_MS"
+
+if command -v ln >/dev/null 2>&1; then
+    echo
+    echo "== Generate symlink performance fixture =="
+    rm -rf "$SYMLINK_WORKSPACE_DIR" "$SYMLINK_TARGET_DIR"
+    mkdir -p "$SYMLINK_WORKSPACE_DIR" "$SYMLINK_TARGET_DIR/files" "$SYMLINK_TARGET_DIR/folders"
+
+    i=1
+    while [ "$i" -le "$SYMLINK_ENTRY_COUNT" ]; do
+        if [ $((i % 2)) -eq 0 ]; then
+            target="$SYMLINK_TARGET_DIR/folders/folder-$i"
+            mkdir -p "$target"
+            ln -s "$target" "$SYMLINK_WORKSPACE_DIR/linked-folder-$i"
+        else
+            target="$SYMLINK_TARGET_DIR/files/file-$i.md"
+            printf 'Symlink target %04d\n' "$i" > "$target"
+            ln -s "$target" "$SYMLINK_WORKSPACE_DIR/linked-file-$i.md"
+        fi
+        i=$((i + 1))
+    done
+    echo "workspace: $SYMLINK_WORKSPACE_DIR"
+    echo "generated_symlinks: $SYMLINK_ENTRY_COUNT"
+
+    echo
+    echo "== Symlink-heavy folder listing smoke =="
+    "$CORE_DIR/target/release/locus-core" perf-list-directory "$SYMLINK_WORKSPACE_DIR" \
+        --iterations "$ITERATIONS" \
+        --budget-ms "$SYMLINK_LIST_BUDGET_MS" \
+        --max-budget-ms "$SYMLINK_LIST_MAX_BUDGET_MS"
+else
+    echo
+    echo "== Symlink-heavy folder listing smoke =="
+    echo "skipped: ln unavailable"
+fi
 
 STATICLIB_PATH="$CORE_DIR/target/release/libapp_ffi.a"
 STATICLIB_BYTES="$(wc -c < "$STATICLIB_PATH" | tr -d ' ')"
