@@ -115,7 +115,7 @@ final class GitWorkspaceStatusTests: XCTestCase {
   func testIgnoredStatusAppliesToIgnoredFolderWithoutMarkingRepositoryRoot() {
     let workspaceURL = URL(filePath: "/tmp/locus")
     let changes = [
-      GitStatusChange(path: "build/", kind: .ignored)
+      GitStatusChange(path: "core/target/", kind: .ignored)
     ]
 
     let statuses = GitSidebarStatusAggregator.statuses(
@@ -125,7 +125,8 @@ final class GitWorkspaceStatusTests: XCTestCase {
     )
 
     XCTAssertNil(statuses["/tmp/locus"])
-    XCTAssertEqual(statuses["/tmp/locus/build"], .ignored)
+    XCTAssertNil(statuses["/tmp/locus/core"])
+    XCTAssertEqual(statuses["/tmp/locus/core/target"], .ignored)
   }
 
   func testIgnoredWorkspaceRootIsMarkedWhenWorkspaceIsIgnoredSubdirectory() {
@@ -142,6 +143,23 @@ final class GitWorkspaceStatusTests: XCTestCase {
     )
 
     XCTAssertEqual(statuses["/tmp/locus/build"], .ignored)
+  }
+
+  func testIgnoredDescendantDoesNotMarkChildWorkspaceRoot() {
+    let repositoryRootURL = URL(filePath: "/tmp/locus")
+    let workspaceURL = URL(filePath: "/tmp/locus/core")
+    let changes = [
+      GitStatusChange(path: "core/target/", kind: .ignored)
+    ]
+
+    let statuses = GitSidebarStatusAggregator.statuses(
+      for: changes,
+      workspaceURL: workspaceURL,
+      repositoryRootURL: repositoryRootURL
+    )
+
+    XCTAssertNil(statuses["/tmp/locus/core"])
+    XCTAssertEqual(statuses["/tmp/locus/core/target"], .ignored)
   }
 
   func testIgnoredAncestorStatusAppliesToDescendants() {
@@ -161,6 +179,28 @@ final class GitWorkspaceStatusTests: XCTestCase {
     ])
 
     XCTAssertEqual(lookup.status(for: "/tmp/locus/build/tracked.md"), .modified)
+  }
+
+  func testModifiedIgnoredAncestorIsNotUsedToDimSiblings() {
+    let workspaceURL = URL(filePath: "/tmp/locus")
+    let changes = [
+      GitStatusChange(path: "node_modules/", kind: .ignored),
+      GitStatusChange(path: "node_modules/keep-me.md", kind: .modified),
+    ]
+
+    let statuses = GitSidebarStatusAggregator.statuses(
+      for: changes,
+      workspaceURL: workspaceURL,
+      repositoryRootURL: workspaceURL
+    )
+    let lookup = GitSidebarStatusLookup(statuses)
+
+    XCTAssertEqual(statuses["/tmp/locus/node_modules"], .modified)
+    XCTAssertEqual(statuses["/tmp/locus/node_modules/keep-me.md"], .modified)
+    // A tracked exception inside an ignored folder makes the folder modified.
+    // Siblings under that folder are not dimmed because the ignored marker is
+    // no longer present on the ancestor path.
+    XCTAssertNil(lookup.status(for: "/tmp/locus/node_modules/junk.md"))
   }
 
   func testIgnoredAncestorLookupStopsAtWorkspaceRoot() {

@@ -574,13 +574,29 @@ enum GitSidebarStatusAggregator {
         continue
       }
 
-      // Only subdirectory workspaces color their synthesized root row. When the
-      // repository root itself is open, child rows already carry the useful signal.
-      if !workspacePrefixComponents.isEmpty {
+      let workspaceIsRepositorySubdirectory = !workspacePrefixComponents.isEmpty
+      let workspaceItselfIsChangedPath = components.isEmpty
+      let shouldMarkWorkspaceRoot =
+        workspaceIsRepositorySubdirectory
+        && (change.kind != .ignored || workspaceItselfIsChangedPath)
+
+      // Modified/added states bubble up to containing folders. Ignored states
+      // flow downward through GitSidebarStatusLookup instead, so only mark the
+      // workspace root when the opened workspace folder itself is ignored.
+      if shouldMarkWorkspaceRoot {
         merge(change.kind, into: &workspaceRootKind)
       }
 
       guard !components.isEmpty else {
+        continue
+      }
+
+      let leafPath = components.reduce(workspacePath) { path, component in
+        appending(component, to: path)
+      }
+
+      if change.kind == .ignored {
+        merge(change.kind, into: &statuses, at: leafPath)
         continue
       }
 
