@@ -38,6 +38,10 @@ struct WorkspaceSidebarView: View {
   let shortcutActions: FileLocationShortcutActions
   let actions: WorkspaceActions
   let onItemCreated: () -> Void
+  let dropItems: ([URL], URL) -> Void
+  // Bumped by the parent after a move/import so the sidebar reloads cached
+  // children of expanded folders, whose contents the root reload doesn't touch.
+  let childReloadToken: Int
   let onVisibleEntriesChange: ([WorkspaceEntry]) -> Void
   @State private var expandedFolderIDs: Set<WorkspaceEntry.ID> = []
   @State private var childStates: [WorkspaceEntry.ID: WorkspaceSidebarChildState] = [:]
@@ -64,6 +68,8 @@ struct WorkspaceSidebarView: View {
     shortcutActions: FileLocationShortcutActions,
     actions: WorkspaceActions,
     onItemCreated: @escaping () -> Void,
+    dropItems: @escaping ([URL], URL) -> Void,
+    childReloadToken: Int,
     onVisibleEntriesChange: @escaping ([WorkspaceEntry]) -> Void
   ) {
     self.folderURL = folderURL
@@ -78,6 +84,8 @@ struct WorkspaceSidebarView: View {
     self.shortcutActions = shortcutActions
     self.actions = actions
     self.onItemCreated = onItemCreated
+    self.dropItems = dropItems
+    self.childReloadToken = childReloadToken
     self.onVisibleEntriesChange = onVisibleEntriesChange
   }
 
@@ -94,6 +102,12 @@ struct WorkspaceSidebarView: View {
               isExpanded: isExpanded(entry),
               toggleExpansion: {
                 toggleExpansion(for: entry)
+              },
+              onSelect: {
+                highlightedEntryID = entry.id
+              },
+              onDropURLs: { urls in
+                handleDrop(urls, onto: entry)
               }
             )
             .tag(entry.id)
@@ -189,6 +203,9 @@ struct WorkspaceSidebarView: View {
     .onChange(of: entries) {
       pruneExpansion(for: entries)
     }
+    .onChange(of: childReloadToken) {
+      reloadExpandedChildren()
+    }
     .onChange(of: folderURL) {
       cancelCreation()
       resetExpansion()
@@ -261,6 +278,14 @@ struct WorkspaceSidebarView: View {
 
   private func gitStatus(for entry: WorkspaceEntry) -> GitWorkspaceChangeKind? {
     gitStatusLookup.status(for: entry.id)
+  }
+
+  private func handleDrop(_ urls: [URL], onto entry: WorkspaceEntry) {
+    guard entry.kind.isDirectoryLike, !urls.isEmpty else {
+      return
+    }
+
+    dropItems(urls, entry.url)
   }
 
   private func rows(for entries: [WorkspaceEntry], depth: Int) -> [WorkspaceSidebarRow] {
@@ -380,6 +405,39 @@ struct WorkspaceSidebarView: View {
     expandedFolderIDs.insert(entry.id)
     loadChildrenIfNeeded(for: entry)
     publishVisibleEntries()
+  }
+
+  /// Invalidates cached children after a move/import (the root reload doesn't
+  /// touch subfolder caches) and reloads the folders that are currently
+  /// expanded. Collapsed folders simply lose their stale cache and reload fresh
+  /// the next time they are expanded.
+  private func reloadExpandedChildren() {
+    let entriesToReload = expandedDirectoryEntries()
+    expansionGeneration &+= 1
+    cancelAllChildLoads()
+    childStates.removeAll()
+    publishVisibleEntries()
+
+    for entry in entriesToReload {
+      loadChildrenIfNeeded(for: entry)
+    }
+  }
+
+  private func expandedDirectoryEntries() -> [WorkspaceEntry] {
+    var result: [WorkspaceEntry] = []
+
+    func collect(_ entries: [WorkspaceEntry]) {
+      for entry in entries
+      where entry.kind.isDirectoryLike && expandedFolderIDs.contains(entry.id) {
+        result.append(entry)
+        if case .loaded(let snapshot) = childStates[entry.id] {
+          collect(snapshot.entries)
+        }
+      }
+    }
+
+    collect(entries)
+    return result
   }
 
   private func loadChildrenIfNeeded(for entry: WorkspaceEntry) {
@@ -1057,12 +1115,36 @@ private struct WorkspaceSidebarCreationRow: View {
   }
 }
 
+/// Attaches a file-URL drop destination only to folder-like rows so files and
+/// status rows never appear as drop targets.
+private struct WorkspaceSidebarDropTarget: ViewModifier {
+  let isEnabled: Bool
+  @Binding var isTargeted: Bool
+  let onDrop: ([URL]) -> Void
+
+  func body(content: Content) -> some View {
+    if isEnabled {
+      content.dropDestination(for: URL.self) { urls, _ in
+        onDrop(urls)
+        return true
+      } isTargeted: { targeted in
+        isTargeted = targeted
+      }
+    } else {
+      content
+    }
+  }
+}
+
 private struct WorkspaceSidebarEntryRow: View {
   let entry: WorkspaceEntry
   let depth: Int
   let gitStatus: GitWorkspaceChangeKind?
   let isExpanded: Bool
   let toggleExpansion: () -> Void
+  let onSelect: () -> Void
+  let onDropURLs: ([URL]) -> Void
+  @State private var isDropTargeted = false
 
   var body: some View {
     HStack(spacing: 6) {
@@ -1091,6 +1173,19 @@ private struct WorkspaceSidebarEntryRow: View {
     .padding(.leading, CGFloat(depth) * WorkspaceSidebarMetrics.depthIndent)
     .frame(maxWidth: .infinity, alignment: .leading)
     .contentShape(Rectangle())
+    .background {
+      if isDropTargeted {
+        RoundedRectangle(cornerRadius: 5)
+          .fill(Color.accentColor.opacity(0.2))
+      }
+    }
+    .modifier(
+      WorkspaceSidebarDropTarget(
+        isEnabled: entry.kind.isDirectoryLike,
+        isTargeted: $isDropTargeted,
+        onDrop: onDropURLs
+      )
+    )
     .help(Text(verbatim: rowHelpText))
   }
 
@@ -1107,6 +1202,11 @@ private struct WorkspaceSidebarEntryRow: View {
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .contentShape(Rectangle())
+    .draggable(entry.url)
+    // `.draggable` competes with the List's built-in selection click and can
+    // swallow clicks that include any pointer movement, so drive selection
+    // explicitly with a simultaneous tap that survives the drag gesture.
+    .simultaneousGesture(TapGesture().onEnded(onSelect))
     .accessibilityElement(children: .ignore)
     .accessibilityLabel(Text(verbatim: rowAccessibilityLabel))
   }

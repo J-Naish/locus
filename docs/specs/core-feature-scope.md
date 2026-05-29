@@ -23,6 +23,10 @@ Must support:
   should be loaded only when a contextual surface explicitly needs it
 - create new files and folders in the current workspace folder from the
   sidebar, without overwriting existing items
+- move files and folders by dragging them onto a folder row in the sidebar,
+  accept files dragged in from Finder (copy), and allow dragging items out to
+  Finder; resolve name collisions by asking to replace or keep both, and make
+  moves, imports, and replacements undoable
 - open one selected file or folder in the document surface
 - navigate to an item's containing folder inside Locus and select the item
 - show recent files and folders

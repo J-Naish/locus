@@ -147,6 +147,8 @@ struct HomeView: View {
         trashCreatedItem: trashCreatedWorkspaceItem,
         trashItemsAtURLs: trashWorkspaceItems,
         restoreDeletedItems: restoreWorkspaceDeletedItems,
+        moveItems: moveWorkspaceItems,
+        importItems: importWorkspaceItems,
         loadFolderChildren: loadSidebarFolderChildren,
         performOpenAction: performOpenAction
       )
@@ -756,6 +758,61 @@ struct HomeView: View {
   }
 
   @MainActor
+  private func moveWorkspaceItems(
+    _ planned: [WorkspacePlannedMove]
+  ) -> WorkspaceMoveExecution {
+    guard let folderURL = workspaceState.folderURL else {
+      return WorkspaceMoveExecution(failure: .noActiveWorkspace)
+    }
+
+    let didStartAccess = folderURL.startAccessingSecurityScopedResource()
+    defer {
+      if didStartAccess {
+        folderURL.stopAccessingSecurityScopedResource()
+      }
+    }
+
+    let execution = WorkspaceItemMove.move(planned)
+    finishWorkspaceItemMove(execution.moved, folderURL: folderURL)
+    return execution
+  }
+
+  @MainActor
+  private func importWorkspaceItems(
+    _ planned: [WorkspacePlannedMove]
+  ) -> WorkspaceMoveExecution {
+    guard let folderURL = workspaceState.folderURL else {
+      return WorkspaceMoveExecution(failure: .noActiveWorkspace)
+    }
+
+    let didStartAccess = folderURL.startAccessingSecurityScopedResource()
+    defer {
+      if didStartAccess {
+        folderURL.stopAccessingSecurityScopedResource()
+      }
+    }
+
+    let execution = WorkspaceItemMove.copy(planned)
+    finishWorkspaceItemMove(execution.moved, folderURL: folderURL)
+    return execution
+  }
+
+  @MainActor
+  private func finishWorkspaceItemMove(_ moved: [WorkspaceMovedItem], folderURL: URL) {
+    let movedSourcePaths = Set(moved.map(\.originalURL.locusStandardizedPath))
+    if let selectedEntryID, movedSourcePaths.contains(selectedEntryID) {
+      self.selectedEntryID = nil
+    }
+
+    startWorkspaceLoad(
+      WorkspaceLoadRequest(
+        folderURL: folderURL,
+        showsLoading: false
+      )
+    )
+  }
+
+  @MainActor
   private func loadSidebarFolderChildren(_ folderURL: URL) async throws -> WorkspaceSnapshot {
     let didStartAccess = folderURL.startAccessingSecurityScopedResource()
     defer {
@@ -930,6 +987,8 @@ struct WorkspaceActions {
   let trashCreatedItem: (URL) throws -> WorkspaceDeletedItem
   let trashItemsAtURLs: ([URL]) throws -> [WorkspaceDeletedItem]
   let restoreDeletedItems: ([WorkspaceDeletedItem]) throws -> [URL]
+  let moveItems: ([WorkspacePlannedMove]) -> WorkspaceMoveExecution
+  let importItems: ([WorkspacePlannedMove]) -> WorkspaceMoveExecution
   let loadFolderChildren: (URL) async throws -> WorkspaceSnapshot
   let performOpenAction: (WorkspaceEntryOpenAction) -> Void
 }
@@ -987,6 +1046,48 @@ private struct WorkspaceBrowserView: View {
     static let debounceDuration: Duration = .milliseconds(250)
   }
 
+  private enum WorkspaceDropOperation: Equatable {
+    case move
+    case copy
+  }
+
+  private struct PlannedDropItem: Equatable {
+    let operation: WorkspaceDropOperation
+    let plan: WorkspacePlannedMove
+  }
+
+  private enum DropCollisionChoice {
+    case replace
+    case keepBoth
+  }
+
+  private struct PendingDropResolution: Equatable {
+    var unresolved: [PlannedDropItem] = []
+    var moveResolved: [WorkspacePlannedMove] = []
+    var copyResolved: [WorkspacePlannedMove] = []
+    // Destinations already claimed by this drop, so two dropped items that
+    // would land on the same name are treated as collisions too.
+    var reservedDestinations: Set<String> = []
+
+    var currentCollision: PlannedDropItem? {
+      unresolved.first
+    }
+  }
+
+  /// A completed drop that can be undone and redone. `moved` are internal moves
+  /// (reversed by moving back), `importedCopies` are copy destinations (undone
+  /// by trashing, redone by restoring), and `replacedTrashed` are items trashed
+  /// because the user chose Replace (undone by restoring, redone by trashing).
+  private struct ReversibleDrop {
+    var moved: [WorkspaceMovedItem] = []
+    var importedCopies: [URL] = []
+    var replacedTrashed: [WorkspaceDeletedItem] = []
+
+    var isEmpty: Bool {
+      moved.isEmpty && importedCopies.isEmpty
+    }
+  }
+
   let folderURL: URL
   let snapshot: WorkspaceSnapshot
   let loadedAt: Date
@@ -1016,6 +1117,10 @@ private struct WorkspaceBrowserView: View {
   @State private var gitRepositoryRootURL: URL?
   @State private var workspaceUndoErrorMessage: String?
   @State private var isWorkspaceUndoErrorPresented = false
+  @State private var workspaceMoveErrorMessage: String?
+  @State private var isWorkspaceMoveErrorPresented = false
+  @State private var pendingDrop: PendingDropResolution?
+  @State private var sidebarChildReloadToken = 0
   @State private var undoRegistrar = WorkspaceUndoRegistrar()
   @Environment(\.undoManager) private var undoManager
   @Environment(\.scenePhase) private var scenePhase
@@ -1089,6 +1194,8 @@ private struct WorkspaceBrowserView: View {
         shortcutActions: shortcutActions,
         actions: sidebarActions,
         onItemCreated: requestGitStatusRefresh,
+        dropItems: handleSidebarDrop,
+        childReloadToken: sidebarChildReloadToken,
         onVisibleEntriesChange: updateSidebarVisibleEntries
       )
       .navigationSplitViewColumnWidth(
@@ -1153,6 +1260,28 @@ private struct WorkspaceBrowserView: View {
       Button("OK", role: .cancel) {}
     } message: {
       Text(workspaceUndoErrorMessage ?? "Locus couldn't undo the last workspace change.")
+    }
+    .alert(
+      dropCollisionTitle,
+      isPresented: dropCollisionPresentedBinding,
+      presenting: pendingDrop?.currentCollision
+    ) { collision in
+      Button("Replace") {
+        resolveCurrentDropCollision(.replace)
+      }
+      Button("Keep Both") {
+        resolveCurrentDropCollision(.keepBoth)
+      }
+      Button("Cancel", role: .cancel) {
+        cancelPendingDrop()
+      }
+    } message: { collision in
+      Text("'\(collision.plan.destinationURL.lastPathComponent)' already exists in this folder.")
+    }
+    .alert("Couldn't Move Item", isPresented: $isWorkspaceMoveErrorPresented) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(workspaceMoveErrorMessage ?? "Locus couldn't complete the move.")
     }
   }
 
@@ -1258,6 +1387,8 @@ private struct WorkspaceBrowserView: View {
       trashCreatedItem: actions.trashCreatedItem,
       trashItemsAtURLs: actions.trashItemsAtURLs,
       restoreDeletedItems: actions.restoreDeletedItems,
+      moveItems: actions.moveItems,
+      importItems: actions.importItems,
       loadFolderChildren: actions.loadFolderChildren,
       performOpenAction: performWorkspaceOpenAction
     )
@@ -1399,6 +1530,297 @@ private struct WorkspaceBrowserView: View {
       workspaceUndoErrorMessage = error.localizedDescription
       isWorkspaceUndoErrorPresented = true
     }
+  }
+
+  // MARK: - Drag-and-drop move/import
+
+  private var dropCollisionTitle: String {
+    "An Item With This Name Already Exists"
+  }
+
+  private var dropCollisionPresentedBinding: Binding<Bool> {
+    Binding(
+      get: { pendingDrop?.currentCollision != nil },
+      set: { isPresented in
+        if !isPresented {
+          pendingDrop = nil
+        }
+      }
+    )
+  }
+
+  private func handleSidebarDrop(_ urls: [URL], onto targetFolderURL: URL) {
+    let workspacePath = folderURL.locusStandardizedPath
+    let internalURLs = urls.filter {
+      $0.locusStandardizedPath.locusHasPathPrefix(workspacePath)
+    }
+    let externalURLs = urls.filter {
+      !$0.locusStandardizedPath.locusHasPathPrefix(workspacePath)
+    }
+
+    do {
+      var plannedItems: [PlannedDropItem] = []
+      if !internalURLs.isEmpty {
+        let moves = try WorkspaceItemMove.plannedMoves(
+          for: internalURLs, into: targetFolderURL, workspaceURL: folderURL)
+        plannedItems += moves.map { PlannedDropItem(operation: .move, plan: $0) }
+      }
+      if !externalURLs.isEmpty {
+        let imports = try WorkspaceItemMove.plannedImports(
+          for: externalURLs, into: targetFolderURL, workspaceURL: folderURL)
+        plannedItems += imports.map { PlannedDropItem(operation: .copy, plan: $0) }
+      }
+
+      guard !plannedItems.isEmpty else {
+        return
+      }
+
+      var resolution = PendingDropResolution()
+      for item in plannedItems {
+        let destinationPath = item.plan.destinationURL.locusStandardizedPath
+        // Collide on either an existing on-disk item or another item from this
+        // same drop that already claimed the destination name.
+        if dropDestinationExists(item.plan.destinationURL)
+          || resolution.reservedDestinations.contains(destinationPath)
+        {
+          resolution.unresolved.append(item)
+        } else {
+          resolution.reservedDestinations.insert(destinationPath)
+          appendResolvedDropItem(item, to: &resolution)
+        }
+      }
+
+      if resolution.unresolved.isEmpty {
+        executeResolvedDrop(resolution)
+      } else {
+        pendingDrop = resolution
+      }
+    } catch {
+      presentMoveError(error)
+    }
+  }
+
+  private func resolveCurrentDropCollision(_ choice: DropCollisionChoice) {
+    guard var resolution = pendingDrop, !resolution.unresolved.isEmpty else {
+      return
+    }
+
+    let collision = resolution.unresolved.removeFirst()
+    switch choice {
+    case .replace:
+      let replacingPlan = WorkspacePlannedMove(
+        sourceURL: collision.plan.sourceURL,
+        destinationURL: collision.plan.destinationURL,
+        replacesExisting: true
+      )
+      resolution.reservedDestinations.insert(collision.plan.destinationURL.locusStandardizedPath)
+      appendResolvedDropItem(
+        PlannedDropItem(operation: collision.operation, plan: replacingPlan), to: &resolution)
+    case .keepBoth:
+      let resolvedDestination = WorkspaceItemMove.disambiguatedURL(
+        for: collision.plan.destinationURL
+      ) { candidate in
+        dropDestinationExists(candidate)
+          || resolution.reservedDestinations.contains(candidate.locusStandardizedPath)
+      }
+      resolution.reservedDestinations.insert(resolvedDestination.locusStandardizedPath)
+      let resolvedItem = PlannedDropItem(
+        operation: collision.operation,
+        plan: WorkspacePlannedMove(
+          sourceURL: collision.plan.sourceURL, destinationURL: resolvedDestination)
+      )
+      appendResolvedDropItem(resolvedItem, to: &resolution)
+    }
+
+    if resolution.unresolved.isEmpty {
+      pendingDrop = nil
+      executeResolvedDrop(resolution)
+    } else {
+      pendingDrop = resolution
+    }
+  }
+
+  private func cancelPendingDrop() {
+    pendingDrop = nil
+  }
+
+  private func appendResolvedDropItem(
+    _ item: PlannedDropItem,
+    to resolution: inout PendingDropResolution
+  ) {
+    switch item.operation {
+    case .move:
+      resolution.moveResolved.append(item.plan)
+    case .copy:
+      resolution.copyResolved.append(item.plan)
+    }
+  }
+
+  private func dropDestinationExists(_ url: URL) -> Bool {
+    FileManager.default.fileExists(atPath: url.path(percentEncoded: false))
+  }
+
+  private func executeResolvedDrop(_ resolution: PendingDropResolution) {
+    let moveExecution =
+      resolution.moveResolved.isEmpty ? nil : actions.moveItems(resolution.moveResolved)
+    let importExecution =
+      resolution.copyResolved.isEmpty ? nil : actions.importItems(resolution.copyResolved)
+
+    // Register undo for whatever actually landed, even if a later item failed,
+    // so a partially-successful drop is still reversible.
+    let record = ReversibleDrop(
+      moved: moveExecution?.moved ?? [],
+      importedCopies: importExecution?.moved.map(\.newURL) ?? [],
+      replacedTrashed: (moveExecution?.replacedTrashed ?? [])
+        + (importExecution?.replacedTrashed ?? [])
+    )
+    registerDropUndo(record, includesImport: importExecution != nil)
+    requestGitStatusRefresh()
+    requestSidebarChildReload()
+
+    if let failure = moveExecution?.failure ?? importExecution?.failure {
+      presentMoveError(failure)
+    }
+  }
+
+  private func registerDropUndo(_ record: ReversibleDrop, includesImport: Bool) {
+    guard !record.isEmpty else {
+      return
+    }
+
+    registerUndoAction(named: dropActionName(for: record, includesImport: includesImport)) {
+      undoDrop(record, includesImport: includesImport)
+    }
+  }
+
+  private func dropActionName(for record: ReversibleDrop, includesImport: Bool) -> String {
+    if record.moved.isEmpty && includesImport {
+      let placeholders = record.importedCopies.map {
+        WorkspaceMovedItem(originalURL: $0, newURL: $0)
+      }
+      return WorkspaceItemMove.importActionName(for: placeholders)
+    }
+    return WorkspaceItemMove.undoActionName(for: record.moved)
+  }
+
+  private func undoDrop(_ record: ReversibleDrop, includesImport: Bool) {
+    do {
+      // Reverse internal moves, vacating their destinations.
+      if !record.moved.isEmpty {
+        let reverse = record.moved.map {
+          WorkspacePlannedMove(sourceURL: $0.newURL, destinationURL: $0.originalURL)
+        }
+        _ = moveWorkspaceItemsForUndo(reverse)
+      }
+      // Trash imported copies; keep the trashed items so redo can restore the
+      // exact bytes rather than re-copying a possibly-changed external source.
+      var trashedCopies: [WorkspaceDeletedItem] = []
+      if !record.importedCopies.isEmpty {
+        trashedCopies = try actions.trashItemsAtURLs(record.importedCopies)
+      }
+      // Restore items that were replaced, now that their destinations are free.
+      if !record.replacedTrashed.isEmpty {
+        _ = try actions.restoreDeletedItems(record.replacedTrashed)
+      }
+
+      registerDropRedo(
+        moved: record.moved,
+        trashedCopies: trashedCopies,
+        replacedOriginalURLs: record.replacedTrashed.map(\.originalURL),
+        includesImport: includesImport
+      )
+      requestGitStatusRefresh()
+      requestSidebarChildReload()
+    } catch {
+      presentMoveError(error)
+    }
+  }
+
+  private func registerDropRedo(
+    moved: [WorkspaceMovedItem],
+    trashedCopies: [WorkspaceDeletedItem],
+    replacedOriginalURLs: [URL],
+    includesImport: Bool
+  ) {
+    guard !moved.isEmpty || !trashedCopies.isEmpty else {
+      return
+    }
+
+    let actionName =
+      moved.isEmpty
+      ? WorkspaceItemMove.importActionName(
+        for: trashedCopies.map {
+          WorkspaceMovedItem(originalURL: $0.originalURL, newURL: $0.originalURL)
+        })
+      : WorkspaceItemMove.undoActionName(for: moved)
+
+    registerUndoAction(named: actionName) {
+      redoDrop(
+        moved: moved,
+        trashedCopies: trashedCopies,
+        replacedOriginalURLs: replacedOriginalURLs,
+        includesImport: includesImport
+      )
+    }
+  }
+
+  private func redoDrop(
+    moved: [WorkspaceMovedItem],
+    trashedCopies: [WorkspaceDeletedItem],
+    replacedOriginalURLs: [URL],
+    includesImport: Bool
+  ) {
+    do {
+      // Re-trash the items that the drop originally replaced, freeing their
+      // destinations before the moves/copies land again.
+      var replacedTrashed: [WorkspaceDeletedItem] = []
+      if !replacedOriginalURLs.isEmpty {
+        replacedTrashed = try actions.trashItemsAtURLs(replacedOriginalURLs)
+      }
+      // Re-apply internal moves forward.
+      if !moved.isEmpty {
+        let forward = moved.map {
+          WorkspacePlannedMove(sourceURL: $0.originalURL, destinationURL: $0.newURL)
+        }
+        _ = moveWorkspaceItemsForUndo(forward)
+      }
+      // Restore the imported copies to their destinations.
+      var importedCopies: [URL] = []
+      if !trashedCopies.isEmpty {
+        importedCopies = try actions.restoreDeletedItems(trashedCopies)
+      }
+
+      let record = ReversibleDrop(
+        moved: moved,
+        importedCopies: importedCopies,
+        replacedTrashed: replacedTrashed
+      )
+      registerDropUndo(record, includesImport: includesImport)
+      requestGitStatusRefresh()
+      requestSidebarChildReload()
+    } catch {
+      presentMoveError(error)
+    }
+  }
+
+  /// Runs a reverse/forward move during undo/redo and surfaces any failure.
+  private func moveWorkspaceItemsForUndo(_ planned: [WorkspacePlannedMove])
+    -> WorkspaceMoveExecution
+  {
+    let execution = actions.moveItems(planned)
+    if let failure = execution.failure {
+      presentMoveError(failure)
+    }
+    return execution
+  }
+
+  private func requestSidebarChildReload() {
+    sidebarChildReloadToken &+= 1
+  }
+
+  private func presentMoveError(_ error: Error) {
+    workspaceMoveErrorMessage = error.localizedDescription
+    isWorkspaceMoveErrorPresented = true
   }
 
   private var gitStatusRefreshKey: GitStatusRefreshKey {
