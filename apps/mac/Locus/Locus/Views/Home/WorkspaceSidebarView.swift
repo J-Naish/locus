@@ -668,10 +668,11 @@ private struct WorkspaceSidebarRecentFoldersSection: View {
           }
         }
         .frame(maxHeight: WorkspaceSidebarMetrics.recentFoldersMaximumHeight)
-        .padding(.bottom, 6)
+        .padding(.bottom, WorkspaceSidebarMetrics.recentFoldersExpandedBottomPadding)
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(.bottom, WorkspaceSidebarMetrics.recentFoldersBottomPadding)
     .accessibilityElement(children: .contain)
     .accessibilityIdentifier("workspace-sidebar-recent-folders")
   }
@@ -707,8 +708,12 @@ private struct WorkspaceSidebarRecentFolderRow: View {
       .frame(height: WorkspaceSidebarMetrics.recentFolderRowHeight)
       .contentShape(Rectangle())
       .background {
+        // Inset only the highlight pill so it stays within the sidebar panel
+        // instead of spanning the full column width and overflowing its rounded
+        // edge. `.contentShape` above keeps the row's full-width hit target.
         RoundedRectangle(cornerRadius: 5)
           .fill(isHovered ? Color.primary.opacity(0.08) : Color.clear)
+          .padding(.horizontal, 12)
       }
     }
     .buttonStyle(.plain)
@@ -919,6 +924,12 @@ private enum WorkspaceSidebarMetrics {
   static let recentFoldersHeaderHeight: CGFloat = 28
   static let recentFolderRowHeight: CGFloat = 28
   static let recentFoldersMaximumHeight: CGFloat = 224
+  // Small bottom margin kept in both states so even a collapsed section isn't
+  // flush against the sidebar bottom.
+  static let recentFoldersBottomPadding: CGFloat = 2
+  // Extra breathing room below the last folder row while expanded, added on top
+  // of the base margin above (so the expanded section shows their sum).
+  static let recentFoldersExpandedBottomPadding: CGFloat = 10
   static let symlinkBadgeSize: CGFloat = 7
   static let symlinkBadgeOffset = CGSize(width: 4, height: 3)
 
