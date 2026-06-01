@@ -58,6 +58,12 @@ struct WorkspaceSidebarView: View {
   @State private var creationTask: Task<Void, Never>?
   @AppStorage(LocusPersistedDefaults.recentFoldersExpanded)
   private var isRecentFoldersExpanded = false
+  // Drives keyboard focus onto the sidebar List. A row's `.draggable` swallows
+  // the mouse-down that would normally make the underlying table the first
+  // responder, so selecting via the tap gesture leaves the List unfocused and
+  // the native source-list highlight renders gray. Focusing the List on select
+  // keeps the selected row drawn in the focused (accent) color.
+  @FocusState private var isListFocused: Bool
 
   init(
     folderURL: URL,
@@ -105,6 +111,9 @@ struct WorkspaceSidebarView: View {
               },
               onSelect: {
                 highlightedEntryID = entry.id
+                // Move first responder to the List so the selection renders in
+                // the focused (accent) color rather than the unfocused gray.
+                isListFocused = true
               },
               onDropURLs: { urls in
                 handleDrop(urls, onto: entry)
@@ -128,6 +137,7 @@ struct WorkspaceSidebarView: View {
         }
       }
       .listStyle(.sidebar)
+      .focused($isListFocused)
       .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
         let selectedEntries = entries(for: selection)
         let creationParent = creationParent(for: selectedEntries)
@@ -912,6 +922,16 @@ private enum WorkspaceSidebarMetrics {
   static let symlinkBadgeSize: CGFloat = 7
   static let symlinkBadgeOffset = CGSize(width: 4, height: 3)
 
+  // Drop-target highlight drawn while dragging onto a folder row.
+  static let dropHighlightCornerRadius: CGFloat = 8
+  static let dropHighlightOpacity: Double = 0.2
+  // Bleed so the highlight reaches the edges of the sidebar row cell rather than
+  // only covering the row content, matching the selection band on all sides. The
+  // `.sidebar` row insets that create these gaps have no public API, so these are
+  // tuned by eye; adjust if the highlight leaves a gap or overflows the row.
+  static let dropHighlightVerticalExpansion: CGFloat = 8
+  static let dropHighlightHorizontalExpansion: CGFloat = 5
+
   // Drag preview pill shown while an entry is being dragged.
   static let dragPreviewSpacing: CGFloat = 6
   static let dragPreviewHorizontalPadding: CGFloat = 12
@@ -1184,8 +1204,12 @@ private struct WorkspaceSidebarEntryRow: View {
     .contentShape(Rectangle())
     .background {
       if isDropTargeted {
-        RoundedRectangle(cornerRadius: 5)
-          .fill(Color.accentColor.opacity(0.2))
+        // Bleed past the row content into the cell's vertical insets so the
+        // highlight fills the full row height, matching the selection band.
+        RoundedRectangle(cornerRadius: WorkspaceSidebarMetrics.dropHighlightCornerRadius)
+          .fill(Color.accentColor.opacity(WorkspaceSidebarMetrics.dropHighlightOpacity))
+          .padding(.vertical, -WorkspaceSidebarMetrics.dropHighlightVerticalExpansion)
+          .padding(.horizontal, -WorkspaceSidebarMetrics.dropHighlightHorizontalExpansion)
       }
     }
     .modifier(

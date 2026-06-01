@@ -1738,19 +1738,28 @@ private struct WorkspaceBrowserView: View {
       }
     }
 
-    do {
-      // Trash imported copies; keep the trashed items so redo can restore the
-      // exact bytes rather than re-copying a possibly-changed external source.
-      if !record.importedCopies.isEmpty {
+    // Trash imported copies; keep the trashed items so redo can restore the
+    // exact bytes rather than re-copying a possibly-changed external source.
+    if !record.importedCopies.isEmpty {
+      do {
         redoTrashedCopies = try actions.trashItemsAtURLs(record.importedCopies)
+      } catch {
+        // Preserve copies trashed before the failure so redo can still restore
+        // them instead of orphaning them in the Trash.
+        redoTrashedCopies = succeededTrashedItems(in: error)
+        presentMoveError(error)
+        return
       }
-      // Restore items that were replaced, now that their destinations are free.
-      if !record.replacedTrashed.isEmpty {
-        _ = try actions.restoreDeletedItems(record.replacedTrashed)
-        redoReplacedOriginalURLs = record.replacedTrashed.map(\.originalURL)
+    }
+    // Restore items that were replaced, now that their destinations are free.
+    if !record.replacedTrashed.isEmpty {
+      do {
+        redoReplacedOriginalURLs = try actions.restoreDeletedItems(record.replacedTrashed)
+      } catch {
+        redoReplacedOriginalURLs = succeededRestoredURLs(in: error)
+        presentMoveError(error)
+        return
       }
-    } catch {
-      presentMoveError(error)
     }
   }
 
@@ -1812,6 +1821,9 @@ private struct WorkspaceBrowserView: View {
         undoReplacedTrashed = try actions.trashItemsAtURLs(replacedOriginalURLs)
       }
     } catch {
+      // Preserve items trashed before the failure so the registered undo can
+      // restore them instead of orphaning them in the Trash.
+      undoReplacedTrashed = succeededTrashedItems(in: error)
       presentMoveError(error)
       return
     }
@@ -1835,8 +1847,27 @@ private struct WorkspaceBrowserView: View {
         undoImportedCopies = try actions.restoreDeletedItems(trashedCopies)
       }
     } catch {
+      undoImportedCopies = succeededRestoredURLs(in: error)
       presentMoveError(error)
     }
+  }
+
+  /// Items moved to the Trash before a partial-failure error. Trash and restore
+  /// can fail partway, carrying the work that did complete in the thrown error;
+  /// undo/redo recover it so those items stay reversible instead of orphaned.
+  private func succeededTrashedItems(in error: Error) -> [WorkspaceDeletedItem] {
+    if case WorkspaceItemDeletionError.partiallyDeleted(let succeededItems, _, _) = error {
+      return succeededItems
+    }
+    return []
+  }
+
+  /// URLs restored from the Trash before a partial-failure error.
+  private func succeededRestoredURLs(in error: Error) -> [URL] {
+    if case WorkspaceItemRestorationError.partiallyRestored(let succeededURLs, _, _) = error {
+      return succeededURLs
+    }
+    return []
   }
 
   /// Runs a reverse/forward move during undo/redo and surfaces any failure.
