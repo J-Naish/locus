@@ -939,7 +939,7 @@ private enum WorkspaceSidebarMetrics {
 
   // Row highlight shape, shared by the drop-target highlight (dragging onto a
   // folder) and the hover highlight.
-  static let dropHighlightCornerRadius: CGFloat = 8
+  static let dropHighlightCornerRadius: CGFloat = 10
   static let dropHighlightOpacity: Double = 0.2
   // Faint gray shown while hovering an unselected row (matches the recent
   // folders hover).
@@ -1213,9 +1213,23 @@ private struct WorkspaceSidebarEntryRow: View {
         .accessibilityLabel(disclosureAccessibilityLabel)
         .accessibilityIdentifier(WorkspaceSidebarAccessibility.disclosureIdentifier(for: entry))
       } else {
-        Color.clear
-          .frame(width: WorkspaceSidebarMetrics.chevronColumnWidth)
-          .accessibilityHidden(true)
+        // Mirror the disclosure button's layout (hidden) so file rows match the
+        // height of folder rows. The Button's intrinsic height otherwise makes
+        // folder rows taller, and a single hover/selection highlight inset can't
+        // fill both heights without clipping one.
+        Button(action: {}) {
+          Image(systemName: "chevron.right")
+            .font(.caption2)
+            .frame(width: WorkspaceSidebarMetrics.chevronColumnWidth)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .hidden()
+        // Belt-and-suspenders: a hidden view is already non-interactive, but
+        // make sure this height-matching placeholder never swallows clicks or
+        // drags in the disclosure column.
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
       }
 
       rowContent
@@ -1229,10 +1243,15 @@ private struct WorkspaceSidebarEntryRow: View {
       // drop-target highlight takes precedence; the hover gray is suppressed for a
       // selected row so it never paints over the selection color.
       if let fill = rowHighlightFill {
-        RoundedRectangle(cornerRadius: WorkspaceSidebarMetrics.dropHighlightCornerRadius)
-          .fill(fill)
-          .padding(.vertical, -WorkspaceSidebarMetrics.dropHighlightVerticalExpansion)
-          .padding(.horizontal, -WorkspaceSidebarMetrics.dropHighlightHorizontalExpansion)
+        // Continuous (squircle) corners to match the native source-list
+        // selection band; the default circular corners read as a different,
+        // "cut off" rounding next to the selection.
+        RoundedRectangle(
+          cornerRadius: WorkspaceSidebarMetrics.dropHighlightCornerRadius, style: .continuous
+        )
+        .fill(fill)
+        .padding(.vertical, -WorkspaceSidebarMetrics.dropHighlightVerticalExpansion)
+        .padding(.horizontal, -WorkspaceSidebarMetrics.dropHighlightHorizontalExpansion)
       }
     }
     .modifier(
@@ -1323,7 +1342,15 @@ private struct WorkspaceSidebarEntryIcon: View {
           .accessibilityHidden(true)
       }
     }
-    .frame(width: WorkspaceSidebarMetrics.iconColumnWidth, alignment: .center)
+    // Reserve a square so every row has the same icon height regardless of the
+    // symbol (e.g. a tall `doc` vs a short `folder`); otherwise rows differ in
+    // height and the hover/selection highlight rounds inconsistently between
+    // files and folders.
+    .frame(
+      width: WorkspaceSidebarMetrics.iconColumnWidth,
+      height: WorkspaceSidebarMetrics.iconColumnWidth,
+      alignment: .center
+    )
   }
 }
 
