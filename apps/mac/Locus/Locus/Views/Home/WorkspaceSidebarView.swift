@@ -106,6 +106,7 @@ struct WorkspaceSidebarView: View {
               depth: row.depth,
               gitStatus: gitStatus(for: entry),
               isExpanded: isExpanded(entry),
+              isSelected: highlightedEntryID == entry.id,
               toggleExpansion: {
                 toggleExpansion(for: entry)
               },
@@ -712,7 +713,11 @@ private struct WorkspaceSidebarRecentFolderRow: View {
         // instead of spanning the full column width and overflowing its rounded
         // edge. `.contentShape` above keeps the row's full-width hit target.
         RoundedRectangle(cornerRadius: 5)
-          .fill(isHovered ? Color.primary.opacity(0.08) : Color.clear)
+          .fill(
+            isHovered
+              ? Color.primary.opacity(WorkspaceSidebarMetrics.rowHoverHighlightOpacity)
+              : Color.clear
+          )
           .padding(.horizontal, 12)
       }
     }
@@ -932,9 +937,13 @@ private enum WorkspaceSidebarMetrics {
   static let symlinkBadgeSize: CGFloat = 7
   static let symlinkBadgeOffset = CGSize(width: 4, height: 3)
 
-  // Drop-target highlight drawn while dragging onto a folder row.
+  // Row highlight shape, shared by the drop-target highlight (dragging onto a
+  // folder) and the hover highlight.
   static let dropHighlightCornerRadius: CGFloat = 8
   static let dropHighlightOpacity: Double = 0.2
+  // Faint gray shown while hovering an unselected row (matches the recent
+  // folders hover).
+  static let rowHoverHighlightOpacity: Double = 0.08
   // Bleed so the highlight reaches the edges of the sidebar row cell rather than
   // only covering the row content, matching the selection band on all sides. The
   // `.sidebar` row insets that create these gaps have no public API, so these are
@@ -1180,10 +1189,12 @@ private struct WorkspaceSidebarEntryRow: View {
   let depth: Int
   let gitStatus: GitWorkspaceChangeKind?
   let isExpanded: Bool
+  let isSelected: Bool
   let toggleExpansion: () -> Void
   let onSelect: () -> Void
   let onDropURLs: ([URL]) -> Void
   @State private var isDropTargeted = false
+  @State private var isHovered = false
 
   var body: some View {
     HStack(spacing: 6) {
@@ -1213,11 +1224,13 @@ private struct WorkspaceSidebarEntryRow: View {
     .frame(maxWidth: .infinity, alignment: .leading)
     .contentShape(Rectangle())
     .background {
-      if isDropTargeted {
-        // Bleed past the row content into the cell's vertical insets so the
-        // highlight fills the full row height, matching the selection band.
+      // The shape bleeds past the row content into the cell's insets so it fills
+      // the full row height/width, matching the native selection band. The accent
+      // drop-target highlight takes precedence; the hover gray is suppressed for a
+      // selected row so it never paints over the selection color.
+      if let fill = rowHighlightFill {
         RoundedRectangle(cornerRadius: WorkspaceSidebarMetrics.dropHighlightCornerRadius)
-          .fill(Color.accentColor.opacity(WorkspaceSidebarMetrics.dropHighlightOpacity))
+          .fill(fill)
           .padding(.vertical, -WorkspaceSidebarMetrics.dropHighlightVerticalExpansion)
           .padding(.horizontal, -WorkspaceSidebarMetrics.dropHighlightHorizontalExpansion)
       }
@@ -1229,6 +1242,17 @@ private struct WorkspaceSidebarEntryRow: View {
         onDrop: onDropURLs
       )
     )
+    .onHover { isHovered = $0 }
+  }
+
+  private var rowHighlightFill: Color? {
+    if isDropTargeted {
+      return Color.accentColor.opacity(WorkspaceSidebarMetrics.dropHighlightOpacity)
+    }
+    if isHovered && !isSelected {
+      return Color.primary.opacity(WorkspaceSidebarMetrics.rowHoverHighlightOpacity)
+    }
+    return nil
   }
 
   private var rowContent: some View {
