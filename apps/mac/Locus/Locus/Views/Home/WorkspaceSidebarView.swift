@@ -733,7 +733,6 @@ private struct WorkspaceSidebarRecentFolderRow: View {
     }
     .accessibilityLabel(Text("Open \(folder.displayName)"))
     .accessibilityIdentifier("workspace-sidebar-recent-folder-row")
-    .help(Text(verbatim: folder.path))
   }
 }
 
@@ -1230,7 +1229,6 @@ private struct WorkspaceSidebarEntryRow: View {
         onDrop: onDropURLs
       )
     )
-    .help(Text(verbatim: rowHelpText))
   }
 
   private var rowContent: some View {
@@ -1275,25 +1273,6 @@ private struct WorkspaceSidebarEntryRow: View {
       components.append(gitStatus.accessibilityDescription)
     }
     return components.joined(separator: ", ")
-  }
-
-  private var rowMetadataDescription: String? {
-    var components: [String] = []
-    if entry.kind.isSymlink {
-      components.append("alias")
-    }
-    if let gitStatus {
-      components.append(gitStatus.accessibilityDescription)
-    }
-    return components.isEmpty ? nil : components.joined(separator: ", ")
-  }
-
-  private var rowHelpText: String {
-    guard let rowMetadataDescription else {
-      return entry.name
-    }
-
-    return "\(entry.name) (\(rowMetadataDescription))"
   }
 }
 
