@@ -115,7 +115,10 @@ struct WorkspaceDocumentSurface: View {
 
       switch loadState {
       case .empty, .loading:
-        DelayedProgressView(accessibilityIdentifier: "document-loading-indicator")
+        // No loading indicator: documents load fast enough that a spinner would
+        // only flash. Keep the surface blank until the content is ready.
+        Color.clear
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
       case .failed(let message):
         ContentUnavailableView {
           Label("Document Could Not Be Opened", systemImage: "exclamationmark.triangle")
@@ -367,44 +370,6 @@ extension WorkspaceDocumentSurface {
   }
 }
 
-/// Loading indicator that stays invisible for a short delay before showing a
-/// `ProgressView`. A document that loads quickly removes this view before the
-/// delay elapses, so no spinner flashes; only genuinely slow loads show one.
-/// Mirrors the sidebar's delayed "Loading…" behavior.
-private struct DelayedProgressView: View {
-  let accessibilityIdentifier: String
-
-  // Below this, a load is fast enough that a spinner would only flash. Matches
-  // the sidebar's loading-indicator delay.
-  private static let appearanceDelay: Duration = .milliseconds(180)
-
-  @State private var isIndicatorVisible = false
-
-  var body: some View {
-    ZStack {
-      Color.clear
-      if isIndicatorVisible {
-        // Identify the spinner itself, so the indicator is only discoverable
-        // while it is actually shown (not during the invisible delay window).
-        ProgressView()
-          .accessibilityIdentifier(accessibilityIdentifier)
-      }
-    }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .task {
-      do {
-        try await Task.sleep(for: Self.appearanceDelay)
-      } catch {
-        // Cancelled because the document loaded and this view was removed before
-        // the delay elapsed: leave the spinner hidden so it never flashes.
-        return
-      }
-      guard !Task.isCancelled else { return }
-      isIndicatorVisible = true
-    }
-  }
-}
-
 private enum TextDocumentLoadState: Equatable {
   case empty
   case loading
@@ -447,7 +412,8 @@ private struct ImageDocumentSurface: View {
     VStack(alignment: .leading, spacing: 0) {
       switch loadState {
       case .loading:
-        DelayedProgressView(accessibilityIdentifier: "document-image-loading-indicator")
+        Color.clear
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
       case .loaded(let image):
         Image(nsImage: image)
           .resizable()
@@ -514,7 +480,8 @@ private struct PDFDocumentSurface: View {
     VStack(alignment: .leading, spacing: 0) {
       switch loadState {
       case .loading:
-        DelayedProgressView(accessibilityIdentifier: "document-pdf-loading-indicator")
+        Color.clear
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
       case .loaded(let document):
         PDFDocumentView(document: document)
           .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -603,7 +570,8 @@ private struct MediaDocumentSurface: View {
     VStack(alignment: .leading, spacing: 0) {
       switch loadState {
       case .loading:
-        DelayedProgressView(accessibilityIdentifier: "document-media-loading-indicator")
+        Color.clear
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
       case .loaded(let document):
         MediaPlayerView(player: document.player)
           .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -714,7 +682,8 @@ private struct QuickLookDocumentSurface: View {
     VStack(alignment: .leading, spacing: 0) {
       switch loadState {
       case .loading:
-        DelayedProgressView(accessibilityIdentifier: "document-quicklook-loading-indicator")
+        Color.clear
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
       case .loaded(let document):
         QuickLookDocumentView(url: document.url)
           .frame(maxWidth: .infinity, maxHeight: .infinity)
