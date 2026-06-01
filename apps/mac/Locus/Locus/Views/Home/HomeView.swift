@@ -1084,7 +1084,7 @@ private struct WorkspaceBrowserView: View {
     var replacedTrashed: [WorkspaceDeletedItem] = []
 
     var isEmpty: Bool {
-      moved.isEmpty && importedCopies.isEmpty
+      moved.isEmpty && importedCopies.isEmpty && replacedTrashed.isEmpty
     }
   }
 
@@ -1704,33 +1704,51 @@ private struct WorkspaceBrowserView: View {
   }
 
   private func undoDrop(_ record: ReversibleDrop, includesImport: Bool) {
-    do {
-      // Reverse internal moves, vacating their destinations.
-      if !record.moved.isEmpty {
-        let reverse = record.moved.map {
-          WorkspacePlannedMove(sourceURL: $0.newURL, destinationURL: $0.originalURL)
-        }
-        _ = moveWorkspaceItemsForUndo(reverse)
-      }
-      // Trash imported copies; keep the trashed items so redo can restore the
-      // exact bytes rather than re-copying a possibly-changed external source.
-      var trashedCopies: [WorkspaceDeletedItem] = []
-      if !record.importedCopies.isEmpty {
-        trashedCopies = try actions.trashItemsAtURLs(record.importedCopies)
-      }
-      // Restore items that were replaced, now that their destinations are free.
-      if !record.replacedTrashed.isEmpty {
-        _ = try actions.restoreDeletedItems(record.replacedTrashed)
-      }
-
+    // Build the redo from operations that actually completed and register it on
+    // every exit path, so a step that fails partway leaves the undo stack
+    // consistent with what really landed on disk rather than with the requested
+    // set.
+    var redoMoved: [WorkspaceMovedItem] = []
+    var redoTrashedCopies: [WorkspaceDeletedItem] = []
+    var redoReplacedOriginalURLs: [URL] = []
+    defer {
       registerDropRedo(
-        moved: record.moved,
-        trashedCopies: trashedCopies,
-        replacedOriginalURLs: record.replacedTrashed.map(\.originalURL),
+        moved: redoMoved,
+        trashedCopies: redoTrashedCopies,
+        replacedOriginalURLs: redoReplacedOriginalURLs,
         includesImport: includesImport
       )
       requestGitStatusRefresh()
       requestSidebarChildReload()
+    }
+
+    // Reverse internal moves, vacating their destinations. Derive the redo set
+    // from the moves that actually reversed and stop if any reverse move failed,
+    // so we never trash/restore further items on top of an inconsistent state.
+    if !record.moved.isEmpty {
+      let reverse = record.moved.map {
+        WorkspacePlannedMove(sourceURL: $0.newURL, destinationURL: $0.originalURL)
+      }
+      let execution = moveWorkspaceItemsForUndo(reverse)
+      redoMoved = execution.moved.map {
+        WorkspaceMovedItem(originalURL: $0.newURL, newURL: $0.originalURL)
+      }
+      if execution.failure != nil {
+        return
+      }
+    }
+
+    do {
+      // Trash imported copies; keep the trashed items so redo can restore the
+      // exact bytes rather than re-copying a possibly-changed external source.
+      if !record.importedCopies.isEmpty {
+        redoTrashedCopies = try actions.trashItemsAtURLs(record.importedCopies)
+      }
+      // Restore items that were replaced, now that their destinations are free.
+      if !record.replacedTrashed.isEmpty {
+        _ = try actions.restoreDeletedItems(record.replacedTrashed)
+        redoReplacedOriginalURLs = record.replacedTrashed.map(\.originalURL)
+      }
     } catch {
       presentMoveError(error)
     }
@@ -1742,7 +1760,7 @@ private struct WorkspaceBrowserView: View {
     replacedOriginalURLs: [URL],
     includesImport: Bool
   ) {
-    guard !moved.isEmpty || !trashedCopies.isEmpty else {
+    guard !moved.isEmpty || !trashedCopies.isEmpty || !replacedOriginalURLs.isEmpty else {
       return
     }
 
@@ -1770,34 +1788,52 @@ private struct WorkspaceBrowserView: View {
     replacedOriginalURLs: [URL],
     includesImport: Bool
   ) {
-    do {
-      // Re-trash the items that the drop originally replaced, freeing their
-      // destinations before the moves/copies land again.
-      var replacedTrashed: [WorkspaceDeletedItem] = []
-      if !replacedOriginalURLs.isEmpty {
-        replacedTrashed = try actions.trashItemsAtURLs(replacedOriginalURLs)
-      }
-      // Re-apply internal moves forward.
-      if !moved.isEmpty {
-        let forward = moved.map {
-          WorkspacePlannedMove(sourceURL: $0.originalURL, destinationURL: $0.newURL)
-        }
-        _ = moveWorkspaceItemsForUndo(forward)
-      }
-      // Restore the imported copies to their destinations.
-      var importedCopies: [URL] = []
-      if !trashedCopies.isEmpty {
-        importedCopies = try actions.restoreDeletedItems(trashedCopies)
-      }
-
+    // Build the undo from operations that actually completed and register it on
+    // every exit path (mirrors undoDrop) so a failed forward move cannot leave
+    // the undo stack describing items that never moved.
+    var undoMoved: [WorkspaceMovedItem] = []
+    var undoImportedCopies: [URL] = []
+    var undoReplacedTrashed: [WorkspaceDeletedItem] = []
+    defer {
       let record = ReversibleDrop(
-        moved: moved,
-        importedCopies: importedCopies,
-        replacedTrashed: replacedTrashed
+        moved: undoMoved,
+        importedCopies: undoImportedCopies,
+        replacedTrashed: undoReplacedTrashed
       )
       registerDropUndo(record, includesImport: includesImport)
       requestGitStatusRefresh()
       requestSidebarChildReload()
+    }
+
+    // Re-trash the items that the drop originally replaced, freeing their
+    // destinations before the moves/copies land again.
+    do {
+      if !replacedOriginalURLs.isEmpty {
+        undoReplacedTrashed = try actions.trashItemsAtURLs(replacedOriginalURLs)
+      }
+    } catch {
+      presentMoveError(error)
+      return
+    }
+
+    // Re-apply internal moves forward, recording only the moves that landed and
+    // stopping if any forward move failed before restoring imported copies.
+    if !moved.isEmpty {
+      let forward = moved.map {
+        WorkspacePlannedMove(sourceURL: $0.originalURL, destinationURL: $0.newURL)
+      }
+      let execution = moveWorkspaceItemsForUndo(forward)
+      undoMoved = execution.moved
+      if execution.failure != nil {
+        return
+      }
+    }
+
+    // Restore the imported copies to their destinations.
+    do {
+      if !trashedCopies.isEmpty {
+        undoImportedCopies = try actions.restoreDeletedItems(trashedCopies)
+      }
     } catch {
       presentMoveError(error)
     }

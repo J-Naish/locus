@@ -912,6 +912,15 @@ private enum WorkspaceSidebarMetrics {
   static let symlinkBadgeSize: CGFloat = 7
   static let symlinkBadgeOffset = CGSize(width: 4, height: 3)
 
+  // Drag preview pill shown while an entry is being dragged.
+  static let dragPreviewSpacing: CGFloat = 6
+  static let dragPreviewHorizontalPadding: CGFloat = 12
+  static let dragPreviewVerticalPadding: CGFloat = 7
+  static let dragPreviewCornerRadius: CGFloat = 8
+  static let dragPreviewShadowRadius: CGFloat = 8
+  static let dragPreviewShadowOffsetY: CGFloat = 2
+  static let dragPreviewShadowOpacity: Double = 0.25
+
   // Fast child listings should appear directly. Show "Loading..." only when a
   // real read stays in flight long enough that silent waiting would feel stuck.
   static let loadingIndicatorDelay: Duration = .milliseconds(180)
@@ -1202,7 +1211,9 @@ private struct WorkspaceSidebarEntryRow: View {
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .contentShape(Rectangle())
-    .draggable(entry.url)
+    .draggable(entry.url) {
+      WorkspaceSidebarDragPreview(entry: entry, gitStatus: gitStatus)
+    }
     // `.draggable` competes with the List's built-in selection click and can
     // swallow clicks that include any pointer movement, so drive selection
     // explicitly with a simultaneous tap that survives the drag gesture.
@@ -1212,22 +1223,7 @@ private struct WorkspaceSidebarEntryRow: View {
   }
 
   private var entryIcon: some View {
-    ZStack(alignment: .bottomTrailing) {
-      Image(systemName: entry.symbolName)
-        .foregroundStyle(gitStatus?.dimsSidebarSymbol == true ? .secondary : entry.symbolColor)
-
-      if entry.kind.isSymlink {
-        Image(systemName: "arrowshape.turn.up.right.fill")
-          .font(.system(size: WorkspaceSidebarMetrics.symlinkBadgeSize, weight: .semibold))
-          .foregroundStyle(.secondary)
-          .offset(
-            x: WorkspaceSidebarMetrics.symlinkBadgeOffset.width,
-            y: WorkspaceSidebarMetrics.symlinkBadgeOffset.height
-          )
-          .accessibilityHidden(true)
-      }
-    }
-    .frame(width: WorkspaceSidebarMetrics.iconColumnWidth, alignment: .center)
+    WorkspaceSidebarEntryIcon(entry: entry, gitStatus: gitStatus)
   }
 
   private var disclosureAccessibilityLabel: Text {
@@ -1263,6 +1259,71 @@ private struct WorkspaceSidebarEntryRow: View {
     }
 
     return "\(entry.name) (\(rowMetadataDescription))"
+  }
+}
+
+/// Shared icon rendering for a workspace entry: the base symbol with ignored
+/// dimming plus the symlink badge. Used by both the sidebar row and the drag
+/// preview so they stay visually consistent.
+private struct WorkspaceSidebarEntryIcon: View {
+  let entry: WorkspaceEntry
+  let gitStatus: GitWorkspaceChangeKind?
+
+  var body: some View {
+    ZStack(alignment: .bottomTrailing) {
+      Image(systemName: entry.symbolName)
+        .foregroundStyle(gitStatus?.dimsSidebarSymbol == true ? .secondary : entry.symbolColor)
+
+      if entry.kind.isSymlink {
+        Image(systemName: "arrowshape.turn.up.right.fill")
+          .font(.system(size: WorkspaceSidebarMetrics.symlinkBadgeSize, weight: .semibold))
+          .foregroundStyle(.secondary)
+          .offset(
+            x: WorkspaceSidebarMetrics.symlinkBadgeOffset.width,
+            y: WorkspaceSidebarMetrics.symlinkBadgeOffset.height
+          )
+          .accessibilityHidden(true)
+      }
+    }
+    .frame(width: WorkspaceSidebarMetrics.iconColumnWidth, alignment: .center)
+  }
+}
+
+/// Drag image shown while a sidebar entry is being dragged. A compact icon +
+/// name pill so the user can see what they are moving instead of a bare label.
+/// Carries the entry's row styling (ignored dimming, Git text color, symlink
+/// badge) so the dragged item reads the same as its row. The drag image is
+/// rendered as a flat snapshot over a transparent backdrop, so it uses an opaque
+/// fill, border, and shadow (materials and Liquid Glass render as nearly
+/// invisible here because there is no content behind them to blur or refract).
+private struct WorkspaceSidebarDragPreview: View {
+  let entry: WorkspaceEntry
+  let gitStatus: GitWorkspaceChangeKind?
+
+  private var shape: RoundedRectangle {
+    RoundedRectangle(
+      cornerRadius: WorkspaceSidebarMetrics.dragPreviewCornerRadius, style: .continuous)
+  }
+
+  var body: some View {
+    HStack(spacing: WorkspaceSidebarMetrics.dragPreviewSpacing) {
+      WorkspaceSidebarEntryIcon(entry: entry, gitStatus: gitStatus)
+
+      Text(entry.name)
+        .lineLimit(1)
+        .foregroundStyle(gitStatus?.sidebarTextColor ?? .primary)
+    }
+    .padding(.horizontal, WorkspaceSidebarMetrics.dragPreviewHorizontalPadding)
+    .padding(.vertical, WorkspaceSidebarMetrics.dragPreviewVerticalPadding)
+    .background(Color(nsColor: .windowBackgroundColor), in: shape)
+    .overlay(shape.strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1))
+    .shadow(
+      color: .black.opacity(WorkspaceSidebarMetrics.dragPreviewShadowOpacity),
+      radius: WorkspaceSidebarMetrics.dragPreviewShadowRadius,
+      y: WorkspaceSidebarMetrics.dragPreviewShadowOffsetY
+    )
+    // Size the pill to hug its icon + name rather than stretch to a container.
+    .fixedSize()
   }
 }
 
