@@ -6,7 +6,6 @@ use std::time::SystemTime;
 
 use crate::file_type::{classify_path, FileType};
 
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkspaceListOptions {
     pub include_ignored: bool,
