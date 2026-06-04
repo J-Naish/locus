@@ -1901,6 +1901,7 @@ private struct WorkspaceBrowserView: View {
     )
   }
 
+  @MainActor
   private func refreshGitStatuses() async {
     do {
       try await Task.sleep(for: GitStatusRefresh.debounceDuration)
