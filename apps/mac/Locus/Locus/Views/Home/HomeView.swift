@@ -1308,13 +1308,9 @@ private struct WorkspaceBrowserView: View {
     }
   }
 
-  private var isTextInputFocused: Bool {
-    isDocumentTextInputFocused
-  }
-
   private var workspaceNavigationCommands: WorkspaceNavigationCommands {
-    let canGoBack = !isTextInputFocused && actions.canGoBack
-    let canGoForward = !isTextInputFocused && actions.canGoForward
+    let canGoBack = !isDocumentTextInputFocused && actions.canGoBack
+    let canGoForward = !isDocumentTextInputFocused && actions.canGoForward
 
     return WorkspaceNavigationCommands(
       canGoBack: canGoBack,
@@ -1339,7 +1335,7 @@ private struct WorkspaceBrowserView: View {
   private var workspaceDeletionCommand: WorkspaceDeletionCommand {
     let entries = deletableHighlightedEntries
     return WorkspaceDeletionCommand(
-      canDelete: !isTextInputFocused && !entries.isEmpty,
+      canDelete: !isDocumentTextInputFocused && !entries.isEmpty,
       delete: {
         guard !entries.isEmpty else {
           return
@@ -1390,7 +1386,7 @@ private struct WorkspaceBrowserView: View {
       moveItems: actions.moveItems,
       importItems: actions.importItems,
       loadFolderChildren: actions.loadFolderChildren,
-      performOpenAction: performWorkspaceOpenAction
+      performOpenAction: actions.performOpenAction
     )
   }
 
@@ -2024,14 +2020,6 @@ private struct WorkspaceBrowserView: View {
     }
   }
 
-  private var selectedEntry: WorkspaceEntry? {
-    openDocumentEntry
-  }
-
-  private func performWorkspaceOpenAction(_ openAction: WorkspaceEntryOpenAction) {
-    actions.performOpenAction(openAction)
-  }
-
   private func updateSidebarVisibleEntries(_ entries: [WorkspaceEntry]) {
     sidebarVisibleEntries = entries
     sidebarSelectionState.setVisibleEntryIDs(Set(entries.map(\.id)))
@@ -2049,7 +2037,7 @@ private struct WorkspaceBrowserView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
         WorkspaceDocumentSurface(
-          entry: selectedEntry,
+          entry: openDocumentEntry,
           textDocumentStore: textDocumentStore,
           imageDocumentStore: imageDocumentStore,
           pdfDocumentStore: pdfDocumentStore,
@@ -2083,10 +2071,6 @@ struct WorkspaceBrowserSearchResults {
   let visibleEntries: [WorkspaceEntry]
   let recentFiles: [RecentFile]
   let recentFolders: [RecentFolder]
-
-  var hasShortcutResults: Bool {
-    !recentFiles.isEmpty || !recentFolders.isEmpty
-  }
 
   static func resolve(
     entries: [WorkspaceEntry],
