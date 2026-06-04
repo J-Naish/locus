@@ -16,11 +16,6 @@ struct ResolvedFileLocationBookmark: Equatable, Sendable {
 }
 
 struct FileLocationBookmarkStore {
-  enum DuplicatePolicy {
-    case keepOriginalPosition
-    case moveToFront
-  }
-
   enum RequiredResource {
     case directory
     case regularFile
@@ -101,8 +96,10 @@ struct FileLocationBookmarkStore {
     return records().contains { $0.path == path }
   }
 
+  /// Inserts (or refreshes) a bookmark at the front of the list. A URL already
+  /// present is moved to the front so the most recently used location leads.
   @discardableResult
-  func insert(_ url: URL, timestamp: Date, duplicatePolicy: DuplicatePolicy) -> Bool {
+  func insert(_ url: URL, timestamp: Date) -> Bool {
     let standardizedURL = url.standardizedFileURL
     guard isExistingRequiredResource(standardizedURL) else {
       return false
@@ -111,10 +108,6 @@ struct FileLocationBookmarkStore {
     let path = standardizedURL.locusStandardizedPath
     var existingRecords = records()
     let existingIndex = existingRecords.firstIndex { $0.path == path }
-
-    if duplicatePolicy == .keepOriginalPosition, existingIndex != nil {
-      return true
-    }
 
     guard let record = makeRecord(for: standardizedURL, timestamp: timestamp) else {
       return false

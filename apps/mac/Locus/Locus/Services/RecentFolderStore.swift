@@ -44,7 +44,7 @@ struct RecentFolderStore {
 
   @discardableResult
   func record(_ folderURL: URL) -> Bool {
-    bookmarkStore.insert(folderURL, timestamp: now(), duplicatePolicy: .moveToFront)
+    bookmarkStore.insert(folderURL, timestamp: now())
   }
 
   func remove(_ folderURL: URL) {

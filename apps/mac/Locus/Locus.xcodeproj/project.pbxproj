@@ -36,6 +36,7 @@
 		1A00000100000000000000D8 /* WorkspaceItemDeletionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000D9 /* WorkspaceItemDeletionTests.swift */; };
 		1A00000100000000000000DC /* WorkspaceItemMove.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000DD /* WorkspaceItemMove.swift */; };
 		1A00000100000000000000DE /* WorkspaceItemMoveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000DF /* WorkspaceItemMoveTests.swift */; };
+		1A00000100000000000000E0 /* FileLocationBookmarkStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000E1 /* FileLocationBookmarkStoreTests.swift */; };
 		1A00000100000000000000CA /* WorkspaceEntryPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000CB /* WorkspaceEntryPresentation.swift */; };
 		1A00000100000000000000CC /* WorkspaceSidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000CD /* WorkspaceSidebarView.swift */; };
 		1A00000100000000000000CE /* WorkspaceSidebarSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000CF /* WorkspaceSidebarSelection.swift */; };
@@ -122,6 +123,7 @@
 		1A00000100000000000000D9 /* WorkspaceItemDeletionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceItemDeletionTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000DD /* WorkspaceItemMove.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceItemMove.swift; sourceTree = "<group>"; };
 		1A00000100000000000000DF /* WorkspaceItemMoveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceItemMoveTests.swift; sourceTree = "<group>"; };
+		1A00000100000000000000E1 /* FileLocationBookmarkStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileLocationBookmarkStoreTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000CB /* WorkspaceEntryPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryPresentation.swift; sourceTree = "<group>"; };
 		1A00000100000000000000CD /* WorkspaceSidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSidebarView.swift; sourceTree = "<group>"; };
 		1A00000100000000000000CF /* WorkspaceSidebarSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSidebarSelection.swift; sourceTree = "<group>"; };
@@ -223,6 +225,7 @@
 				1A00000100000000000000C7 /* WorkspaceItemCreationTests.swift */,
 				1A00000100000000000000D9 /* WorkspaceItemDeletionTests.swift */,
 				1A00000100000000000000DF /* WorkspaceItemMoveTests.swift */,
+				1A00000100000000000000E1 /* FileLocationBookmarkStoreTests.swift */,
 				1A00000100000000000000A7 /* WorkspaceDocumentSurfaceSupportTests.swift */,
 				1A00000100000000000000AF /* WorkspaceHomeVisibilityTests.swift */,
 				1A000001000000000000006B /* WorkspaceNavigationTests.swift */,
@@ -540,6 +543,7 @@
 				1A00000100000000000000C6 /* WorkspaceItemCreationTests.swift in Sources */,
 				1A00000100000000000000D8 /* WorkspaceItemDeletionTests.swift in Sources */,
 				1A00000100000000000000DE /* WorkspaceItemMoveTests.swift in Sources */,
+				1A00000100000000000000E0 /* FileLocationBookmarkStoreTests.swift in Sources */,
 				1A00000100000000000000A6 /* WorkspaceDocumentSurfaceSupportTests.swift in Sources */,
 				1A00000100000000000000AE /* WorkspaceHomeVisibilityTests.swift in Sources */,
 				1A000001000000000000006A /* WorkspaceNavigationTests.swift in Sources */,
