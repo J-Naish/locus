@@ -75,6 +75,44 @@ enum WorkspaceItemMove {
     items.count == 1 ? "Add Item" : "Add Items"
   }
 
+  /// Splits dropped URLs into those that physically live inside `workspaceURL`
+  /// (an internal move) and those that do not (an external import/copy).
+  ///
+  /// Intermediate path components are resolved through symlinks before the
+  /// comparison, so a URL that only *lexically* sits under the workspace — for
+  /// example one reached through a symlinked directory that points elsewhere —
+  /// is treated as external instead of being moved as if it were a local item.
+  /// The final path component is left unresolved so a dragged symlink file is
+  /// classified by where the link itself lives, not by its target. Both sides
+  /// are resolved the same way, so a workspace reached through a symlink (such
+  /// as macOS `/var` -> `/private/var`) still classifies its own children as
+  /// internal.
+  static func partitionByWorkspace(
+    _ urls: [URL],
+    workspaceURL: URL
+  ) -> (internalURLs: [URL], externalURLs: [URL]) {
+    let workspacePath = workspaceURL.resolvingSymlinksInPath().locusStandardizedPath
+    var internalURLs: [URL] = []
+    var externalURLs: [URL] = []
+    for url in urls {
+      if resolvedParentPath(of: url).locusHasPathPrefix(workspacePath) {
+        internalURLs.append(url)
+      } else {
+        externalURLs.append(url)
+      }
+    }
+    return (internalURLs, externalURLs)
+  }
+
+  /// Canonical path of `url` with intermediate symlinks resolved but the final
+  /// component preserved (see `partitionByWorkspace`).
+  private static func resolvedParentPath(of url: URL) -> String {
+    url.deletingLastPathComponent()
+      .resolvingSymlinksInPath()
+      .appending(component: url.lastPathComponent)
+      .locusStandardizedPath
+  }
+
   /// Validates source URLs against the workspace and target folder and returns
   /// the concrete (source, destination) pairs to perform. Pure path logic with
   /// no file system access, so it is safe to run before showing collision UI.

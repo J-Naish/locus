@@ -1546,13 +1546,8 @@ private struct WorkspaceBrowserView: View {
   }
 
   private func handleSidebarDrop(_ urls: [URL], onto targetFolderURL: URL) {
-    let workspacePath = folderURL.locusStandardizedPath
-    let internalURLs = urls.filter {
-      $0.locusStandardizedPath.locusHasPathPrefix(workspacePath)
-    }
-    let externalURLs = urls.filter {
-      !$0.locusStandardizedPath.locusHasPathPrefix(workspacePath)
-    }
+    let (internalURLs, externalURLs) = WorkspaceItemMove.partitionByWorkspace(
+      urls, workspaceURL: folderURL)
 
     do {
       var plannedItems: [PlannedDropItem] = []

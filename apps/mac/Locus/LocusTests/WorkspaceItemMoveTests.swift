@@ -320,6 +320,67 @@ final class WorkspaceItemMoveTests: XCTestCase {
     XCTAssertTrue(FileManager.default.fileExists(atPath: expectedURL.path(percentEncoded: false)))
   }
 
+  // MARK: - partitionByWorkspace
+
+  func testPartitionByWorkspaceSplitsInternalAndExternalURLs() {
+    let workspaceURL = URL(filePath: "/tmp/locus")
+    let inside = URL(filePath: "/tmp/locus/notes.md")
+    let insideNested = URL(filePath: "/tmp/locus/Drafts/outline.md")
+    let outside = URL(filePath: "/tmp/other/file.md")
+
+    let (internalURLs, externalURLs) = WorkspaceItemMove.partitionByWorkspace(
+      [inside, outside, insideNested], workspaceURL: workspaceURL)
+
+    XCTAssertEqual(
+      internalURLs.map(\.locusStandardizedPath),
+      [inside.locusStandardizedPath, insideNested.locusStandardizedPath])
+    XCTAssertEqual(externalURLs.map(\.locusStandardizedPath), [outside.locusStandardizedPath])
+  }
+
+  func testPartitionByWorkspaceTreatsSymlinkedDirectoryEscapeAsExternal() throws {
+    let root = try temporaryDirectory()
+    let workspaceURL = root.appending(path: "workspace", directoryHint: .isDirectory)
+    let outsideURL = root.appending(path: "outside", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: false)
+    try FileManager.default.createDirectory(at: outsideURL, withIntermediateDirectories: false)
+    let secretURL = outsideURL.appending(path: "secret.txt")
+    try "secret".write(to: secretURL, atomically: true, encoding: .utf8)
+
+    // A symlinked directory inside the workspace that points outside it.
+    let linkURL = workspaceURL.appending(path: "escape", directoryHint: .isDirectory)
+    try FileManager.default.createSymbolicLink(at: linkURL, withDestinationURL: outsideURL)
+
+    // A path that only lexically sits under the workspace but resolves outside.
+    let throughLink = linkURL.appending(path: "secret.txt")
+
+    let (internalURLs, externalURLs) = WorkspaceItemMove.partitionByWorkspace(
+      [throughLink], workspaceURL: workspaceURL)
+
+    XCTAssertTrue(internalURLs.isEmpty)
+    XCTAssertEqual(externalURLs, [throughLink])
+  }
+
+  func testPartitionByWorkspaceTreatsSymlinkFileInsideWorkspaceAsInternal() throws {
+    let root = try temporaryDirectory()
+    let workspaceURL = root.appending(path: "workspace", directoryHint: .isDirectory)
+    let outsideURL = root.appending(path: "outside", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: false)
+    try FileManager.default.createDirectory(at: outsideURL, withIntermediateDirectories: false)
+    let targetURL = outsideURL.appending(path: "target.txt")
+    try "target".write(to: targetURL, atomically: true, encoding: .utf8)
+
+    // A symlink file living inside the workspace pointing outside it. Dragging it
+    // should move the link itself, so it stays an internal operation.
+    let linkURL = workspaceURL.appending(path: "alias.txt")
+    try FileManager.default.createSymbolicLink(at: linkURL, withDestinationURL: targetURL)
+
+    let (internalURLs, externalURLs) = WorkspaceItemMove.partitionByWorkspace(
+      [linkURL], workspaceURL: workspaceURL)
+
+    XCTAssertEqual(internalURLs, [linkURL])
+    XCTAssertTrue(externalURLs.isEmpty)
+  }
+
   private func temporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appending(
       path: "locus-item-move-tests-\(UUID().uuidString)",
