@@ -16,12 +16,18 @@ SYMLINK_LIST_BUDGET_MS="${LOCUS_PERF_SYMLINK_LIST_BUDGET_MS:-50}"
 SYMLINK_LIST_MAX_BUDGET_MS="${LOCUS_PERF_SYMLINK_LIST_MAX_BUDGET_MS:-150}"
 STATICLIB_BUDGET_BYTES="${LOCUS_PERF_STATICLIB_BUDGET_BYTES:-25000000}"
 APP_BUDGET_KB="${LOCUS_PERF_APP_BUDGET_KB:-10240}"
+BUFFER_SIZE_BYTES="${LOCUS_PERF_BUFFER_SIZE_BYTES:-262144}"
+BUFFER_OPEN_BUDGET_MS="${LOCUS_PERF_BUFFER_OPEN_BUDGET_MS:-50}"
+BUFFER_SCROLL_BUDGET_MS="${LOCUS_PERF_BUFFER_SCROLL_BUDGET_MS:-20}"
+BUFFER_EDIT_BUDGET_MS="${LOCUS_PERF_BUFFER_EDIT_BUDGET_MS:-50}"
 SKIP_MAC_BUILD="${LOCUS_PERF_SKIP_MAC_BUILD:-0}"
 
 # Local baseline on 2026-05-22:
 # - generated workspace: 1,010 visible entries, avg 4.255 ms, max 5.688 ms
 # - core/target/release/libapp_ffi.a: 17,687,384 bytes
 # - .build/xcode-derived/Build/Products/Release/Locus.app: 648 KiB
+# - text buffer @256KB (release): open ~0.3 ms, scroll ~0.004 ms, edit ~1.4 ms/op
+#   (edit is O(n) on the interim engine; it drops sharply once the O(log n) tree lands)
 # Defaults intentionally leave CI headroom while still catching obvious regressions.
 
 if [ -z "$WORKSPACE_DIR" ]; then
@@ -90,6 +96,15 @@ else
     echo "== Symlink-heavy folder listing smoke =="
     echo "skipped: ln unavailable"
 fi
+
+echo
+echo "== Text buffer smoke =="
+"$CORE_DIR/target/release/locus-core" perf-buffer \
+    --size-bytes "$BUFFER_SIZE_BYTES" \
+    --iterations "$ITERATIONS" \
+    --open-budget-ms "$BUFFER_OPEN_BUDGET_MS" \
+    --scroll-budget-ms "$BUFFER_SCROLL_BUDGET_MS" \
+    --edit-budget-ms "$BUFFER_EDIT_BUDGET_MS"
 
 STATICLIB_PATH="$CORE_DIR/target/release/libapp_ffi.a"
 STATICLIB_BYTES="$(wc -c < "$STATICLIB_PATH" | tr -d ' ')"
