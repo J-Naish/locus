@@ -8,15 +8,32 @@
 //!
 //! Content is modeled as a piece table: an immutable original (owned now,
 //! memory-mapped from the FFI layer later) plus an append-only add buffer,
-//! referenced by an ordered list of pieces. Edits never touch the original;
-//! they trim pieces and append inserted text to the add buffer.
+//! referenced by pieces. Edits never touch the original; they trim pieces and
+//! append inserted text to the add buffer.
 //!
-//! The line index and offset conversions are currently recomputed by walking
-//! the pieces (`O(n)`); a balanced tree with subtree aggregates replaces this
-//! with `O(log n)` queries in a later slice, behind the same public API.
+//! The pieces live in a balanced binary tree (a treap) whose nodes cache
+//! subtree aggregates (`bytes`, `chars`, `utf16`, `line_breaks`). That makes
+//! every offset/line conversion and every edit `O(log n)` in the number of
+//! pieces, instead of walking the whole content. The original is split into
+//! bounded chunks at construction so a within-piece scan is bounded too.
+//!
+//! The buffer never copies content to support undo: each [`EditRecord`] holds
+//! piece *references* (into the immutable original / append-only add buffer),
+//! so undoing even a multi-megabyte delete only re-links pieces.
 
 use std::error;
 use std::fmt;
+
+/// Maximum bytes per original-buffer piece. Splitting the immutable original
+/// into bounded chunks keeps every within-piece scan bounded; the tree then
+/// makes navigation across chunks `O(log n)`. 64 KiB matches the order of
+/// magnitude VS Code uses for its buffer chunks.
+const ORIGINAL_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Seed for the deterministic treap priority generator. A fixed, non-zero seed
+/// keeps tree shapes reproducible across runs (so tests are deterministic)
+/// while still giving the balance properties of randomized priorities.
+const PRIORITY_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// Borrowed access to the buffer's original content bytes.
 ///
@@ -105,37 +122,83 @@ enum PieceSource {
     Add,
 }
 
-/// A contiguous slice of one of the two byte stores.
+/// A contiguous slice of one of the two byte stores, with its own cached
+/// counts. Counts are computed once when the piece is created (a bounded scan)
+/// and then summed through the tree, so neither edits nor queries rescan the
+/// whole content.
 #[derive(Debug, Clone, Copy)]
 struct Piece {
     source: PieceSource,
     start: usize,
     len: usize,
+    chars: usize,
+    utf16: usize,
+    line_breaks: usize,
 }
 
-/// One reversible edit, modeled uniformly as "at `at_byte`, the text `before`
-/// was replaced by `after`". A pure insert has an empty `before`; a pure delete
-/// has an empty `after`. `seq` identifies the edit across undo/redo so the
+/// Node identity in the arena (`TextBuffer::nodes`). Freed slots are recycled
+/// through `TextBuffer::free`, so the arena stays bounded by the live node
+/// count rather than the total number of edits.
+type NodeId = usize;
+
+/// A treap node owning one [`Piece`] plus the aggregates of its whole subtree
+/// (including this node). The aggregates let navigation descend in `O(log n)`.
+#[derive(Debug, Clone, Copy)]
+struct Node {
+    piece: Piece,
+    left: Option<NodeId>,
+    right: Option<NodeId>,
+    priority: u64,
+    sub_bytes: usize,
+    sub_chars: usize,
+    sub_utf16: usize,
+    sub_line_breaks: usize,
+}
+
+/// One reversible edit, modeled uniformly as "at `at_byte`, the pieces
+/// `removed` were replaced by the pieces `inserted`". A pure insert has an
+/// empty `removed`; a pure delete has an empty `inserted`. Both sides hold
+/// piece *references* — never copied content — so reverting a large delete is
+/// as cheap as a small one. `seq` identifies the edit across undo/redo so the
 /// dirty flag can tell when the buffer returns to its saved state.
 #[derive(Debug, Clone)]
 struct EditRecord {
     seq: u64,
     at_byte: usize,
-    before: String,
-    after: String,
+    removed: Vec<Piece>,
+    inserted: Vec<Piece>,
 }
 
-/// A line-indexed, editable UTF-8 text buffer.
+impl EditRecord {
+    fn removed_len(&self) -> usize {
+        self.removed.iter().map(|piece| piece.len).sum()
+    }
+
+    fn inserted_len(&self) -> usize {
+        self.inserted.iter().map(|piece| piece.len).sum()
+    }
+}
+
+/// Where a UTF-16 offset lands: the `piece` containing it, the byte/char/
+/// line-break prefixes of everything before that piece, and the offset within
+/// the piece (`utf16_in`).
+#[derive(Debug, Clone, Copy)]
+struct Utf16Descent {
+    piece: Piece,
+    prefix_byte: usize,
+    prefix_char: usize,
+    prefix_breaks: usize,
+    utf16_in: usize,
+}
+
+/// A line-indexed, editable UTF-8 text buffer backed by a balanced piece tree.
 pub struct TextBuffer {
     original: Box<dyn ContentBytes>,
     add: Vec<u8>,
-    pieces: Vec<Piece>,
-    /// Byte offset of the start of each logical line (logical = the assembled
-    /// piece content). Always begins with `0`; a trailing newline yields a
-    /// final empty line, matching the editor's line-number semantics.
-    line_starts: Vec<usize>,
-    utf16_len: usize,
-    byte_len: usize,
+    nodes: Vec<Node>,
+    free: Vec<NodeId>,
+    root: Option<NodeId>,
+    priority_state: u64,
     undo_stack: Vec<EditRecord>,
     redo_stack: Vec<EditRecord>,
     seq_counter: u64,
@@ -153,35 +216,60 @@ impl TextBuffer {
 
     /// Builds a buffer from any content source. The bytes must be valid UTF-8.
     pub fn from_source(source: Box<dyn ContentBytes>) -> Result<Self, TextBufferError> {
+        Self::from_source_with_chunk(source, ORIGINAL_CHUNK_BYTES)
+    }
+
+    fn from_source_with_chunk(
+        source: Box<dyn ContentBytes>,
+        chunk: usize,
+    ) -> Result<Self, TextBufferError> {
         let bytes = source.as_bytes();
         if std::str::from_utf8(bytes).is_err() {
             return Err(TextBufferError::NotUtf8);
         }
 
-        let pieces = if bytes.is_empty() {
-            Vec::new()
-        } else {
-            vec![Piece {
+        // A zero chunk would make `next_chunk_end` stall; keep progress guaranteed.
+        let chunk = chunk.max(1);
+
+        // Split the original into bounded, char-aligned chunks so within-piece
+        // scans stay bounded. This borrow of `source` ends before it is moved.
+        let mut pieces = Vec::new();
+        let len = bytes.len();
+        let mut start = 0;
+        while start < len {
+            let end = next_chunk_end(bytes, start, chunk);
+            let (chars, utf16, line_breaks) = count_text(&bytes[start..end]);
+            pieces.push(Piece {
                 source: PieceSource::Original,
-                start: 0,
-                len: bytes.len(),
-            }]
-        };
+                start,
+                len: end - start,
+                chars,
+                utf16,
+                line_breaks,
+            });
+            start = end;
+        }
 
         let mut buffer = Self {
             original: source,
             add: Vec::new(),
-            pieces,
-            line_starts: vec![0],
-            utf16_len: 0,
-            byte_len: 0,
+            nodes: Vec::new(),
+            free: Vec::new(),
+            root: None,
+            priority_state: PRIORITY_SEED,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             seq_counter: 0,
             saved_seq: None,
             revision: 0,
         };
-        buffer.recompute_caches();
+
+        let mut root = None;
+        for piece in pieces {
+            let node = buffer.alloc_node(piece);
+            root = buffer.merge(root, Some(node));
+        }
+        buffer.root = root;
         Ok(buffer)
     }
 
@@ -189,17 +277,17 @@ impl TextBuffer {
 
     /// Total bytes of UTF-8 content.
     pub fn byte_len(&self) -> usize {
-        self.byte_len
+        self.sub_bytes(self.root)
     }
 
     /// Total UTF-16 code units (the unit AppKit/`NSRange` speak in).
     pub fn utf16_len(&self) -> usize {
-        self.utf16_len
+        self.sub_utf16(self.root)
     }
 
     /// Number of logical lines. A trailing newline counts a final empty line.
     pub fn line_count(&self) -> usize {
-        self.line_starts.len()
+        self.sub_line_breaks(self.root) + 1
     }
 
     /// A monotonic counter bumped on every content mutation (including undo and
@@ -233,21 +321,37 @@ impl TextBuffer {
             return String::new();
         }
         let end_line = start_line.saturating_add(count).min(total);
+        let line_count = end_line - start_line;
 
-        let mut out = String::new();
-        for line in start_line..end_line {
-            if line > start_line {
+        // Two line lookups bound the byte range; one forward read assembles it.
+        // (A per-line loop would re-descend the tree for every line — fine for a
+        // small viewport but needlessly quadratic over the chunk scans.)
+        let start_byte = self.line_start_prefix(start_line).byte;
+        let end_byte = if end_line < total {
+            self.line_start_prefix(end_line).byte
+        } else {
+            self.byte_len()
+        };
+        let raw = self.read_logical(start_byte, end_byte);
+
+        // The range holds exactly `line_count` lines, each followed by its
+        // terminator — except the buffer's final line, which has none. Splitting
+        // on '\n' yields those lines; a '\r' immediately before a '\n' is part of
+        // the terminator and is stripped, while a trailing '\r' on the buffer's
+        // last line (no following '\n') is genuine content and is kept.
+        let strip_final = end_line < total;
+        let mut out = String::with_capacity(raw.len());
+        for (index, segment) in raw.split('\n').take(line_count).enumerate() {
+            if index > 0 {
                 out.push('\n');
             }
-            let (start, end) = self.line_bounds(line);
-            let mut content = self.read_logical(start, end);
-            if content.ends_with('\n') {
-                content.pop();
-                if content.ends_with('\r') {
-                    content.pop();
-                }
-            }
-            out.push_str(&content);
+            let is_final = index + 1 == line_count;
+            let content = if is_final && !strip_final {
+                segment
+            } else {
+                segment.strip_suffix('\r').unwrap_or(segment)
+            };
+            out.push_str(content);
         }
         out
     }
@@ -261,18 +365,18 @@ impl TextBuffer {
             return Ok(());
         }
         let at_byte = self.utf16_to_byte(at_utf16)?;
-        self.apply_replace(at_byte, 0, text);
+        let inserted = self.apply_replace(at_byte, 0, text);
         self.redo_stack.clear();
 
         // Extend the previous typed run, but never coalesce into the saved
         // baseline record: doing so would hide the new edit from dirty tracking.
         let saved_seq = self.saved_seq;
         if let Some(top) = self.undo_stack.last_mut() {
-            if top.before.is_empty()
-                && top.at_byte + top.after.len() == at_byte
+            if top.removed.is_empty()
+                && top.at_byte + top.inserted_len() == at_byte
                 && Some(top.seq) != saved_seq
             {
-                top.after.push_str(text);
+                coalesce_inserted(&mut top.inserted, &inserted);
                 return Ok(());
             }
         }
@@ -281,8 +385,8 @@ impl TextBuffer {
         self.undo_stack.push(EditRecord {
             seq,
             at_byte,
-            before: String::new(),
-            after: text.to_string(),
+            removed: Vec::new(),
+            inserted,
         });
         Ok(())
     }
@@ -300,17 +404,18 @@ impl TextBuffer {
         }
         let start_byte = self.utf16_to_byte(start_utf16)?;
         let end_byte = self.utf16_to_byte(end_utf16)?;
-        let before = self.read_logical(start_byte, end_byte);
 
-        self.apply_replace(start_byte, end_byte - start_byte, "");
+        // `replace_range` returns the pieces it removed — references into the
+        // existing stores, so even a huge delete copies only piece descriptors.
+        let removed = self.replace_range(start_byte, end_byte - start_byte, &[]);
         self.redo_stack.clear();
 
         let seq = self.next_seq();
         self.undo_stack.push(EditRecord {
             seq,
             at_byte: start_byte,
-            before,
-            after: String::new(),
+            removed,
+            inserted: Vec::new(),
         });
         Ok(())
     }
@@ -320,7 +425,9 @@ impl TextBuffer {
         let Some(record) = self.undo_stack.pop() else {
             return false;
         };
-        self.apply_replace(record.at_byte, record.after.len(), &record.before);
+        // The inserted pieces currently occupy `[at_byte, at_byte + inserted)`;
+        // put the removed pieces back in their place.
+        self.replace_range(record.at_byte, record.inserted_len(), &record.removed);
         self.redo_stack.push(record);
         true
     }
@@ -331,12 +438,63 @@ impl TextBuffer {
         let Some(record) = self.redo_stack.pop() else {
             return false;
         };
-        self.apply_replace(record.at_byte, record.before.len(), &record.after);
+        self.replace_range(record.at_byte, record.removed_len(), &record.inserted);
         self.undo_stack.push(record);
         true
     }
 
-    // MARK: - Internals
+    // MARK: - Edit internals
+
+    /// Appends `insert` to the add buffer and splices it in at `at_byte`,
+    /// returning the inserted pieces for the undo record. Used by `insert`,
+    /// which never removes (`remove_len` is always 0 here); `delete` calls
+    /// [`replace_range`](Self::replace_range) directly to capture removed pieces.
+    fn apply_replace(&mut self, at_byte: usize, remove_len: usize, insert: &str) -> Vec<Piece> {
+        let inserted = if insert.is_empty() {
+            Vec::new()
+        } else {
+            let start = self.add.len();
+            self.add.extend_from_slice(insert.as_bytes());
+            let (chars, utf16, line_breaks) = count_text(insert.as_bytes());
+            vec![Piece {
+                source: PieceSource::Add,
+                start,
+                len: insert.len(),
+                chars,
+                utf16,
+                line_breaks,
+            }]
+        };
+        self.replace_range(at_byte, remove_len, &inserted);
+        inserted
+    }
+
+    /// Splits out `[at_byte, at_byte + remove_len)`, returns the pieces that
+    /// occupied it (in order, by reference — no content copy), and splices
+    /// `pieces` into the gap. Every mutation path funnels through here so the
+    /// revision counter advances exactly once per edit.
+    fn replace_range(&mut self, at_byte: usize, remove_len: usize, pieces: &[Piece]) -> Vec<Piece> {
+        let (left, rest) = self.split(self.root, at_byte);
+        let (mid, right) = self.split(rest, remove_len);
+
+        let mut removed = Vec::new();
+        self.collect_pieces(mid, &mut removed);
+        self.free_subtree(mid);
+
+        let mut built = None;
+        for &piece in pieces {
+            if piece.len == 0 {
+                continue;
+            }
+            let node = self.alloc_node(piece);
+            built = self.merge(built, Some(node));
+        }
+
+        let left = self.merge(left, built);
+        self.root = self.merge(left, right);
+        self.revision += 1;
+        removed
+    }
 
     fn current_top_seq(&self) -> Option<u64> {
         self.undo_stack.last().map(|record| record.seq)
@@ -347,36 +505,206 @@ impl TextBuffer {
         self.seq_counter
     }
 
-    fn piece_bytes(&self, piece: &Piece) -> &[u8] {
-        let buffer = match piece.source {
+    fn next_priority(&mut self) -> u64 {
+        // xorshift64 — deterministic given the fixed seed.
+        let mut state = self.priority_state;
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        self.priority_state = state;
+        state
+    }
+
+    // MARK: - Arena / tree primitives
+
+    fn alloc_node(&mut self, piece: Piece) -> NodeId {
+        let priority = self.next_priority();
+        let node = Node {
+            piece,
+            left: None,
+            right: None,
+            priority,
+            sub_bytes: piece.len,
+            sub_chars: piece.chars,
+            sub_utf16: piece.utf16,
+            sub_line_breaks: piece.line_breaks,
+        };
+        if let Some(id) = self.free.pop() {
+            self.nodes[id] = node;
+            id
+        } else {
+            self.nodes.push(node);
+            self.nodes.len() - 1
+        }
+    }
+
+    fn free_subtree(&mut self, id: Option<NodeId>) {
+        let Some(start) = id else {
+            return;
+        };
+        let mut stack = vec![start];
+        while let Some(id) = stack.pop() {
+            if let Some(left) = self.nodes[id].left {
+                stack.push(left);
+            }
+            if let Some(right) = self.nodes[id].right {
+                stack.push(right);
+            }
+            self.free.push(id);
+        }
+    }
+
+    fn sub_bytes(&self, id: Option<NodeId>) -> usize {
+        id.map_or(0, |id| self.nodes[id].sub_bytes)
+    }
+
+    fn sub_chars(&self, id: Option<NodeId>) -> usize {
+        id.map_or(0, |id| self.nodes[id].sub_chars)
+    }
+
+    fn sub_utf16(&self, id: Option<NodeId>) -> usize {
+        id.map_or(0, |id| self.nodes[id].sub_utf16)
+    }
+
+    fn sub_line_breaks(&self, id: Option<NodeId>) -> usize {
+        id.map_or(0, |id| self.nodes[id].sub_line_breaks)
+    }
+
+    fn update(&mut self, id: NodeId) {
+        let node = self.nodes[id];
+        let bytes = self.sub_bytes(node.left) + node.piece.len + self.sub_bytes(node.right);
+        let chars = self.sub_chars(node.left) + node.piece.chars + self.sub_chars(node.right);
+        let utf16 = self.sub_utf16(node.left) + node.piece.utf16 + self.sub_utf16(node.right);
+        let line_breaks = self.sub_line_breaks(node.left)
+            + node.piece.line_breaks
+            + self.sub_line_breaks(node.right);
+        let node = &mut self.nodes[id];
+        node.sub_bytes = bytes;
+        node.sub_chars = chars;
+        node.sub_utf16 = utf16;
+        node.sub_line_breaks = line_breaks;
+    }
+
+    /// Merges two order-adjacent subtrees (all of `left` precedes all of
+    /// `right`) into one treap. Recursion depth is the tree height (`O(log n)`).
+    fn merge(&mut self, left: Option<NodeId>, right: Option<NodeId>) -> Option<NodeId> {
+        match (left, right) {
+            (None, other) | (other, None) => other,
+            (Some(left), Some(right)) => {
+                if self.nodes[left].priority >= self.nodes[right].priority {
+                    let left_right = self.nodes[left].right;
+                    let merged = self.merge(left_right, Some(right));
+                    self.nodes[left].right = merged;
+                    self.update(left);
+                    Some(left)
+                } else {
+                    let right_left = self.nodes[right].left;
+                    let merged = self.merge(Some(left), right_left);
+                    self.nodes[right].left = merged;
+                    self.update(right);
+                    Some(right)
+                }
+            }
+        }
+    }
+
+    /// Splits a subtree at byte offset `at` into `(< at, >= at)`. A piece that
+    /// straddles `at` is split in two (at a char boundary — every edit offset is
+    /// char-validated, so `at` always lands on one).
+    fn split(&mut self, id: Option<NodeId>, at: usize) -> (Option<NodeId>, Option<NodeId>) {
+        let Some(id) = id else {
+            return (None, None);
+        };
+        let left = self.nodes[id].left;
+        let left_bytes = self.sub_bytes(left);
+        let piece_len = self.nodes[id].piece.len;
+
+        if at <= left_bytes {
+            let (ll, lr) = self.split(left, at);
+            self.nodes[id].left = lr;
+            self.update(id);
+            (ll, Some(id))
+        } else if at >= left_bytes + piece_len {
+            let right = self.nodes[id].right;
+            let (rl, rr) = self.split(right, at - left_bytes - piece_len);
+            self.nodes[id].right = rl;
+            self.update(id);
+            (Some(id), rr)
+        } else {
+            // `at` falls inside this node's piece: split the piece, recycle the
+            // node, and rebuild the two sides.
+            let within = at - left_bytes;
+            let piece = self.nodes[id].piece;
+            let left_child = self.nodes[id].left;
+            let right_child = self.nodes[id].right;
+            let (left_piece, right_piece) = self.split_piece(piece, within);
+            self.free.push(id);
+            let left_node = self.alloc_node(left_piece);
+            let right_node = self.alloc_node(right_piece);
+            let left_tree = self.merge(left_child, Some(left_node));
+            let right_tree = self.merge(Some(right_node), right_child);
+            (left_tree, right_tree)
+        }
+    }
+
+    /// Splits a piece at byte offset `within` (a char boundary), recomputing the
+    /// two halves' counts from the smaller side.
+    fn split_piece(&self, piece: Piece, within: usize) -> (Piece, Piece) {
+        let bytes = self.piece_bytes(piece.source, piece.start, piece.len);
+        let (chars, utf16, line_breaks) = count_text(&bytes[..within]);
+        let left = Piece {
+            source: piece.source,
+            start: piece.start,
+            len: within,
+            chars,
+            utf16,
+            line_breaks,
+        };
+        let right = Piece {
+            source: piece.source,
+            start: piece.start + within,
+            len: piece.len - within,
+            chars: piece.chars - chars,
+            utf16: piece.utf16 - utf16,
+            line_breaks: piece.line_breaks - line_breaks,
+        };
+        (left, right)
+    }
+
+    fn collect_pieces(&self, id: Option<NodeId>, out: &mut Vec<Piece>) {
+        let Some(id) = id else {
+            return;
+        };
+        self.collect_pieces(self.nodes[id].left, out);
+        out.push(self.nodes[id].piece);
+        self.collect_pieces(self.nodes[id].right, out);
+    }
+
+    fn piece_bytes(&self, source: PieceSource, start: usize, len: usize) -> &[u8] {
+        let buffer = match source {
             PieceSource::Original => self.original.as_bytes(),
             PieceSource::Add => &self.add,
         };
-        &buffer[piece.start..piece.start + piece.len]
+        &buffer[start..start + len]
     }
+
+    // MARK: - Navigation
 
     /// Logical byte range of a line including its trailing terminator.
     fn line_bounds(&self, line: usize) -> (usize, usize) {
-        let start = self.line_starts[line];
-        let end = if line + 1 < self.line_starts.len() {
-            self.line_starts[line + 1]
+        let start = self.line_start_prefix(line).byte;
+        let end = if line + 1 < self.line_count() {
+            self.line_start_prefix(line + 1).byte
         } else {
-            self.byte_len
+            self.byte_len()
         };
         (start, end)
     }
 
     /// The byte at logical offset `at`, if it is in range.
     fn logical_byte(&self, at: usize) -> Option<u8> {
-        let mut offset = 0;
-        for piece in &self.pieces {
-            let piece_end = offset + piece.len;
-            if at < piece_end {
-                return Some(self.piece_bytes(piece)[at - offset]);
-            }
-            offset = piece_end;
-        }
-        None
+        let (piece, within) = self.descend_byte(at)?;
+        Some(self.piece_bytes(piece.source, piece.start, piece.len)[within])
     }
 
     /// End of a line's *content* — the terminating `\n` and a preceding `\r` are
@@ -393,68 +721,257 @@ impl TextBuffer {
         content_end
     }
 
-    /// Assembles the UTF-8 text for a logical byte range. The range endpoints
-    /// are always on character boundaries (line starts follow ASCII `\n`, and
-    /// edit positions are validated to char boundaries), so slicing is safe.
+    /// Assembles the UTF-8 text for a logical byte range, visiting only the
+    /// overlapping pieces (`O(log n + range)`). The endpoints are always on
+    /// character boundaries, so slicing each piece is safe.
     fn read_logical(&self, start: usize, end: usize) -> String {
         let mut out = String::with_capacity(end.saturating_sub(start));
-        let mut offset = 0;
-        for piece in &self.pieces {
-            let piece_end = offset + piece.len;
-            if piece_end <= start {
-                offset = piece_end;
-                continue;
-            }
-            if offset >= end {
-                break;
-            }
-            let bytes = self.piece_bytes(piece);
-            let from = start.max(offset) - offset;
-            let to = end.min(piece_end) - offset;
+        self.collect_text(self.root, 0, start, end, &mut out);
+        out
+    }
+
+    fn collect_text(
+        &self,
+        id: Option<NodeId>,
+        base: usize,
+        start: usize,
+        end: usize,
+        out: &mut String,
+    ) {
+        let Some(id) = id else {
+            return;
+        };
+        let node = self.nodes[id];
+        let piece_start = base + self.sub_bytes(node.left);
+        let piece_end = piece_start + node.piece.len;
+
+        if start < piece_start {
+            self.collect_text(node.left, base, start, end, out);
+        }
+        if start < piece_end && end > piece_start {
+            let from = start.max(piece_start) - piece_start;
+            let to = end.min(piece_end) - piece_start;
+            let bytes = self.piece_bytes(node.piece.source, node.piece.start, node.piece.len);
             out.push_str(
                 std::str::from_utf8(&bytes[from..to])
                     .expect("piece content is validated UTF-8 on char boundaries"),
             );
-            offset = piece_end;
         }
-        out
+        if end > piece_end {
+            self.collect_text(node.right, piece_end, start, end, out);
+        }
+    }
+
+    /// Descends to the piece containing byte `at`, returning it and the offset
+    /// within it. Returns `None` for `at >= byte_len`.
+    fn descend_byte(&self, at: usize) -> Option<(Piece, usize)> {
+        let mut id = self.root;
+        let mut acc = 0;
+        while let Some(node_id) = id {
+            let node = self.nodes[node_id];
+            let left_bytes = self.sub_bytes(node.left);
+            if at < acc + left_bytes {
+                id = node.left;
+                continue;
+            }
+            let piece_start = acc + left_bytes;
+            let piece_end = piece_start + node.piece.len;
+            if at < piece_end {
+                return Some((node.piece, at - piece_start));
+            }
+            acc = piece_end;
+            id = node.right;
+        }
+        None
+    }
+
+    /// Prefix aggregates (byte/char/utf16) at the first byte of `line`. Line 0
+    /// is the origin; line `L > 0` begins just after the `L`-th `\n`.
+    fn line_start_prefix(&self, line: usize) -> Position {
+        let mut prefix = Position::default();
+        if line == 0 {
+            return prefix;
+        }
+        let mut id = self.root;
+        let mut breaks_before = 0;
+        while let Some(node_id) = id {
+            let node = self.nodes[node_id];
+            let left_breaks = self.sub_line_breaks(node.left);
+            if line <= breaks_before + left_breaks {
+                id = node.left;
+                continue;
+            }
+            // The target newline is at or after this node's piece. Fold the
+            // whole left subtree into the prefix.
+            let left_bytes = self.sub_bytes(node.left);
+            let left_chars = self.sub_chars(node.left);
+            let left_utf16 = self.sub_utf16(node.left);
+            let breaks_before_piece = breaks_before + left_breaks;
+            if line <= breaks_before_piece + node.piece.line_breaks {
+                // The (line - breaks_before_piece)-th newline lands in this piece.
+                let nth = line - breaks_before_piece;
+                let (byte, chars, utf16) = self.scan_after_nth_newline(node.piece, nth);
+                return Position {
+                    byte: prefix.byte + left_bytes + byte,
+                    char: prefix.char + left_chars + chars,
+                    utf16: prefix.utf16 + left_utf16 + utf16,
+                    line,
+                    column_utf16: 0,
+                };
+            }
+            prefix.byte += left_bytes + node.piece.len;
+            prefix.char += left_chars + node.piece.chars;
+            prefix.utf16 += left_utf16 + node.piece.utf16;
+            breaks_before = breaks_before_piece + node.piece.line_breaks;
+            id = node.right;
+        }
+        // Fewer newlines than requested: clamp to the end of the content.
+        Position {
+            byte: self.byte_len(),
+            char: self.sub_chars(self.root),
+            utf16: self.utf16_len(),
+            line,
+            column_utf16: 0,
+        }
+    }
+
+    /// Scans a piece for the `nth` (1-based) `\n`, returning the byte/char/utf16
+    /// counts up to and including it (i.e. the start of the following line).
+    fn scan_after_nth_newline(&self, piece: Piece, nth: usize) -> (usize, usize, usize) {
+        let bytes = self.piece_bytes(piece.source, piece.start, piece.len);
+        let text = std::str::from_utf8(bytes).expect("piece content is validated UTF-8");
+        let mut byte = 0;
+        let mut chars = 0;
+        let mut utf16 = 0;
+        let mut found = 0;
+        for character in text.chars() {
+            byte += character.len_utf8();
+            chars += 1;
+            utf16 += character.len_utf16();
+            if character == '\n' {
+                found += 1;
+                if found == nth {
+                    break;
+                }
+            }
+        }
+        (byte, chars, utf16)
     }
 
     /// Maps a UTF-16 offset to a full [`Position`]. The end-of-buffer offset is
     /// valid; an offset inside a surrogate pair or past the end is rejected.
     pub fn position_for_utf16(&self, target_utf16: usize) -> Result<Position, TextBufferError> {
-        if target_utf16 > self.utf16_len {
+        let total = self.utf16_len();
+        if target_utf16 > total {
             return Err(TextBufferError::InvalidUtf16Offset {
                 offset: target_utf16,
-                limit: self.utf16_len,
+                limit: total,
             });
         }
-        let mut position = Position::default();
-        for piece in &self.pieces {
-            let text = std::str::from_utf8(self.piece_bytes(piece))
-                .expect("piece content is validated UTF-8");
-            for character in text.chars() {
-                if position.utf16 == target_utf16 {
-                    return Ok(position);
-                }
-                advance_position(&mut position, character);
+        if target_utf16 == total {
+            let line = self.sub_line_breaks(self.root);
+            let line_start = self.line_start_prefix(line);
+            return Ok(Position {
+                byte: self.byte_len(),
+                char: self.sub_chars(self.root),
+                utf16: total,
+                line,
+                column_utf16: total - line_start.utf16,
+            });
+        }
+
+        let Some(Utf16Descent {
+            piece,
+            prefix_byte,
+            prefix_char,
+            prefix_breaks,
+            utf16_in,
+        }) = self.descend_utf16(target_utf16)
+        else {
+            return Err(TextBufferError::InvalidUtf16Offset {
+                offset: target_utf16,
+                limit: total,
+            });
+        };
+
+        let bytes = self.piece_bytes(piece.source, piece.start, piece.len);
+        let text = std::str::from_utf8(bytes).expect("piece content is validated UTF-8");
+        let mut byte = 0;
+        let mut chars = 0;
+        let mut utf16 = 0;
+        let mut breaks_in = 0;
+        for character in text.chars() {
+            if utf16 == utf16_in {
+                break;
+            }
+            let next = utf16 + character.len_utf16();
+            if next > utf16_in {
+                // The target fell between the two code units of a surrogate pair.
+                return Err(TextBufferError::InvalidUtf16Offset {
+                    offset: target_utf16,
+                    limit: total,
+                });
+            }
+            byte += character.len_utf8();
+            chars += 1;
+            utf16 = next;
+            if character == '\n' {
+                breaks_in += 1;
             }
         }
-        if position.utf16 == target_utf16 {
-            Ok(position)
-        } else {
-            // Landed between the two code units of a surrogate pair.
-            Err(TextBufferError::InvalidUtf16Offset {
-                offset: target_utf16,
-                limit: self.utf16_len,
-            })
+
+        let line = prefix_breaks + breaks_in;
+        let line_start = self.line_start_prefix(line);
+        Ok(Position {
+            byte: prefix_byte + byte,
+            char: prefix_char + chars,
+            utf16: target_utf16,
+            line,
+            column_utf16: target_utf16 - line_start.utf16,
+        })
+    }
+
+    /// Descends to the piece whose UTF-16 span contains `target` (which the
+    /// caller guarantees is `< utf16_len`).
+    fn descend_utf16(&self, target: usize) -> Option<Utf16Descent> {
+        let mut id = self.root;
+        let mut acc_byte = 0;
+        let mut acc_char = 0;
+        let mut acc_utf16 = 0;
+        let mut acc_breaks = 0;
+        while let Some(node_id) = id {
+            let node = self.nodes[node_id];
+            let left_utf16 = self.sub_utf16(node.left);
+            if target < acc_utf16 + left_utf16 {
+                id = node.left;
+                continue;
+            }
+            let left_bytes = self.sub_bytes(node.left);
+            let left_chars = self.sub_chars(node.left);
+            let left_breaks = self.sub_line_breaks(node.left);
+            let before_piece_utf16 = acc_utf16 + left_utf16;
+            if target < before_piece_utf16 + node.piece.utf16 {
+                return Some(Utf16Descent {
+                    piece: node.piece,
+                    prefix_byte: acc_byte + left_bytes,
+                    prefix_char: acc_char + left_chars,
+                    prefix_breaks: acc_breaks + left_breaks,
+                    utf16_in: target - before_piece_utf16,
+                });
+            }
+            acc_byte += left_bytes + node.piece.len;
+            acc_char += left_chars + node.piece.chars;
+            acc_utf16 = before_piece_utf16 + node.piece.utf16;
+            acc_breaks += left_breaks + node.piece.line_breaks;
+            id = node.right;
         }
+        None
     }
 
     /// Maps a 0-based `line` and UTF-16 `column_utf16` (from the line start) to
     /// a full [`Position`]. A column past the line's content is clamped to the
     /// end of the line, so clicking past the last character places the caret
-    /// there.
+    /// there (and never inside a `\r\n`).
     pub fn position_for_line_column(
         &self,
         line: usize,
@@ -464,123 +981,126 @@ impl TextBuffer {
         if line >= total {
             return Err(TextBufferError::InvalidLine { line, total });
         }
-        // Stop at the line's content end so a column past the last character
-        // clamps before any `\r\n`/`\n` terminator rather than inside it.
-        let content_end = self.line_content_end(line);
-        let mut position = Position::default();
-        for piece in &self.pieces {
-            let text = std::str::from_utf8(self.piece_bytes(piece))
-                .expect("piece content is validated UTF-8");
-            for character in text.chars() {
-                if position.line == line
-                    && (position.column_utf16 >= column_utf16 || position.byte >= content_end)
-                {
-                    return Ok(position);
-                }
-                advance_position(&mut position, character);
-            }
+        let line_start = self.line_start_prefix(line);
+        let content_end_byte = self.line_content_end(line);
+        // Take the UTF-16 count at the line's content end directly from the
+        // tree. Materializing the line (`read_logical`) would allocate the whole
+        // line, which is catastrophic for a giant single line (minified JSON, a
+        // log line); this descent is bounded by one piece scan instead.
+        let content_utf16 = self.utf16_before_byte(content_end_byte);
+        // `column_utf16` is untrusted (it comes from AppKit `NSRange`): clamp it
+        // before adding the line-start offset so a hostile column cannot overflow.
+        let target = line_start
+            .utf16
+            .saturating_add(column_utf16)
+            .min(content_utf16);
+        self.position_for_utf16(target)
+    }
+
+    /// UTF-16 code units before byte offset `at` (which must lie on a char
+    /// boundary). One `O(log n)` descent plus a scan bounded by a single piece —
+    /// it never assembles the spanned text.
+    fn utf16_before_byte(&self, at: usize) -> usize {
+        if at >= self.byte_len() {
+            return self.utf16_len();
         }
-        // End of buffer: the target line is the final (possibly empty) line.
-        Ok(position)
+        let mut id = self.root;
+        let mut acc_byte = 0;
+        let mut acc_utf16 = 0;
+        while let Some(node_id) = id {
+            let node = self.nodes[node_id];
+            let left_bytes = self.sub_bytes(node.left);
+            if at < acc_byte + left_bytes {
+                id = node.left;
+                continue;
+            }
+            let before_piece_byte = acc_byte + left_bytes;
+            let piece_end_byte = before_piece_byte + node.piece.len;
+            let before_piece_utf16 = acc_utf16 + self.sub_utf16(node.left);
+            if at < piece_end_byte {
+                let within = at - before_piece_byte;
+                let bytes = self.piece_bytes(node.piece.source, node.piece.start, node.piece.len);
+                let text = std::str::from_utf8(&bytes[..within])
+                    .expect("piece content is validated UTF-8");
+                return before_piece_utf16 + utf16_len_of(text);
+            }
+            acc_byte = piece_end_byte;
+            acc_utf16 = before_piece_utf16 + node.piece.utf16;
+            id = node.right;
+        }
+        self.utf16_len()
     }
 
     /// Converts a UTF-16 offset to a logical byte offset.
     fn utf16_to_byte(&self, target_utf16: usize) -> Result<usize, TextBufferError> {
         Ok(self.position_for_utf16(target_utf16)?.byte)
     }
-
-    /// Replaces `remove_len` logical bytes at `at_byte` with `insert`, rewriting
-    /// the piece list and recomputing the cached indexes.
-    fn apply_replace(&mut self, at_byte: usize, remove_len: usize, insert: &str) {
-        let delete_end = at_byte + remove_len;
-        let add_start = self.add.len();
-        if !insert.is_empty() {
-            self.add.extend_from_slice(insert.as_bytes());
-        }
-
-        let mut new_pieces = Vec::with_capacity(self.pieces.len() + 2);
-
-        // Fragments before the edit point.
-        let mut offset = 0;
-        for piece in &self.pieces {
-            let piece_end = offset + piece.len;
-            if offset < at_byte {
-                let keep_end = piece_end.min(at_byte);
-                if keep_end > offset {
-                    new_pieces.push(Piece {
-                        source: piece.source,
-                        start: piece.start,
-                        len: keep_end - offset,
-                    });
-                }
-            }
-            offset = piece_end;
-        }
-
-        // The inserted text.
-        if !insert.is_empty() {
-            new_pieces.push(Piece {
-                source: PieceSource::Add,
-                start: add_start,
-                len: insert.len(),
-            });
-        }
-
-        // Fragments after the deleted range.
-        let mut offset = 0;
-        for piece in &self.pieces {
-            let piece_end = offset + piece.len;
-            if piece_end > delete_end {
-                let keep_start = offset.max(delete_end);
-                let within = keep_start - offset;
-                new_pieces.push(Piece {
-                    source: piece.source,
-                    start: piece.start + within,
-                    len: piece_end - keep_start,
-                });
-            }
-            offset = piece_end;
-        }
-
-        self.pieces = new_pieces;
-        self.recompute_caches();
-        self.revision += 1;
-    }
-
-    /// Recomputes the line index and length caches by walking the pieces.
-    /// Replaced by an incremental `O(log n)` index in a later slice.
-    fn recompute_caches(&mut self) {
-        let mut line_starts = vec![0];
-        let mut utf16_len = 0;
-        let mut byte_len = 0;
-        for piece in &self.pieces {
-            let bytes = self.piece_bytes(piece);
-            for (index, byte) in bytes.iter().enumerate() {
-                if *byte == b'\n' {
-                    line_starts.push(byte_len + index + 1);
-                }
-            }
-            let text = std::str::from_utf8(bytes).expect("piece content is validated UTF-8");
-            utf16_len += text.chars().map(char::len_utf16).sum::<usize>();
-            byte_len += bytes.len();
-        }
-        self.line_starts = line_starts;
-        self.utf16_len = utf16_len;
-        self.byte_len = byte_len;
-    }
 }
 
-/// Advances a [`Position`] past `character`, updating every coordinate. A
-/// newline moves to the start of the next line.
-fn advance_position(position: &mut Position, character: char) {
-    position.byte += character.len_utf8();
-    position.char += 1;
-    position.utf16 += character.len_utf16();
-    if character == '\n' {
-        position.line += 1;
-        position.column_utf16 = 0;
-    } else {
-        position.column_utf16 += character.len_utf16();
+/// Counts (chars, utf16 code units, `\n` count) of a char-aligned UTF-8 slice.
+fn count_text(bytes: &[u8]) -> (usize, usize, usize) {
+    let text = std::str::from_utf8(bytes).expect("piece content is validated UTF-8");
+    let mut chars = 0;
+    let mut utf16 = 0;
+    let mut line_breaks = 0;
+    for character in text.chars() {
+        chars += 1;
+        utf16 += character.len_utf16();
+        if character == '\n' {
+            line_breaks += 1;
+        }
+    }
+    (chars, utf16, line_breaks)
+}
+
+fn utf16_len_of(text: &str) -> usize {
+    text.chars().map(char::len_utf16).sum()
+}
+
+/// Picks a chunk end `> start` on a UTF-8 char boundary, aiming for `chunk`
+/// bytes. It backs off to the boundary at or before the target; if the target
+/// splits a char wider than the whole chunk (only reachable with the tiny chunk
+/// sizes used in tests), it extends forward instead so progress is guaranteed.
+fn next_chunk_end(bytes: &[u8], start: usize, chunk: usize) -> usize {
+    let len = bytes.len();
+    let target = (start + chunk).min(len);
+    if target >= len {
+        return len;
+    }
+    let mut end = target;
+    while end > start && !is_char_boundary(bytes[end]) {
+        end -= 1;
+    }
+    if end > start {
+        return end;
+    }
+    let mut end = target;
+    while end < len && !is_char_boundary(bytes[end]) {
+        end += 1;
+    }
+    end
+}
+
+/// Whether `byte` begins a UTF-8 code point (i.e. is not a continuation byte).
+fn is_char_boundary(byte: u8) -> bool {
+    byte & 0xC0 != 0x80
+}
+
+/// Extends a coalesced insert run's piece list with the just-inserted piece.
+/// Consecutive caret inserts append contiguous bytes to the add buffer, so the
+/// new piece extends the previous one in place; otherwise it is appended.
+fn coalesce_inserted(run: &mut Vec<Piece>, inserted: &[Piece]) {
+    for &piece in inserted {
+        if let Some(last) = run.last_mut() {
+            if last.source == piece.source && last.start + last.len == piece.start {
+                last.len += piece.len;
+                last.chars += piece.chars;
+                last.utf16 += piece.utf16;
+                last.line_breaks += piece.line_breaks;
+                continue;
+            }
+        }
+        run.push(piece);
     }
 }
 
@@ -590,6 +1110,14 @@ mod tests {
 
     fn buffer(text: &str) -> TextBuffer {
         TextBuffer::from_utf8_bytes(text.as_bytes().to_vec()).expect("valid utf-8")
+    }
+
+    fn chunked(text: &str, chunk: usize) -> TextBuffer {
+        TextBuffer::from_source_with_chunk(
+            Box::new(OwnedBytes::new(text.as_bytes().to_vec())),
+            chunk,
+        )
+        .expect("valid utf-8")
     }
 
     fn contents(buffer: &TextBuffer) -> String {
@@ -1007,6 +1535,19 @@ mod tests {
     }
 
     #[test]
+    fn position_for_line_column_clamps_hostile_column_without_overflow() {
+        // `column_utf16` is untrusted FFI input; a huge value on a non-zero line
+        // must clamp to the line end, never overflow `usize`.
+        let buffer = buffer("aa\nbb");
+        let position = buffer
+            .position_for_line_column(1, usize::MAX)
+            .expect("clamped");
+        assert_eq!(position.line, 1);
+        assert_eq!(position.column_utf16, 2);
+        assert_eq!(position.utf16, 5);
+    }
+
+    #[test]
     fn position_for_line_column_handles_empty_and_final_lines() {
         let doc = buffer("x\n\ny");
         // The middle empty line.
@@ -1055,5 +1596,155 @@ mod tests {
             assert_eq!(round.utf16, offset, "offset {offset}");
             assert_eq!(round.byte, position.byte, "offset {offset}");
         }
+    }
+
+    // MARK: - Balanced tree / chunking (O(log n) representation)
+
+    #[test]
+    fn multi_chunk_original_reads_and_counts_correctly() {
+        // A tiny chunk forces many pieces over a small input.
+        let text = "alpha\nbeta\ngamma\ndelta\nepsilon";
+        let buffer = chunked(text, 3);
+        assert_eq!(buffer.line_count(), 5);
+        assert_eq!(buffer.byte_len(), text.len());
+        assert_eq!(contents(&buffer), text);
+        assert_eq!(buffer.text_for_line_range(1, 2), "beta\ngamma");
+        assert_eq!(buffer.text_for_line_range(4, 1), "epsilon");
+    }
+
+    #[test]
+    fn crlf_split_across_chunk_boundary_is_still_one_terminator() {
+        // chunk=4 places "\r" at the end of one piece and "\n" at the start of
+        // the next for "abc\r\ndef".
+        let buffer = chunked("abc\r\ndef", 4);
+        assert_eq!(buffer.line_count(), 2);
+        assert_eq!(buffer.text_for_line_range(0, 1), "abc");
+        assert_eq!(buffer.text_for_line_range(0, 2), "abc\ndef");
+        let position = buffer.position_for_line_column(0, 99).expect("clamped");
+        assert_eq!(position.byte, 3);
+    }
+
+    #[test]
+    fn multibyte_chars_are_never_split_across_chunks() {
+        // "あ" is 3 bytes; with chunk=2 the boundary cannot fall mid-char.
+        let text = "あいうえお\nかきくけこ";
+        let buffer = chunked(text, 2);
+        assert_eq!(buffer.line_count(), 2);
+        assert_eq!(contents(&buffer), text);
+        // Round-trip a position that sits across several chunks.
+        let position = buffer.position_for_utf16(7).expect("position");
+        assert_eq!(position.line, 1);
+        assert_eq!(position.column_utf16, 1);
+    }
+
+    #[test]
+    fn editing_across_chunk_boundaries_stays_consistent() {
+        let mut buffer = chunked("0123456789", 3);
+        buffer.insert(5, "ABC").expect("insert");
+        assert_eq!(contents(&buffer), "01234ABC56789");
+        // Remove utf16 [2, 9) = "234ABC5", spanning original and add pieces.
+        buffer.delete(2, 9).expect("delete");
+        assert_eq!(contents(&buffer), "016789");
+        assert!(buffer.undo());
+        assert_eq!(contents(&buffer), "01234ABC56789");
+        assert!(buffer.undo());
+        assert_eq!(contents(&buffer), "0123456789");
+    }
+
+    #[test]
+    fn many_inserts_remain_correct_and_fully_undoable() {
+        let mut buffer = buffer("");
+        let mut expected = String::new();
+        for index in 0..500 {
+            // Insert at the front every few steps to break caret contiguity and
+            // exercise tree rebalancing at varied offsets.
+            let at = if index % 7 == 0 {
+                0
+            } else {
+                buffer.utf16_len()
+            };
+            let token = format!("{}", index % 10);
+            buffer.insert(at, &token).expect("insert");
+            if at == 0 {
+                expected.insert_str(0, &token);
+            } else {
+                expected.push_str(&token);
+            }
+        }
+        assert_eq!(contents(&buffer), expected);
+        assert_eq!(buffer.utf16_len(), expected.chars().count());
+        // Unwind everything back to empty.
+        while buffer.undo() {}
+        assert_eq!(contents(&buffer), "");
+    }
+
+    #[test]
+    fn large_delete_records_pieces_without_copying_content() {
+        // The deleted text lives in the original buffer; undo must not re-append
+        // it to the add buffer (the whole point of piece references).
+        let text = "x".repeat(50_000);
+        let mut buffer = chunked(&text, 64);
+        let add_before = buffer.add.len();
+        buffer.delete(10, 49_990).expect("delete");
+        assert_eq!(buffer.add.len(), add_before, "delete must not grow add");
+        assert_eq!(buffer.byte_len(), 20);
+        assert!(buffer.undo());
+        assert_eq!(buffer.add.len(), add_before, "undo must not grow add");
+        assert_eq!(buffer.byte_len(), 50_000);
+        assert!(buffer.redo());
+        assert_eq!(buffer.byte_len(), 20);
+    }
+
+    #[test]
+    fn freed_nodes_are_recycled_across_edits() {
+        // Repeated insert/undo cycles must not grow the arena without bound.
+        let mut buffer = buffer("seed");
+        for _ in 0..200 {
+            buffer.insert(0, "ABCDE").expect("insert");
+            buffer.undo();
+        }
+        // A loose bound: a leak would push the arena into the thousands.
+        assert!(
+            buffer.nodes.len() < 64,
+            "arena grew to {}",
+            buffer.nodes.len()
+        );
+        assert_eq!(contents(&buffer), "seed");
+    }
+
+    #[test]
+    fn line_column_on_a_long_single_line_maps_via_tree_not_materialization() {
+        // One line, no '\n', spanning many original chunks, with an astral char
+        // so UTF-16 counting matters. The query must not assemble the line.
+        let head = "a".repeat(100_000);
+        let tail = "b".repeat(100_000);
+        let text = format!("{head}𝄞{tail}");
+        let buffer = buffer(&text);
+        assert_eq!(buffer.line_count(), 1);
+
+        // Column at the astral char's UTF-16 start (after `head`).
+        let at_astral = buffer
+            .position_for_line_column(0, 100_000)
+            .expect("position");
+        assert_eq!(at_astral.byte, head.len());
+        assert_eq!(at_astral.char, 100_000);
+
+        // A column past the end clamps to the content end (total UTF-16), and the
+        // astral char counts as two UTF-16 units.
+        let total_utf16 = 100_000 + 2 + 100_000;
+        let clamped = buffer
+            .position_for_line_column(0, usize::MAX)
+            .expect("clamped");
+        assert_eq!(clamped.utf16, total_utf16);
+        assert_eq!(clamped.byte, text.len());
+    }
+
+    #[test]
+    fn zero_chunk_size_does_not_stall_and_builds_correctly() {
+        // The chunk guard (`chunk.max(1)`) keeps `next_chunk_end` progressing.
+        let buffer = chunked("ab\ncd\n", 0);
+        assert_eq!(buffer.line_count(), 3);
+        assert_eq!(contents(&buffer), "ab\ncd\n");
+        assert_eq!(buffer.text_for_line_range(1, 1), "cd");
     }
 }

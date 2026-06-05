@@ -26,8 +26,11 @@ SKIP_MAC_BUILD="${LOCUS_PERF_SKIP_MAC_BUILD:-0}"
 # - generated workspace: 1,010 visible entries, avg 4.255 ms, max 5.688 ms
 # - core/target/release/libapp_ffi.a: 17,687,384 bytes
 # - .build/xcode-derived/Build/Products/Release/Locus.app: 648 KiB
-# - text buffer @256KB (release): open ~0.3 ms, scroll ~0.004 ms, edit ~1.4 ms/op
-#   (edit is O(n) on the interim engine; it drops sharply once the O(log n) tree lands)
+# - text buffer @256KB (release): open ~0.2 ms, scroll ~0.1 ms, edit ~0.05 ms/op
+#   (balanced piece tree: for normal-length lines, edit and scroll stay flat as
+#   total size grows — e.g. at 64 MB edit ~0.14 ms, scroll ~0.05 ms. Cost scales
+#   with the longest line in the viewport, not the file; only open is O(size)
+#   until mmap lands. This generated fixture uses short fixed-length lines.)
 # Defaults intentionally leave CI headroom while still catching obvious regressions.
 
 if [ -z "$WORKSPACE_DIR" ]; then
