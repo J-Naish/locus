@@ -104,17 +104,7 @@ direction explicitly changes.
 
 ## Performance, Weight, and Polish Rules
 
-Performance, lightweight behavior, and refined UX/UI are top-priority product qualities. Treat them as core requirements, not later polish.
-
-- Keep startup work minimal; do not eagerly scan, parse, index, thumbnail, hash, or preview large folders.
-- Load file lists, previews, metadata, thumbnails, and indexes lazily and incrementally.
-- Keep UI interactions responsive while background work is running.
-- Treat slow startup, unnecessary memory growth, avoidable disk churn, and dependency bloat as product bugs.
-- Measure before adding broad caching, background indexing, or complex abstractions.
-- Preserve a quiet, native, document-oriented interface; visual polish should make common work feel clearer and calmer, not more decorative.
-- Refine empty states, loading states, error states, and file handoff flows as part of implementation, not as cleanup.
-- Defer fine-grained UI affordances such as secondary keyboard shortcuts, menu polish, and convenience focus behavior until the main product flows they support are in place, unless the user explicitly asks for them or the feature would be awkward without them.
-- Do not accept technically correct UI that feels dense, developer-centric, sluggish, surprising, or unfinished.
+User experience is the top priority: Locus must feel comfortable, responsive, calm, and native to use. Judge performance, weight, and polish work by its effect on that experience — pursue an optimization when it makes the product feel better to use, not for its own sake.
 
 ## Coding Style
 
