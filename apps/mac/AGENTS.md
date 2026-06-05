@@ -6,7 +6,7 @@ Rules for the native macOS app, Swift, SwiftUI, CoreBridge, and Xcode project wo
 
 - Build a native macOS UI shell.
 - Keep raw C/FFI calls inside the bridge layer; do not spread them through SwiftUI views.
-- Keep UI-specific behavior in Swift unless it is truly cross-platform domain logic.
+- Keep UI-specific behavior in Swift. Move work into the Rust core only when it measurably improves performance, and keep what crosses the FFI boundary compact.
 - Use native OS capabilities for preview, file dialogs, metadata, and logging where practical.
 
 ## Xcode Commands

@@ -4,10 +4,10 @@ Rules for `core/`, including Rust crates, FFI, generated/exported headers, and c
 
 ## Scope
 
-- Shared behavior belongs in `app-core`.
+- Performance-sensitive, reusable logic belongs in `app-core`. The core exists primarily for speed and efficiency; cross-platform reuse is a secondary benefit.
 - C ABI and memory ownership boundaries belong in `app-ffi`.
 - Debugging and benchmark commands belong in `app-cli`.
-- UI-specific behavior does not belong in Rust unless it is truly cross-platform domain logic.
+- UI-specific behavior does not belong in Rust. Add logic to the core when it measurably improves performance, not by default, and only when results cross the FFI boundary as compact data rather than large copies.
 
 ## Rust Commands
 

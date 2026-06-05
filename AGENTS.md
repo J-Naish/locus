@@ -68,8 +68,8 @@ Before making product or architecture decisions, read the relevant docs:
 - Build native UI shells per platform.
 - For Apple platform UI, stay as close as practical to native SwiftUI and
   AppKit patterns before introducing custom chrome or custom-drawn controls.
-- Put shared, testable behavior in Rust core.
-- Keep UI-specific behavior out of Rust unless it is truly cross-platform domain logic.
+- Put performance-sensitive, testable logic in the Rust core. The core exists primarily for speed and efficiency; cross-platform reuse is a secondary benefit.
+- Keep UI-specific behavior in the native app. Move work into the Rust core when it measurably improves performance, not by default, and only when it can cross the FFI boundary as compact data rather than large copies.
 - Use thin platform-specific bridges around the core; do not spread low-level integration details through UI code.
 - Use SQLite for boring, inspectable local persistence unless there is a clear reason not to.
 - Prefer simple native OS capabilities over bundled runtimes, heavy dependencies, or custom infrastructure.
