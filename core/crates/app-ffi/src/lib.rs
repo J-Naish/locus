@@ -11,6 +11,7 @@ use app_core::workspace::{
     WorkspaceListOptions,
 };
 
+mod mmap;
 pub mod text_buffer;
 
 pub const ABI_VERSION: u32 = 2;

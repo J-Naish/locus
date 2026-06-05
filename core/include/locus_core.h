@@ -293,6 +293,11 @@ typedef struct LocusTextSnapshot LocusTextSnapshot;
  * file returns LOCUS_TEXT_STATUS_NOT_UTF8 so the caller can decode the bytes
  * itself and use locus_text_buffer_open_bytes.
  *
+ * Large files are memory-mapped read-only rather than copied onto the heap. As
+ * a result, if such a file is truncated or replaced by another process while
+ * the buffer is open, accessing it may fault; pair this with a file-change
+ * monitor that reloads on external edits.
+ *
  * Ownership: on LOCUS_STATUS_OK, writes a Rust-owned buffer to *out_buffer that
  * the caller releases exactly once with locus_text_buffer_free.
  */
