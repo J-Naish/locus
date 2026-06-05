@@ -138,9 +138,9 @@ final class TextDocumentStoreTests: XCTestCase {
     }
   }
 
-  func testRejectsOversizedTextDocumentBeforeLoadingContents() async throws {
-    let url = try temporaryFile(named: "large-unknown", byteCount: 16 * 1024 * 1024 + 1)
-    let store = TextDocumentStore()
+  func testRejectsTextDocumentLargerThanCapBeforeLoadingContents() async throws {
+    let url = try temporaryFile(named: "large-unknown", byteCount: 9)
+    let store = TextDocumentStore(maximumLoadedTextByteCount: 8)
 
     do {
       _ = try await store.loadText(at: url)
@@ -150,6 +150,20 @@ final class TextDocumentStoreTests: XCTestCase {
     } catch {
       XCTFail("Expected fileTooLarge, got \(error)")
     }
+  }
+
+  func testLoadsTextDocumentAtExactlyTheCap() async throws {
+    let url = try temporaryFile(named: "at-cap.txt", contents: "abcdefgh")
+    let store = TextDocumentStore(maximumLoadedTextByteCount: 8)
+
+    let text = try await store.loadText(at: url)
+
+    XCTAssertEqual(text.text, "abcdefgh")
+  }
+
+  func testDefaultMaximumLoadedTextByteCountIsSixtyFourMegabytes() {
+    XCTAssertEqual(TextDocumentStore.defaultMaximumLoadedTextByteCount, 64 * 1024 * 1024)
+    XCTAssertEqual(TextDocumentStore().maximumLoadedTextByteCount, 64 * 1024 * 1024)
   }
 
   private func temporaryFile(named name: String, contents: String) throws -> URL {

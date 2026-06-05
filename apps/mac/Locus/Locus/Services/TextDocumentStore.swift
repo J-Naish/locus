@@ -11,11 +11,23 @@ protocol TextDocumentStoring: Sendable {
 }
 
 struct TextDocumentStore: TextDocumentStoring {
+  static let defaultMaximumLoadedTextByteCount = 64 * 1024 * 1024
+
+  /// The largest file (in bytes) Locus loads as an editable text document.
+  /// Files above this fail with `fileTooLarge`. Injectable so tests can exercise
+  /// the boundary without writing large fixtures.
+  let maximumLoadedTextByteCount: Int
+
+  init(maximumLoadedTextByteCount: Int = TextDocumentStore.defaultMaximumLoadedTextByteCount) {
+    self.maximumLoadedTextByteCount = maximumLoadedTextByteCount
+  }
+
   /// The current app is unsandboxed, so most calls return `false` here.
   /// Keeping access balanced in this boundary makes later bookmark-backed
   /// document loading explicit instead of scattering scope calls in views.
   func loadText(at url: URL) async throws -> TextDocument {
-    try await Task.detached(priority: .userInitiated) {
+    let maximumByteCount = maximumLoadedTextByteCount
+    return try await Task.detached(priority: .userInitiated) {
       let didStartAccess = url.startAccessingSecurityScopedResource()
       defer {
         if didStartAccess {
@@ -24,7 +36,7 @@ struct TextDocumentStore: TextDocumentStoring {
       }
 
       let fileSize = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize
-      if let fileSize, fileSize > TextDocumentStore.maximumLoadedTextByteCount {
+      if let fileSize, fileSize > maximumByteCount {
         throw TextDocumentStoreError.fileTooLarge
       }
 
@@ -121,8 +133,6 @@ struct TextDocumentStore: TextDocumentStoring {
     .shiftJIS,
     .isoLatin1,
   ]
-
-  private static let maximumLoadedTextByteCount = 16 * 1024 * 1024
 }
 
 enum TextDocumentStoreError: LocalizedError {
