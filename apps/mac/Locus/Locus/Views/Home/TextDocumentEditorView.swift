@@ -482,10 +482,10 @@ final class TextLineNumberGutterView: NSView {
 }
 
 enum TextLineNumberLayout {
-  static let leadingPadding: CGFloat = 6
-  static let trailingPadding: CGFloat = 10
+  // Gutter geometry is shared with the large-file viewer via `GutterMetrics`.
+  static let leadingPadding = GutterMetrics.leadingPadding
+  static let trailingPadding = GutterMetrics.trailingPadding
   static let maximumLineNumberedUTF16Length = 200_000
-  private static let minimumGutterWidth: CGFloat = 42
 
   static func shouldShowLineNumbers(
     syntax: TextDocumentSyntax,
@@ -549,10 +549,7 @@ enum TextLineNumberLayout {
   }
 
   static func gutterWidth(lineCount: Int, font: NSFont) -> CGFloat {
-    let digitCount = max(2, String(max(1, lineCount)).count)
-    let sample = String(repeating: "8", count: digitCount) as NSString
-    let digitWidth = sample.size(withAttributes: [.font: font]).width
-    return ceil(max(minimumGutterWidth, leadingPadding + digitWidth + trailingPadding))
+    GutterMetrics.width(lineCount: lineCount, font: font)
   }
 
   static func editCanChangeLineStarts(
@@ -616,7 +613,7 @@ final class FocusReportingTextView: NSTextView {
 
 extension TextDocumentSyntax {
   fileprivate static var lineNumberFont: NSFont {
-    .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+    GutterMetrics.lineNumberFont
   }
 
   var supportsLineNumbers: Bool {

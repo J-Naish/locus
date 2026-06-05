@@ -12,6 +12,7 @@
 		1A0000010000000000000002 /* CoreBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000012 /* CoreBridge.swift */; };
 		1A00000100000000000000E2 /* TextBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000E3 /* TextBuffer.swift */; };
 		1A00000100000000000000E6 /* VirtualizedTextDocumentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000E7 /* VirtualizedTextDocumentView.swift */; };
+		1A00000100000000000000EA /* GutterMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000EB /* GutterMetrics.swift */; };
 		1A0000010000000000000078 /* EmptyWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000079 /* EmptyWorkspaceView.swift */; };
 		1A0000010000000000000003 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000013 /* HomeView.swift */; };
 		1A0000010000000000000004 /* CoreBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000014 /* CoreBridgeTests.swift */; };
@@ -102,6 +103,7 @@
 		1A0000010000000000000012 /* CoreBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreBridge.swift; sourceTree = "<group>"; };
 		1A00000100000000000000E3 /* TextBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextBuffer.swift; sourceTree = "<group>"; };
 		1A00000100000000000000E7 /* VirtualizedTextDocumentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualizedTextDocumentView.swift; sourceTree = "<group>"; };
+		1A00000100000000000000EB /* GutterMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GutterMetrics.swift; sourceTree = "<group>"; };
 		1A0000010000000000000079 /* EmptyWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyWorkspaceView.swift; sourceTree = "<group>"; };
 		1A0000010000000000000013 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		1A0000010000000000000014 /* CoreBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreBridgeTests.swift; sourceTree = "<group>"; };
@@ -323,6 +325,7 @@
 				1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */,
 				1A0000010000000000000099 /* WorkspaceDocumentSurface.swift */,
 				1A00000100000000000000E7 /* VirtualizedTextDocumentView.swift */,
+				1A00000100000000000000EB /* GutterMetrics.swift */,
 				1A00000100000000000000CB /* WorkspaceEntryPresentation.swift */,
 				1A0000010000000000000065 /* WorkspaceEntryOpenAction.swift */,
 				1A000001000000000000006F /* WorkspaceEntryPathCopy.swift */,
@@ -519,6 +522,7 @@
 				1A000001000000000000008A /* WorkspaceDirectoryMonitor.swift in Sources */,
 				1A0000010000000000000098 /* WorkspaceDocumentSurface.swift in Sources */,
 				1A00000100000000000000E6 /* VirtualizedTextDocumentView.swift in Sources */,
+				1A00000100000000000000EA /* GutterMetrics.swift in Sources */,
 				1A0000010000000000000064 /* WorkspaceEntryOpenAction.swift in Sources */,
 				1A000001000000000000006E /* WorkspaceEntryPathCopy.swift in Sources */,
 				1A00000100000000000000C4 /* WorkspaceItemCreation.swift in Sources */,

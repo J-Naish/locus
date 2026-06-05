@@ -99,4 +99,20 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertNotNil(color)
     XCTAssertNotEqual(color, NSColor.labelColor)
   }
+
+  @MainActor
+  func testGutterWidthHasAMinimumForSmallFiles() {
+    let font = GutterMetrics.lineNumberFont
+    XCTAssertEqual(GutterMetrics.width(lineCount: 1, font: font), GutterMetrics.minimumWidth)
+    XCTAssertEqual(GutterMetrics.width(lineCount: 9, font: font), GutterMetrics.minimumWidth)
+  }
+
+  @MainActor
+  func testGutterWidthGrowsWithDigitCount() {
+    let font = GutterMetrics.lineNumberFont
+    XCTAssertGreaterThan(
+      GutterMetrics.width(lineCount: 1_000_000, font: font),
+      GutterMetrics.width(lineCount: 1, font: font)
+    )
+  }
 }
