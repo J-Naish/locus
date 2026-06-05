@@ -32,6 +32,10 @@ struct TextDocumentEditorView: NSViewRepresentable {
     textView.minSize = .zero
     textView.maxSize = NSSize(
       width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+    // Lay out only the visible region; the text view grows its own height
+    // lazily as TextKit lays out fragments. This is what keeps large files
+    // responsive on open and while scrolling.
+    textView.layoutManager?.allowsNonContiguousLayout = true
     textView.autoresizingMask = [.width]
     textView.frame = NSRect(x: 0, y: 0, width: 1, height: 0)
     textView.setAccessibilityIdentifier("document-text-editor")
@@ -314,31 +318,20 @@ final class TextDocumentEditorContainerView: NSView {
   override func layout() {
     super.layout()
 
+    // Match the text view width to the clip view and keep a short document
+    // filling the viewport via minSize. Height is owned by the vertically
+    // resizable text view, which grows it lazily as TextKit lays out the
+    // visible region. Forcing full-document layout here (ensureLayout/usedRect)
+    // would defeat lazy layout and stall on large files.
     let contentWidth = max(1, scrollView.contentSize.width)
     let contentHeight = max(1, scrollView.contentSize.height)
-    let documentHeight = textDocumentHeight(minimumHeight: contentHeight)
-    let targetSize = NSSize(width: contentWidth, height: documentHeight)
-    if textView.frame.size != targetSize {
-      textView.setFrameSize(targetSize)
-      textView.textContainer?.containerSize = NSSize(
-        width: contentWidth,
-        height: CGFloat.greatestFiniteMagnitude
-      )
-    }
-  }
 
-  private func textDocumentHeight(minimumHeight: CGFloat) -> CGFloat {
-    guard let layoutManager = textView.layoutManager,
-      let textContainer = textView.textContainer
-    else {
-      return minimumHeight
+    if textView.frame.width != contentWidth {
+      textView.setFrameSize(NSSize(width: contentWidth, height: textView.frame.height))
     }
-
-    layoutManager.ensureLayout(for: textContainer)
-    let usedHeight =
-      layoutManager.usedRect(for: textContainer).height
-      + (textView.textContainerInset.height * 2)
-    return max(minimumHeight, ceil(usedHeight))
+    if textView.minSize.height != contentHeight {
+      textView.minSize.height = contentHeight
+    }
   }
 
   @available(*, unavailable)
