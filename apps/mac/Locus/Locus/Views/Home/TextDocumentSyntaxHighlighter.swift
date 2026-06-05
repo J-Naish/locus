@@ -18,9 +18,12 @@ enum TextDocumentSyntax: Equatable {
 }
 
 enum TextDocumentSyntaxHighlighter {
-  // Full-document highlighting is intentionally disabled above this size.
-  // Large files remain editable with base text styling instead of doing broad
-  // regex work on the main thread.
+  // Rule highlighting is skipped when the text passed to a *single* `apply`
+  // call exceeds this size, to avoid broad regex work on the main thread. This
+  // is a per-call limit on the supplied `text`, not on the whole document: the
+  // editable path passes the entire document (so large files fall back to base
+  // styling), while the large-file viewer passes one visible line at a time (so
+  // it stays highlighted regardless of total file size).
   static let maximumHighlightedUTF16Length = 200_000
 
   static func apply(
@@ -37,8 +40,11 @@ enum TextDocumentSyntaxHighlighter {
     apply(to: textStorage, text: text, syntax: syntax, font: font, range: fullRange)
   }
 
+  // Accepts any `NSMutableAttributedString` (an `NSTextStorage` is one) so the
+  // editable path can style its storage and the large-file viewer can style a
+  // throwaway per-band string with the same rules.
   static func apply(
-    to textStorage: NSTextStorage,
+    to textStorage: NSMutableAttributedString,
     text: String,
     syntax: TextDocumentSyntax,
     font: NSFont,
@@ -86,7 +92,7 @@ enum TextDocumentSyntaxHighlighter {
   }
 
   private static func highlightMarkdown(
-    _ text: String, in textStorage: NSTextStorage, range: NSRange
+    _ text: String, in textStorage: NSMutableAttributedString, range: NSRange
   ) {
     apply(rule: .markdownHeading, text: text, textStorage: textStorage, range: range)
     apply(rule: .markdownInlineCode, text: text, textStorage: textStorage, range: range)
@@ -95,7 +101,7 @@ enum TextDocumentSyntaxHighlighter {
   }
 
   private static func highlightStructuredText(
-    _ text: String, in textStorage: NSTextStorage, range: NSRange
+    _ text: String, in textStorage: NSMutableAttributedString, range: NSRange
   ) {
     apply(rule: .structuredKey, text: text, textStorage: textStorage, range: range)
     apply(rule: .structuredString, text: text, textStorage: textStorage, range: range)
@@ -103,7 +109,9 @@ enum TextDocumentSyntaxHighlighter {
     apply(rule: .structuredBoolean, text: text, textStorage: textStorage, range: range)
   }
 
-  private static func highlightCode(_ text: String, in textStorage: NSTextStorage, range: NSRange) {
+  private static func highlightCode(
+    _ text: String, in textStorage: NSMutableAttributedString, range: NSRange
+  ) {
     apply(rule: .codeComment, text: text, textStorage: textStorage, range: range)
     apply(rule: .codeString, text: text, textStorage: textStorage, range: range)
     apply(rule: .codeKeyword, text: text, textStorage: textStorage, range: range)
@@ -112,7 +120,7 @@ enum TextDocumentSyntaxHighlighter {
   private static func apply(
     rule: TextHighlightRule,
     text: String,
-    textStorage: NSTextStorage,
+    textStorage: NSMutableAttributedString,
     range: NSRange
   ) {
     for match in rule.expression.matches(in: text, range: range) {

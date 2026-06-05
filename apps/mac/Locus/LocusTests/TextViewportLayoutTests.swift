@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 
 @testable import Locus
@@ -77,5 +78,25 @@ final class TextViewportLayoutTests: XCTestCase {
       VirtualizedTextDocumentView.failureMessage(for: error),
       error.localizedDescription
     )
+  }
+
+  @MainActor
+  func testHighlighterStylesAPlainMutableAttributedString() {
+    // The band viewer highlights a throwaway NSMutableAttributedString rather
+    // than an NSTextStorage; verify that generalized entry point colors a token.
+    let source = "let x = 1"
+    let attributed = NSMutableAttributedString(string: source)
+    let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    TextDocumentSyntaxHighlighter.apply(
+      to: attributed,
+      text: source,
+      syntax: .code,
+      font: font,
+      range: NSRange(location: 0, length: (source as NSString).length)
+    )
+    // "let" is a keyword, so the first character is no longer the base color.
+    let color = attributed.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+    XCTAssertNotNil(color)
+    XCTAssertNotEqual(color, NSColor.labelColor)
   }
 }

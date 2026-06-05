@@ -44,25 +44,26 @@ final class LineRenderingTextView: NSView {
   private let lineNumberFont: NSFont
   private let layout: TextViewportLayout
   private let horizontalPadding: CGFloat = 8
-  private let textColor: NSColor = .textColor
   private let backgroundColor: NSColor = .textBackgroundColor
   private let lineNumberColor: NSColor = .secondaryLabelColor
   private let gutterSeparatorColor: NSColor = .separatorColor
-  /// Whether to draw the line-number gutter. Driven by the syntax's line-number
-  /// support. Unlike the editable path there is no large-document cutoff: the
-  /// editor hides numbers past ~200K characters only because it indexes the
-  /// whole string, whereas this gutter renders just the visible band.
-  var showsLineNumbers = false {
+  /// The document's syntax. It drives both line-number visibility (via the
+  /// syntax's own support policy) and per-band highlighting. Unlike the editable
+  /// path there is no large-document cutoff: the editor stops at ~200K
+  /// characters only because it styles/indexes the whole string, whereas this
+  /// view works one visible band at a time.
+  var syntax: TextDocumentSyntax = .plainText {
     didSet {
-      guard showsLineNumbers != oldValue else { return }
+      guard syntax != oldValue else { return }
+      cachedBand = nil
       recomputeGutterWidth()
       needsDisplay = true
     }
   }
-  /// Width of the line-number gutter, recomputed when the buffer or
-  /// `showsLineNumbers` changes. The gutter scrolls vertically with its lines
-  /// (it is drawn in the document view's left margin) and stays at the left edge
-  /// because the view does not scroll horizontally yet.
+  /// Width of the line-number gutter, recomputed when the buffer or `syntax`
+  /// changes. The gutter scrolls vertically with its lines (it is drawn in the
+  /// document view's left margin) and stays at the left edge because the view
+  /// does not scroll horizontally yet.
   private var gutterWidth: CGFloat = 0
 
   // Gutter geometry, kept local so the viewer does not depend on the editor's
@@ -73,10 +74,11 @@ final class LineRenderingTextView: NSView {
   /// Without horizontal scrolling, only the start of a line is ever visible, so
   /// a pathologically long line is truncated before layout to bound draw cost.
   private let maximumDrawnCharactersPerLine = 5_000
-  /// One-entry cache of the last fetched band so repeated draws of the same
-  /// range (overlapping dirty rects, redraws without scrolling) skip the FFI
-  /// fetch. Keyed by revision so any future edit invalidates it.
-  private var cachedBand: (revision: UInt64, range: Range<Int>, lines: [String])?
+  /// One-entry cache of the last band's highlighted lines so repeated draws of
+  /// the same range (overlapping dirty rects, redraws without scrolling) skip
+  /// both the FFI fetch and the regex highlighting. Keyed by revision so any
+  /// future edit invalidates it.
+  private var cachedBand: (revision: UInt64, range: Range<Int>, lines: [NSAttributedString])?
 
   init() {
     let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -110,7 +112,7 @@ final class LineRenderingTextView: NSView {
   }
 
   private func recomputeGutterWidth() {
-    guard showsLineNumbers, let buffer else {
+    guard syntax.supportsLineNumbers, let buffer else {
       gutterWidth = 0
       return
     }
@@ -124,19 +126,49 @@ final class LineRenderingTextView: NSView {
     return ceil(max(minimumGutterWidth, gutterLeadingPadding + digitWidth + gutterTrailingPadding))
   }
 
-  /// Returns the visible band's line contents, reusing the cache when the same
-  /// `(revision, range)` is requested again.
-  private func bandLines(for buffer: TextBuffer, range: Range<Int>) -> [String] {
+  /// Returns the visible band's lines, already highlighted, reusing the cache
+  /// when the same `(revision, range)` is requested again.
+  private func attributedBandLines(for buffer: TextBuffer, range: Range<Int>)
+    -> [NSAttributedString]
+  {
     let revision = buffer.revision
     if let cachedBand, cachedBand.revision == revision, cachedBand.range == range {
       return cachedBand.lines
     }
+    // Fetch + highlight runs synchronously on each new band. The work is bounded
+    // by the visible band (a screenful of lines) and the per-line cap, so it is
+    // small for normal text; on-device profiling is the acceptance gate, and the
+    // fallbacks if it ever hitches are base-only styling or async highlighting.
+    //
     // `text(forLineRange:)` joins the requested lines with "\n" (terminators
     // stripped), so splitting on "\n" recovers exactly `range.count` lines.
     let lines = buffer.text(forLineRange: range.lowerBound, count: range.count)
       .components(separatedBy: "\n")
+      .map(highlightedLine)
     cachedBand = (revision, range, lines)
     return lines
+  }
+
+  /// Builds a highlighted, draw-ready line: only the start is laid out (no
+  /// horizontal scrolling yet), syntax rules supply colors, and the font is
+  /// forced uniform afterwards so a styled token cannot change the line height.
+  ///
+  /// The cap bounds layout, highlighting, and drawing — but it is applied after
+  /// the line already crossed the FFI boundary as a full Swift `String`. A file
+  /// that is one enormous line (e.g. minified JSON) therefore still materializes
+  /// that line per fetch. Closing that hole needs a capped per-line read in the
+  /// Rust core; it is the next slice, paired with horizontal scrolling.
+  private func highlightedLine(_ line: String) -> NSAttributedString {
+    let visible =
+      line.count > maximumDrawnCharactersPerLine
+      ? String(line.prefix(maximumDrawnCharactersPerLine))
+      : line
+    let attributed = NSMutableAttributedString(string: visible)
+    let fullRange = NSRange(location: 0, length: (visible as NSString).length)
+    TextDocumentSyntaxHighlighter.apply(
+      to: attributed, text: visible, syntax: syntax, font: font, range: fullRange)
+    attributed.addAttribute(.font, value: font, range: fullRange)
+    return attributed
   }
 
   /// Resizes the document height to the current line count. Width is left to the
@@ -171,18 +203,14 @@ final class LineRenderingTextView: NSView {
       separator.stroke()
     }
 
-    let lines = bandLines(for: buffer, range: range)
+    let lines = attributedBandLines(for: buffer, range: range)
     let textOriginX = gutterWidth + horizontalPadding
     let textWidth = max(bounds.width - textOriginX - horizontalPadding, 0)
-    let textAttributes: [NSAttributedString.Key: Any] = [
-      .font: font,
-      .foregroundColor: textColor,
-    ]
     let numberAttributes: [NSAttributedString.Key: Any] = [
       .font: lineNumberFont,
       .foregroundColor: lineNumberColor,
     ]
-    for (offset, line) in lines.enumerated() {
+    for (offset, attributedLine) in lines.enumerated() {
       let lineIndex = range.lowerBound + offset
       let y = layout.yOffset(forLine: lineIndex)
 
@@ -201,16 +229,9 @@ final class LineRenderingTextView: NSView {
         )
       }
 
-      // Only the line's start is visible without horizontal scrolling; cap the
-      // laid-out text so one very long line cannot stall drawing.
-      let visible =
-        line.count > maximumDrawnCharactersPerLine
-        ? String(line.prefix(maximumDrawnCharactersPerLine))
-        : line
-      let attributed = NSAttributedString(string: visible, attributes: textAttributes)
-      // `.usesLineFragmentOrigin` makes the rect origin the line's top-left,
-      // which is what we want in a flipped view.
-      attributed.draw(
+      // The line is already highlighted and capped; `.usesLineFragmentOrigin`
+      // makes the rect origin its top-left, which is what we want when flipped.
+      attributedLine.draw(
         with: NSRect(x: textOriginX, y: y, width: textWidth, height: layout.lineHeight),
         options: [.usesLineFragmentOrigin]
       )
@@ -222,7 +243,7 @@ final class LineRenderingTextView: NSView {
 struct LargeTextViewport: NSViewRepresentable {
   let buffer: TextBuffer
   let accessibilityLabel: String
-  let showsLineNumbers: Bool
+  let syntax: TextDocumentSyntax
 
   func makeNSView(context: Context) -> NSScrollView {
     let scrollView = NSScrollView()
@@ -242,7 +263,7 @@ struct LargeTextViewport: NSViewRepresentable {
     scrollView.documentView = documentView
     documentView.setFrameSize(NSSize(width: scrollView.contentSize.width, height: 0))
     // Set before the buffer so the gutter width is computed on the first layout.
-    documentView.showsLineNumbers = showsLineNumbers
+    documentView.syntax = syntax
     documentView.setBuffer(buffer)
 
     context.coordinator.documentView = documentView
@@ -254,7 +275,7 @@ struct LargeTextViewport: NSViewRepresentable {
       return
     }
     documentView.setAccessibilityLabel(accessibilityLabel)
-    documentView.showsLineNumbers = showsLineNumbers
+    documentView.syntax = syntax
     // A new buffer (e.g. after an external-change reload) replaces the content.
     if documentView.buffer !== buffer {
       documentView.setBuffer(buffer)
@@ -277,7 +298,7 @@ struct LargeTextViewport: NSViewRepresentable {
 struct VirtualizedTextDocumentView: View {
   let url: URL
   let accessibilityLabel: String
-  let showsLineNumbers: Bool
+  let syntax: TextDocumentSyntax
   /// Changing this (e.g. on external file change) re-opens the buffer.
   let reloadToken: Int
 
@@ -300,7 +321,7 @@ struct VirtualizedTextDocumentView: View {
         LargeTextViewport(
           buffer: buffer,
           accessibilityLabel: accessibilityLabel,
-          showsLineNumbers: showsLineNumbers
+          syntax: syntax
         )
       case .failed(let message):
         ContentUnavailableView {
