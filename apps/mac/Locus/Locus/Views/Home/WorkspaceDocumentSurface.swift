@@ -142,6 +142,12 @@ struct WorkspaceDocumentSurface: View {
             isEditorFocused = isFocused
           }
         )
+      case .tooLargeForEditing(let url):
+        VirtualizedTextDocumentView(
+          url: url,
+          accessibilityLabel: "\(entry.name) text",
+          reloadToken: documentReloadGeneration
+        )
       }
     }
   }
@@ -188,6 +194,14 @@ struct WorkspaceDocumentSurface: View {
       }
 
       applyLoadedTextDocument(document, fingerprint: fingerprint)
+    } catch TextDocumentStoreError.fileTooLarge {
+      guard self.entry?.id == entry.id else {
+        return
+      }
+      // Too large to edit as a string: open it read-only in the virtualized
+      // viewer, which streams the visible band from the Rust buffer.
+      knownDocumentFingerprint = await DocumentFileFingerprint.load(at: entry.url)
+      loadState = .tooLargeForEditing(entry.url)
     } catch {
       guard self.entry?.id == entry.id else {
         return
@@ -328,7 +342,12 @@ extension WorkspaceDocumentSurface {
       return
     }
 
-    if WorkspaceTextDocumentSupport.canEdit(entry) {
+    if case .tooLargeForEditing = loadState {
+      // Read-only large viewer: reopen it on a fresh memory map rather than
+      // running the editable string load (which would just fail as too large).
+      knownDocumentFingerprint = fingerprint
+      documentReloadGeneration &+= 1
+    } else if WorkspaceTextDocumentSupport.canEdit(entry) {
       await syncTextDocumentFromDisk(entry, fingerprint: fingerprint)
     } else {
       knownDocumentFingerprint = fingerprint
@@ -374,6 +393,9 @@ private enum TextDocumentLoadState: Equatable {
   case empty
   case loading
   case loaded
+  /// The file exceeds the editable-string size limit; it is shown read-only in
+  /// the virtualized viewer instead, opened by URL.
+  case tooLargeForEditing(URL)
   case failed(String)
 }
 
