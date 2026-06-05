@@ -10,7 +10,7 @@
 //! file is not copied onto the heap) and reads smaller files normally, behind
 //! `app_core`'s `ContentBytes` seam and with no ABI change.
 
-use std::ffi::{c_char, CString};
+use std::ffi::c_char;
 
 use app_core::text_buffer::{Position, TextBuffer, TextBufferError};
 
@@ -19,10 +19,7 @@ use crate::mmap::MmapBytes;
 #[cfg(unix)]
 use std::path::Path;
 
-use crate::{
-    clear_last_error_message, sanitized_cstring, set_last_error_message, string_from_c_str,
-    LOCUS_STATUS_OK,
-};
+use crate::{clear_last_error_message, set_last_error_message, string_from_c_str, LOCUS_STATUS_OK};
 
 // Status codes, offset from the workspace band (0..=6) so they never collide.
 pub const LOCUS_TEXT_STATUS_INVALID_ARGUMENT: u32 = 100;
@@ -48,10 +45,12 @@ pub struct LocusTextBuffer {
     buffer: TextBuffer,
 }
 
-/// Opaque Rust-owned snapshot of a line range's text. The text pointer is
-/// borrowed and is invalidated by `locus_text_snapshot_free`.
+/// Opaque Rust-owned snapshot of a line range's text. The text is length-counted
+/// (not NUL-terminated) raw UTF-8, so an embedded NUL in the document is
+/// preserved; the pointer is borrowed and invalidated by
+/// `locus_text_snapshot_free`.
 pub struct LocusTextSnapshot {
-    text: CString,
+    text: Box<[u8]>,
     first_line: usize,
     line_count: usize,
 }
@@ -334,6 +333,54 @@ pub unsafe extern "C" fn locus_text_buffer_snapshot_line_range(
     count: usize,
     out_snapshot: *mut *mut LocusTextSnapshot,
 ) -> u32 {
+    // SAFETY: forwards the caller's pointers unchanged; see the impl's contract.
+    unsafe { snapshot_line_range_impl(buffer, start_line, count, None, out_snapshot) }
+}
+
+/// Like `locus_text_buffer_snapshot_line_range`, but returns at most
+/// `max_bytes_per_line` bytes of any one line's content, so a file that is one
+/// enormous line does not materialize that whole line. A viewer passes a cap
+/// comfortably larger than what it can display.
+///
+/// # Safety
+///
+/// `buffer` must be NULL or a live handle. `out_snapshot` must point to
+/// caller-owned writable storage for a `*mut LocusTextSnapshot`; on success the
+/// caller releases it with `locus_text_snapshot_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_snapshot_line_range_capped(
+    buffer: *const LocusTextBuffer,
+    start_line: usize,
+    count: usize,
+    max_bytes_per_line: usize,
+    out_snapshot: *mut *mut LocusTextSnapshot,
+) -> u32 {
+    // SAFETY: forwards the caller's pointers unchanged; see the impl's contract.
+    unsafe {
+        snapshot_line_range_impl(
+            buffer,
+            start_line,
+            count,
+            Some(max_bytes_per_line),
+            out_snapshot,
+        )
+    }
+}
+
+/// Shared body for the snapshot reads. `max_bytes_per_line` selects the capped
+/// read when `Some`.
+///
+/// # Safety
+///
+/// `buffer` must be NULL or a live handle. `out_snapshot` must point to
+/// caller-owned writable storage for a `*mut LocusTextSnapshot`.
+unsafe fn snapshot_line_range_impl(
+    buffer: *const LocusTextBuffer,
+    start_line: usize,
+    count: usize,
+    max_bytes_per_line: Option<usize>,
+    out_snapshot: *mut *mut LocusTextSnapshot,
+) -> u32 {
     clear_last_error_message();
     if out_snapshot.is_null() {
         set_last_error_message("out_snapshot must not be NULL");
@@ -351,14 +398,21 @@ pub unsafe extern "C" fn locus_text_buffer_snapshot_line_range(
     };
 
     let total = handle.buffer.line_count();
-    let text = handle.buffer.text_for_line_range(start_line, count);
+    let text = match max_bytes_per_line {
+        Some(cap) => handle
+            .buffer
+            .text_for_line_range_capped(start_line, count, cap),
+        None => handle.buffer.text_for_line_range(start_line, count),
+    };
     let returned = if start_line >= total {
         0
     } else {
         count.min(total - start_line)
     };
     let snapshot = LocusTextSnapshot {
-        text: sanitized_cstring(&text),
+        // Length-counted raw UTF-8; an embedded NUL stays intact (unlike a
+        // sanitized C string), matching the buffer's truth source.
+        text: text.into_bytes().into_boxed_slice(),
         first_line: start_line.min(total),
         line_count: returned,
     };
@@ -379,7 +433,7 @@ pub unsafe extern "C" fn locus_text_snapshot_text(
 ) -> *const c_char {
     // SAFETY: snapshot is NULL or a live handle the caller still owns.
     match unsafe { snapshot.as_ref() } {
-        Some(snapshot) => snapshot.text.as_ptr(),
+        Some(snapshot) => snapshot.text.as_ptr().cast::<c_char>(),
         None => std::ptr::null(),
     }
 }
@@ -392,7 +446,7 @@ pub unsafe extern "C" fn locus_text_snapshot_byte_length(
 ) -> usize {
     // SAFETY: snapshot is NULL or a live handle the caller still owns.
     match unsafe { snapshot.as_ref() } {
-        Some(snapshot) => snapshot.text.as_bytes().len(),
+        Some(snapshot) => snapshot.text.len(),
         None => 0,
     }
 }
@@ -681,18 +735,21 @@ mod tests {
         handle
     }
 
+    /// Reads a snapshot length-counted (it is not NUL-terminated), returning the
+    /// raw bytes so an embedded NUL is observable.
+    fn snapshot_bytes(snapshot: *mut LocusTextSnapshot) -> Vec<u8> {
+        let ptr = unsafe { locus_text_snapshot_text(snapshot) };
+        let len = unsafe { locus_text_snapshot_byte_length(snapshot) };
+        unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) }.to_vec()
+    }
+
     fn snapshot_all(handle: *mut LocusTextBuffer) -> String {
         let line_count = unsafe { locus_text_buffer_line_count(handle) };
         let mut snapshot: *mut LocusTextSnapshot = ptr::null_mut();
         let status =
             unsafe { locus_text_buffer_snapshot_line_range(handle, 0, line_count, &mut snapshot) };
         assert_eq!(status, LOCUS_STATUS_OK);
-        let text = unsafe {
-            std::ffi::CStr::from_ptr(locus_text_snapshot_text(snapshot))
-                .to_str()
-                .unwrap()
-                .to_owned()
-        };
+        let text = String::from_utf8(snapshot_bytes(snapshot)).unwrap();
         unsafe { locus_text_snapshot_free(snapshot) };
         text
     }
@@ -704,6 +761,36 @@ mod tests {
         assert_eq!(unsafe { locus_text_buffer_byte_length(handle) }, 6);
         assert_eq!(unsafe { locus_text_buffer_utf16_length(handle) }, 6);
         assert_eq!(snapshot_all(handle), "ab\ncde");
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn capped_snapshot_truncates_long_lines() {
+        let long = "x".repeat(5_000);
+        let handle = open(&format!("a\n{long}\nb"));
+        let mut snapshot: *mut LocusTextSnapshot = ptr::null_mut();
+        let status =
+            unsafe { locus_text_buffer_snapshot_line_range_capped(handle, 0, 3, 5, &mut snapshot) };
+        assert_eq!(status, LOCUS_STATUS_OK);
+        assert_eq!(snapshot_bytes(snapshot), b"a\nxxxxx\nb");
+        unsafe { locus_text_snapshot_free(snapshot) };
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn snapshot_preserves_embedded_nul() {
+        // A NUL is valid UTF-8 and the buffer keeps it; the length-counted
+        // snapshot must not sanitize it away (it is not a C string).
+        let bytes = b"a\0b";
+        let mut handle: *mut LocusTextBuffer = ptr::null_mut();
+        let status =
+            unsafe { locus_text_buffer_open_bytes(bytes.as_ptr(), bytes.len(), &mut handle) };
+        assert_eq!(status, LOCUS_STATUS_OK);
+        let mut snapshot: *mut LocusTextSnapshot = ptr::null_mut();
+        let status = unsafe { locus_text_buffer_snapshot_line_range(handle, 0, 1, &mut snapshot) };
+        assert_eq!(status, LOCUS_STATUS_OK);
+        assert_eq!(snapshot_bytes(snapshot), b"a\0b");
+        unsafe { locus_text_snapshot_free(snapshot) };
         unsafe { locus_text_buffer_free(handle) };
     }
 
@@ -972,11 +1059,11 @@ mod tests {
     }
 
     #[test]
-    fn embedded_nul_is_sanitized_in_snapshot_text() {
-        // NUL is valid UTF-8 content, but cannot cross as a C string, so the
-        // snapshot replaces it with U+FFFD.
+    fn embedded_nul_is_preserved_in_snapshot_text() {
+        // NUL is valid UTF-8 content; the length-counted snapshot keeps it
+        // rather than sanitizing to U+FFFD (it is not a C string).
         let handle = open("a\u{0}b");
-        assert_eq!(snapshot_all(handle), "a\u{FFFD}b");
+        assert_eq!(snapshot_all(handle), "a\u{0}b");
         unsafe { locus_text_buffer_free(handle) };
     }
 
@@ -988,8 +1075,8 @@ mod tests {
             unsafe { locus_text_buffer_insert_bytes(handle, 1, bytes.as_ptr(), bytes.len()) },
             LOCUS_STATUS_OK
         );
-        // The buffer keeps the NUL; the snapshot sanitizes it to U+FFFD.
-        assert_eq!(snapshot_all(handle), "aX\u{FFFD}Yc");
+        // The buffer keeps the NUL and so does the length-counted snapshot.
+        assert_eq!(snapshot_all(handle), "aX\u{0}Yc");
         unsafe { locus_text_buffer_free(handle) };
     }
 

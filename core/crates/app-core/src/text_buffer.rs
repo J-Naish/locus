@@ -321,8 +321,6 @@ impl TextBuffer {
             return String::new();
         }
         let end_line = start_line.saturating_add(count).min(total);
-        let line_count = end_line - start_line;
-
         // Two line lookups bound the byte range; one forward read assembles it.
         // (A per-line loop would re-descend the tree for every line — fine for a
         // small viewport but needlessly quadratic over the chunk scans.)
@@ -332,25 +330,112 @@ impl TextBuffer {
         } else {
             self.byte_len()
         };
-        let raw = self.read_logical(start_byte, end_byte);
+        self.format_band(
+            start_byte,
+            end_byte,
+            end_line - start_line,
+            end_line < total,
+            None,
+        )
+    }
 
+    /// Like [`text_for_line_range`](Self::text_for_line_range), but never returns
+    /// more than `max_bytes_per_line` bytes of any single line's content. This
+    /// keeps a file that is one enormous line (e.g. minified JSON) from
+    /// materializing that whole line: a viewer only needs the visible prefix.
+    pub fn text_for_line_range_capped(
+        &self,
+        start_line: usize,
+        count: usize,
+        max_bytes_per_line: usize,
+    ) -> String {
+        let total = self.line_count();
+        if start_line >= total || count == 0 {
+            return String::new();
+        }
+        let end_line = start_line.saturating_add(count).min(total);
+        let line_count = end_line - start_line;
+        let start_byte = self.line_start_prefix(start_line).byte;
+        let end_byte = if end_line < total {
+            self.line_start_prefix(end_line).byte
+        } else {
+            self.byte_len()
+        };
+
+        // Fast path: when the whole band fits in roughly the cap budget, read it
+        // in one shot and cap each line in the assembled string (no per-line tree
+        // descents). The single read is bounded to `~line_count * cap`, and the
+        // per-line cap is still enforced — the budget check alone would not, since
+        // it bounds the total, not any one line.
+        let budget = line_count
+            .saturating_mul(max_bytes_per_line.saturating_add(2))
+            .saturating_add(2);
+        if end_byte - start_byte <= budget {
+            return self.format_band(
+                start_byte,
+                end_byte,
+                line_count,
+                end_line < total,
+                Some(max_bytes_per_line),
+            );
+        }
+
+        // Slow path: at least one line is very long. Read each line's content
+        // capped on a char boundary, so the giant line never fully materializes.
+        // Per-line descents are bounded by chunk size even across a huge line.
+        let mut out = String::new();
+        for line in start_line..end_line {
+            if line > start_line {
+                out.push('\n');
+            }
+            let (start, end) = self.line_bounds(line);
+            let content_end = self.strip_terminator(start, end);
+            let capped = self.char_boundary_at_or_before(
+                content_end.min(start.saturating_add(max_bytes_per_line)),
+            );
+            out.push_str(&self.read_logical(start, capped));
+        }
+        out
+    }
+
+    /// Formats the byte range of a band (already located) into the public line
+    /// shape: `line_count` lines joined by `\n`, each terminator stripped. When
+    /// `cap` is `Some`, each line's content is also truncated to that many bytes
+    /// on a char boundary.
+    fn format_band(
+        &self,
+        start_byte: usize,
+        end_byte: usize,
+        line_count: usize,
+        strip_final: bool,
+        cap: Option<usize>,
+    ) -> String {
+        let raw = self.read_logical(start_byte, end_byte);
         // The range holds exactly `line_count` lines, each followed by its
         // terminator — except the buffer's final line, which has none. Splitting
         // on '\n' yields those lines; a '\r' immediately before a '\n' is part of
         // the terminator and is stripped, while a trailing '\r' on the buffer's
         // last line (no following '\n') is genuine content and is kept.
-        let strip_final = end_line < total;
         let mut out = String::with_capacity(raw.len());
         for (index, segment) in raw.split('\n').take(line_count).enumerate() {
             if index > 0 {
                 out.push('\n');
             }
             let is_final = index + 1 == line_count;
-            let content = if is_final && !strip_final {
+            let mut content = if is_final && !strip_final {
                 segment
             } else {
                 segment.strip_suffix('\r').unwrap_or(segment)
             };
+            if let Some(cap) = cap {
+                if content.len() > cap {
+                    let mut end = cap;
+                    while end > 0 && !content.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    content = &content[..end];
+                }
+            }
             out.push_str(content);
         }
         out
@@ -711,6 +796,12 @@ impl TextBuffer {
     /// excluded — so a caret can never be placed inside a CRLF terminator.
     fn line_content_end(&self, line: usize) -> usize {
         let (start, end) = self.line_bounds(line);
+        self.strip_terminator(start, end)
+    }
+
+    /// Given a line's byte bounds, returns the end of its content with a
+    /// trailing `\n` and a preceding `\r` excluded.
+    fn strip_terminator(&self, start: usize, end: usize) -> usize {
         let mut content_end = end;
         if content_end > start && self.logical_byte(content_end - 1) == Some(b'\n') {
             content_end -= 1;
@@ -719,6 +810,21 @@ impl TextBuffer {
             }
         }
         content_end
+    }
+
+    /// The largest byte offset `<= at` that lies on a UTF-8 char boundary, so a
+    /// capped read never splits a multi-byte character.
+    fn char_boundary_at_or_before(&self, at: usize) -> usize {
+        let mut at = at.min(self.byte_len());
+        // A continuation byte (`0b10xxxxxx`) is mid-character; back off past it.
+        while at > 0
+            && self
+                .logical_byte(at)
+                .is_some_and(|byte| byte & 0xC0 == 0x80)
+        {
+            at -= 1;
+        }
+        at
     }
 
     /// Assembles the UTF-8 text for a logical byte range, visiting only the
@@ -1610,6 +1716,55 @@ mod tests {
         assert_eq!(contents(&buffer), text);
         assert_eq!(buffer.text_for_line_range(1, 2), "beta\ngamma");
         assert_eq!(buffer.text_for_line_range(4, 1), "epsilon");
+    }
+
+    // MARK: - Capped viewport reads
+
+    #[test]
+    fn capped_read_matches_uncapped_for_short_lines() {
+        let buffer = buffer("alpha\nbeta\ngamma");
+        assert_eq!(
+            buffer.text_for_line_range_capped(0, 3, 1000),
+            buffer.text_for_line_range(0, 3)
+        );
+    }
+
+    #[test]
+    fn capped_read_truncates_a_long_line_but_keeps_neighbors() {
+        let long = "x".repeat(10_000);
+        let buffer = buffer(&format!("a\n{long}\nb"));
+        // The middle line is capped to 5 bytes; its neighbors stay intact.
+        assert_eq!(buffer.text_for_line_range_capped(0, 3, 5), "a\nxxxxx\nb");
+    }
+
+    #[test]
+    fn capped_read_on_a_single_huge_line_returns_only_the_prefix() {
+        let buffer = buffer(&"y".repeat(100_000));
+        assert_eq!(buffer.line_count(), 1);
+        assert_eq!(buffer.text_for_line_range_capped(0, 1, 8), "yyyyyyyy");
+    }
+
+    #[test]
+    fn capped_read_does_not_split_multibyte_chars() {
+        // A long line of 3-byte chars forces the capped path; a 4-byte cap must
+        // back off to 3 (one whole "あ") rather than split the next character.
+        let buffer = buffer(&format!("{}\nb", "あ".repeat(1_000)));
+        assert_eq!(buffer.text_for_line_range_capped(0, 1, 4), "あ");
+    }
+
+    #[test]
+    fn capped_read_clamps_past_the_end() {
+        let buffer = buffer("a\nb");
+        assert_eq!(buffer.text_for_line_range_capped(5, 3, 100), "");
+        assert_eq!(buffer.text_for_line_range_capped(0, 0, 100), "");
+    }
+
+    #[test]
+    fn capped_read_caps_a_line_even_on_the_fast_path() {
+        // A small band stays on the fast path, but an over-long line must still
+        // be capped — the budget check bounds the total, not any single line.
+        let buffer = buffer("1234567890\n\n");
+        assert_eq!(buffer.text_for_line_range_capped(0, 3, 5), "12345\n\n");
     }
 
     #[test]

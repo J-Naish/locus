@@ -109,11 +109,32 @@ final class TextBuffer {
     }
     var snapshot: OpaquePointer?
     let status = locus_text_buffer_snapshot_line_range(handle, start, count, &snapshot)
+    return Self.decodeSnapshot(status, snapshot, context: "text(forLineRange:)")
+  }
+
+  /// Like `text(forLineRange:count:)`, but never returns more than
+  /// `maxBytesPerLine` bytes of any single line's content. A file that is one
+  /// enormous line therefore never crosses the FFI boundary in full.
+  func text(forLineRange start: Int, count: Int, maxBytesPerLine: Int) -> String {
+    guard start >= 0, count >= 0, maxBytesPerLine >= 0 else {
+      return ""
+    }
+    var snapshot: OpaquePointer?
+    let status = locus_text_buffer_snapshot_line_range_capped(
+      handle, start, count, maxBytesPerLine, &snapshot)
+    return Self.decodeSnapshot(status, snapshot, context: "text(forLineRange:maxBytesPerLine:)")
+  }
+
+  /// Copies a borrowed snapshot's text into a Swift `String` and frees it,
+  /// decoding by the length-counted ABI contract (not a NUL terminator).
+  private static func decodeSnapshot(
+    _ status: UInt32, _ snapshot: OpaquePointer?, context: String
+  ) -> String {
     guard status == LOCUS_STATUS_OK, let snapshot else {
       if status != LOCUS_STATUS_OK {
         // Snapshots are in-memory, so this is not expected; log so ABI drift or
         // an unexpected failure is visible rather than silently empty.
-        Self.logger.error("text(forLineRange:) failed with status \(status)")
+        logger.error("\(context) failed with status \(status)")
       }
       return ""
     }
@@ -121,8 +142,6 @@ final class TextBuffer {
     guard let text = locus_text_snapshot_text(snapshot) else {
       return ""
     }
-    // Decode using the snapshot's byte length rather than relying on a NUL
-    // terminator, honoring the length-counted ABI contract.
     let byteLength = locus_text_snapshot_byte_length(snapshot)
     return String(decoding: UnsafeRawBufferPointer(start: text, count: byteLength), as: UTF8.self)
   }

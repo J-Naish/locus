@@ -11,6 +11,20 @@ final class TextBufferTests: XCTestCase {
     XCTAssertFalse(buffer.isDirty)
   }
 
+  func testCappedLineRangeTruncatesLongLinesButKeepsNeighbors() throws {
+    let long = String(repeating: "x", count: 5_000)
+    let buffer = try TextBuffer.open(bytes: Data("a\n\(long)\nb".utf8))
+    XCTAssertEqual(buffer.text(forLineRange: 0, count: 3, maxBytesPerLine: 5), "a\nxxxxx\nb")
+    // A generous cap leaves short lines unchanged.
+    XCTAssertEqual(buffer.text(forLineRange: 0, count: 1, maxBytesPerLine: 1_000), "a")
+  }
+
+  func testCappedLineRangeRejectsNegativeInputs() throws {
+    let buffer = try TextBuffer.open(bytes: Data("abc".utf8))
+    XCTAssertEqual(buffer.text(forLineRange: 0, count: 1, maxBytesPerLine: -1), "")
+    XCTAssertEqual(buffer.text(forLineRange: -1, count: 1, maxBytesPerLine: 10), "")
+  }
+
   func testRejectsInvalidUTF8() {
     XCTAssertThrowsError(try TextBuffer.open(bytes: Data([0xFF, 0xFE, 0x00]))) {
       XCTAssertEqual($0 as? TextBufferError, .notUTF8)
@@ -44,8 +58,8 @@ final class TextBufferTests: XCTestCase {
     let buffer = try TextBuffer.open(bytes: Data("aあ".utf8))
     // Insert after "aあ" (UTF-16 offset 2) text that contains a NUL.
     try buffer.insert("X\u{0}", atUTF16: 2)
-    // The snapshot sanitizes the NUL to U+FFFD for the C-string boundary.
-    XCTAssertEqual(buffer.text(forLineRange: 0, count: 1), "aあX\u{FFFD}")
+    // The snapshot is length-counted, so the embedded NUL is preserved.
+    XCTAssertEqual(buffer.text(forLineRange: 0, count: 1), "aあX\u{0}")
   }
 
   func testPositionConversionsRoundTrip() throws {

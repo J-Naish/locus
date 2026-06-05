@@ -342,7 +342,23 @@ LocusStatus locus_text_buffer_snapshot_line_range(
     const LocusTextBuffer *buffer, size_t start_line, size_t count,
     LocusTextSnapshot **out_snapshot);
 
-/* Borrowed UTF-8 text of the snapshot, valid until locus_text_snapshot_free. */
+/**
+ * Like locus_text_buffer_snapshot_line_range, but returns at most
+ * max_bytes_per_line bytes of any single line's content (truncated on a UTF-8
+ * character boundary). This keeps a file that is one enormous line from
+ * materializing that whole line; a viewer passes a cap larger than it can show.
+ *
+ * Ownership: identical to locus_text_buffer_snapshot_line_range.
+ */
+LocusStatus locus_text_buffer_snapshot_line_range_capped(
+    const LocusTextBuffer *buffer, size_t start_line, size_t count,
+    size_t max_bytes_per_line, LocusTextSnapshot **out_snapshot);
+
+/*
+ * Borrowed UTF-8 text of the snapshot, valid until locus_text_snapshot_free.
+ * Length-counted (NOT NUL-terminated): always read locus_text_snapshot_byte_length
+ * bytes, since an embedded NUL in the document is preserved.
+ */
 const char *locus_text_snapshot_text(const LocusTextSnapshot *snapshot);
 size_t locus_text_snapshot_byte_length(const LocusTextSnapshot *snapshot);
 size_t locus_text_snapshot_first_line(const LocusTextSnapshot *snapshot);

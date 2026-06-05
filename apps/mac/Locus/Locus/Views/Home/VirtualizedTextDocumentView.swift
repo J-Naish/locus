@@ -71,8 +71,12 @@ final class LineRenderingTextView: NSView {
   private static let gutterLeadingPadding: CGFloat = 6
   private static let gutterTrailingPadding: CGFloat = 10
   private static let minimumGutterWidth: CGFloat = 42
+  /// Upper bound on the bytes the core returns for any one line. Caps the FFI
+  /// fetch so a file that is one enormous line never crosses the boundary in
+  /// full; comfortably larger than anything the view can show.
+  private let maximumFetchedBytesPerLine = 16_384
   /// Without horizontal scrolling, only the start of a line is ever visible, so
-  /// a pathologically long line is truncated before layout to bound draw cost.
+  /// a long line is also truncated before layout to bound highlighting/drawing.
   private let maximumDrawnCharactersPerLine = 5_000
   /// One-entry cache of the last band's highlighted lines so repeated draws of
   /// the same range (overlapping dirty rects, redraws without scrolling) skip
@@ -140,11 +144,15 @@ final class LineRenderingTextView: NSView {
     // small for normal text; on-device profiling is the acceptance gate, and the
     // fallbacks if it ever hitches are base-only styling or async highlighting.
     //
-    // `text(forLineRange:)` joins the requested lines with "\n" (terminators
+    // The capped read bounds each line so even a one-enormous-line file never
+    // crosses the FFI in full. The result joins lines with "\n" (terminators
     // stripped), so splitting on "\n" recovers exactly `range.count` lines.
-    let lines = buffer.text(forLineRange: range.lowerBound, count: range.count)
-      .components(separatedBy: "\n")
-      .map(highlightedLine)
+    let lines = buffer.text(
+      forLineRange: range.lowerBound, count: range.count,
+      maxBytesPerLine: maximumFetchedBytesPerLine
+    )
+    .components(separatedBy: "\n")
+    .map(highlightedLine)
     cachedBand = (revision, range, lines)
     return lines
   }
@@ -153,11 +161,9 @@ final class LineRenderingTextView: NSView {
   /// horizontal scrolling yet), syntax rules supply colors, and the font is
   /// forced uniform afterwards so a styled token cannot change the line height.
   ///
-  /// The cap bounds layout, highlighting, and drawing — but it is applied after
-  /// the line already crossed the FFI boundary as a full Swift `String`. A file
-  /// that is one enormous line (e.g. minified JSON) therefore still materializes
-  /// that line per fetch. Closing that hole needs a capped per-line read in the
-  /// Rust core; it is the next slice, paired with horizontal scrolling.
+  /// The core already capped the fetched bytes; this char cap is a second bound
+  /// on layout/highlighting/drawing, since the fetched line can still be wider
+  /// than the viewport.
   private func highlightedLine(_ line: String) -> NSAttributedString {
     let visible =
       line.count > maximumDrawnCharactersPerLine
