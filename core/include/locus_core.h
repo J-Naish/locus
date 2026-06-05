@@ -250,6 +250,135 @@ const LocusWorkspacePartialError *locus_workspace_snapshot_partial_errors(
  */
 void locus_workspace_snapshot_free(LocusWorkspaceSnapshot *snapshot);
 
+/*
+ * Text buffer API (added additively in ABI version 2).
+ *
+ * An arbitrary-size, editable UTF-8 text buffer. The buffer is the source of
+ * truth for the editor; text never crosses the boundary as one giant string.
+ * Statuses live in a 100+ band so they never collide with the workspace
+ * statuses above. LOCUS_STATUS_OK (0) remains the only success value.
+ *
+ * Thread-safety: a given LocusTextBuffer handle is NOT internally synchronized.
+ * All calls operating on the same handle must be serialized by the caller
+ * (e.g. confined to one thread/actor); concurrent use is undefined behavior.
+ */
+#define LOCUS_TEXT_STATUS_INVALID_ARGUMENT ((LocusStatus)100u)
+#define LOCUS_TEXT_STATUS_IO ((LocusStatus)101u)
+#define LOCUS_TEXT_STATUS_NOT_UTF8 ((LocusStatus)102u)
+#define LOCUS_TEXT_STATUS_INVALID_OFFSET ((LocusStatus)103u)
+#define LOCUS_TEXT_STATUS_INVALID_RANGE ((LocusStatus)104u)
+#define LOCUS_TEXT_STATUS_INVALID_LINE ((LocusStatus)105u)
+
+/*
+ * A buffer position in every coordinate the editor needs. char_index is the
+ * Unicode scalar index (named to avoid the C keyword `char`).
+ */
+typedef struct LocusTextPosition {
+  size_t byte;
+  size_t char_index;
+  size_t utf16;
+  size_t line;
+  size_t column_utf16;
+} LocusTextPosition;
+
+/*
+ * Opaque Rust-owned handles. Callers must never allocate, free, copy, or
+ * inspect these directly; use the functions below.
+ */
+typedef struct LocusTextBuffer LocusTextBuffer;
+typedef struct LocusTextSnapshot LocusTextSnapshot;
+
+/**
+ * Opens a text file into a buffer. The file must be valid UTF-8; a non-UTF-8
+ * file returns LOCUS_TEXT_STATUS_NOT_UTF8 so the caller can decode the bytes
+ * itself and use locus_text_buffer_open_bytes.
+ *
+ * Ownership: on LOCUS_STATUS_OK, writes a Rust-owned buffer to *out_buffer that
+ * the caller releases exactly once with locus_text_buffer_free.
+ */
+LocusStatus locus_text_buffer_open(const char *path, LocusTextBuffer **out_buffer);
+
+/**
+ * Opens a buffer from already-UTF-8 bytes (bytes may be NULL only when len is
+ * 0). The bytes are copied; the caller retains ownership of the input.
+ *
+ * Ownership: on LOCUS_STATUS_OK, writes a Rust-owned buffer to *out_buffer.
+ */
+LocusStatus locus_text_buffer_open_bytes(
+    const uint8_t *bytes, size_t len, LocusTextBuffer **out_buffer);
+
+/**
+ * Releases a text buffer. Passing NULL is allowed and has no effect.
+ *
+ * Ownership: consumes the buffer; all snapshots borrowed from it must already
+ * be freed.
+ */
+void locus_text_buffer_free(LocusTextBuffer *buffer);
+
+/* Scalar queries. NULL returns 0 / false. */
+size_t locus_text_buffer_line_count(const LocusTextBuffer *buffer);
+size_t locus_text_buffer_byte_length(const LocusTextBuffer *buffer);
+size_t locus_text_buffer_utf16_length(const LocusTextBuffer *buffer);
+uint64_t locus_text_buffer_revision(const LocusTextBuffer *buffer);
+bool locus_text_buffer_is_dirty(const LocusTextBuffer *buffer);
+
+/* Marks the current content as saved (clears dirty). NULL is a no-op. */
+void locus_text_buffer_mark_saved(LocusTextBuffer *buffer);
+
+/**
+ * Snapshots the text of lines [start_line, start_line + count) (clamped) as one
+ * UTF-8 block, lines joined by '\n'.
+ *
+ * Ownership: on LOCUS_STATUS_OK, writes a Rust-owned snapshot to *out_snapshot;
+ * release it with locus_text_snapshot_free. The snapshot's text pointer is
+ * borrowed and is invalidated by that free.
+ */
+LocusStatus locus_text_buffer_snapshot_line_range(
+    const LocusTextBuffer *buffer, size_t start_line, size_t count,
+    LocusTextSnapshot **out_snapshot);
+
+/* Borrowed UTF-8 text of the snapshot, valid until locus_text_snapshot_free. */
+const char *locus_text_snapshot_text(const LocusTextSnapshot *snapshot);
+size_t locus_text_snapshot_byte_length(const LocusTextSnapshot *snapshot);
+size_t locus_text_snapshot_first_line(const LocusTextSnapshot *snapshot);
+size_t locus_text_snapshot_line_count(const LocusTextSnapshot *snapshot);
+void locus_text_snapshot_free(LocusTextSnapshot *snapshot);
+
+/**
+ * Maps a UTF-16 offset to a full position. The end-of-buffer offset is valid;
+ * an offset inside a surrogate pair or past the end returns
+ * LOCUS_TEXT_STATUS_INVALID_OFFSET. Writes *out_position on success.
+ */
+LocusStatus locus_text_buffer_position_for_utf16(
+    const LocusTextBuffer *buffer, size_t utf16, LocusTextPosition *out_position);
+
+/**
+ * Maps a 0-based line and UTF-16 column (from the line start) to a full
+ * position. A column past the line content is clamped to the line end; a line
+ * past the last line returns LOCUS_TEXT_STATUS_INVALID_LINE.
+ */
+LocusStatus locus_text_buffer_position_for_line_column(
+    const LocusTextBuffer *buffer, size_t line, size_t column_utf16,
+    LocusTextPosition *out_position);
+
+/*
+ * Inserts text at a UTF-16 offset. The `_insert` form takes a NUL-terminated C
+ * string (cannot carry an embedded NUL); `_insert_bytes` takes a length-counted
+ * UTF-8 buffer that may contain NUL (invalid UTF-8 -> LOCUS_TEXT_STATUS_NOT_UTF8).
+ */
+LocusStatus locus_text_buffer_insert(
+    LocusTextBuffer *buffer, size_t at_utf16, const char *text);
+LocusStatus locus_text_buffer_insert_bytes(
+    LocusTextBuffer *buffer, size_t at_utf16, const uint8_t *bytes, size_t len);
+
+/* Deletes the UTF-16 range [start_utf16, end_utf16). */
+LocusStatus locus_text_buffer_delete(
+    LocusTextBuffer *buffer, size_t start_utf16, size_t end_utf16);
+
+/* Undo/redo. out_did_* (which may be NULL) receives whether anything changed. */
+LocusStatus locus_text_buffer_undo(LocusTextBuffer *buffer, bool *out_did_undo);
+LocusStatus locus_text_buffer_redo(LocusTextBuffer *buffer, bool *out_did_redo);
+
 #ifdef __cplusplus
 }
 #endif

@@ -11,6 +11,8 @@ use app_core::workspace::{
     WorkspaceListOptions,
 };
 
+pub mod text_buffer;
+
 pub const ABI_VERSION: u32 = 2;
 
 static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
@@ -154,10 +156,10 @@ unsafe fn list_directory_impl(
         *out_snapshot = ptr::null_mut();
     }
 
-    // string_from_c_path itself validates `path` for NULL and only dereferences
+    // string_from_c_str itself validates `path` for NULL and only dereferences
     // it inside its own SAFETY-justified unsafe block; the caller's contract is
     // documented at the function level above.
-    let Some(path) = string_from_c_path(path) else {
+    let Some(path) = string_from_c_str(path) else {
         set_last_error_message("path must be non-NULL UTF-8");
         return LOCUS_STATUS_INVALID_ARGUMENT;
     };
@@ -308,21 +310,21 @@ impl LocusWorkspaceSnapshot {
     }
 }
 
-fn string_from_c_path(path: *const c_char) -> Option<String> {
-    if path.is_null() {
+pub(crate) fn string_from_c_str(value: *const c_char) -> Option<String> {
+    if value.is_null() {
         return None;
     }
 
-    // SAFETY: path is non-null and must point to a NUL-terminated C string for
+    // SAFETY: value is non-null and must point to a NUL-terminated C string for
     // the duration of this call. Invalid UTF-8 is rejected.
-    unsafe { CStr::from_ptr(path).to_str().ok().map(ToOwned::to_owned) }
+    unsafe { CStr::from_ptr(value).to_str().ok().map(ToOwned::to_owned) }
 }
 
-fn clear_last_error_message() {
+pub(crate) fn clear_last_error_message() {
     set_last_error_message("");
 }
 
-fn set_last_error_message(message: impl AsRef<str>) {
+pub(crate) fn set_last_error_message(message: impl AsRef<str>) {
     LAST_ERROR_MESSAGE.with_borrow_mut(|stored| {
         *stored = sanitized_cstring(message.as_ref());
     });
