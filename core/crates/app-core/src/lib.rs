@@ -1,4 +1,5 @@
 pub mod file_type;
+pub mod text_buffer;
 pub mod workspace;
 
 pub const APP_NAME: &str = "Locus";
