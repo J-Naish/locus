@@ -41,10 +41,35 @@ struct TextViewportLayout: Equatable {
 final class LineRenderingTextView: NSView {
   private(set) var buffer: TextBuffer?
   private let font: NSFont
+  private let lineNumberFont: NSFont
   private let layout: TextViewportLayout
   private let horizontalPadding: CGFloat = 8
   private let textColor: NSColor = .textColor
   private let backgroundColor: NSColor = .textBackgroundColor
+  private let lineNumberColor: NSColor = .secondaryLabelColor
+  private let gutterSeparatorColor: NSColor = .separatorColor
+  /// Whether to draw the line-number gutter. Driven by the syntax's line-number
+  /// support. Unlike the editable path there is no large-document cutoff: the
+  /// editor hides numbers past ~200K characters only because it indexes the
+  /// whole string, whereas this gutter renders just the visible band.
+  var showsLineNumbers = false {
+    didSet {
+      guard showsLineNumbers != oldValue else { return }
+      recomputeGutterWidth()
+      needsDisplay = true
+    }
+  }
+  /// Width of the line-number gutter, recomputed when the buffer or
+  /// `showsLineNumbers` changes. The gutter scrolls vertically with its lines
+  /// (it is drawn in the document view's left margin) and stays at the left edge
+  /// because the view does not scroll horizontally yet.
+  private var gutterWidth: CGFloat = 0
+
+  // Gutter geometry, kept local so the viewer does not depend on the editor's
+  // line-number helper.
+  private static let gutterLeadingPadding: CGFloat = 6
+  private static let gutterTrailingPadding: CGFloat = 10
+  private static let minimumGutterWidth: CGFloat = 42
   /// Without horizontal scrolling, only the start of a line is ever visible, so
   /// a pathologically long line is truncated before layout to bound draw cost.
   private let maximumDrawnCharactersPerLine = 5_000
@@ -56,6 +81,7 @@ final class LineRenderingTextView: NSView {
   init() {
     let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
     self.font = font
+    self.lineNumberFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
     self.layout = TextViewportLayout(
       lineHeight: ceil(font.ascender - font.descender + font.leading))
     super.init(frame: .zero)
@@ -77,9 +103,25 @@ final class LineRenderingTextView: NSView {
   func setBuffer(_ buffer: TextBuffer?) {
     self.buffer = buffer
     cachedBand = nil
+    recomputeGutterWidth()
     updateHeight()
     scroll(.zero)
     needsDisplay = true
+  }
+
+  private func recomputeGutterWidth() {
+    guard showsLineNumbers, let buffer else {
+      gutterWidth = 0
+      return
+    }
+    gutterWidth = Self.gutterWidth(lineCount: buffer.lineCount, font: lineNumberFont)
+  }
+
+  private static func gutterWidth(lineCount: Int, font: NSFont) -> CGFloat {
+    let digitCount = max(2, String(max(1, lineCount)).count)
+    let sample = String(repeating: "8", count: digitCount) as NSString
+    let digitWidth = sample.size(withAttributes: [.font: font]).width
+    return ceil(max(minimumGutterWidth, gutterLeadingPadding + digitWidth + gutterTrailingPadding))
   }
 
   /// Returns the visible band's line contents, reusing the cache when the same
@@ -119,29 +161,57 @@ final class LineRenderingTextView: NSView {
       return
     }
 
+    // Hairline separating the gutter from the text, across the dirty band only.
+    if gutterWidth > 0 {
+      gutterSeparatorColor.setStroke()
+      let separator = NSBezierPath()
+      separator.move(to: NSPoint(x: gutterWidth, y: dirtyRect.minY))
+      separator.line(to: NSPoint(x: gutterWidth, y: dirtyRect.maxY))
+      separator.lineWidth = 1
+      separator.stroke()
+    }
+
     let lines = bandLines(for: buffer, range: range)
-    let attributes: [NSAttributedString.Key: Any] = [
+    let textOriginX = gutterWidth + horizontalPadding
+    let textWidth = max(bounds.width - textOriginX - horizontalPadding, 0)
+    let textAttributes: [NSAttributedString.Key: Any] = [
       .font: font,
       .foregroundColor: textColor,
     ]
+    let numberAttributes: [NSAttributedString.Key: Any] = [
+      .font: lineNumberFont,
+      .foregroundColor: lineNumberColor,
+    ]
     for (offset, line) in lines.enumerated() {
       let lineIndex = range.lowerBound + offset
+      let y = layout.yOffset(forLine: lineIndex)
+
+      // Right-aligned 1-based line number in the gutter.
+      if gutterWidth > 0 {
+        let number = NSAttributedString(string: "\(lineIndex + 1)", attributes: numberAttributes)
+        let numberWidth = number.size().width
+        number.draw(
+          with: NSRect(
+            x: max(0, gutterWidth - Self.gutterTrailingPadding - numberWidth),
+            y: y,
+            width: numberWidth,
+            height: layout.lineHeight
+          ),
+          options: [.usesLineFragmentOrigin]
+        )
+      }
+
       // Only the line's start is visible without horizontal scrolling; cap the
       // laid-out text so one very long line cannot stall drawing.
       let visible =
         line.count > maximumDrawnCharactersPerLine
         ? String(line.prefix(maximumDrawnCharactersPerLine))
         : line
-      let attributed = NSAttributedString(string: visible, attributes: attributes)
+      let attributed = NSAttributedString(string: visible, attributes: textAttributes)
       // `.usesLineFragmentOrigin` makes the rect origin the line's top-left,
       // which is what we want in a flipped view.
       attributed.draw(
-        with: NSRect(
-          x: horizontalPadding,
-          y: layout.yOffset(forLine: lineIndex),
-          width: max(bounds.width - horizontalPadding * 2, 0),
-          height: layout.lineHeight
-        ),
+        with: NSRect(x: textOriginX, y: y, width: textWidth, height: layout.lineHeight),
         options: [.usesLineFragmentOrigin]
       )
     }
@@ -152,6 +222,7 @@ final class LineRenderingTextView: NSView {
 struct LargeTextViewport: NSViewRepresentable {
   let buffer: TextBuffer
   let accessibilityLabel: String
+  let showsLineNumbers: Bool
 
   func makeNSView(context: Context) -> NSScrollView {
     let scrollView = NSScrollView()
@@ -170,6 +241,8 @@ struct LargeTextViewport: NSViewRepresentable {
 
     scrollView.documentView = documentView
     documentView.setFrameSize(NSSize(width: scrollView.contentSize.width, height: 0))
+    // Set before the buffer so the gutter width is computed on the first layout.
+    documentView.showsLineNumbers = showsLineNumbers
     documentView.setBuffer(buffer)
 
     context.coordinator.documentView = documentView
@@ -181,6 +254,7 @@ struct LargeTextViewport: NSViewRepresentable {
       return
     }
     documentView.setAccessibilityLabel(accessibilityLabel)
+    documentView.showsLineNumbers = showsLineNumbers
     // A new buffer (e.g. after an external-change reload) replaces the content.
     if documentView.buffer !== buffer {
       documentView.setBuffer(buffer)
@@ -198,11 +272,12 @@ struct LargeTextViewport: NSViewRepresentable {
 }
 
 /// Read-only viewer for text files too large for the editable string path. It
-/// opens the file through the Rust [`TextBuffer`] (which memory-maps very large
-/// files) off the main thread, then renders it with [`LargeTextViewport`].
+/// opens the file through the Rust [`TextBuffer`] off the main thread, then
+/// renders it with [`LargeTextViewport`].
 struct VirtualizedTextDocumentView: View {
   let url: URL
   let accessibilityLabel: String
+  let showsLineNumbers: Bool
   /// Changing this (e.g. on external file change) re-opens the buffer.
   let reloadToken: Int
 
@@ -219,10 +294,14 @@ struct VirtualizedTextDocumentView: View {
       switch phase {
       case .loading:
         // Matches the editable surface: no spinner, just a blank canvas until
-        // the buffer is ready (opening is fast even for large files).
+        // the buffer finishes opening off the main thread.
         Color(nsColor: .textBackgroundColor)
       case .loaded(let buffer):
-        LargeTextViewport(buffer: buffer, accessibilityLabel: accessibilityLabel)
+        LargeTextViewport(
+          buffer: buffer,
+          accessibilityLabel: accessibilityLabel,
+          showsLineNumbers: showsLineNumbers
+        )
       case .failed(let message):
         ContentUnavailableView {
           Label("Document Could Not Be Opened", systemImage: "exclamationmark.triangle")

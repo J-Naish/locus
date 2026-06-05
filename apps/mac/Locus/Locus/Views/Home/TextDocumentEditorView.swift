@@ -619,7 +619,7 @@ extension TextDocumentSyntax {
     .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
   }
 
-  fileprivate var supportsLineNumbers: Bool {
+  var supportsLineNumbers: Bool {
     switch self {
     case .markdown, .plainText, .structuredText, .code:
       return true

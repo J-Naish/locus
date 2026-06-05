@@ -146,6 +146,12 @@ struct WorkspaceDocumentSurface: View {
         VirtualizedTextDocumentView(
           url: url,
           accessibilityLabel: "\(entry.name) text",
+          // The virtualized viewer renders only the visible band, so it keeps
+          // line numbers at any size — the editor's 200K cutoff is a limit of
+          // its whole-string indexing, not a product rule. It still honors the
+          // syntax's line-number support.
+          showsLineNumbers: (WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText)
+            .supportsLineNumbers,
           reloadToken: documentReloadGeneration
         )
       }
