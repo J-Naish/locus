@@ -560,12 +560,78 @@ final class TextViewportLayoutTests: XCTestCase {
 
   @MainActor
   func testWordMoveLandsOnComposedBoundaryAroundEmoji() throws {
+    // The emoji is its own word unit (locale-aware), so word moves step a → 😀 → b.
+    // Every landing column (1, 3, 4) is a grapheme boundary: the caret never lands
+    // at index 2, inside the emoji's surrogate pair.
     let view = try makeViewer("a😀b")
     view.moveToDocumentEdge(end: false, extend: false)
-    view.moveByWord(forward: true, extend: false)  // end of "a" / start of 😀
+    view.moveByWord(forward: true, extend: false)  // end of "a"
     XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 1))
+    view.moveByWord(forward: true, extend: false)  // end of the emoji word
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 3))
     view.moveByWord(forward: true, extend: false)  // end of "b"
     XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 4))
+  }
+
+  @MainActor
+  func testWordMoveStopsAtLocaleWordBoundaryAcrossScripts() throws {
+    // The tokenizer splits scripts: a forward word move from the start of "猫cat"
+    // stops after the ideograph rather than treating the whole run as one word
+    // (which the previous alphanumeric heuristic did).
+    let view = try makeViewer("猫cat dog")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveByWord(forward: true, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 1))  // after 猫
+  }
+
+  @MainActor
+  func testWordMoveBackwardStopsAtWordStarts() throws {
+    let view = try makeViewer("one two three")
+    view.moveToDocumentEdge(end: true, extend: false)  // (0,13)
+    view.moveByWord(forward: false, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 8))  // start of "three"
+    view.moveByWord(forward: false, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 4))  // start of "two"
+    view.moveByWord(forward: false, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))  // start of "one"
+  }
+
+  @MainActor
+  func testWordMoveBackwardStopsAtScriptBoundary() throws {
+    let view = try makeViewer("猫cat dog")  // length 8
+    view.moveToDocumentEdge(end: true, extend: false)  // (0,8)
+    view.moveByWord(forward: false, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 5))  // start of "dog"
+    view.moveByWord(forward: false, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 1))  // start of "cat", after 猫
+  }
+
+  @MainActor
+  func testWordMoveBackwardStaysOnGraphemeBoundaryAroundEmoji() throws {
+    // Backward stops at 3 then 1 — both grapheme boundaries; the caret never lands
+    // at index 2, inside the emoji's surrogate pair.
+    let view = try makeViewer("a😀b")
+    view.moveToDocumentEdge(end: true, extend: false)  // (0,4)
+    view.moveByWord(forward: false, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 3))  // start of "b"
+    view.moveByWord(forward: false, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 1))  // start of the emoji word
+  }
+
+  @MainActor
+  func testDeleteWordBackwardRemovesPreviousWord() throws {
+    let view = try makeEditableViewer("one two three")
+    view.moveToDocumentEdge(end: true, extend: false)  // caret after "three"
+    view.deleteWordBackward()
+    XCTAssertEqual(content(of: view), "one two ")
+  }
+
+  @MainActor
+  func testDeleteWordForwardRemovesNextWord() throws {
+    let view = try makeEditableViewer("one two three")
+    view.moveToDocumentEdge(end: false, extend: false)  // caret before "one"
+    view.deleteWordForward()
+    XCTAssertEqual(content(of: view), " two three")
   }
 
   // MARK: Accessibility

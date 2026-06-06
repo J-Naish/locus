@@ -1010,49 +1010,59 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return endpoint
   }
 
-  /// One word step, advancing by whole composed character sequences (so the caret
-  /// never lands inside a surrogate pair, emoji, or combining sequence) using a
-  /// simple alphanumeric-run heuristic. Wraps across line boundaries at the ends.
+  /// One word step using the OS text tokenizer's word boundaries, so it is
+  /// locale-aware (CJK and other scripts split into words rather than skipping a
+  /// whole run). Forward lands on the end of the next word, backward on the start
+  /// of the previous word; both wrap across line boundaries at the ends. Word
+  /// ranges fall on grapheme boundaries, so the caret never splits a composed
+  /// sequence (surrogate pair, emoji, combining mark).
   private func steppedWordEndpoint(from endpoint: TextSelection.Endpoint, forward: Bool)
     -> TextSelection.Endpoint
   {
     let line = attributedLine(forLine: endpoint.line).string as NSString
-    // Classify the composed character that begins at `index` (a valid boundary).
-    func isWordCharacter(at index: Int) -> Bool {
-      let range = line.rangeOfComposedCharacterSequence(at: index)
-      guard let scalar = line.substring(with: range).unicodeScalars.first else { return false }
-      return CharacterSet.alphanumerics.contains(scalar)
-    }
-    func boundary(after index: Int) -> Int {
-      NSMaxRange(line.rangeOfComposedCharacterSequence(at: index))
-    }
-    func boundary(before index: Int) -> Int {
-      line.rangeOfComposedCharacterSequence(at: index - 1).location
-    }
+    let words = Self.wordTokenRanges(in: line)
+    let index = endpoint.columnUTF16
 
     if forward {
-      var index = endpoint.columnUTF16
-      if index >= line.length {
-        return endpoint.line < lineCount - 1
-          ? .init(line: endpoint.line + 1, columnUTF16: 0) : endpoint
+      if let end = words.first(where: { $0.end > index })?.end {
+        return .init(line: endpoint.line, columnUTF16: end)
       }
-      while index < line.length, !isWordCharacter(at: index) { index = boundary(after: index) }
-      while index < line.length, isWordCharacter(at: index) { index = boundary(after: index) }
-      return .init(line: endpoint.line, columnUTF16: index)
+      // No word ahead on this line: move to the line end, or to the next line when
+      // already there.
+      if index < line.length {
+        return .init(line: endpoint.line, columnUTF16: line.length)
+      }
+      return endpoint.line < lineCount - 1
+        ? .init(line: endpoint.line + 1, columnUTF16: 0) : endpoint
     }
 
-    var index = endpoint.columnUTF16
-    if index <= 0 {
-      return endpoint.line > 0
-        ? .init(line: endpoint.line - 1, columnUTF16: lineLengthUTF16(endpoint.line - 1)) : endpoint
+    if let start = words.last(where: { $0.start < index })?.start {
+      return .init(line: endpoint.line, columnUTF16: start)
     }
-    while index > 0, !isWordCharacter(at: boundary(before: index)) {
-      index = boundary(before: index)
+    // No word before this point on the line: move to the line start, or to the
+    // previous line when already there.
+    if index > 0 {
+      return .init(line: endpoint.line, columnUTF16: 0)
     }
-    while index > 0, isWordCharacter(at: boundary(before: index)) {
-      index = boundary(before: index)
+    return endpoint.line > 0
+      ? .init(line: endpoint.line - 1, columnUTF16: lineLengthUTF16(endpoint.line - 1)) : endpoint
+  }
+
+  /// Word token ranges (UTF-16) in `string`, locale-aware via the OS tokenizer, so
+  /// CJK and other scripts segment into words. Whitespace and punctuation between
+  /// words are not tokens. Shared by word navigation.
+  static func wordTokenRanges(in string: NSString) -> [(start: Int, end: Int)] {
+    guard string.length > 0 else { return [] }
+    let tokenizer = CFStringTokenizerCreate(
+      kCFAllocatorDefault, string as CFString,
+      CFRange(location: 0, length: string.length),
+      kCFStringTokenizerUnitWord, CFLocaleCopyCurrent())
+    var ranges: [(start: Int, end: Int)] = []
+    while !CFStringTokenizerAdvanceToNextToken(tokenizer).isEmpty {
+      let range = CFStringTokenizerGetCurrentTokenRange(tokenizer)
+      ranges.append((range.location, range.location + range.length))
     }
-    return .init(line: endpoint.line, columnUTF16: index)
+    return ranges
   }
 
   // MARK: Editing
