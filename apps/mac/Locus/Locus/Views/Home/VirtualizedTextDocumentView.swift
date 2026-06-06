@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import SwiftUI
 
 /// Pure geometry for a uniform-line-height virtualized text view: it maps
@@ -31,6 +32,59 @@ struct TextViewportLayout: Equatable {
       return 0..<0
     }
     return first..<last
+  }
+}
+
+/// A text selection (or caret, when empty) as two endpoints in line/UTF-16-column
+/// coordinates. `anchor` is the fixed end set when the gesture began; `head` is
+/// the moving end the caret follows. Kept free of AppKit state so the ordering
+/// and per-line span logic are unit-testable.
+struct TextSelection: Equatable {
+  struct Endpoint: Equatable, Comparable {
+    var line: Int
+    var columnUTF16: Int
+
+    static func < (lhs: Endpoint, rhs: Endpoint) -> Bool {
+      (lhs.line, lhs.columnUTF16) < (rhs.line, rhs.columnUTF16)
+    }
+  }
+
+  var anchor: Endpoint
+  var head: Endpoint
+
+  init(anchor: Endpoint, head: Endpoint) {
+    self.anchor = anchor
+    self.head = head
+  }
+
+  /// A zero-length selection (caret) at a single endpoint.
+  init(caretAt endpoint: Endpoint) {
+    self.anchor = endpoint
+    self.head = endpoint
+  }
+
+  var isEmpty: Bool { anchor == head }
+  /// The earlier endpoint in document order.
+  var start: Endpoint { Swift.min(anchor, head) }
+  /// The later endpoint in document order.
+  var end: Endpoint { Swift.max(anchor, head) }
+
+  /// The half-open UTF-16 column span `[start, end)` selected on `line`, or `nil`
+  /// when the line lies outside the selection. A line fully spanned by a
+  /// multi-line selection reports `lineLengthUTF16` as its end so the highlight
+  /// can extend to (and past) the line's last character.
+  func columnSpan(onLine line: Int, lineLengthUTF16: Int) -> (start: Int, end: Int)? {
+    guard !isEmpty else {
+      return nil
+    }
+    let lower = start
+    let upper = end
+    guard line >= lower.line, line <= upper.line else {
+      return nil
+    }
+    let startColumn = line == lower.line ? lower.columnUTF16 : 0
+    let endColumn = line == upper.line ? upper.columnUTF16 : lineLengthUTF16
+    return (startColumn, endColumn)
   }
 }
 
@@ -78,11 +132,31 @@ final class LineRenderingTextView: NSView {
   private let maximumFetchedBytesPerLine = 16_384
   /// Characters actually drawn per line. Lines longer than this are clipped for
   /// display (this is a read-only viewer, not a full horizontal renderer), which
-  /// also bounds the document's width.
+  /// also bounds the document's width. Selection and copy use the same clipped
+  /// text, so all three share one coordinate system.
   private let maximumDrawnCharactersPerLine = 5_000
+  /// Upper bound on how many bytes one copy may materialize. Cmd+A (or a huge
+  /// drag) on a multi-gigabyte file must not build a giant string on the main
+  /// thread, so an over-budget copy is refused (with a beep) rather than risking
+  /// an out-of-memory freeze. Internal so tests can lower it. A future
+  /// range-snapshot FFI could stream instead of materializing.
+  var maximumCopiedByteCount = 256 * 1024 * 1024
   private var cachedBand: (revision: UInt64, range: Range<Int>, lines: [NSAttributedString])?
   private var maxObservedLineWidth: CGFloat = 0
   private var pendingLayoutUpdate = false
+
+  // Read-only selection / caret. The view owns this state (it is not an
+  // NSTextView), maps clicks to (line, UTF-16 column) endpoints, draws the
+  // highlight and caret, and copies the selected text on demand.
+  private(set) var selection: TextSelection?
+  private var isSelecting = false
+  /// Extra highlight width drawn past a fully selected line to signal that the
+  /// line's trailing newline is part of the selection.
+  private let newlineSelectionWidth: CGFloat = 6
+  /// Last seen horizontal scroll offset, to detect horizontal scrolling (which
+  /// requires repainting the pinned gutter) versus vertical scrolling (handled by
+  /// copy-on-scroll).
+  private var lastHorizontalOffset: CGFloat = 0
 
   var lineCount: Int { buffer?.lineCount ?? 1 }
 
@@ -110,6 +184,9 @@ final class LineRenderingTextView: NSView {
     self.buffer = buffer
     cachedBand = nil
     maxObservedLineWidth = 0
+    selection = nil
+    isSelecting = false
+    lastHorizontalOffset = 0
     updateLayout()
     // A new document always opens at the top-left; otherwise a reused scroll view
     // would keep the previous file's scroll position.
@@ -125,6 +202,148 @@ final class LineRenderingTextView: NSView {
   /// entire (potentially multi-million-point) document.
   func invalidateVisibleArea() {
     setNeedsDisplay(visibleRect)
+  }
+
+  /// Called when the clip view scrolls. Vertical scrolling is left to
+  /// copy-on-scroll (cheap); only a change in the horizontal offset forces a
+  /// repaint, to re-pin the gutter and caret at the new offset.
+  func viewportDidScroll() {
+    let offsetX = enclosingScrollView?.contentView.bounds.origin.x ?? 0
+    guard abs(offsetX - lastHorizontalOffset) > 0.01 else { return }
+    lastHorizontalOffset = offsetX
+    invalidateVisibleArea()
+  }
+
+  // MARK: First responder & focus
+
+  override var acceptsFirstResponder: Bool { buffer != nil }
+
+  override func becomeFirstResponder() -> Bool {
+    let didBecome = super.becomeFirstResponder()
+    if didBecome { invalidateVisibleArea() }
+    return didBecome
+  }
+
+  override func resignFirstResponder() -> Bool {
+    let didResign = super.resignFirstResponder()
+    if didResign { invalidateVisibleArea() }
+    return didResign
+  }
+
+  // MARK: Mouse selection
+
+  override func mouseDown(with event: NSEvent) {
+    guard buffer != nil else { return }
+    window?.makeFirstResponder(self)
+    let endpoint = endpoint(at: convert(event.locationInWindow, from: nil))
+    selection = TextSelection(caretAt: endpoint)
+    isSelecting = true
+    invalidateVisibleArea()
+  }
+
+  override func mouseDragged(with event: NSEvent) {
+    guard isSelecting, selection != nil else { return }
+    autoscroll(with: event)
+    selection?.head = endpoint(at: convert(event.locationInWindow, from: nil))
+    invalidateVisibleArea()
+  }
+
+  override func mouseUp(with event: NSEvent) {
+    isSelecting = false
+  }
+
+  /// Maps a point in this view's coordinates to the nearest (line, UTF-16 column)
+  /// endpoint, clamped to the document.
+  private func endpoint(at point: NSPoint) -> TextSelection.Endpoint {
+    let lastLine = max(0, lineCount - 1)
+    let line = min(lastLine, max(0, Int((point.y / layout.lineHeight).rounded(.down))))
+    let column = columnUTF16(forX: point.x - (gutterWidth + horizontalPadding), in: line)
+    return TextSelection.Endpoint(line: line, columnUTF16: column)
+  }
+
+  // MARK: Selection commands
+
+  override func selectAll(_ sender: Any?) {
+    guard let buffer, buffer.lineCount > 0 else { return }
+    let lastLine = buffer.lineCount - 1
+    selection = TextSelection(
+      anchor: .init(line: 0, columnUTF16: 0),
+      head: .init(line: lastLine, columnUTF16: lineLengthUTF16(lastLine))
+    )
+    invalidateVisibleArea()
+  }
+
+  @objc func copy(_ sender: Any?) {
+    guard let text = selectedText(), !text.isEmpty else { return }
+    ClipboardService().copyPlainText(text)
+  }
+
+  override func performKeyEquivalent(with event: NSEvent) -> Bool {
+    // Only act while focused; otherwise let the focused responder (e.g. the
+    // editable editor) handle the shortcut.
+    guard window?.firstResponder === self,
+      event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+      let key = event.charactersIgnoringModifiers
+    else {
+      return super.performKeyEquivalent(with: event)
+    }
+    switch key {
+    case "a":
+      selectAll(nil)
+      return true
+    case "c":
+      copy(nil)
+      return true
+    default:
+      return super.performKeyEquivalent(with: event)
+    }
+  }
+
+  /// The selected text for copying. Returns `nil` for an empty/absent selection,
+  /// or when the selection is larger than `maximumCopiedByteCount` (in which case
+  /// it beeps rather than materializing a giant string on the main thread).
+  ///
+  /// The selection operates on the same clipped per-line text the view displays
+  /// (`maximumDrawnCharactersPerLine`), so what is copied matches what is shown
+  /// and selectable. Line terminators are normalized to LF — the view is
+  /// line-based and does not retain original terminators (a CRLF file copies with
+  /// LF); preserving them would require a terminator-aware range snapshot.
+  func selectedText() -> String? {
+    guard let buffer, let selection, !selection.isEmpty else {
+      return nil
+    }
+    let lower = selection.start
+    let upper = selection.end
+
+    if let startByte = (try? buffer.position(forLine: lower.line, columnUTF16: lower.columnUTF16))?
+      .byte,
+      let endByte = (try? buffer.position(forLine: upper.line, columnUTF16: upper.columnUTF16))?
+        .byte,
+      endByte - startByte > maximumCopiedByteCount
+    {
+      NSSound.beep()
+      return nil
+    }
+
+    let count = upper.line - lower.line + 1
+    var lines = displayLineStrings(forLineRange: lower.line, count: count)
+    guard !lines.isEmpty else {
+      return ""
+    }
+
+    if lines.count == 1 {
+      let line = lines[0] as NSString
+      let from = min(lower.columnUTF16, line.length)
+      let to = min(upper.columnUTF16, line.length)
+      guard to > from else { return "" }
+      return line.substring(with: NSRange(location: from, length: to - from))
+    }
+
+    let first = lines[0] as NSString
+    lines[0] = first.substring(from: min(lower.columnUTF16, first.length))
+    let last = lines[lines.count - 1] as NSString
+    lines[lines.count - 1] = last.substring(to: min(upper.columnUTF16, last.length))
+    return lines.joined(separator: "\n")
   }
 
   /// Resizes the document to fit the line count (height) and the widest line seen
@@ -157,17 +376,69 @@ final class LineRenderingTextView: NSView {
     return lines
   }
 
-  private func highlightedLine(_ line: String) -> NSAttributedString {
-    let visible =
-      line.count > maximumDrawnCharactersPerLine
+  /// A single line clipped to the displayed character limit. Display, selection,
+  /// and copy all go through this so they share one coordinate system.
+  private func clippedDisplayLine(_ line: String) -> String {
+    line.count > maximumDrawnCharactersPerLine
       ? String(line.prefix(maximumDrawnCharactersPerLine))
       : line
+  }
+
+  /// The clipped plain text of lines `[start, start + count)`, matching what the
+  /// view displays. Used by copy so the copied text equals the selectable text.
+  private func displayLineStrings(forLineRange start: Int, count: Int) -> [String] {
+    guard let buffer else { return [] }
+    return
+      buffer.text(forLineRange: start, count: count, maxBytesPerLine: maximumFetchedBytesPerLine)
+      .components(separatedBy: "\n")
+      .map(clippedDisplayLine)
+  }
+
+  private func highlightedLine(_ line: String) -> NSAttributedString {
+    let visible = clippedDisplayLine(line)
     let attributed = NSMutableAttributedString(string: visible)
     let fullRange = NSRange(location: 0, length: (visible as NSString).length)
     TextDocumentSyntaxHighlighter.apply(
       to: attributed, text: visible, syntax: syntax, font: font, range: fullRange)
     attributed.addAttribute(.font, value: font, range: fullRange)
     return attributed
+  }
+
+  // MARK: Line geometry (selection / caret hit-testing)
+
+  /// The displayed (highlighted, possibly truncated) attributed string for a
+  /// line, reusing the cached band when the line falls within it.
+  private func attributedLine(forLine line: Int) -> NSAttributedString {
+    if let cachedBand, cachedBand.range.contains(line) {
+      return cachedBand.lines[line - cachedBand.range.lowerBound]
+    }
+    guard let buffer else { return NSAttributedString() }
+    let text =
+      buffer.text(forLineRange: line, count: 1, maxBytesPerLine: maximumFetchedBytesPerLine)
+      .components(separatedBy: "\n").first ?? ""
+    return highlightedLine(text)
+  }
+
+  private func lineLengthUTF16(_ line: Int) -> Int {
+    attributedLine(forLine: line).length
+  }
+
+  /// UTF-16 column at horizontal offset `x` (relative to the text's left edge)
+  /// within `line`, clamped to the line.
+  private func columnUTF16(forX x: CGFloat, in line: Int) -> Int {
+    let attributed = attributedLine(forLine: line)
+    guard x > 0, attributed.length > 0 else { return 0 }
+    let ctLine = CTLineCreateWithAttributedString(attributed)
+    let index = CTLineGetStringIndexForPosition(ctLine, CGPoint(x: x, y: 0))
+    guard index != kCFNotFound else { return attributed.length }
+    return max(0, min(index, attributed.length))
+  }
+
+  /// Horizontal offset (relative to the text's left edge) of UTF-16 `column`.
+  private func xOffset(forColumn column: Int, in attributed: NSAttributedString) -> CGFloat {
+    let clamped = max(0, min(column, attributed.length))
+    let ctLine = CTLineCreateWithAttributedString(attributed)
+    return CTLineGetOffsetForStringIndex(ctLine, clamped, nil)
   }
 
   override func draw(_ dirtyRect: NSRect) {
@@ -185,6 +456,11 @@ final class LineRenderingTextView: NSView {
     let gutter = gutterWidth
     let textX = gutter + horizontalPadding
     let lines = attributedBandLines(for: buffer, range: range)
+
+    if let selection, !selection.isEmpty {
+      drawSelectionHighlight(selection, lines: lines, range: range, textX: textX)
+    }
+
     var widest = maxObservedLineWidth
     for (offset, attributedLine) in lines.enumerated() {
       let y = layout.yOffset(forLine: range.lowerBound + offset)
@@ -195,6 +471,7 @@ final class LineRenderingTextView: NSView {
         options: [.usesLineFragmentOrigin]
       )
     }
+    drawCaretIfNeeded(lines: lines, range: range, textX: textX)
     if gutter > 0 {
       drawGutter(width: gutter, lineRange: range, dirtyRect: dirtyRect)
     }
@@ -209,6 +486,45 @@ final class LineRenderingTextView: NSView {
         }
       }
     }
+  }
+
+  /// Fills the selected column span on each visible line, behind the text. Lines
+  /// fully spanned by a multi-line selection extend a little past their last
+  /// character to signal the trailing newline is selected.
+  private func drawSelectionHighlight(
+    _ selection: TextSelection, lines: [NSAttributedString], range: Range<Int>, textX: CGFloat
+  ) {
+    let focused = window?.firstResponder === self
+    (focused ? NSColor.selectedTextBackgroundColor : .unemphasizedSelectedTextBackgroundColor)
+      .setFill()
+    for line in range {
+      let attributed = lines[line - range.lowerBound]
+      guard let span = selection.columnSpan(onLine: line, lineLengthUTF16: attributed.length) else {
+        continue
+      }
+      let xStart = textX + xOffset(forColumn: span.start, in: attributed)
+      var xEnd = textX + xOffset(forColumn: span.end, in: attributed)
+      if line < selection.end.line {
+        xEnd += newlineSelectionWidth
+      }
+      NSRect(
+        x: xStart, y: layout.yOffset(forLine: line),
+        width: max(0, xEnd - xStart), height: layout.lineHeight
+      ).fill()
+    }
+  }
+
+  /// Draws the caret at the (empty) selection head while focused and visible.
+  private func drawCaretIfNeeded(lines: [NSAttributedString], range: Range<Int>, textX: CGFloat) {
+    guard window?.firstResponder === self, let selection, selection.isEmpty else {
+      return
+    }
+    let line = selection.head.line
+    guard range.contains(line) else { return }
+    let attributed = lines[line - range.lowerBound]
+    let x = textX + xOffset(forColumn: selection.head.columnUTF16, in: attributed)
+    NSColor.textColor.setFill()
+    NSRect(x: x, y: layout.yOffset(forLine: line), width: 1.5, height: layout.lineHeight).fill()
   }
 
   /// Draws the line-number gutter pinned to the left of the visible viewport, on
@@ -266,10 +582,10 @@ struct LargeTextViewport: NSViewRepresentable {
     scrollView.borderType = .noBorder
     scrollView.drawsBackground = true
     scrollView.backgroundColor = .textBackgroundColor
-    // The pinned gutter is drawn by the document view at the current scroll
-    // offset, so the whole visible area must repaint on scroll (the default
-    // copy-on-scroll would smear the gutter horizontally).
-    scrollView.contentView.copiesOnScroll = false
+    // Keep copy-on-scroll (the default): vertical scrolling then only repaints
+    // the newly exposed rows, and the gutter/selection/caret — drawn in document
+    // coordinates — move with the copied content. Horizontal scrolling needs the
+    // pinned gutter repainted, which the coordinator handles explicitly.
 
     let documentView = LineRenderingTextView()
     documentView.setAccessibilityIdentifier("document-large-text-viewer")
@@ -321,9 +637,7 @@ struct LargeTextViewport: NSViewRepresentable {
     weak var documentView: LineRenderingTextView?
 
     @objc func viewportScrolled(_ notification: Notification) {
-      // Repaint so the pinned gutter follows the new horizontal offset and shows
-      // the line numbers for the newly visible rows.
-      documentView?.invalidateVisibleArea()
+      documentView?.viewportDidScroll()
     }
 
     @objc func viewportResized(_ notification: Notification) {

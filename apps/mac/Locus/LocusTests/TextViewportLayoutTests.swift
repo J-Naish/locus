@@ -125,6 +125,50 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(textView.gutterWidth, 0)
   }
 
+  func testSelectionStartAndEndAreOrderedRegardlessOfDragDirection() {
+    // Dragging upward (head before anchor) still reports start < end.
+    let anchor = TextSelection.Endpoint(line: 5, columnUTF16: 2)
+    let head = TextSelection.Endpoint(line: 1, columnUTF16: 8)
+    let selection = TextSelection(anchor: anchor, head: head)
+    XCTAssertEqual(selection.start, head)
+    XCTAssertEqual(selection.end, anchor)
+    XCTAssertFalse(selection.isEmpty)
+  }
+
+  func testCaretSelectionIsEmpty() {
+    let caret = TextSelection(caretAt: .init(line: 3, columnUTF16: 4))
+    XCTAssertTrue(caret.isEmpty)
+    XCTAssertNil(caret.columnSpan(onLine: 3, lineLengthUTF16: 10))
+  }
+
+  func testColumnSpanReturnsNilOutsideSelection() {
+    let selection = TextSelection(
+      anchor: .init(line: 2, columnUTF16: 1), head: .init(line: 4, columnUTF16: 3))
+    XCTAssertNil(selection.columnSpan(onLine: 1, lineLengthUTF16: 10))
+    XCTAssertNil(selection.columnSpan(onLine: 5, lineLengthUTF16: 10))
+  }
+
+  func testColumnSpanOnSingleSelectedLine() {
+    let selection = TextSelection(
+      anchor: .init(line: 2, columnUTF16: 3), head: .init(line: 2, columnUTF16: 7))
+    let span = selection.columnSpan(onLine: 2, lineLengthUTF16: 20)
+    XCTAssertEqual(span?.start, 3)
+    XCTAssertEqual(span?.end, 7)
+  }
+
+  func testColumnSpanAcrossMultipleLinesClampsToLineEnds() {
+    // First line: from start column to its end. Middle line: whole line. Last
+    // line: from 0 to the end column.
+    let selection = TextSelection(
+      anchor: .init(line: 1, columnUTF16: 4), head: .init(line: 3, columnUTF16: 2))
+    XCTAssertEqual(
+      selection.columnSpan(onLine: 1, lineLengthUTF16: 10).map { [$0.start, $0.end] }, [4, 10])
+    XCTAssertEqual(
+      selection.columnSpan(onLine: 2, lineLengthUTF16: 15).map { [$0.start, $0.end] }, [0, 15])
+    XCTAssertEqual(
+      selection.columnSpan(onLine: 3, lineLengthUTF16: 8).map { [$0.start, $0.end] }, [0, 2])
+  }
+
   @MainActor
   func testGutterWidthMatchesGutterMetricsWhenShown() {
     // With line numbers shown the gutter reserves the metric width. An empty
@@ -136,5 +180,56 @@ final class TextViewportLayoutTests: XCTestCase {
       textView.gutterWidth,
       GutterMetrics.width(lineCount: textView.lineCount, font: GutterMetrics.lineNumberFont)
     )
+  }
+
+  // MARK: selectedText (copy)
+
+  @MainActor
+  private func makeViewer(_ contents: String) throws -> LineRenderingTextView {
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    let view = LineRenderingTextView()
+    view.setBuffer(buffer)
+    return view
+  }
+
+  @MainActor
+  func testSelectedTextRoundTripsMultiLineSelection() throws {
+    let view = try makeViewer("alpha\nbravo\ncharlie")
+    view.selectAll(nil)
+    XCTAssertEqual(view.selectedText(), "alpha\nbravo\ncharlie")
+  }
+
+  @MainActor
+  func testSelectedTextNormalizesCRLFToLF() throws {
+    // The line-based viewer does not retain terminators, so a copy of a CRLF
+    // document is normalized to LF. This is intentional for now.
+    let view = try makeViewer("a\r\nb\r\nc")
+    view.selectAll(nil)
+    XCTAssertEqual(view.selectedText(), "a\nb\nc")
+  }
+
+  @MainActor
+  func testSelectedTextClipsLongLineToDisplayLimit() throws {
+    // Selection and copy share the displayed (clipped) text, so a copy of an
+    // over-long line is bounded to what is shown/selectable.
+    let view = try makeViewer(String(repeating: "x", count: 6000))
+    view.selectAll(nil)
+    XCTAssertEqual(view.selectedText()?.count, 5000)
+  }
+
+  @MainActor
+  func testSelectedTextRefusesSelectionOverByteBudget() throws {
+    // A selection larger than the copy budget is refused rather than
+    // materializing a giant string on the main thread.
+    let view = try makeViewer("abcdefghij")
+    view.maximumCopiedByteCount = 4
+    view.selectAll(nil)
+    XCTAssertNil(view.selectedText())
+  }
+
+  @MainActor
+  func testSelectedTextIsNilWithoutSelection() throws {
+    let view = try makeViewer("alpha\nbravo")
+    XCTAssertNil(view.selectedText())
   }
 }
