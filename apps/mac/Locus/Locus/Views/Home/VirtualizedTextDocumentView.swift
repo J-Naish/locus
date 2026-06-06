@@ -135,6 +135,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// the actual write (it has the file URL and the atomic/symlink policy).
   var onSaveRequested: (() -> Void)?
 
+  /// Reports the buffer's dirty state to the host after each edit/undo, so it can
+  /// decide whether an external change may safely reload (clean) or conflicts
+  /// with unsaved edits.
+  var onDirtyChange: ((Bool) -> Void)?
+
   /// Bytes fetched per line for the visible band; longer lines are truncated for
   /// the fetch so one enormous line never crosses the FFI in full.
   private let maximumFetchedBytesPerLine = 16_384
@@ -866,6 +871,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       scrollCaretToVisible(head)
     }
     invalidateVisibleArea()
+    notifyDirtyChanged()
   }
 
   /// Clamps the selection endpoints into the current document bounds, since
@@ -935,6 +941,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       scrollCaretToVisible(head)
     }
     invalidateVisibleArea()
+    notifyDirtyChanged()
+  }
+
+  /// Reports the buffer's current dirty state to the host (after an edit/undo).
+  private func notifyDirtyChanged() {
+    onDirtyChange?(buffer?.isDirty ?? false)
   }
 
   /// Text-relative x of the caret at `endpoint`.
@@ -1399,6 +1411,7 @@ struct LargeTextViewport: NSViewRepresentable {
   let syntax: TextDocumentSyntax
   let isEditable: Bool
   let onSaveRequested: () -> Void
+  let onDirtyChange: (Bool) -> Void
 
   func makeNSView(context: Context) -> NSScrollView {
     let scrollView = NSScrollView()
@@ -1420,6 +1433,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.showsLineNumbers = syntax.supportsLineNumbers
     documentView.isEditable = isEditable
     documentView.onSaveRequested = onSaveRequested
+    documentView.onDirtyChange = onDirtyChange
     scrollView.documentView = documentView
 
     documentView.setBuffer(buffer)
@@ -1453,6 +1467,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.showsLineNumbers = syntax.supportsLineNumbers
     documentView.isEditable = isEditable
     documentView.onSaveRequested = onSaveRequested
+    documentView.onDirtyChange = onDirtyChange
     if documentView.buffer !== buffer {
       documentView.setBuffer(buffer)
     }
@@ -1493,9 +1508,13 @@ struct VirtualizedTextDocumentView: View {
   let isEditable: Bool
   /// Changing this (e.g. on external file change) re-opens the buffer.
   let reloadToken: Int
-  /// Reports a save outcome (nil = success) so the host can refresh its
-  /// file fingerprint (avoiding a self-triggered reload) or surface the error.
-  var onSaveCompletion: (Error?) -> Void = { _ in }
+  /// Reports a save outcome to the host: on success the new file fingerprint
+  /// (read synchronously right after the write) so the host can record it before
+  /// the change monitor reacts; on failure the error to surface.
+  var onSaveCompletion: (Result<DocumentFileFingerprint?, Error>) -> Void = { _ in }
+  /// Reports the buffer's dirty state so the host can decide whether an external
+  /// change may safely reload or conflicts with unsaved edits.
+  var onDirtyChange: (Bool) -> Void = { _ in }
 
   @State private var phase: Phase = .loading
   private let bufferStore = TextBufferStore()
@@ -1517,7 +1536,8 @@ struct VirtualizedTextDocumentView: View {
           accessibilityLabel: accessibilityLabel,
           syntax: syntax,
           isEditable: isEditable,
-          onSaveRequested: { save(buffer) }
+          onSaveRequested: { save(buffer) },
+          onDirtyChange: onDirtyChange
         )
       case .failed(let message):
         ContentUnavailableView {
@@ -1550,6 +1570,7 @@ struct VirtualizedTextDocumentView: View {
         return
       }
       phase = .loaded(loaded.buffer)
+      onDirtyChange(false)  // a freshly opened buffer is clean
     } catch {
       guard !Task.isCancelled else {
         return
@@ -1569,10 +1590,13 @@ struct VirtualizedTextDocumentView: View {
     do {
       try bufferStore.save(buffer, to: url)
       buffer.markSaved()
-      onSaveCompletion(nil)
+      onDirtyChange(false)
+      // Read the fingerprint synchronously while still on the main actor, so the
+      // host records the post-save state before the change monitor fires.
+      onSaveCompletion(.success(DocumentFileFingerprint.read(at: url)))
     } catch {
       NSSound.beep()
-      onSaveCompletion(error)
+      onSaveCompletion(.failure(error))
     }
   }
 

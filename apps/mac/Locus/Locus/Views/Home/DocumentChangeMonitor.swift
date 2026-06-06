@@ -7,26 +7,33 @@ struct DocumentFileFingerprint: Equatable, Sendable {
 
   static func load(at url: URL) async -> DocumentFileFingerprint? {
     await Task.detached(priority: .utility) {
-      let didStartAccess = url.startAccessingSecurityScopedResource()
-      defer {
-        if didStartAccess {
-          url.stopAccessingSecurityScopedResource()
-        }
-      }
-
-      guard
-        let attributes = try? FileManager.default.attributesOfItem(
-          atPath: url.path(percentEncoded: false)
-        )
-      else {
-        return nil
-      }
-
-      return DocumentFileFingerprint(
-        size: (attributes[.size] as? NSNumber).map(\.uint64Value),
-        modificationDate: attributes[.modificationDate] as? Date
-      )
+      read(at: url)
     }.value
+  }
+
+  /// Synchronous size + modification-date read. Used inline right after a save so
+  /// the new fingerprint is recorded before the change monitor's debounced event
+  /// can treat the self-write as an external change.
+  static func read(at url: URL) -> DocumentFileFingerprint? {
+    let didStartAccess = url.startAccessingSecurityScopedResource()
+    defer {
+      if didStartAccess {
+        url.stopAccessingSecurityScopedResource()
+      }
+    }
+
+    guard
+      let attributes = try? FileManager.default.attributesOfItem(
+        atPath: url.path(percentEncoded: false)
+      )
+    else {
+      return nil
+    }
+
+    return DocumentFileFingerprint(
+      size: (attributes[.size] as? NSNumber).map(\.uint64Value),
+      modificationDate: attributes[.modificationDate] as? Date
+    )
   }
 }
 

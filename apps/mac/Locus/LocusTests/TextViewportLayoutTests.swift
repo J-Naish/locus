@@ -796,4 +796,20 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertTrue(try makeEditableViewer("ab").validateUserInterfaceItem(pasteItem))
     XCTAssertFalse(try makeViewer("ab").validateUserInterfaceItem(pasteItem))  // read-only
   }
+
+  // MARK: Dirty reporting (external-change conflict bridge)
+
+  @MainActor
+  func testEditingReportsDirtyThenCleanAfterUndo() throws {
+    let view = try makeEditableViewer("abc")
+    var reported: [Bool] = []
+    view.onDirtyChange = { reported.append($0) }
+
+    view.moveToDocumentEdge(end: true, extend: false)
+    view.insertText("X")
+    XCTAssertEqual(reported.last, true)  // an edit makes the buffer dirty
+
+    view.undoEdit()
+    XCTAssertEqual(reported.last, false)  // undo back to the opened state is clean
+  }
 }

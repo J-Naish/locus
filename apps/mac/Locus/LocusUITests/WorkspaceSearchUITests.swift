@@ -1271,6 +1271,103 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testLargeFileViewerConflictsOnExternalChangeWhileDirty() throws {
+    let workspace = FileManager.default.temporaryDirectory
+      .appendingPathComponent("locus-conflict-uitest-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: workspace) }
+    let fileURL = workspace.appendingPathComponent("Notes.txt")
+    try Data("ORIGINAL".utf8).write(to: fileURL)
+
+    let app = try launchApp(
+      workspacePath: workspace.path,
+      extraArguments: ["--ui-test-max-text-bytes", "3"]
+    )
+
+    let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
+    XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+    row.click()
+
+    let viewer = app.textViews["document-large-text-viewer"]
+    XCTAssertTrue(viewer.waitForExistence(timeout: 5), app.debugDescription)
+    viewer.click()
+
+    // Make unsaved edits, then change the file externally.
+    app.typeKey("a", modifierFlags: [.command])
+    app.typeText("DIRTYEDIT")
+    try Data("EXTERNAL".utf8).write(to: fileURL)
+
+    func copyAll() -> String? {
+      NSPasteboard.general.clearContents()
+      app.typeKey("a", modifierFlags: [.command])
+      app.typeKey("c", modifierFlags: [.command])
+      return NSPasteboard.general.string(forType: .string)
+    }
+
+    // A conflict banner appears (rather than silently reloading).
+    let reload = app.buttons["Reload"]
+    XCTAssertTrue(reload.waitForExistence(timeout: 3), app.debugDescription)
+
+    // The unsaved edits are preserved (the buffer was not reloaded).
+    viewer.click()
+    XCTAssertEqual(copyAll(), "DIRTYEDIT")
+
+    // Reload discards the edits and shows the on-disk content.
+    reload.click()
+    let gone = NSPredicate(format: "exists == false")
+    expectation(for: gone, evaluatedWith: reload)
+    waitForExpectations(timeout: 3)
+
+    viewer.click()
+    var reloaded: String?
+    let deadline = Date().addingTimeInterval(2)
+    repeat {
+      reloaded = copyAll()
+      if reloaded == "EXTERNAL" { break }
+      Thread.sleep(forTimeInterval: 0.05)
+    } while Date() < deadline
+    XCTAssertEqual(reloaded, "EXTERNAL")
+  }
+
+  @MainActor
+  func testLargeFileViewerKeepsConflictWhenUndoneToClean() throws {
+    // Regression: undoing edits back to a clean buffer must not hide a pending
+    // external-change conflict (the file on disk is still divergent).
+    let workspace = FileManager.default.temporaryDirectory
+      .appendingPathComponent("locus-conflict-undo-uitest-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: workspace) }
+    let fileURL = workspace.appendingPathComponent("Notes.txt")
+    try Data("ORIGINAL".utf8).write(to: fileURL)
+
+    let app = try launchApp(
+      workspacePath: workspace.path,
+      extraArguments: ["--ui-test-max-text-bytes", "3"]
+    )
+
+    let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
+    XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+    row.click()
+
+    let viewer = app.textViews["document-large-text-viewer"]
+    XCTAssertTrue(viewer.waitForExistence(timeout: 5), app.debugDescription)
+    viewer.click()
+
+    app.typeKey("a", modifierFlags: [.command])
+    app.typeText("DIRTYEDIT")  // single replace edit
+    try Data("EXTERNAL".utf8).write(to: fileURL)
+
+    let reload = app.buttons["Reload"]
+    XCTAssertTrue(reload.waitForExistence(timeout: 3), app.debugDescription)
+
+    // Undo back to the opened content: the buffer is clean again, but the disk
+    // change is still unreconciled, so the conflict banner must remain.
+    app.typeKey("z", modifierFlags: [.command])
+    Thread.sleep(forTimeInterval: 0.3)
+    XCTAssertTrue(reload.exists, "conflict banner should persist after undo")
+  }
+
+  @MainActor
   private func launchAppWithBasicWorkspace() throws -> XCUIApplication {
     try launchApp(workspacePath: fixtureWorkspacePath("basic"))
   }

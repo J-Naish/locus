@@ -23,6 +23,12 @@ struct WorkspaceDocumentSurface: View {
   @State private var knownDocumentFingerprint: DocumentFileFingerprint?
   @State private var documentReloadGeneration = 0
   @State private var isEditorFocused = false
+  /// Whether the large-file viewer has unsaved edits, mirrored from it so an
+  /// external change can be reconciled without losing edits.
+  @State private var largeDocumentDirty = false
+  /// Set when an external change arrives while the large-file viewer is dirty:
+  /// the buffer is kept (not reloaded) and a conflict banner is shown.
+  @State private var largeDocumentConflict = false
   @StateObject private var documentChangeMonitor = DocumentChangeMonitor()
 
   var body: some View {
@@ -89,6 +95,8 @@ struct WorkspaceDocumentSurface: View {
       persistActiveDraftIfNeeded()
       isEditorFocused = false
       knownDocumentFingerprint = nil
+      largeDocumentDirty = false
+      largeDocumentConflict = false
       onTextInputFocusChange(false)
     }
     .onChange(of: isEditorFocused) {
@@ -111,6 +119,21 @@ struct WorkspaceDocumentSurface: View {
           .foregroundStyle(.red)
           .padding(12)
           .accessibilityIdentifier("document-save-error")
+      }
+
+      if largeDocumentConflict {
+        HStack(spacing: 12) {
+          Label("This file changed on disk.", systemImage: "exclamationmark.triangle")
+            .font(.caption)
+          Spacer(minLength: 0)
+          // Dismiss the warning and keep editing the in-memory version; the
+          // divergence from disk is resolved on the next save.
+          Button("Keep Editing") { largeDocumentConflict = false }
+          Button("Reload") { reloadLargeDocumentDiscardingEdits() }
+        }
+        .padding(12)
+        .background(.thinMaterial)
+        .accessibilityIdentifier("document-conflict-banner")
       }
 
       switch loadState {
@@ -149,7 +172,8 @@ struct WorkspaceDocumentSurface: View {
           syntax: WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText,
           isEditable: Self.largeFileEditingEnabled && !entry.isReadOnly,
           reloadToken: documentReloadGeneration,
-          onSaveCompletion: { error in handleLargeDocumentSaveResult(error, for: entry) }
+          onSaveCompletion: { result in handleLargeDocumentSaveResult(result, for: entry) },
+          onDirtyChange: { isDirty in handleLargeDocumentDirtyChange(isDirty) }
         )
       }
     }
@@ -324,26 +348,47 @@ struct WorkspaceDocumentSurface: View {
   }
 
   /// Reconciles a large-file viewer save. On success the file fingerprint is
-  /// refreshed so the change monitor does not treat our own write as an external
-  /// change and reload the buffer (the 250 ms debounce leaves ample time for this
-  /// to land first). On failure the error is surfaced like an editable-text save.
+  /// recorded synchronously from the save result (the viewer read it right after
+  /// writing), so the change monitor never treats our own write as an external
+  /// change — no async window to race. A save also resolves any pending conflict,
+  /// since the file now holds our content. On failure the error is surfaced.
   @MainActor
-  private func handleLargeDocumentSaveResult(_ error: Error?, for entry: WorkspaceEntry) {
+  private func handleLargeDocumentSaveResult(
+    _ result: Result<DocumentFileFingerprint?, Error>, for entry: WorkspaceEntry
+  ) {
     guard self.entry?.id == entry.id else {
       return
     }
-    if let error {
+    switch result {
+    case .success(let fingerprint):
+      saveErrorMessage = nil
+      largeDocumentConflict = false
+      knownDocumentFingerprint = fingerprint
+    case .failure(let error):
       saveErrorMessage = error.localizedDescription
+    }
+  }
+
+  /// Mirrors the large-file viewer's dirty state. A pending conflict is *not*
+  /// cleared just because the buffer became clean (e.g. undoing edits): the
+  /// external change is still unreconciled, so the banner stays until the user
+  /// reloads/keeps or a reload/save resolves it.
+  @MainActor
+  private func handleLargeDocumentDirtyChange(_ isDirty: Bool) {
+    guard largeDocumentDirty != isDirty else {
       return
     }
-    saveErrorMessage = nil
-    Task {
-      let fingerprint = await DocumentFileFingerprint.load(at: entry.url)
-      guard self.entry?.id == entry.id else {
-        return
-      }
-      knownDocumentFingerprint = fingerprint
-    }
+    largeDocumentDirty = isDirty
+  }
+
+  /// Resolves an external-change conflict by discarding in-memory edits and
+  /// reopening the file from disk. The fingerprint was already updated when the
+  /// conflict was detected, so the reopen does not immediately re-conflict.
+  @MainActor
+  private func reloadLargeDocumentDiscardingEdits() {
+    largeDocumentConflict = false
+    largeDocumentDirty = false
+    documentReloadGeneration &+= 1
   }
 
   @MainActor
@@ -386,10 +431,20 @@ extension WorkspaceDocumentSurface {
     }
 
     if case .tooLargeForEditing = loadState {
-      // Read-only large viewer: reopen it on a fresh memory map rather than
-      // running the editable string load (which would just fail as too large).
+      // Accept this disk state as known either way, so the same external change
+      // is not re-detected on every later sync.
       knownDocumentFingerprint = fingerprint
-      documentReloadGeneration &+= 1
+      if largeDocumentDirty {
+        // Unsaved edits: do not reopen (that would discard them). Surface a
+        // conflict so the user chooses to reload or keep their changes.
+        largeDocumentConflict = true
+      } else {
+        // Clean: reopen on a fresh memory map to show the new content. This also
+        // reconciles to disk, so any earlier conflict (e.g. one made clean by
+        // undo) is resolved.
+        largeDocumentConflict = false
+        documentReloadGeneration &+= 1
+      }
     } else if WorkspaceTextDocumentSupport.canEdit(entry) {
       await syncTextDocumentFromDisk(entry, fingerprint: fingerprint)
     } else {
