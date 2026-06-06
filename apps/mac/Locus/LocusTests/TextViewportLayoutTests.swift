@@ -508,4 +508,142 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(content(of: view), "ab")
     XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 1))
   }
+
+  // MARK: Text input (IME / composition)
+
+  private static let noReplacement = NSRange(location: NSNotFound, length: 0)
+
+  @MainActor
+  func testMarkedTextShowsWithoutChangingBuffer() throws {
+    let view = try makeEditableViewer("ab")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: false)  // caret (0,1)
+    view.setMarkedText(
+      "か", selectedRange: NSRange(location: 1, length: 0), replacementRange: Self.noReplacement)
+    XCTAssertTrue(view.hasMarkedText())
+    XCTAssertEqual(content(of: view), "ab")  // composing text is not in the buffer yet
+    XCTAssertEqual(view.markedRange(), NSRange(location: 1, length: 1))
+  }
+
+  @MainActor
+  func testCommittingComposedTextInsertsIntoBuffer() throws {
+    let view = try makeEditableViewer("ab")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: false)  // caret (0,1)
+    view.setMarkedText(
+      "か", selectedRange: NSRange(location: 1, length: 0), replacementRange: Self.noReplacement)
+    view.insertText("が", replacementRange: Self.noReplacement)  // commit
+    XCTAssertFalse(view.hasMarkedText())
+    XCTAssertEqual(content(of: view), "aがb")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 2))
+  }
+
+  @MainActor
+  func testUpdatingMarkedTextReplacesPreviousComposition() throws {
+    let view = try makeEditableViewer("ab")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: false)  // caret (0,1)
+    view.setMarkedText(
+      "か", selectedRange: NSRange(location: 1, length: 0), replacementRange: Self.noReplacement)
+    view.setMarkedText(
+      "かん", selectedRange: NSRange(location: 2, length: 0), replacementRange: Self.noReplacement)
+    XCTAssertEqual(content(of: view), "ab")  // still uncommitted
+    XCTAssertEqual(view.markedRange(), NSRange(location: 1, length: 2))
+  }
+
+  @MainActor
+  func testUnmarkTextCommitsMarkedText() throws {
+    let view = try makeEditableViewer("ab")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: false)  // caret (0,1)
+    view.setMarkedText(
+      "か", selectedRange: NSRange(location: 1, length: 0), replacementRange: Self.noReplacement)
+    view.unmarkText()
+    XCTAssertFalse(view.hasMarkedText())
+    XCTAssertEqual(content(of: view), "aかb")
+  }
+
+  @MainActor
+  func testEmptyMarkedTextCancelsComposition() throws {
+    let view = try makeEditableViewer("ab")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: false)  // caret (0,1)
+    view.setMarkedText(
+      "か", selectedRange: NSRange(location: 1, length: 0), replacementRange: Self.noReplacement)
+    view.setMarkedText(
+      "", selectedRange: NSRange(location: 0, length: 0), replacementRange: Self.noReplacement)
+    XCTAssertFalse(view.hasMarkedText())
+    XCTAssertEqual(content(of: view), "ab")
+  }
+
+  @MainActor
+  func testComposingReplacesActiveSelection() throws {
+    let view = try makeEditableViewer("hello")
+    view.selectAll(nil)
+    view.setMarkedText(
+      "か", selectedRange: NSRange(location: 1, length: 0), replacementRange: Self.noReplacement)
+    XCTAssertTrue(view.hasMarkedText())
+    XCTAssertEqual(content(of: view), "")  // the selection is replaced by the composition
+    view.unmarkText()
+    XCTAssertEqual(content(of: view), "か")
+  }
+
+  @MainActor
+  func testReadOnlyViewerIgnoresComposition() throws {
+    let view = try makeViewer("ab")  // read-only
+    view.setMarkedText(
+      "か", selectedRange: NSRange(location: 1, length: 0), replacementRange: Self.noReplacement)
+    XCTAssertFalse(view.hasMarkedText())
+    view.insertText("が", replacementRange: Self.noReplacement)
+    XCTAssertEqual(content(of: view), "ab")
+  }
+
+  @MainActor
+  func testSelectedRangeReflectsCompositionCursor() throws {
+    let view = try makeEditableViewer("ab")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: false)  // caret (0,1)
+    view.setMarkedText(
+      "かん", selectedRange: NSRange(location: 1, length: 0), replacementRange: Self.noReplacement)
+    XCTAssertEqual(view.markedRange(), NSRange(location: 1, length: 2))
+    XCTAssertEqual(view.selectedRange(), NSRange(location: 2, length: 0))
+  }
+
+  @MainActor
+  func testSelectedRangeWithoutCompositionReflectsSelection() throws {
+    let view = try makeEditableViewer("hello")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: true)
+    view.moveHorizontally(forward: true, extend: true)  // select "he"
+    XCTAssertFalse(view.hasMarkedText())
+    XCTAssertEqual(view.selectedRange(), NSRange(location: 0, length: 2))
+    XCTAssertEqual(view.markedRange().location, NSNotFound)
+  }
+
+  @MainActor
+  func testDoCommandInsertNewlineInsertsLineBreak() throws {
+    let view = try makeEditableViewer("ab")
+    view.moveToDocumentEdge(end: true, extend: false)  // caret (0,2)
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+    XCTAssertEqual(content(of: view), "ab\n")
+    XCTAssertEqual(view.buffer?.lineCount, 2)
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testDoCommandDeleteBackwardDeletes() throws {
+    let view = try makeEditableViewer("abc")
+    view.moveToDocumentEdge(end: true, extend: false)  // caret (0,3)
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.deleteBackward(_:)))
+    XCTAssertEqual(content(of: view), "ab")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 2))
+  }
+
+  @MainActor
+  func testDoCommandMoveRightNavigatesEvenWhenReadOnly() throws {
+    let view = try makeViewer("ab")  // read-only: navigation still works
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.moveRight(_:)))
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 1))
+  }
 }

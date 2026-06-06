@@ -88,28 +88,6 @@ struct TextSelection: Equatable {
   }
 }
 
-/// Physical (keyboard-layout-independent) key codes for the navigation keys the
-/// read-only viewer handles in `keyDown`.
-private enum NavigationKeyCode {
-  static let leftArrow: UInt16 = 123
-  static let rightArrow: UInt16 = 124
-  static let downArrow: UInt16 = 125
-  static let upArrow: UInt16 = 126
-  static let home: UInt16 = 115
-  static let end: UInt16 = 119
-}
-
-/// Physical key codes for the editing keys the editable viewer handles directly
-/// in `keyDown`. Text composition (dead keys, CJK input methods) is a later
-/// slice via `NSTextInputClient`; these are the direct, modifier-free edits.
-private enum EditingKeyCode {
-  static let delete: UInt16 = 51  // Backspace
-  static let forwardDelete: UInt16 = 117
-  static let returnKey: UInt16 = 36
-  static let keypadEnter: UInt16 = 76
-  static let tab: UInt16 = 48
-}
-
 /// Custom flipped `NSView` document view that draws only the visible band of a
 /// [`TextBuffer`], fetching that band from the Rust core on demand. The document
 /// height is synthesized from the line count, so a multi-gigabyte file never has
@@ -198,6 +176,18 @@ final class LineRenderingTextView: NSView {
   /// copy-on-scroll).
   private var lastHorizontalOffset: CGFloat = 0
 
+  /// In-progress input-method composition (marked text). The uncommitted text is
+  /// held here and drawn inline at `anchor`; it is not written to the buffer
+  /// until the input method commits it. `nil` when not composing.
+  private struct Composition {
+    var text: String
+    /// The input method's cursor/selection within `text`, in UTF-16.
+    var selectedRange: NSRange
+    /// The buffer caret (line, UTF-16 column) the marked text is anchored at.
+    var anchor: TextSelection.Endpoint
+  }
+  private var composition: Composition?
+
   var lineCount: Int { buffer?.lineCount ?? 1 }
 
   /// Width of the line-number gutter for the current line count, or 0 when hidden.
@@ -228,6 +218,7 @@ final class LineRenderingTextView: NSView {
     isSelecting = false
     verticalGoalX = nil
     lastHorizontalOffset = 0
+    composition = nil
     updateLayout()
     // A new document always opens at the top-left; otherwise a reused scroll view
     // would keep the previous file's scroll position.
@@ -292,7 +283,12 @@ final class LineRenderingTextView: NSView {
 
   override func resignFirstResponder() -> Bool {
     let didResign = super.resignFirstResponder()
-    if didResign { invalidateVisibleArea() }
+    if didResign {
+      // Abandon any in-progress composition rather than committing it on a focus
+      // change; the input context deactivates with the responder.
+      composition = nil
+      invalidateVisibleArea()
+    }
     return didResign
   }
 
@@ -300,6 +296,8 @@ final class LineRenderingTextView: NSView {
 
   override func mouseDown(with event: NSEvent) {
     guard buffer != nil else { return }
+    // Finalize any in-progress composition before moving the caret.
+    if hasMarkedText() { unmarkText() }
     window?.makeFirstResponder(self)
     let endpoint = endpoint(at: convert(event.locationInWindow, from: nil))
     selection = TextSelection(caretAt: endpoint)
@@ -423,112 +421,93 @@ final class LineRenderingTextView: NSView {
     return endByte - startByte
   }
 
-  // MARK: Keyboard navigation & editing
+  // MARK: Key input
 
-  // Arrow keys (Option=word, Command=line/document, Shift=extend), plus basic
-  // editing when `isEditable`. Keyed off physical key codes (layout-independent)
-  // rather than `interpretKeyEvents` so the read-only viewer can swallow
-  // text-producing keys without beeping. Composition-aware input (dead keys, CJK
-  // input methods) moves to `interpretKeyEvents` + `NSTextInputClient` in a later
-  // slice; this handles direct character entry and deletion.
+  // Key events are routed through the input context so input methods (CJK IME,
+  // dead keys, accents, dictation) drive `insertText`/`setMarkedText`, and
+  // navigation/editing arrive as `doCommand(by:)` selectors. This keeps input
+  // generic across every language the OS supports rather than hardcoding keys.
   override func keyDown(with event: NSEvent) {
     guard buffer != nil else {
       super.keyDown(with: event)
       return
     }
-    let flags = event.modifierFlags
-    let extend = flags.contains(.shift)
-    let command = flags.contains(.command)
-    let option = flags.contains(.option)
-    let control = flags.contains(.control)
+    interpretKeyEvents([event])
+  }
 
-    // Navigation works in both read-only and editable modes.
-    switch event.keyCode {
-    case NavigationKeyCode.leftArrow:
-      if command {
-        moveToLineEdge(end: false, extend: extend)
-      } else if option {
-        moveByWord(forward: false, extend: extend)
-      } else {
-        moveHorizontally(forward: false, extend: extend)
-      }
-      return
-    case NavigationKeyCode.rightArrow:
-      if command {
-        moveToLineEdge(end: true, extend: extend)
-      } else if option {
-        moveByWord(forward: true, extend: extend)
-      } else {
-        moveHorizontally(forward: true, extend: extend)
-      }
-      return
-    case NavigationKeyCode.downArrow:
-      if command {
-        moveToDocumentEdge(end: true, extend: extend)
-      } else {
-        moveVertically(down: true, extend: extend)
-      }
-      return
-    case NavigationKeyCode.upArrow:
-      if command {
-        moveToDocumentEdge(end: false, extend: extend)
-      } else {
-        moveVertically(down: false, extend: extend)
-      }
-      return
-    case NavigationKeyCode.home:
-      moveToDocumentEdge(end: false, extend: extend)
-      return
-    case NavigationKeyCode.end:
-      moveToDocumentEdge(end: true, extend: extend)
-      return
+  /// Standard key-binding commands from `interpretKeyEvents`. Navigation works in
+  /// both read-only and editable modes; editing commands no-op when read-only
+  /// (their handlers guard on `isEditable`). Unhandled commands are ignored
+  /// without a beep — self-inserting text arrives via `insertText`, not here.
+  override func doCommand(by selector: Selector) {
+    switch selector {
+    case #selector(NSStandardKeyBindingResponding.moveLeft(_:)):
+      moveHorizontally(forward: false, extend: false)
+    case #selector(NSStandardKeyBindingResponding.moveRight(_:)):
+      moveHorizontally(forward: true, extend: false)
+    case #selector(NSStandardKeyBindingResponding.moveLeftAndModifySelection(_:)):
+      moveHorizontally(forward: false, extend: true)
+    case #selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)):
+      moveHorizontally(forward: true, extend: true)
+    case #selector(NSStandardKeyBindingResponding.moveUp(_:)):
+      moveVertically(down: false, extend: false)
+    case #selector(NSStandardKeyBindingResponding.moveDown(_:)):
+      moveVertically(down: true, extend: false)
+    case #selector(NSStandardKeyBindingResponding.moveUpAndModifySelection(_:)):
+      moveVertically(down: false, extend: true)
+    case #selector(NSStandardKeyBindingResponding.moveDownAndModifySelection(_:)):
+      moveVertically(down: true, extend: true)
+    case #selector(NSStandardKeyBindingResponding.moveWordLeft(_:)),
+      #selector(NSStandardKeyBindingResponding.moveWordBackward(_:)):
+      moveByWord(forward: false, extend: false)
+    case #selector(NSStandardKeyBindingResponding.moveWordRight(_:)),
+      #selector(NSStandardKeyBindingResponding.moveWordForward(_:)):
+      moveByWord(forward: true, extend: false)
+    case #selector(NSStandardKeyBindingResponding.moveWordLeftAndModifySelection(_:)),
+      #selector(NSStandardKeyBindingResponding.moveWordBackwardAndModifySelection(_:)):
+      moveByWord(forward: false, extend: true)
+    case #selector(NSStandardKeyBindingResponding.moveWordRightAndModifySelection(_:)),
+      #selector(NSStandardKeyBindingResponding.moveWordForwardAndModifySelection(_:)):
+      moveByWord(forward: true, extend: true)
+    case #selector(NSStandardKeyBindingResponding.moveToLeftEndOfLine(_:)),
+      #selector(NSStandardKeyBindingResponding.moveToBeginningOfLine(_:)):
+      moveToLineEdge(end: false, extend: false)
+    case #selector(NSStandardKeyBindingResponding.moveToRightEndOfLine(_:)),
+      #selector(NSStandardKeyBindingResponding.moveToEndOfLine(_:)):
+      moveToLineEdge(end: true, extend: false)
+    case #selector(NSStandardKeyBindingResponding.moveToLeftEndOfLineAndModifySelection(_:)),
+      #selector(NSStandardKeyBindingResponding.moveToBeginningOfLineAndModifySelection(_:)):
+      moveToLineEdge(end: false, extend: true)
+    case #selector(NSStandardKeyBindingResponding.moveToRightEndOfLineAndModifySelection(_:)),
+      #selector(NSStandardKeyBindingResponding.moveToEndOfLineAndModifySelection(_:)):
+      moveToLineEdge(end: true, extend: true)
+    case #selector(NSStandardKeyBindingResponding.moveToBeginningOfDocument(_:)):
+      moveToDocumentEdge(end: false, extend: false)
+    case #selector(NSStandardKeyBindingResponding.moveToEndOfDocument(_:)):
+      moveToDocumentEdge(end: true, extend: false)
+    case #selector(NSStandardKeyBindingResponding.moveToBeginningOfDocumentAndModifySelection(_:)):
+      moveToDocumentEdge(end: false, extend: true)
+    case #selector(NSStandardKeyBindingResponding.moveToEndOfDocumentAndModifySelection(_:)):
+      moveToDocumentEdge(end: true, extend: true)
+    case #selector(NSStandardKeyBindingResponding.insertNewline(_:)),
+      #selector(NSStandardKeyBindingResponding.insertLineBreak(_:)),
+      #selector(NSStandardKeyBindingResponding.insertParagraphSeparator(_:)):
+      insertText("\n")
+    case #selector(NSStandardKeyBindingResponding.insertTab(_:)):
+      insertText("\t")
+    case #selector(NSStandardKeyBindingResponding.deleteBackward(_:)):
+      deleteBackward()
+    case #selector(NSStandardKeyBindingResponding.deleteForward(_:)):
+      deleteForward()
+    case #selector(NSStandardKeyBindingResponding.deleteWordBackward(_:)):
+      deleteWordBackward()
+    case #selector(NSStandardKeyBindingResponding.deleteWordForward(_:)):
+      deleteWordForward()
+    case #selector(NSResponder.selectAll(_:)):
+      selectAll(nil)
     default:
       break
     }
-
-    // Basic editing (no Command/Control chords, which are shortcuts). Text
-    // composition (dead keys, CJK input methods) and undo/cut/paste are later
-    // slices; this handles direct character entry and deletion.
-    if isEditable, !command, !control {
-      switch event.keyCode {
-      case EditingKeyCode.delete:
-        deleteBackward()
-        return
-      case EditingKeyCode.forwardDelete:
-        deleteForward()
-        return
-      case EditingKeyCode.returnKey, EditingKeyCode.keypadEnter:
-        insertText("\n")
-        return
-      case EditingKeyCode.tab:
-        insertText("\t")
-        return
-      default:
-        if let characters = event.characters, isInsertableCharacters(characters) {
-          insertText(characters)
-          return
-        }
-      }
-    }
-
-    // Unhandled: ignore self-inserting keys (no beep); pass the rest on so the
-    // scroll view can still handle Page Up/Down etc.
-    if let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first,
-      scalar.value >= 0x20, !command
-    {
-      return
-    }
-    super.keyDown(with: event)
-  }
-
-  /// Whether a key event's characters are a self-inserting character rather than
-  /// a control or function key. AppKit reports function keys (arrows, Page
-  /// Up/Down, F-keys, Help) in the U+F700–U+F8FF private-use range, and DEL as
-  /// U+007F; none of those should be inserted as text.
-  private func isInsertableCharacters(_ characters: String) -> Bool {
-    guard let scalar = characters.unicodeScalars.first else { return false }
-    return scalar.value >= 0x20 && scalar.value != 0x7F
-      && !(0xF700...0xF8FF).contains(scalar.value)
   }
 
   /// The caret/extension origin, defaulting to the document start when nothing is
@@ -686,29 +665,40 @@ final class LineRenderingTextView: NSView {
   /// the selected text is never silently lost. (A single coalesced `replace`
   /// also matters for undo granularity and is a later slice.)
   func insertText(_ string: String) {
-    guard isEditable, let buffer, !string.isEmpty, let range = currentSelectionUTF16Range() else {
+    guard isEditable, !string.isEmpty, let range = currentSelectionUTF16Range() else {
       return
     }
-    let replacingSelection = range.end > range.start
-    if replacingSelection {
+    replace(globalStart: range.start, globalEnd: range.end, with: string)
+  }
+
+  /// Replaces the global UTF-16 range `[start, end)` with `string`, leaving the
+  /// caret after the inserted text. The two ops (delete then insert) are kept
+  /// atomic: a failed insert rolls the delete back via the buffer's undo so text
+  /// is never silently lost.
+  private func replace(globalStart start: Int, globalEnd end: Int, with string: String) {
+    guard let buffer else { return }
+    let deleting = end > start
+    if deleting {
       do {
-        try buffer.delete(fromUTF16: range.start, toUTF16: range.end)
+        try buffer.delete(fromUTF16: start, toUTF16: end)
       } catch {
         NSSound.beep()
         return
       }
     }
-    do {
-      try buffer.insert(string, atUTF16: range.start)
-    } catch {
-      if replacingSelection {
-        _ = try? buffer.undo()  // restore the just-deleted selection
+    if !string.isEmpty {
+      do {
+        try buffer.insert(string, atUTF16: start)
+      } catch {
+        if deleting {
+          _ = try? buffer.undo()  // restore the just-deleted range
+        }
+        NSSound.beep()
+        finishEdit(caretUTF16: start)
+        return
       }
-      NSSound.beep()
-      finishEdit(caretUTF16: range.start)
-      return
     }
-    finishEdit(caretUTF16: range.start + (string as NSString).length)
+    finishEdit(caretUTF16: start + (string as NSString).length)
   }
 
   /// Deletes the selection, or one composed character before the caret (merging
@@ -735,6 +725,32 @@ final class LineRenderingTextView: NSView {
     }
     let caret = navigationHead
     let next = steppedCharacterEndpoint(from: caret, forward: true)
+    guard next != caret else { return }
+    deleteRange(from: caret, to: next)
+  }
+
+  /// Deletes the selection, or from the previous word boundary to the caret.
+  func deleteWordBackward() {
+    guard isEditable, buffer != nil else { return }
+    if let selection, !selection.isEmpty {
+      deleteRange(from: selection.start, to: selection.end)
+      return
+    }
+    let caret = navigationHead
+    let previous = steppedWordEndpoint(from: caret, forward: false)
+    guard previous != caret else { return }
+    deleteRange(from: previous, to: caret)
+  }
+
+  /// Deletes the selection, or from the caret to the next word boundary.
+  func deleteWordForward() {
+    guard isEditable, buffer != nil else { return }
+    if let selection, !selection.isEmpty {
+      deleteRange(from: selection.start, to: selection.end)
+      return
+    }
+    let caret = navigationHead
+    let next = steppedWordEndpoint(from: caret, forward: true)
     guard next != caret else { return }
     deleteRange(from: caret, to: next)
   }
@@ -926,10 +942,12 @@ final class LineRenderingTextView: NSView {
 
     var widest = maxObservedLineWidth
     for (offset, attributedLine) in lines.enumerated() {
-      let y = layout.yOffset(forLine: range.lowerBound + offset)
-      let size = attributedLine.size()
+      let lineIndex = range.lowerBound + offset
+      let drawn = composedLineForDisplay(line: lineIndex, base: attributedLine)
+      let y = layout.yOffset(forLine: lineIndex)
+      let size = drawn.size()
       widest = max(widest, size.width)
-      attributedLine.draw(
+      drawn.draw(
         with: NSRect(x: textX, y: y, width: size.width, height: layout.lineHeight),
         options: [.usesLineFragmentOrigin]
       )
@@ -977,17 +995,60 @@ final class LineRenderingTextView: NSView {
     }
   }
 
-  /// Draws the caret at the (empty) selection head while focused and visible.
+  /// Draws the caret at the (empty) selection head while focused and visible, or
+  /// within the marked text while composing.
   private func drawCaretIfNeeded(lines: [NSAttributedString], range: Range<Int>, textX: CGFloat) {
-    guard window?.firstResponder === self, let selection, selection.isEmpty else {
+    guard window?.firstResponder === self else { return }
+    if let composition {
+      drawCompositionCaret(composition, lines: lines, range: range, textX: textX)
       return
     }
+    guard let selection, selection.isEmpty else { return }
     let line = selection.head.line
     guard range.contains(line) else { return }
     let attributed = lines[line - range.lowerBound]
     let x = textX + xOffset(forColumn: selection.head.columnUTF16, in: attributed)
     NSColor.textColor.setFill()
     NSRect(x: x, y: layout.yOffset(forLine: line), width: 1.5, height: layout.lineHeight).fill()
+  }
+
+  /// Draws the caret within the marked (composing) text at the input method's
+  /// cursor position.
+  private func drawCompositionCaret(
+    _ composition: Composition, lines: [NSAttributedString], range: Range<Int>, textX: CGFloat
+  ) {
+    let line = composition.anchor.line
+    guard range.contains(line) else { return }
+    let base = lines[line - range.lowerBound]
+    let column = max(0, min(composition.anchor.columnUTF16, base.length))
+    let markedText = composition.text as NSString
+    let within = max(0, min(composition.selectedRange.location, markedText.length))
+    let prefixWidth = markedText.substring(to: within).size(withAttributes: [.font: font]).width
+    let x = textX + xOffset(forColumn: column, in: base) + prefixWidth
+    NSColor.textColor.setFill()
+    NSRect(x: x, y: layout.yOffset(forLine: line), width: 1.5, height: layout.lineHeight).fill()
+  }
+
+  /// The attributed string to draw for `line`: the base line with any in-progress
+  /// marked (composing) text inserted at the composition anchor and underlined.
+  private func composedLineForDisplay(line: Int, base: NSAttributedString) -> NSAttributedString {
+    guard let composition, composition.anchor.line == line, !composition.text.isEmpty else {
+      return base
+    }
+    let column = max(0, min(composition.anchor.columnUTF16, base.length))
+    let result = NSMutableAttributedString(
+      attributedString: base.attributedSubstring(from: NSRange(location: 0, length: column)))
+    result.append(
+      NSAttributedString(
+        string: composition.text,
+        attributes: [
+          .font: font,
+          .foregroundColor: NSColor.textColor,
+          .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ]))
+    result.append(
+      base.attributedSubstring(from: NSRange(location: column, length: base.length - column)))
+    return result
   }
 
   /// Draws the line-number gutter pinned to the left of the visible viewport, on
@@ -1025,6 +1086,179 @@ final class LineRenderingTextView: NSView {
         options: [.usesLineFragmentOrigin]
       )
     }
+  }
+}
+
+extension LineRenderingTextView: @preconcurrency NSTextInputClient {
+  // International text input. The input method (CJK IME, dead keys, accents,
+  // dictation) drives these; nothing is hardcoded per language. Marked
+  // (composing) text is held in `composition`, drawn inline, and only written to
+  // the buffer on commit. Positions exchanged here are global UTF-16 offsets,
+  // mapped to/from the buffer's (line, column) on demand so the document is never
+  // materialized.
+
+  /// Commit path: insert (replacing the selection, or `replacementRange`) and end
+  /// any composition. Also the plain typing path when not composing.
+  func insertText(_ string: Any, replacementRange: NSRange) {
+    guard let text = Self.plainText(from: string) else { return }
+    let wasComposing = composition != nil
+    composition = nil
+    guard isEditable, buffer != nil else {
+      if wasComposing { refreshAfterComposition() }
+      return
+    }
+    if replacementRange.location != NSNotFound {
+      replace(
+        globalStart: replacementRange.location,
+        globalEnd: replacementRange.location + replacementRange.length, with: text)
+    } else if !text.isEmpty {
+      insertText(text)
+    } else {
+      refreshAfterComposition()
+    }
+  }
+
+  /// Updates the in-progress composition. The marked text is not written to the
+  /// buffer; it is drawn inline at a collapsed caret until committed.
+  func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+    guard isEditable, buffer != nil, let text = Self.plainText(from: string) else { return }
+
+    if composition == nil {
+      // Begin composing: clear whatever the marked text replaces so it sits at a
+      // collapsed caret.
+      if replacementRange.location != NSNotFound {
+        replace(
+          globalStart: replacementRange.location,
+          globalEnd: replacementRange.location + replacementRange.length, with: "")
+      } else if let range = currentSelectionUTF16Range(), range.end > range.start {
+        replace(globalStart: range.start, globalEnd: range.end, with: "")
+      }
+      composition = Composition(
+        text: "", selectedRange: NSRange(location: 0, length: 0), anchor: navigationHead)
+    }
+
+    if text.isEmpty {
+      composition = nil  // empty marked text cancels the composition
+    } else {
+      composition?.text = text
+      composition?.selectedRange = selectedRange
+    }
+    if let anchor = composition?.anchor {
+      selection = TextSelection(caretAt: anchor)
+      scrollCaretToVisible(anchor)
+    }
+    refreshAfterComposition()
+  }
+
+  /// Finalizes the composition, committing the marked text at the anchor.
+  func unmarkText() {
+    guard let composition else { return }
+    let text = composition.text
+    self.composition = nil
+    if isEditable, !text.isEmpty {
+      insertText(text)
+    } else {
+      refreshAfterComposition()
+    }
+  }
+
+  func hasMarkedText() -> Bool { composition != nil }
+
+  func markedRange() -> NSRange {
+    guard let composition, let anchor = utf16Offset(of: composition.anchor) else {
+      return NSRange(location: NSNotFound, length: 0)
+    }
+    return NSRange(location: anchor, length: (composition.text as NSString).length)
+  }
+
+  func selectedRange() -> NSRange {
+    if let composition, let anchor = utf16Offset(of: composition.anchor) {
+      return NSRange(
+        location: anchor + composition.selectedRange.location,
+        length: composition.selectedRange.length)
+    }
+    guard let range = currentSelectionUTF16Range() else {
+      return NSRange(location: 0, length: 0)
+    }
+    return NSRange(location: range.start, length: range.end - range.start)
+  }
+
+  func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?)
+    -> NSAttributedString?
+  {
+    // Only the marked text the input method asks about is materialized; the
+    // (possibly huge) document body is never assembled here.
+    guard let composition, let anchor = utf16Offset(of: composition.anchor) else {
+      actualRange?.pointee = NSRange(location: NSNotFound, length: 0)
+      return nil
+    }
+    let markedText = composition.text as NSString
+    let intersection = NSIntersectionRange(
+      range, NSRange(location: anchor, length: markedText.length))
+    guard intersection.length > 0 else {
+      actualRange?.pointee = NSRange(location: NSNotFound, length: 0)
+      return nil
+    }
+    actualRange?.pointee = intersection
+    let local = NSRange(location: intersection.location - anchor, length: intersection.length)
+    return NSAttributedString(string: markedText.substring(with: local), attributes: [.font: font])
+  }
+
+  // The view draws marked text with its own underline, so no IME-provided marked
+  // attributes are honored.
+  func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
+
+  /// Screen rect for the start of `range` — where the input method anchors its
+  /// candidate window (at the composing caret, or the selection when not
+  /// composing).
+  func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+    actualRange?.pointee = range
+    guard let window else { return .zero }
+    let line: Int
+    let textRelativeX: CGFloat
+    if let composition, let anchor = utf16Offset(of: composition.anchor) {
+      line = composition.anchor.line
+      let base = attributedLine(forLine: line)
+      let column = max(0, min(composition.anchor.columnUTF16, base.length))
+      let markedText = composition.text as NSString
+      let within = max(0, min(range.location - anchor, markedText.length))
+      textRelativeX =
+        xOffset(forColumn: column, in: base)
+        + markedText.substring(to: within).size(withAttributes: [.font: font]).width
+    } else {
+      let caret = selection?.head ?? navigationHead
+      line = caret.line
+      textRelativeX = caretX(for: caret)
+    }
+    let rect = NSRect(
+      x: gutterWidth + horizontalPadding + textRelativeX,
+      y: layout.yOffset(forLine: line),
+      width: 1,
+      height: layout.lineHeight)
+    return window.convertToScreen(convert(rect, to: nil))
+  }
+
+  func characterIndex(for point: NSPoint) -> Int {
+    guard buffer != nil, let window else { return NSNotFound }
+    let viewPoint = convert(window.convertPoint(fromScreen: point), from: nil)
+    return utf16Offset(of: endpoint(at: viewPoint)) ?? NSNotFound
+  }
+
+  /// Stringifies an `insertText`/`setMarkedText` argument (`String` or
+  /// `NSAttributedString`).
+  fileprivate static func plainText(from object: Any) -> String? {
+    if let string = object as? String { return string }
+    if let attributed = object as? NSAttributedString { return attributed.string }
+    return nil
+  }
+
+  /// Repaints and re-measures after the composition state changes, and asks the
+  /// input method to reposition its candidate window.
+  fileprivate func refreshAfterComposition() {
+    maxObservedLineWidth = 0
+    updateLayout()
+    invalidateVisibleArea()
+    inputContext?.invalidateCharacterCoordinates()
   }
 }
 
