@@ -276,6 +276,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   // highlight and caret, and copies the selected text on demand.
   private(set) var selection: TextSelection?
   private var isSelecting = false
+  /// Granularity of the in-progress drag selection: a single click extends by
+  /// character, a double-click by whole words, a triple-click by whole lines.
+  private enum SelectionGranularity { case character, word, line }
+  private var selectionGranularity: SelectionGranularity = .character
+  /// For a word/line drag, the originally selected unit's range, so dragging
+  /// extends by whole units anchored to it (rather than collapsing to the click).
+  private var selectionAnchorRange: (start: TextSelection.Endpoint, end: TextSelection.Endpoint)?
   /// Extra highlight width drawn past a fully selected line to signal that the
   /// line's trailing newline is part of the selection.
   private let newlineSelectionWidth: CGFloat = 6
@@ -558,38 +565,96 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if hasMarkedText() { unmarkText() }
     window?.makeFirstResponder(self)
     let endpoint = endpoint(at: convert(event.locationInWindow, from: nil))
-    // A double-click selects the word, a triple-click the whole line; both are a
-    // completed selection (no drag-extend yet). A single click places the caret
-    // and begins a drag selection.
+    // A double-click selects the word, a triple-click the whole line, a single
+    // click places the caret. Each begins a drag that then extends at the matching
+    // granularity (character / word / line).
     switch event.clickCount {
     case 3...:
-      selectLine(at: endpoint.line)
-      isSelecting = false
+      beginLineSelection(at: endpoint.line)
     case 2:
-      selectWord(at: endpoint)
-      isSelecting = false
+      beginWordSelection(at: endpoint)
     default:
-      selection = TextSelection(caretAt: endpoint)
-      isSelecting = true
+      beginCaretSelection(at: endpoint)
     }
     invalidateVisibleArea()
   }
 
-  /// Selects the word containing `endpoint`, using the system's locale-aware
-  /// word-boundary rules (so it behaves correctly for CJK and other scripts). A
-  /// click past the last character, or on an empty line, collapses to a caret.
-  func selectWord(at endpoint: TextSelection.Endpoint) {
+  /// Begins a character-granularity drag with a caret at `endpoint`.
+  func beginCaretSelection(at endpoint: TextSelection.Endpoint) {
+    selection = TextSelection(caretAt: endpoint)
+    selectionGranularity = .character
+    selectionAnchorRange = nil
+    isSelecting = true
+  }
+
+  /// Begins a word-granularity drag, selecting the word at `endpoint`.
+  func beginWordSelection(at endpoint: TextSelection.Endpoint) {
+    let unit = wordSelection(at: endpoint)
+    selection = unit
+    selectionGranularity = .word
+    selectionAnchorRange = (unit.start, unit.end)
+    isSelecting = true
+  }
+
+  /// Begins a line-granularity drag, selecting the whole line.
+  func beginLineSelection(at line: Int) {
+    let unit = lineSelection(at: line)
+    selection = unit
+    selectionGranularity = .line
+    selectionAnchorRange = (unit.start, unit.end)
+    isSelecting = true
+  }
+
+  /// Extends the in-progress drag to `cursor` at the current granularity: by
+  /// character, or by whole words/lines spanning from the anchored unit through
+  /// the unit under the cursor (reversing when the cursor passes the anchor).
+  func extendSelection(to cursor: TextSelection.Endpoint) {
+    guard isSelecting else { return }
+    switch selectionGranularity {
+    case .character:
+      selection?.head = cursor
+    case .word:
+      extendUnitSelection(cursorUnit: wordSelection(at: cursor))
+    case .line:
+      extendUnitSelection(cursorUnit: lineSelection(at: cursor.line))
+    }
+  }
+
+  private func extendUnitSelection(cursorUnit: TextSelection) {
+    guard let anchor = selectionAnchorRange else { return }
+    selection = Self.extendedSelection(anchor: anchor, cursor: (cursorUnit.start, cursorUnit.end))
+  }
+
+  /// Spans a word/line drag from the anchored unit through the unit under the
+  /// cursor, oriented so the head is on the cursor side (and never shrinks below
+  /// the anchored unit). Pure, so the spanning logic is unit-testable.
+  static func extendedSelection(
+    anchor: (start: TextSelection.Endpoint, end: TextSelection.Endpoint),
+    cursor: (start: TextSelection.Endpoint, end: TextSelection.Endpoint)
+  ) -> TextSelection {
+    if cursor.start >= anchor.start {
+      return TextSelection(anchor: anchor.start, head: Swift.max(anchor.end, cursor.end))
+    }
+    return TextSelection(anchor: anchor.end, head: Swift.min(anchor.start, cursor.start))
+  }
+
+  /// The locale-aware word selection at `endpoint`, via the OS tokenizer (so CJK
+  /// and other scripts segment correctly). An empty line, or a position in the
+  /// empty area past the last character, yields a caret rather than a far-away word.
+  func wordSelection(at endpoint: TextSelection.Endpoint) -> TextSelection {
     let line = attributedLine(forLine: endpoint.line).string as NSString
-    // An empty line, or a click in the empty area past the last character, places
-    // a caret rather than selecting a far-away word.
     guard line.length > 0, endpoint.columnUTF16 < line.length else {
-      selection = TextSelection(caretAt: endpoint)
-      return
+      return TextSelection(caretAt: endpoint)
     }
     let word = Self.wordRange(in: line, at: endpoint.columnUTF16)
-    selection = TextSelection(
+    return TextSelection(
       anchor: .init(line: endpoint.line, columnUTF16: word.location),
       head: .init(line: endpoint.line, columnUTF16: NSMaxRange(word)))
+  }
+
+  /// Selects the word containing `endpoint` (see `wordSelection(at:)`).
+  func selectWord(at endpoint: TextSelection.Endpoint) {
+    selection = wordSelection(at: endpoint)
   }
 
   /// The locale-aware word-boundary range (UTF-16) containing `index` in `string`,
@@ -609,18 +674,23 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return NSRange(location: range.location, length: range.length)
   }
 
-  /// Selects the whole logical line (its content, not the trailing newline).
-  func selectLine(at line: Int) {
+  /// The whole-logical-line selection (its content, not the trailing newline).
+  func lineSelection(at line: Int) -> TextSelection {
     let clamped = min(max(0, line), max(0, lineCount - 1))
-    selection = TextSelection(
+    return TextSelection(
       anchor: .init(line: clamped, columnUTF16: 0),
       head: .init(line: clamped, columnUTF16: lineLengthUTF16(clamped)))
+  }
+
+  /// Selects the whole logical line (see `lineSelection(at:)`).
+  func selectLine(at line: Int) {
+    selection = lineSelection(at: line)
   }
 
   override func mouseDragged(with event: NSEvent) {
     guard isSelecting, selection != nil else { return }
     autoscroll(with: event)
-    selection?.head = endpoint(at: convert(event.locationInWindow, from: nil))
+    extendSelection(to: endpoint(at: convert(event.locationInWindow, from: nil)))
     invalidateVisibleArea()
   }
 

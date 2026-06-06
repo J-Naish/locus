@@ -267,6 +267,65 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(view.selectedText(), "only")
   }
 
+  // MARK: Drag-extend by word / line
+
+  @MainActor
+  func testWordDragExtendsBySpanningWholeWords() throws {
+    let view = try makeViewer("one two three")
+    view.beginWordSelection(at: .init(line: 0, columnUTF16: 5))  // "two"
+    XCTAssertEqual(view.selectedText(), "two")
+    view.extendSelection(to: .init(line: 0, columnUTF16: 9))  // inside "three"
+    XCTAssertEqual(view.selectedText(), "two three")  // whole words, not "two thr"
+  }
+
+  @MainActor
+  func testWordDragLeftSpansWholeWords() throws {
+    let view = try makeViewer("one two three")
+    view.beginWordSelection(at: .init(line: 0, columnUTF16: 5))  // "two"
+    view.extendSelection(to: .init(line: 0, columnUTF16: 1))  // inside "one"
+    XCTAssertEqual(view.selectedText(), "one two")
+  }
+
+  @MainActor
+  func testWordDragWithinAnchorWordKeepsWholeWord() throws {
+    let view = try makeViewer("one two three")
+    view.beginWordSelection(at: .init(line: 0, columnUTF16: 5))  // "two"
+    view.extendSelection(to: .init(line: 0, columnUTF16: 6))  // still inside "two"
+    XCTAssertEqual(view.selectedText(), "two")  // never shrinks below the anchored word
+  }
+
+  @MainActor
+  func testLineDragExtendsBySpanningWholeLines() throws {
+    let view = try makeViewer("ab\ncde\nf")
+    view.beginLineSelection(at: 1)  // "cde"
+    view.extendSelection(to: .init(line: 2, columnUTF16: 0))  // onto last line
+    XCTAssertEqual(view.selectedText(), "cde\nf")  // whole lines
+  }
+
+  @MainActor
+  func testCharacterDragExtendsByCharacter() throws {
+    let view = try makeViewer("hello")
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 0))
+    view.extendSelection(to: .init(line: 0, columnUTF16: 3))
+    XCTAssertEqual(view.selectedText(), "hel")  // single-click drag stays per-character
+  }
+
+  @MainActor
+  func testLineDragUpwardSpansWholeLines() throws {
+    let view = try makeViewer("ab\ncde\nf")
+    view.beginLineSelection(at: 1)  // "cde"
+    view.extendSelection(to: .init(line: 0, columnUTF16: 0))  // drag up onto the first line
+    XCTAssertEqual(view.selectedText(), "ab\ncde")  // whole lines, reversed direction
+  }
+
+  @MainActor
+  func testWordDragAcrossLinesSpansWholeWords() throws {
+    let view = try makeViewer("one two\nthree four")
+    view.beginWordSelection(at: .init(line: 0, columnUTF16: 5))  // "two"
+    view.extendSelection(to: .init(line: 1, columnUTF16: 2))  // inside "three" on the next line
+    XCTAssertEqual(view.selectedText(), "two\nthree")  // whole words across the line boundary
+  }
+
   // MARK: Scroll rendering stability
 
   func testViewerOptsOutOfResponsiveScrolling() {
