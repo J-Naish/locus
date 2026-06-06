@@ -183,20 +183,37 @@ struct LocusApp: App {
     }
   }
 
-  /// Honors a UI-test-only launch argument that lowers the editable-size limit so
-  /// a small fixture file routes to the large-file viewer (which otherwise needs a
-  /// 64 MB+ file). No effect in Release or outside UI testing.
+  /// Chooses the editable-size threshold that decides whether a text file opens in
+  /// the legacy editable-string editor (at or below the limit) or the custom
+  /// large-file engine (above it).
+  ///
+  /// - Release: the full 64 MB limit — the legacy editor handles everyday files
+  ///   until the custom engine reaches feature parity.
+  /// - Debug under UI testing: the full limit by default (so legacy-editor flows
+  ///   keep routing small fixtures there), unless `--ui-test-max-text-bytes` pins
+  ///   an explicit limit for large-viewer UI tests.
+  /// - Debug, normal run: routes every text file to the custom engine (limit 0) so
+  ///   development dogfoods the engine we are unifying on — its line-number gutter,
+  ///   soft wrap, and editing — without any launch-argument setup. Override with
+  ///   the `LOCUS_MAX_TEXT_BYTES` environment variable (e.g. set it very high to
+  ///   fall back to the legacy editor for a side-by-side comparison).
   private static let textDocumentStore: any TextDocumentStoring = {
     #if DEBUG
-      if ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1",
-        let raw = LaunchArgumentValues.value(
+      let environment = ProcessInfo.processInfo.environment
+      if environment["LOCUS_UI_TESTING"] == "1" {
+        if let raw = LaunchArgumentValues.value(
           named: "--ui-test-max-text-bytes", in: ProcessInfo.processInfo.arguments),
-        let maxBytes = Int(raw), maxBytes > 0
-      {
-        return TextDocumentStore(maximumLoadedTextByteCount: maxBytes)
+          let maxBytes = Int(raw), maxBytes > 0
+        {
+          return TextDocumentStore(maximumLoadedTextByteCount: maxBytes)
+        }
+        return TextDocumentStore()
       }
+      let override = environment["LOCUS_MAX_TEXT_BYTES"].flatMap(Int.init)
+      return TextDocumentStore(maximumLoadedTextByteCount: override ?? 0)
+    #else
+      return TextDocumentStore()
     #endif
-    return TextDocumentStore()
   }()
 
   private static let recentFolderStore: RecentFolderStore = {

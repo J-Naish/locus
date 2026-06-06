@@ -164,6 +164,81 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(view.frame.height, view.layout.lineHeight)  // fits one visual row
   }
 
+  /// A viewer whose frame is set *before* the buffer, so soft wrap is active.
+  @MainActor
+  private func makeWrappingViewer(_ contents: String, width: CGFloat) throws
+    -> LineRenderingTextView
+  {
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: width, height: 400)
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    view.setBuffer(buffer)
+    view.isEditable = true
+    return view
+  }
+
+  @MainActor
+  func testSingleLineInsertWrapsIdenticallyToAFullRebuild() throws {
+    // Typing within one line takes the incremental wrap path (only that line is
+    // re-wrapped). The result must match a full rebuild of the same final text.
+    let width: CGFloat = 160
+    let view = try makeWrappingViewer("a\nbbbb bbbb bbbb cccc dddd\nc", width: width)
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveVertically(down: true, extend: false)  // onto the long middle line
+    view.moveToLineEdge(end: true, extend: false)  // its end
+    view.insertText(" eeee ffff gggg hhhh")  // single-line insert: lengthens it
+
+    let reference = try makeWrappingViewer(content(of: view), width: width)
+    XCTAssertEqual(view.frame.height, reference.frame.height)
+    // Sanity: the middle line actually wraps (document is taller than 3 rows).
+    XCTAssertGreaterThan(view.frame.height, view.layout.lineHeight * 3)
+  }
+
+  @MainActor
+  func testNewlineInsertFallsBackToFullWrapRebuild() throws {
+    // Inserting a line break changes the line count, so the incremental path must
+    // defer to a full rebuild; the height must still match a fresh viewer.
+    let width: CGFloat = 160
+    let view = try makeWrappingViewer("one two three four five\nsix", width: width)
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveToLineEdge(end: true, extend: false)  // end of the first (wrapping) line
+    view.insertText("\nsplit")  // adds a line → not single-line
+
+    let reference = try makeWrappingViewer(content(of: view), width: width)
+    XCTAssertEqual(view.frame.height, reference.frame.height)
+  }
+
+  // MARK: Scroll rendering stability
+
+  func testViewerOptsOutOfResponsiveScrolling() {
+    // The synthesized-height view draws viewport-relative chrome (pinned gutter,
+    // caret, selection). Responsive scrolling's overdraw cache renders those at a
+    // stale offset — tearing rows and blanking bands while scrolling — so the view
+    // must opt out and redraw the visible band on each scroll instead.
+    XCTAssertFalse(LineRenderingTextView.isCompatibleWithResponsiveScrolling)
+  }
+
+  @MainActor
+  func testViewerIsOpaque() {
+    // The view fills every dirty rect with the background before drawing, so it is
+    // opaque; declaring so avoids compositing flashes in the layer-backed host.
+    XCTAssertTrue(LineRenderingTextView().isOpaque)
+  }
+
+  @MainActor
+  func testViewerKeepsLineNumberGutterForPlainText() throws {
+    // The custom engine draws line numbers for every text file regardless of size
+    // (unlike the legacy editor, which hides them above a length cap). Plain text
+    // must still get a non-zero gutter so numbers are drawn.
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+    view.syntax = .plainText
+    let buffer = try TextBuffer.open(bytes: Data("alpha\nbeta\ngamma\n".utf8))
+    view.setBuffer(buffer)
+    XCTAssertTrue(view.showsLineNumbers)
+    XCTAssertGreaterThan(view.gutterWidth, 0)
+  }
+
   @MainActor
   func testFailureMessageCallsOutLargeNonUTF8() {
     // A large non-UTF-8 file is rejected by the UTF-8-only buffer; the message

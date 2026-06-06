@@ -93,8 +93,10 @@ struct WrapIndex: Equatable {
 enum LineWrap {
   /// Defensive upper bound on the visual rows computed for one logical line, so a
   /// pathologically long line at a tiny width cannot materialize an unbounded
-  /// array. Callers should also pass the display-clipped line, which keeps the
-  /// real count far lower; this is only a safety net.
+  /// array. This default is only a fallback: the view always overrides it with
+  /// `maximumDrawnCharactersPerLine`, which equals the per-line character clip, so
+  /// each row holds at least one character and the cap is reached only when the
+  /// line is already clipped — it never drops text the clip has not already removed.
   static let defaultMaximumRows = 4096
 
   /// UTF-16 offsets where each wrapped visual row begins (the first is always 0).
@@ -247,9 +249,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// the fetch so one enormous line never crosses the FFI in full.
   private let maximumFetchedBytesPerLine = 16_384
   /// Characters actually drawn per line. Lines longer than this are clipped for
-  /// display (this is a read-only viewer, not a full horizontal renderer), which
-  /// also bounds the document's width. Selection and copy use the same clipped
-  /// text, so all three share one coordinate system.
+  /// display — the viewer does not lay out arbitrarily long single lines in full
+  /// (in wrap mode there is no horizontal scroll; in no-wrap mode this also bounds
+  /// the document width). Selection and copy use the same clipped text, so all
+  /// three share one coordinate system.
   private let maximumDrawnCharactersPerLine = 5_000
   /// Upper bound on how many bytes one copy may materialize. Cmd+A (or a huge
   /// drag) on a multi-gigabyte file must not build a giant string on the main
@@ -278,17 +281,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private let newlineSelectionWidth: CGFloat = 6
   /// Horizontal margin kept around the caret when scrolling it into view.
   private let caretScrollMargin: CGFloat = 8
-  /// Smallest horizontal scroll change that counts as a horizontal scroll (and so
-  /// triggers a gutter repaint); below this is treated as a pure vertical scroll.
-  private let horizontalScrollEpsilon: CGFloat = 0.01
   /// Preferred horizontal offset (text-relative) the caret keeps while moving up
   /// or down, so vertical motion does not drift in/out on short lines. Reset by
   /// any non-vertical move.
   private var verticalGoalX: CGFloat?
-  /// Last seen horizontal scroll offset, to detect horizontal scrolling (which
-  /// requires repainting the pinned gutter) versus vertical scrolling (handled by
-  /// copy-on-scroll).
-  private var lastHorizontalOffset: CGFloat = 0
 
   /// In-progress input-method composition (marked text). The uncommitted text is
   /// held here and drawn inline at `anchor`; it is not written to the buffer
@@ -315,8 +311,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private let maximumWrappableByteCount = 2 * 1024 * 1024
   private let maximumWrappableLineCount = 50_000
   /// Per-logical-line → visual-row mapping while wrapping is active; `nil` when not
-  /// wrapping. Rebuilt on open, width change, and edit.
+  /// wrapping. Rebuilt fully on open, width change, and undo/redo; updated for the
+  /// single changed line on ordinary typing/deletion within a line.
   private var wrapIndex: WrapIndex?
+  /// The per-logical-line wrapped-row counts the current `wrapIndex` was built from,
+  /// kept so a single-line edit can recompute just that line instead of re-wrapping
+  /// the whole document. `nil` whenever wrapping is inactive (mirrors `wrapIndex`).
+  private var wrapRowCounts: [Int]?
   /// Wrap width the current `wrapIndex` was built at, so resize only rebuilds when
   /// the width actually changes.
   private var lastWrapWidth: CGFloat = -1
@@ -338,16 +339,42 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       buffer.lineCount <= maximumWrappableLineCount, wrapContentWidth > 0
     else {
       wrapIndex = nil
+      wrapRowCounts = nil
       return
     }
     let width = wrapContentWidth
-    let counts = displayLineStrings(forLineRange: 0, count: buffer.lineCount).map { line -> Int in
-      let attributed = NSAttributedString(string: line, attributes: [.font: font])
-      return LineWrap.visualRowStartOffsets(
-        of: attributed, width: width, maximumRows: maximumDrawnCharactersPerLine
-      ).count
+    let counts = displayLineStrings(forLineRange: 0, count: buffer.lineCount).map { lineText in
+      wrapRowCount(text: lineText, width: width)
     }
+    wrapRowCounts = counts
     wrapIndex = WrapIndex(visualRowsPerLine: counts)
+  }
+
+  /// Recomputes the wrap index after an edit confined to one logical line (no line
+  /// added or removed), replacing only that line's wrapped-row count rather than
+  /// re-wrapping the whole document. Falls back to a full rebuild whenever the fast
+  /// path is not provably safe: wrapping inactive, no cached counts, the line count
+  /// changed, or the width changed since the last build.
+  private func updateWrapIndex(forChangedLine line: Int) {
+    guard wrapsLines, let buffer, var counts = wrapRowCounts,
+      counts.count == buffer.lineCount, line >= 0, line < counts.count,
+      lastWrapWidth == wrapContentWidth
+    else {
+      rebuildWrapIndex()
+      return
+    }
+    let text = displayLineStrings(forLineRange: line, count: 1).first ?? ""
+    counts[line] = wrapRowCount(text: text, width: wrapContentWidth)
+    wrapRowCounts = counts
+    wrapIndex = WrapIndex(visualRowsPerLine: counts)
+  }
+
+  /// Number of visual rows `text` wraps into at `width`.
+  private func wrapRowCount(text: String, width: CGFloat) -> Int {
+    let attributed = NSAttributedString(string: text, attributes: [.font: font])
+    return LineWrap.visualRowStartOffsets(
+      of: attributed, width: width, maximumRows: maximumDrawnCharactersPerLine
+    ).count
   }
 
   /// Total visual rows in the document (equals the logical line count when not
@@ -422,6 +449,22 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   override var isFlipped: Bool { true }
 
+  // The view fills every pixel of any dirty rect with the background before
+  // drawing text, so it is fully opaque. Declaring this avoids the layer-backed
+  // host compositing it against whatever is behind, which showed as brief blanks
+  // while scrolling.
+  override var isOpaque: Bool { true }
+
+  // Opt out of responsive scrolling. That optimization renders an overdraw cache
+  // beyond the visible rect and reuses it as the scroll offset changes — but this
+  // view synthesizes a multi-million-point frame and draws viewport-relative
+  // chrome (the pinned line-number gutter, caret, and selection), so the cache is
+  // shown at a stale offset: rows tear (the content appears to jump by a line),
+  // the gutter is left unpainted, and fast scrolls reveal blank bands before the
+  // next draw. Legacy synchronous scrolling redraws the (cheap) visible band on
+  // every scroll instead, which stays correct.
+  override class var isCompatibleWithResponsiveScrolling: Bool { false }
+
   func setBuffer(_ buffer: TextBuffer?) {
     self.buffer = buffer
     cachedBand = nil
@@ -429,7 +472,6 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     selection = nil
     isSelecting = false
     verticalGoalX = nil
-    lastHorizontalOffset = 0
     composition = nil
     // A save in flight (if any) was for the previous buffer; let its completion
     // mark that buffer saved, but the new document starts editable and clean.
@@ -452,13 +494,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     setNeedsDisplay(visibleRect)
   }
 
-  /// Called when the clip view scrolls. Vertical scrolling is left to
-  /// copy-on-scroll (cheap); only a change in the horizontal offset forces a
-  /// repaint, to re-pin the gutter and caret at the new offset.
+  /// Called when the clip view scrolls. Repaints the visible band on every scroll:
+  /// copy-on-scroll is disabled (it tore rows on this synthesized-height view), and
+  /// the gutter, caret, and selection are drawn relative to the current viewport,
+  /// so the whole visible band — not just a newly exposed strip — must be redrawn
+  /// to stay aligned. The band fetch and highlight are bounded to the visible rows,
+  /// so this stays cheap even for a multi-gigabyte document.
   func viewportDidScroll() {
-    let offsetX = enclosingScrollView?.contentView.bounds.origin.x ?? 0
-    guard abs(offsetX - lastHorizontalOffset) > horizontalScrollEpsilon else { return }
-    lastHorizontalOffset = offsetX
     invalidateVisibleArea()
   }
 
@@ -997,7 +1039,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       NSSound.beep()
       return false
     }
-    finishEdit(caretUTF16: start + (string as NSString).length)
+    // A pure insert with no line break changes only the line it lands on, so the
+    // wrap index can be updated for that line alone. A range replace may span or
+    // introduce line breaks, so it triggers a full rebuild.
+    let isSingleLineInsert = end == start && string.rangeOfCharacter(from: .newlines) == nil
+    finishEdit(
+      caretUTF16: start + (string as NSString).length, singleLineChange: isSingleLineInsert)
     return true
   }
 
@@ -1119,7 +1166,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     do {
       try buffer.delete(fromUTF16: startOffset, toUTF16: endOffset)
-      finishEdit(caretUTF16: startOffset)
+      // A deletion confined to one line removes no line break, so only that line's
+      // wrap changes; a deletion spanning lines merges them and needs a full rebuild.
+      finishEdit(caretUTF16: startOffset, singleLineChange: start.line == end.line)
     } catch {
       NSSound.beep()
     }
@@ -1145,19 +1194,27 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Shared post-edit refresh: places the caret at `offset`, drops cached band
   /// and geometry (the buffer revision changed), re-measures the document, and
-  /// repaints the visible band.
-  private func finishEdit(caretUTF16 offset: Int) {
+  /// repaints the visible band. When `singleLineChange` is true the edit stayed
+  /// within one logical line, so only that line's wrap is recomputed instead of
+  /// the whole document.
+  private func finishEdit(caretUTF16 offset: Int, singleLineChange: Bool = false) {
     cachedBand = nil
     verticalGoalX = nil
     // The widest-line high-water mark can only shrink via an edit (deleting or
     // splitting a long line), so reset it and let `draw` re-measure the visible
     // band rather than keeping a stale, too-wide horizontal extent.
     maxObservedLineWidth = 0
+    var changedLine: Int?
     if let buffer, let position = try? buffer.position(forUTF16: offset) {
       selection = TextSelection(
         caretAt: .init(line: position.line, columnUTF16: position.columnUTF16))
+      changedLine = position.line
     }
-    rebuildWrapIndex()
+    if singleLineChange, let changedLine {
+      updateWrapIndex(forChangedLine: changedLine)
+    } else {
+      rebuildWrapIndex()
+    }
     updateLayout()
     if let head = selection?.head {
       scrollCaretToVisible(head)
@@ -1775,6 +1832,9 @@ struct LargeTextViewport: NSViewRepresentable {
   let isEditable: Bool
   let saveURL: URL
   let saveEncoding: String.Encoding
+  /// A monotonic counter the host bumps to request a save (the viewer owns the
+  /// off-main write). A change since the last seen value triggers `requestSave`.
+  let saveRequest: Int
   let onSaveCompletion: (Result<DocumentFileFingerprint?, Error>) -> Void
   let onDirtyChange: (Bool) -> Void
 
@@ -1786,10 +1846,6 @@ struct LargeTextViewport: NSViewRepresentable {
     scrollView.borderType = .noBorder
     scrollView.drawsBackground = true
     scrollView.backgroundColor = .textBackgroundColor
-    // Keep copy-on-scroll (the default): vertical scrolling then only repaints
-    // the newly exposed rows, and the gutter/selection/caret — drawn in document
-    // coordinates — move with the copied content. Horizontal scrolling needs the
-    // pinned gutter repainted, which the coordinator handles explicitly.
 
     let documentView = LineRenderingTextView()
     documentView.setAccessibilityIdentifier("document-large-text-viewer")
@@ -1806,6 +1862,13 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.setBuffer(buffer)
 
     let clipView = scrollView.contentView
+    // Disable copy-on-scroll. Blitting prior pixels and redrawing only the newly
+    // exposed strip assumes drawing is stable in document coordinates, but this
+    // view draws viewport-relative chrome (pinned gutter, caret, selection) and
+    // rounds the visible band to whole rows — so the blit tore rows (content
+    // appeared to jump a line) and left the gutter stale. Instead the visible band
+    // is fully redrawn on each scroll (see `viewportDidScroll`).
+    clipView.copiesOnScroll = false
     clipView.postsBoundsChangedNotifications = true
     clipView.postsFrameChangedNotifications = true
     NotificationCenter.default.addObserver(
@@ -1821,6 +1884,9 @@ struct LargeTextViewport: NSViewRepresentable {
       object: clipView
     )
     context.coordinator.documentView = documentView
+    // Adopt the initial request value so the first `updateNSView` does not mistake
+    // it for a save request.
+    context.coordinator.lastSaveRequest = saveRequest
 
     return scrollView
   }
@@ -1840,6 +1906,11 @@ struct LargeTextViewport: NSViewRepresentable {
     if documentView.buffer !== buffer {
       documentView.setBuffer(buffer)
     }
+    // A bumped save request (from the menu/Cmd+S command) asks the viewer to save.
+    if context.coordinator.lastSaveRequest != saveRequest {
+      context.coordinator.lastSaveRequest = saveRequest
+      documentView.requestSave()
+    }
   }
 
   func makeCoordinator() -> Coordinator {
@@ -1849,6 +1920,8 @@ struct LargeTextViewport: NSViewRepresentable {
   @MainActor
   final class Coordinator: NSObject {
     weak var documentView: LineRenderingTextView?
+    /// Last save-request value handled, so only an increment triggers a new save.
+    var lastSaveRequest = 0
 
     @objc func viewportScrolled(_ notification: Notification) {
       documentView?.viewportDidScroll()
@@ -1877,6 +1950,9 @@ struct VirtualizedTextDocumentView: View {
   let isEditable: Bool
   /// Changing this (e.g. on external file change) re-opens the buffer.
   let reloadToken: Int
+  /// A monotonic counter the host bumps to request a save (e.g. from the Save menu
+  /// command), since the viewer — not the host — owns the buffer and its write.
+  var saveRequest: Int = 0
   /// Reports a save outcome to the host: on success the new file fingerprint
   /// (read synchronously right after the write) so the host can record it before
   /// the change monitor reacts; on failure the error to surface.
@@ -1907,6 +1983,7 @@ struct VirtualizedTextDocumentView: View {
           isEditable: isEditable,
           saveURL: url,
           saveEncoding: encoding,
+          saveRequest: saveRequest,
           onSaveCompletion: onSaveCompletion,
           onDirtyChange: onDirtyChange
         )

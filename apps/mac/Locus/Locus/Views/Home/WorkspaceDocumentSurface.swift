@@ -29,6 +29,10 @@ struct WorkspaceDocumentSurface: View {
   /// Set when an external change arrives while the large-file viewer is dirty:
   /// the buffer is kept (not reloaded) and a conflict banner is shown.
   @State private var largeDocumentConflict = false
+  /// Bumped to ask the large-file viewer to save. The viewer owns the buffer and
+  /// its off-main write, so the menu/Cmd+S command routes through this token
+  /// rather than saving here.
+  @State private var largeDocumentSaveRequest = 0
   @StateObject private var documentChangeMonitor = DocumentChangeMonitor()
 
   var body: some View {
@@ -172,6 +176,7 @@ struct WorkspaceDocumentSurface: View {
           syntax: WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText,
           isEditable: Self.largeFileEditingEnabled && !entry.isReadOnly,
           reloadToken: documentReloadGeneration,
+          saveRequest: largeDocumentSaveRequest,
           onSaveCompletion: { result in handleLargeDocumentSaveResult(result, for: entry) },
           onDirtyChange: { isDirty in handleLargeDocumentDirtyChange(isDirty) }
         )
@@ -198,14 +203,20 @@ struct WorkspaceDocumentSurface: View {
   }
 
   private var isSaveDisabled: Bool {
-    guard case .loaded = loadState,
-      let entry,
-      !entry.isReadOnly
-    else {
+    guard let entry, !entry.isReadOnly else {
       return true
     }
 
-    return text == savedText
+    switch loadState {
+    case .loaded:
+      return text == savedText
+    case .tooLargeForEditing:
+      // The large-file viewer owns its dirty state; Save is enabled only when it
+      // is editable (Debug) and has unsaved edits.
+      return !(Self.largeFileEditingEnabled && largeDocumentDirty)
+    default:
+      return true
+    }
   }
 
   @MainActor
@@ -317,6 +328,13 @@ struct WorkspaceDocumentSurface: View {
     guard let entry,
       !isSaveDisabled
     else {
+      return
+    }
+
+    if case .tooLargeForEditing = loadState {
+      // The large-file viewer holds the buffer and performs the write off the main
+      // thread; ask it to save by bumping a token it observes.
+      largeDocumentSaveRequest &+= 1
       return
     }
 
