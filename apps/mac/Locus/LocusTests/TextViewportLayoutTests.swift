@@ -331,6 +331,42 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 4))
   }
 
+  // MARK: Accessibility
+
+  @MainActor
+  func testLargeViewerIsTextAreaAccessibilityElement() throws {
+    let view = try makeViewer("hello\nworld")
+    XCTAssertEqual(view.accessibilityRole(), .textArea)
+    XCTAssertTrue(view.isAccessibilityElement())
+  }
+
+  @MainActor
+  func testLargeViewerDoesNotExposeWholeDocumentAsValue() throws {
+    // Range-based AX: the value must not materialize the (possibly huge) document.
+    let view = try makeViewer("hello\nworld")
+    XCTAssertNil(view.accessibilityValue() as Any?)
+    XCTAssertEqual(view.accessibilityNumberOfCharacters(), 11)
+  }
+
+  @MainActor
+  func testLargeViewerAccessibilitySelectedTextReflectsSelection() throws {
+    let view = try makeViewer("hello\nworld")
+    XCTAssertNil(view.accessibilitySelectedText())
+    view.selectAll(nil)
+    XCTAssertEqual(view.accessibilitySelectedText(), "hello\nworld")
+  }
+
+  @MainActor
+  func testLargeViewerAccessibilitySelectedTextIsBoundedBelowCopyLimit() throws {
+    // Assistive tech may poll repeatedly, so an over-budget selection reports no
+    // text (whereas explicit copy, with its larger budget, would still work).
+    let view = try makeViewer("abcdefghij")
+    view.maximumAccessibilitySelectedTextByteCount = 4
+    view.selectAll(nil)
+    XCTAssertNil(view.accessibilitySelectedText())
+    XCTAssertEqual(view.selectedText(), "abcdefghij")  // copy budget is far larger
+  }
+
   @MainActor
   func testWordMoveCollapsesReversedSelectionToDirectionalEdge() throws {
     // A right-to-left selection has its head before its anchor; a non-extending

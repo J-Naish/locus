@@ -162,6 +162,7 @@ struct LocusApp: App {
   var body: some Scene {
     WindowGroup {
       HomeView(
+        textDocumentStore: Self.textDocumentStore,
         recentFileStore: Self.recentFileStore,
         recentFolderStore: Self.recentFolderStore,
         initialFolderResolution: Self.initialFolderResolution,
@@ -181,6 +182,22 @@ struct LocusApp: App {
       WorkspaceNavigationCommandMenu()
     }
   }
+
+  /// Honors a UI-test-only launch argument that lowers the editable-size limit so
+  /// a small fixture file routes to the large-file viewer (which otherwise needs a
+  /// 64 MB+ file). No effect in Release or outside UI testing.
+  private static let textDocumentStore: any TextDocumentStoring = {
+    #if DEBUG
+      if ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1",
+        let raw = LaunchArgumentValues.value(
+          named: "--ui-test-max-text-bytes", in: ProcessInfo.processInfo.arguments),
+        let maxBytes = Int(raw), maxBytes > 0
+      {
+        return TextDocumentStore(maximumLoadedTextByteCount: maxBytes)
+      }
+    #endif
+    return TextDocumentStore()
+  }()
 
   private static let recentFolderStore: RecentFolderStore = {
     #if DEBUG

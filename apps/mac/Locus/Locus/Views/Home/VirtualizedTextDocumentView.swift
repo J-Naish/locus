@@ -152,6 +152,9 @@ final class LineRenderingTextView: NSView {
   /// an out-of-memory freeze. Internal so tests can lower it. A future
   /// range-snapshot FFI could stream instead of materializing.
   var maximumCopiedByteCount = 256 * 1024 * 1024
+  /// Much lower bound for the selection text handed to assistive technology, which
+  /// may poll it repeatedly. Over this, accessibility reports no selected text.
+  var maximumAccessibilitySelectedTextByteCount = 1 * 1024 * 1024
   private var cachedBand: (revision: UInt64, range: Range<Int>, lines: [NSAttributedString])?
   private var maxObservedLineWidth: CGFloat = 0
   private var pendingLayoutUpdate = false
@@ -234,6 +237,31 @@ final class LineRenderingTextView: NSView {
     lastHorizontalOffset = offsetX
     invalidateVisibleArea()
   }
+
+  // MARK: Accessibility
+
+  // Expose the viewer as a text area so it resolves to `textViews` (matching the
+  // editable editor) for XCUITest and is announced as a text region. The value is
+  // deliberately *not* the whole document — it could be gigabytes — so only the
+  // bounded selected text is exposed (for copy). Full VoiceOver text-range reading
+  // of the body is a later accessibility pass.
+
+  override func accessibilityRole() -> NSAccessibility.Role? { .textArea }
+
+  override func isAccessibilityElement() -> Bool { buffer != nil }
+
+  override func accessibilityValue() -> Any? { nil }
+
+  override func accessibilitySelectedText() -> String? {
+    // Assistive tech may poll this repeatedly, so bound it well below the (much
+    // larger) explicit-copy limit; an over-budget selection reports no text.
+    guard let span = selectionByteSpan(), span <= maximumAccessibilitySelectedTextByteCount else {
+      return nil
+    }
+    return selectedText()
+  }
+
+  override func accessibilityNumberOfCharacters() -> Int { buffer?.utf16Length ?? 0 }
 
   // MARK: First responder & focus
 
@@ -330,22 +358,16 @@ final class LineRenderingTextView: NSView {
   /// line-based and does not retain original terminators (a CRLF file copies with
   /// LF); preserving them would require a terminator-aware range snapshot.
   func selectedText() -> String? {
-    guard let buffer, let selection, !selection.isEmpty else {
+    guard buffer != nil, let selection, !selection.isEmpty else {
       return nil
     }
-    let lower = selection.start
-    let upper = selection.end
-
-    if let startByte = (try? buffer.position(forLine: lower.line, columnUTF16: lower.columnUTF16))?
-      .byte,
-      let endByte = (try? buffer.position(forLine: upper.line, columnUTF16: upper.columnUTF16))?
-        .byte,
-      endByte - startByte > maximumCopiedByteCount
-    {
+    if let span = selectionByteSpan(), span > maximumCopiedByteCount {
       NSSound.beep()
       return nil
     }
 
+    let lower = selection.start
+    let upper = selection.end
     let count = upper.line - lower.line + 1
     var lines = displayLineStrings(forLineRange: lower.line, count: count)
     guard !lines.isEmpty else {
@@ -365,6 +387,23 @@ final class LineRenderingTextView: NSView {
     let last = lines[lines.count - 1] as NSString
     lines[lines.count - 1] = last.substring(to: min(upper.columnUTF16, last.length))
     return lines.joined(separator: "\n")
+  }
+
+  /// Byte length of the current selection, computed cheaply from its endpoints'
+  /// positions, or `nil` when there is no selection or a position lookup fails.
+  /// Used to bound how much text copy and accessibility will materialize.
+  private func selectionByteSpan() -> Int? {
+    guard let buffer, let selection, !selection.isEmpty,
+      let startByte =
+        (try? buffer.position(
+          forLine: selection.start.line, columnUTF16: selection.start.columnUTF16))?.byte,
+      let endByte =
+        (try? buffer.position(
+          forLine: selection.end.line, columnUTF16: selection.end.columnUTF16))?.byte
+    else {
+      return nil
+    }
+    return endByte - startByte
   }
 
   // MARK: Keyboard navigation

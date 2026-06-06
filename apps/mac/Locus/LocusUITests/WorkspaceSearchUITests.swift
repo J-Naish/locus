@@ -1115,6 +1115,39 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testLargeFileViewerExposesSelectAllAndCopy() throws {
+    // Lower the editable-size limit so a small fixture routes to the large-file
+    // viewer (which otherwise needs a 64 MB+ file), then verify the viewer
+    // resolves as a text view and supports select-all + copy.
+    let app = try launchApp(
+      workspacePath: fixtureWorkspacePath("basic"),
+      extraArguments: ["--ui-test-max-text-bytes", "10"]
+    )
+
+    let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
+    XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+    row.click()
+
+    let viewer = app.textViews["document-large-text-viewer"]
+    XCTAssertTrue(viewer.waitForExistence(timeout: 5), app.debugDescription)
+    viewer.click()
+
+    NSPasteboard.general.clearContents()
+    var copied: String?
+    let deadline = Date().addingTimeInterval(2)
+    repeat {
+      app.typeKey("a", modifierFlags: [.command])
+      app.typeKey("c", modifierFlags: [.command])
+      copied = NSPasteboard.general.string(forType: .string)
+      if copied?.contains("Meeting notes") == true { break }
+      Thread.sleep(forTimeInterval: 0.05)
+    } while Date() < deadline
+
+    XCTAssertEqual(copied?.contains("Meeting notes"), true, "copied=\(copied ?? "nil")")
+    XCTAssertEqual(copied?.contains("Avoid startup indexing."), true, "copied=\(copied ?? "nil")")
+  }
+
+  @MainActor
   private func launchAppWithBasicWorkspace() throws -> XCUIApplication {
     try launchApp(workspacePath: fixtureWorkspacePath("basic"))
   }
@@ -1125,7 +1158,8 @@ final class WorkspaceSearchUITests: XCTestCase {
     recentFilesKey: String = "recentFiles.uiTests.\(UUID().uuidString)",
     recentFoldersKey: String = "recentFolders.uiTests.\(UUID().uuidString)",
     recentFiles: [String] = [],
-    recentFolders: [String] = []
+    recentFolders: [String] = [],
+    extraArguments: [String] = []
   ) throws -> XCUIApplication {
     trackUserDefaultsKeys(
       recentFilesKey,
@@ -1153,6 +1187,7 @@ final class WorkspaceSearchUITests: XCTestCase {
         workspacePath,
       ]
     }
+    app.launchArguments += extraArguments
     try launchAndWaitForWindow(app)
     return app
   }
