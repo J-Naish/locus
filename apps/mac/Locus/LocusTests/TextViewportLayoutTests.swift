@@ -208,6 +208,65 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(view.frame.height, reference.frame.height)
   }
 
+  // MARK: Multi-click selection
+
+  @MainActor
+  func testSelectWordSelectsTheWordAtThePosition() throws {
+    let view = try makeViewer("hello world")
+    view.selectWord(at: .init(line: 0, columnUTF16: 8))  // inside "world"
+    XCTAssertEqual(view.selectedText(), "world")
+  }
+
+  @MainActor
+  func testSelectWordKeepsNonASCIIWordIntact() throws {
+    // Locale-aware word boundaries keep an accented word whole rather than
+    // splitting at the diacritic.
+    let view = try makeViewer("café latte")
+    view.selectWord(at: .init(line: 0, columnUTF16: 1))  // inside "café"
+    XCTAssertEqual(view.selectedText(), "café")
+  }
+
+  @MainActor
+  func testSelectWordOnEmptyLineCollapsesToCaret() throws {
+    let view = try makeViewer("\nsecond")  // first line is empty
+    view.selectWord(at: .init(line: 0, columnUTF16: 0))
+    XCTAssertEqual(view.selection?.isEmpty, true)
+  }
+
+  @MainActor
+  func testSelectWordPastLineEndCollapsesToCaret() throws {
+    // A double-click in the empty area to the right of the text (column at or past
+    // the line length) places a caret instead of selecting the last word.
+    let view = try makeViewer("hello world")  // length 11
+    view.selectWord(at: .init(line: 0, columnUTF16: 11))
+    XCTAssertEqual(view.selection?.isEmpty, true)
+  }
+
+  @MainActor
+  func testSelectWordOnWhitespaceSelectsOnlyWhitespace() throws {
+    // Clicking on the gap between words selects whitespace, never a neighbouring
+    // word. (Exact run length is locale/tokenizer-defined; assert it is blank.)
+    let view = try makeViewer("ab cd")
+    view.selectWord(at: .init(line: 0, columnUTF16: 2))  // the space
+    let selected = try XCTUnwrap(view.selectedText())
+    XCTAssertFalse(selected.isEmpty)
+    XCTAssertTrue(selected.trimmingCharacters(in: .whitespaces).isEmpty)
+  }
+
+  @MainActor
+  func testSelectLineSelectsTheWholeLineContent() throws {
+    let view = try makeViewer("ab\ncde\nf")
+    view.selectLine(at: 1)
+    XCTAssertEqual(view.selectedText(), "cde")  // content only, no trailing newline
+  }
+
+  @MainActor
+  func testSelectLineClampsOutOfRangeLine() throws {
+    let view = try makeViewer("only")
+    view.selectLine(at: 99)
+    XCTAssertEqual(view.selectedText(), "only")
+  }
+
   // MARK: Scroll rendering stability
 
   func testViewerOptsOutOfResponsiveScrolling() {

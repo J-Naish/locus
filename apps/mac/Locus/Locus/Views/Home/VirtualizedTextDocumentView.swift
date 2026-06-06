@@ -558,9 +558,63 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if hasMarkedText() { unmarkText() }
     window?.makeFirstResponder(self)
     let endpoint = endpoint(at: convert(event.locationInWindow, from: nil))
-    selection = TextSelection(caretAt: endpoint)
-    isSelecting = true
+    // A double-click selects the word, a triple-click the whole line; both are a
+    // completed selection (no drag-extend yet). A single click places the caret
+    // and begins a drag selection.
+    switch event.clickCount {
+    case 3...:
+      selectLine(at: endpoint.line)
+      isSelecting = false
+    case 2:
+      selectWord(at: endpoint)
+      isSelecting = false
+    default:
+      selection = TextSelection(caretAt: endpoint)
+      isSelecting = true
+    }
     invalidateVisibleArea()
+  }
+
+  /// Selects the word containing `endpoint`, using the system's locale-aware
+  /// word-boundary rules (so it behaves correctly for CJK and other scripts). A
+  /// click past the last character, or on an empty line, collapses to a caret.
+  func selectWord(at endpoint: TextSelection.Endpoint) {
+    let line = attributedLine(forLine: endpoint.line).string as NSString
+    // An empty line, or a click in the empty area past the last character, places
+    // a caret rather than selecting a far-away word.
+    guard line.length > 0, endpoint.columnUTF16 < line.length else {
+      selection = TextSelection(caretAt: endpoint)
+      return
+    }
+    let word = Self.wordRange(in: line, at: endpoint.columnUTF16)
+    selection = TextSelection(
+      anchor: .init(line: endpoint.line, columnUTF16: word.location),
+      head: .init(line: endpoint.line, columnUTF16: NSMaxRange(word)))
+  }
+
+  /// The locale-aware word-boundary range (UTF-16) containing `index` in `string`,
+  /// via the OS text tokenizer (so CJK and other scripts segment correctly).
+  /// Falls back to the single composed character at `index` when the tokenizer
+  /// reports no token there.
+  static func wordRange(in string: NSString, at index: Int) -> NSRange {
+    let tokenizer = CFStringTokenizerCreate(
+      kCFAllocatorDefault, string as CFString,
+      CFRange(location: 0, length: string.length),
+      kCFStringTokenizerUnitWordBoundary, CFLocaleCopyCurrent())
+    CFStringTokenizerGoToTokenAtIndex(tokenizer, index)
+    let range = CFStringTokenizerGetCurrentTokenRange(tokenizer)
+    guard range.location != kCFNotFound, range.length > 0 else {
+      return string.rangeOfComposedCharacterSequence(at: index)
+    }
+    return NSRange(location: range.location, length: range.length)
+  }
+
+  /// Selects the whole logical line (its content, not the trailing newline).
+  func selectLine(at line: Int) {
+    let clamped = min(max(0, line), max(0, lineCount - 1))
+    selection = TextSelection(
+      anchor: .init(line: clamped, columnUTF16: 0),
+      head: .init(line: clamped, columnUTF16: lineLengthUTF16(clamped)))
   }
 
   override func mouseDragged(with event: NSEvent) {
