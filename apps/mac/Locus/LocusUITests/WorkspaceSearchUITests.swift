@@ -1148,6 +1148,42 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testLargeFileViewerAcceptsBasicTyping() throws {
+    // The large-file viewer is editable: select the whole document, type a known
+    // marker to replace it, then read it back through select-all + copy (the AX
+    // value intentionally never materializes the whole document). Edits stay in
+    // memory — there is no save here — so the fixture on disk is untouched.
+    let app = try launchApp(
+      workspacePath: fixtureWorkspacePath("basic"),
+      extraArguments: ["--ui-test-max-text-bytes", "10"]
+    )
+
+    let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
+    XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+    row.click()
+
+    let viewer = app.textViews["document-large-text-viewer"]
+    XCTAssertTrue(viewer.waitForExistence(timeout: 5), app.debugDescription)
+    viewer.click()
+
+    app.typeKey("a", modifierFlags: [.command])  // select all
+    app.typeText("LocusEdit")  // replaces the selection
+
+    NSPasteboard.general.clearContents()
+    var copied: String?
+    let deadline = Date().addingTimeInterval(2)
+    repeat {
+      app.typeKey("a", modifierFlags: [.command])
+      app.typeKey("c", modifierFlags: [.command])
+      copied = NSPasteboard.general.string(forType: .string)
+      if copied == "LocusEdit" { break }
+      Thread.sleep(forTimeInterval: 0.05)
+    } while Date() < deadline
+
+    XCTAssertEqual(copied, "LocusEdit", "copied=\(copied ?? "nil")")
+  }
+
+  @MainActor
   private func launchAppWithBasicWorkspace() throws -> XCUIApplication {
     try launchApp(workspacePath: fixtureWorkspacePath("basic"))
   }

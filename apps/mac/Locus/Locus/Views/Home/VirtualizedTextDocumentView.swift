@@ -99,6 +99,17 @@ private enum NavigationKeyCode {
   static let end: UInt16 = 119
 }
 
+/// Physical key codes for the editing keys the editable viewer handles directly
+/// in `keyDown`. Text composition (dead keys, CJK input methods) is a later
+/// slice via `NSTextInputClient`; these are the direct, modifier-free edits.
+private enum EditingKeyCode {
+  static let delete: UInt16 = 51  // Backspace
+  static let forwardDelete: UInt16 = 117
+  static let returnKey: UInt16 = 36
+  static let keypadEnter: UInt16 = 76
+  static let tab: UInt16 = 48
+}
+
 /// Custom flipped `NSView` document view that draws only the visible band of a
 /// [`TextBuffer`], fetching that band from the Rust core on demand. The document
 /// height is synthesized from the line count, so a multi-gigabyte file never has
@@ -137,6 +148,12 @@ final class LineRenderingTextView: NSView {
       invalidateVisibleArea()
     }
   }
+
+  /// Whether the viewer accepts edits. Read-only entries (and the not-yet-saved
+  /// large-file path before its save story exists) keep this false; the host
+  /// enables it for writable text. Editing is routed to the Rust buffer; saving
+  /// is a later slice, so edits are in-memory until then.
+  var isEditable = false
 
   /// Bytes fetched per line for the visible band; longer lines are truncated for
   /// the fetch so one enormous line never crosses the FFI in full.
@@ -406,12 +423,14 @@ final class LineRenderingTextView: NSView {
     return endByte - startByte
   }
 
-  // MARK: Keyboard navigation
+  // MARK: Keyboard navigation & editing
 
-  // Arrow keys, with Option (word), Command (line/document), and Shift (extend).
-  // Keyed off physical key codes (layout-independent) rather than
-  // `interpretKeyEvents`, so a read-only viewer can swallow text-producing keys
-  // without beeping while still navigating.
+  // Arrow keys (Option=word, Command=line/document, Shift=extend), plus basic
+  // editing when `isEditable`. Keyed off physical key codes (layout-independent)
+  // rather than `interpretKeyEvents` so the read-only viewer can swallow
+  // text-producing keys without beeping. Composition-aware input (dead keys, CJK
+  // input methods) moves to `interpretKeyEvents` + `NSTextInputClient` in a later
+  // slice; this handles direct character entry and deletion.
   override func keyDown(with event: NSEvent) {
     guard buffer != nil else {
       super.keyDown(with: event)
@@ -421,7 +440,9 @@ final class LineRenderingTextView: NSView {
     let extend = flags.contains(.shift)
     let command = flags.contains(.command)
     let option = flags.contains(.option)
+    let control = flags.contains(.control)
 
+    // Navigation works in both read-only and editable modes.
     switch event.keyCode {
     case NavigationKeyCode.leftArrow:
       if command {
@@ -431,6 +452,7 @@ final class LineRenderingTextView: NSView {
       } else {
         moveHorizontally(forward: false, extend: extend)
       }
+      return
     case NavigationKeyCode.rightArrow:
       if command {
         moveToLineEdge(end: true, extend: extend)
@@ -439,30 +461,74 @@ final class LineRenderingTextView: NSView {
       } else {
         moveHorizontally(forward: true, extend: extend)
       }
+      return
     case NavigationKeyCode.downArrow:
       if command {
         moveToDocumentEdge(end: true, extend: extend)
       } else {
         moveVertically(down: true, extend: extend)
       }
+      return
     case NavigationKeyCode.upArrow:
       if command {
         moveToDocumentEdge(end: false, extend: extend)
       } else {
         moveVertically(down: false, extend: extend)
       }
-    case NavigationKeyCode.home: moveToDocumentEdge(end: false, extend: extend)
-    case NavigationKeyCode.end: moveToDocumentEdge(end: true, extend: extend)
+      return
+    case NavigationKeyCode.home:
+      moveToDocumentEdge(end: false, extend: extend)
+      return
+    case NavigationKeyCode.end:
+      moveToDocumentEdge(end: true, extend: extend)
+      return
     default:
-      // Read-only: ignore text-producing keys (no beep); pass control keys on so
-      // the scroll view can still handle Page Up/Down etc.
-      if let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first,
-        scalar.value >= 0x20, !command
-      {
-        return
-      }
-      super.keyDown(with: event)
+      break
     }
+
+    // Basic editing (no Command/Control chords, which are shortcuts). Text
+    // composition (dead keys, CJK input methods) and undo/cut/paste are later
+    // slices; this handles direct character entry and deletion.
+    if isEditable, !command, !control {
+      switch event.keyCode {
+      case EditingKeyCode.delete:
+        deleteBackward()
+        return
+      case EditingKeyCode.forwardDelete:
+        deleteForward()
+        return
+      case EditingKeyCode.returnKey, EditingKeyCode.keypadEnter:
+        insertText("\n")
+        return
+      case EditingKeyCode.tab:
+        insertText("\t")
+        return
+      default:
+        if let characters = event.characters, isInsertableCharacters(characters) {
+          insertText(characters)
+          return
+        }
+      }
+    }
+
+    // Unhandled: ignore self-inserting keys (no beep); pass the rest on so the
+    // scroll view can still handle Page Up/Down etc.
+    if let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first,
+      scalar.value >= 0x20, !command
+    {
+      return
+    }
+    super.keyDown(with: event)
+  }
+
+  /// Whether a key event's characters are a self-inserting character rather than
+  /// a control or function key. AppKit reports function keys (arrows, Page
+  /// Up/Down, F-keys, Help) in the U+F700–U+F8FF private-use range, and DEL as
+  /// U+007F; none of those should be inserted as text.
+  private func isInsertableCharacters(_ characters: String) -> Bool {
+    guard let scalar = characters.unicodeScalars.first else { return false }
+    return scalar.value >= 0x20 && scalar.value != 0x7F
+      && !(0xF700...0xF8FF).contains(scalar.value)
   }
 
   /// The caret/extension origin, defaulting to the document start when nothing is
@@ -602,6 +668,130 @@ final class LineRenderingTextView: NSView {
       index = boundary(before: index)
     }
     return .init(line: endpoint.line, columnUTF16: index)
+  }
+
+  // MARK: Editing
+
+  // Basic insert/delete routed to the Rust buffer. Endpoints (line, UTF-16
+  // column) are mapped to global UTF-16 offsets via the buffer's position
+  // lookups, so a multi-gigabyte file never has its text assembled to edit it.
+  // Composition (IME), undo/redo, and cut/paste are later slices; these methods
+  // are the shared primitives those will build on.
+
+  /// Inserts `string`, replacing the current selection if any, and leaves the
+  /// caret after the inserted text. A no-op when read-only, empty, or absent.
+  ///
+  /// A selection replace is two buffer ops (delete then insert). To keep it
+  /// atomic, a failed insert rolls the delete back via the buffer's own undo so
+  /// the selected text is never silently lost. (A single coalesced `replace`
+  /// also matters for undo granularity and is a later slice.)
+  func insertText(_ string: String) {
+    guard isEditable, let buffer, !string.isEmpty, let range = currentSelectionUTF16Range() else {
+      return
+    }
+    let replacingSelection = range.end > range.start
+    if replacingSelection {
+      do {
+        try buffer.delete(fromUTF16: range.start, toUTF16: range.end)
+      } catch {
+        NSSound.beep()
+        return
+      }
+    }
+    do {
+      try buffer.insert(string, atUTF16: range.start)
+    } catch {
+      if replacingSelection {
+        _ = try? buffer.undo()  // restore the just-deleted selection
+      }
+      NSSound.beep()
+      finishEdit(caretUTF16: range.start)
+      return
+    }
+    finishEdit(caretUTF16: range.start + (string as NSString).length)
+  }
+
+  /// Deletes the selection, or one composed character before the caret (merging
+  /// lines at a line start). A no-op at the document start.
+  func deleteBackward() {
+    guard isEditable, buffer != nil else { return }
+    if let selection, !selection.isEmpty {
+      deleteRange(from: selection.start, to: selection.end)
+      return
+    }
+    let caret = navigationHead
+    let previous = steppedCharacterEndpoint(from: caret, forward: false)
+    guard previous != caret else { return }
+    deleteRange(from: previous, to: caret)
+  }
+
+  /// Deletes the selection, or one composed character after the caret (merging
+  /// the next line at a line end). A no-op at the document end.
+  func deleteForward() {
+    guard isEditable, buffer != nil else { return }
+    if let selection, !selection.isEmpty {
+      deleteRange(from: selection.start, to: selection.end)
+      return
+    }
+    let caret = navigationHead
+    let next = steppedCharacterEndpoint(from: caret, forward: true)
+    guard next != caret else { return }
+    deleteRange(from: caret, to: next)
+  }
+
+  /// Deletes the UTF-16 range between two endpoints and collapses the caret to
+  /// the start. Endpoints must already be ordered (`from` before `to`).
+  private func deleteRange(from start: TextSelection.Endpoint, to end: TextSelection.Endpoint) {
+    guard let buffer, let startOffset = utf16Offset(of: start),
+      let endOffset = utf16Offset(of: end), endOffset > startOffset
+    else {
+      return
+    }
+    do {
+      try buffer.delete(fromUTF16: startOffset, toUTF16: endOffset)
+      finishEdit(caretUTF16: startOffset)
+    } catch {
+      NSSound.beep()
+    }
+  }
+
+  /// The current selection as a global UTF-16 range, or a zero-length range at
+  /// the caret when nothing is selected. `nil` only if a position lookup fails.
+  private func currentSelectionUTF16Range() -> (start: Int, end: Int)? {
+    let selection = self.selection ?? TextSelection(caretAt: navigationHead)
+    guard let start = utf16Offset(of: selection.start), let end = utf16Offset(of: selection.end)
+    else {
+      return nil
+    }
+    return (start, end)
+  }
+
+  /// The global UTF-16 offset of a (line, column) endpoint, or `nil` if the
+  /// buffer is absent or the lookup fails.
+  private func utf16Offset(of endpoint: TextSelection.Endpoint) -> Int? {
+    guard let buffer else { return nil }
+    return (try? buffer.position(forLine: endpoint.line, columnUTF16: endpoint.columnUTF16))?.utf16
+  }
+
+  /// Shared post-edit refresh: places the caret at `offset`, drops cached band
+  /// and geometry (the buffer revision changed), re-measures the document, and
+  /// repaints the visible band.
+  private func finishEdit(caretUTF16 offset: Int) {
+    cachedBand = nil
+    verticalGoalX = nil
+    // The widest-line high-water mark can only shrink via an edit (deleting or
+    // splitting a long line), so reset it and let `draw` re-measure the visible
+    // band rather than keeping a stale, too-wide horizontal extent.
+    maxObservedLineWidth = 0
+    if let buffer, let position = try? buffer.position(forUTF16: offset) {
+      selection = TextSelection(
+        caretAt: .init(line: position.line, columnUTF16: position.columnUTF16))
+    }
+    updateLayout()
+    if let head = selection?.head {
+      scrollCaretToVisible(head)
+    }
+    invalidateVisibleArea()
   }
 
   /// Text-relative x of the caret at `endpoint`.
@@ -846,6 +1036,7 @@ struct LargeTextViewport: NSViewRepresentable {
   let buffer: TextBuffer
   let accessibilityLabel: String
   let syntax: TextDocumentSyntax
+  let isEditable: Bool
 
   func makeNSView(context: Context) -> NSScrollView {
     let scrollView = NSScrollView()
@@ -865,6 +1056,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.setAccessibilityLabel(accessibilityLabel)
     documentView.syntax = syntax
     documentView.showsLineNumbers = syntax.supportsLineNumbers
+    documentView.isEditable = isEditable
     scrollView.documentView = documentView
 
     documentView.setBuffer(buffer)
@@ -896,6 +1088,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.setAccessibilityLabel(accessibilityLabel)
     documentView.syntax = syntax
     documentView.showsLineNumbers = syntax.supportsLineNumbers
+    documentView.isEditable = isEditable
     if documentView.buffer !== buffer {
       documentView.setBuffer(buffer)
     }
@@ -924,13 +1117,16 @@ struct LargeTextViewport: NSViewRepresentable {
   }
 }
 
-/// Read-only viewer for text files too large for the editable string path. It
-/// opens the file through the Rust [`TextBuffer`] off the main thread, then
-/// renders it with [`LargeTextViewport`].
+/// Viewer for text files too large for the editable string path. It opens the
+/// file through the Rust [`TextBuffer`] off the main thread, then renders it
+/// with [`LargeTextViewport`]. Editing (when `isEditable`) is routed to the
+/// buffer in memory; saving large-file edits is a later slice.
 struct VirtualizedTextDocumentView: View {
   let url: URL
   let accessibilityLabel: String
   let syntax: TextDocumentSyntax
+  /// Whether the viewer accepts edits (false for read-only entries).
+  let isEditable: Bool
   /// Changing this (e.g. on external file change) re-opens the buffer.
   let reloadToken: Int
 
@@ -951,7 +1147,8 @@ struct VirtualizedTextDocumentView: View {
         LargeTextViewport(
           buffer: buffer,
           accessibilityLabel: accessibilityLabel,
-          syntax: syntax
+          syntax: syntax,
+          isEditable: isEditable
         )
       case .failed(let message):
         ContentUnavailableView {

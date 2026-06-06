@@ -379,4 +379,133 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 13))  // collapsed to end edge
     XCTAssertTrue(view.selection?.isEmpty == true)
   }
+
+  // MARK: Editing
+
+  @MainActor
+  private func makeEditableViewer(_ contents: String) throws -> LineRenderingTextView {
+    let view = try makeViewer(contents)
+    view.isEditable = true
+    return view
+  }
+
+  /// The whole buffer content, for round-trip assertions (terminators normalized
+  /// to LF, matching the line-based buffer read).
+  @MainActor
+  private func content(of view: LineRenderingTextView) -> String {
+    guard let buffer = view.buffer else { return "" }
+    return buffer.text(forLineRange: 0, count: buffer.lineCount)
+  }
+
+  @MainActor
+  func testEditingIsIgnoredWhenNotEditable() throws {
+    let view = try makeViewer("abc")  // read-only by default
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.insertText("X")
+    view.deleteForward()
+    XCTAssertEqual(content(of: view), "abc")
+  }
+
+  @MainActor
+  func testInsertTextAtCaretAdvancesCaret() throws {
+    let view = try makeEditableViewer("abc")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: false)  // caret (0,1)
+    view.insertText("X")
+    XCTAssertEqual(content(of: view), "aXbc")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 2))
+    XCTAssertTrue(view.selection?.isEmpty == true)
+  }
+
+  @MainActor
+  func testTypingReplacesSelection() throws {
+    let view = try makeEditableViewer("hello")
+    view.selectAll(nil)  // (0,0)..(0,5)
+    view.insertText("Z")
+    XCTAssertEqual(content(of: view), "Z")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 1))
+  }
+
+  @MainActor
+  func testInsertNewlineSplitsLineAndPlacesCaretAtNextLineStart() throws {
+    let view = try makeEditableViewer("abcd")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: false)
+    view.moveHorizontally(forward: true, extend: false)  // caret (0,2)
+    view.insertText("\n")
+    XCTAssertEqual(content(of: view), "ab\ncd")
+    XCTAssertEqual(view.buffer?.lineCount, 2)
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testDeleteBackwardRemovesPreviousCharacter() throws {
+    let view = try makeEditableViewer("abc")
+    view.moveToDocumentEdge(end: true, extend: false)  // caret (0,3)
+    view.deleteBackward()
+    XCTAssertEqual(content(of: view), "ab")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 2))
+  }
+
+  @MainActor
+  func testDeleteBackwardAtLineStartMergesLines() throws {
+    let view = try makeEditableViewer("ab\ncd")
+    view.moveToDocumentEdge(end: true, extend: false)  // caret (1,2)
+    view.moveToLineEdge(end: false, extend: false)  // caret (1,0)
+    view.deleteBackward()
+    XCTAssertEqual(content(of: view), "abcd")
+    XCTAssertEqual(view.buffer?.lineCount, 1)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 2))
+  }
+
+  @MainActor
+  func testDeleteForwardRemovesNextCharacter() throws {
+    let view = try makeEditableViewer("abc")
+    view.moveToDocumentEdge(end: false, extend: false)  // caret (0,0)
+    view.deleteForward()
+    XCTAssertEqual(content(of: view), "bc")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testDeleteBackwardWithSelectionDeletesSelection() throws {
+    let view = try makeEditableViewer("hello")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: true)
+    view.moveHorizontally(forward: true, extend: true)  // select "he"
+    view.deleteBackward()
+    XCTAssertEqual(content(of: view), "llo")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+    XCTAssertTrue(view.selection?.isEmpty == true)
+  }
+
+  @MainActor
+  func testDeleteBackwardAtDocumentStartIsNoOp() throws {
+    let view = try makeEditableViewer("abc")
+    view.moveToDocumentEdge(end: false, extend: false)  // caret (0,0)
+    view.deleteBackward()
+    XCTAssertEqual(content(of: view), "abc")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testInsertingEmojiAdvancesCaretPastWholePair() throws {
+    // 😀 is a surrogate pair (two UTF-16 units); the caret must land after both.
+    let view = try makeEditableViewer("ab")
+    view.moveToDocumentEdge(end: false, extend: false)  // caret (0,0)
+    view.insertText("😀")
+    XCTAssertEqual(content(of: view), "😀ab")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 2))
+  }
+
+  @MainActor
+  func testDeleteBackwardRemovesWholeEmoji() throws {
+    let view = try makeEditableViewer("a😀b")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: false)  // caret (0,1) after "a"
+    view.moveHorizontally(forward: true, extend: false)  // caret (0,3) after 😀
+    view.deleteBackward()
+    XCTAssertEqual(content(of: view), "ab")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 1))
+  }
 }

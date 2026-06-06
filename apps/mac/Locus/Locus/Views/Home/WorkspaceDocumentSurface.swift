@@ -147,6 +147,7 @@ struct WorkspaceDocumentSurface: View {
           url: url,
           accessibilityLabel: "\(entry.name) text",
           syntax: WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText,
+          isEditable: Self.largeFileEditingEnabled && !entry.isReadOnly,
           reloadToken: documentReloadGeneration
         )
       }
@@ -155,6 +156,19 @@ struct WorkspaceDocumentSurface: View {
 
   private func documentReloadTrigger(for entry: WorkspaceEntry) -> DocumentReloadTrigger {
     DocumentReloadTrigger(entryID: entry.id, generation: documentReloadGeneration)
+  }
+
+  /// Whether the large-file viewer accepts edits. It has no save path yet
+  /// (saving, dirty tracking, and external-change conflict handling are a later
+  /// slice), so editing is limited to Debug builds for on-device validation;
+  /// shipped (Release) builds keep large files read-only until those exist, so
+  /// no editable-but-unsaveable surface can reach users.
+  private static var largeFileEditingEnabled: Bool {
+    #if DEBUG
+      return true
+    #else
+      return false
+    #endif
   }
 
   private var isSaveDisabled: Bool {
@@ -199,8 +213,10 @@ struct WorkspaceDocumentSurface: View {
       guard self.entry?.id == entry.id else {
         return
       }
-      // Too large to edit as a string: open it read-only in the virtualized
-      // viewer, which streams the visible band from the Rust buffer.
+      // Too large to edit as a string: open it in the virtualized viewer, which
+      // streams the visible band from the Rust buffer. In Debug it also edits in
+      // place for on-device validation; Release stays read-only until the save /
+      // dirty / external-change-conflict slice (see `largeFileEditingEnabled`).
       knownDocumentFingerprint = await DocumentFileFingerprint.load(at: entry.url)
       loadState = .tooLargeForEditing(entry.url)
     } catch {
