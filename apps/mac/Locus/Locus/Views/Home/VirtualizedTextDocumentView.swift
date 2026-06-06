@@ -2216,13 +2216,12 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.setBuffer(buffer)
 
     let clipView = scrollView.contentView
-    // Disable copy-on-scroll. Blitting prior pixels and redrawing only the newly
-    // exposed strip assumes drawing is stable in document coordinates, but this
-    // view draws viewport-relative chrome (pinned gutter, caret, selection) and
-    // rounds the visible band to whole rows — so the blit tore rows (content
-    // appeared to jump a line) and left the gutter stale. Instead the visible band
-    // is fully redrawn on each scroll (see `viewportDidScroll`).
-    clipView.copiesOnScroll = false
+    // This view draws viewport-relative chrome (pinned gutter, caret, selection)
+    // and rounds the visible band to whole rows, so it redraws the whole visible
+    // band on each scroll (see `viewportDidScroll`) instead of letting the clip
+    // view repaint only the newly exposed strip — which tore rows (content
+    // appeared to jump a line) and left the gutter stale. (`copiesOnScroll` is a
+    // no-op on macOS 11+, so the redraw is driven explicitly.)
     clipView.postsBoundsChangedNotifications = true
     clipView.postsFrameChangedNotifications = true
     NotificationCenter.default.addObserver(
