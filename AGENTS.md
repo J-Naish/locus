@@ -62,6 +62,7 @@ Before making product or architecture decisions, read the relevant docs:
 - `docs/`: product, architecture, specs, and ADRs
 - `fixtures/`: reusable test fixtures
 - `scripts/`: development, build, release, and platform scripts
+- `Makefile`: thin task runner over `scripts/` and the toolchains; run `make help` for common tasks (`make run-release`, `make test`, `make perf`, …)
 
 ## Architecture Rules
 
