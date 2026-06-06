@@ -27,7 +27,7 @@ The implementation should keep the product native, local-first, fast, and docume
 - Keep raw C ABI calls inside a thin Swift bridge, not in view code.
 - Make expensive work cancellable or backgrounded from the start.
 - Prefer small tested Rust modules over large UI-driven behavior.
-- Use native frameworks for previews: PDFKit, Quick Look, AVKit, image views, and TextKit 2/NSTextView.
+- Use native frameworks for previews: PDFKit, Quick Look, AVKit, and image views. Text editing uses a custom virtualized engine (Core Text over the Rust buffer), not NSTextView/TextKit.
 - Defer full-text search, delayed thumbnails, PDF annotation persistence polish, and state restoration until the basic MVP path is stable.
 
 ## macOS App Shape
@@ -58,7 +58,7 @@ Responsibilities:
 
 Use SwiftUI for app structure and normal controls, with AppKit bridges where native document behavior matters:
 
-- `NSTextView` / TextKit 2 for Markdown and structured text editing.
+- A custom virtualized text view (a flipped `NSView` drawing the visible band with Core Text, backed by the Rust `TextBuffer`) for Markdown and structured-text editing at any file size.
 - `PDFView` for PDFs.
 - `QLPreviewView` for Office previews inside Locus; defer Quick Look panel handoff until an explicit fallback workflow is needed.
 - `AVPlayerView` for video and audio.
@@ -184,7 +184,7 @@ Acceptance:
 
 Deliverables:
 
-- Markdown editor using `NSTextView`/TextKit with normal save behavior.
+- Markdown editor using the custom virtualized text engine with normal save behavior.
 - Structured plain-text editor for YAML, JSON, TOML, and common text files.
 - Lightweight readability-focused syntax highlighting for Markdown, structured
   text, and common source files; avoid IDE-oriented language tooling in this

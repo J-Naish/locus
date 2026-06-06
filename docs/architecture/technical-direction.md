@@ -23,7 +23,8 @@ Expected stack:
 - Swift
 - AppKit
 - SwiftUI
-- TextKit 2 / NSTextView
+- Core Text (custom virtualized text engine over the Rust buffer; text editing
+  does not use NSTextView/TextKit)
 - PDFKit
 - Quick Look
 - AVKit
