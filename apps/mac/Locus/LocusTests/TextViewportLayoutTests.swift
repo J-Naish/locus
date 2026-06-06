@@ -812,4 +812,19 @@ final class TextViewportLayoutTests: XCTestCase {
     view.undoEdit()
     XCTAssertEqual(reported.last, false)  // undo back to the opened state is clean
   }
+
+  @MainActor
+  func testBufferMutationsArePausedWhileSaving() throws {
+    // The background save reads the buffer; mutations must be paused for its
+    // duration so the read never races an edit.
+    let view = try makeEditableViewer("abc")
+    view.moveToDocumentEdge(end: true, extend: false)
+    view.isSaving = true
+
+    view.insertText("X")
+    view.deleteBackward()
+    view.undoEdit()
+    view.redoEdit()
+    XCTAssertEqual(content(of: view), "abc")  // every mutation no-ops while saving
+  }
 }

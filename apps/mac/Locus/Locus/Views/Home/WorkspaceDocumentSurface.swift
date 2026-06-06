@@ -183,13 +183,12 @@ struct WorkspaceDocumentSurface: View {
     DocumentReloadTrigger(entryID: entry.id, generation: documentReloadGeneration)
   }
 
-  /// Whether the large-file viewer accepts edits. The whole editable large-file
-  /// path — including Cmd+S save — is Debug-only validation for now: save is
-  /// synchronous (briefly blocks on huge files), dirty state is not surfaced, and
-  /// an external change to an unsaved buffer still reloads it. Before this is
-  /// enabled for shipped (Release) builds it needs non-blocking save, dirty
-  /// tracking, and external-change conflict handling. Until then Release keeps
-  /// large files read-only so no editable-but-unsaveable surface reaches users.
+  /// Whether the large-file viewer accepts edits. The editable large-file path —
+  /// edit, Cmd+S save (off the main thread), and external-change conflict
+  /// handling — is Debug-only validation for now. Remaining before it can be
+  /// enabled for shipped (Release) builds: routing all sizes through this engine
+  /// and preserving the original text encoding on save. Until then Release keeps
+  /// large files read-only so no half-finished editing surface reaches users.
   private static var largeFileEditingEnabled: Bool {
     #if DEBUG
       return true

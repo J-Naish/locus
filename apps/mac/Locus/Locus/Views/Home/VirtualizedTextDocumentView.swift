@@ -131,14 +131,27 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// host enables it for writable text. Editing is routed to the Rust buffer.
   var isEditable = false
 
-  /// Invoked when the user requests a save (Cmd+S) while editing. The host owns
-  /// the actual write (it has the file URL and the atomic/symlink policy).
-  var onSaveRequested: (() -> Void)?
+  /// File the buffer is saved to on Cmd+S. The viewer owns the write so it can
+  /// run it off the main thread without blocking the UI.
+  var saveURL: URL?
+
+  /// Reports a save outcome to the host: on success the post-write file
+  /// fingerprint (so the host records it before the change monitor reacts), on
+  /// failure the error to surface.
+  var onSaveCompletion: ((Result<DocumentFileFingerprint?, Error>) -> Void)?
+
+  /// True while a save is writing on a background thread. Buffer *mutations* are
+  /// paused while it is true so the background read never races an edit; reads
+  /// (rendering, selection) stay safe because the core buffer is `Sync`. Set
+  /// synchronously on the main thread by the save flow (settable for tests).
+  var isSaving = false
 
   /// Reports the buffer's dirty state to the host after each edit/undo, so it can
   /// decide whether an external change may safely reload (clean) or conflicts
   /// with unsaved edits.
   var onDirtyChange: ((Bool) -> Void)?
+
+  private let bufferStore = TextBufferStore()
 
   /// Bytes fetched per line for the visible band; longer lines are truncated for
   /// the fetch so one enormous line never crosses the FFI in full.
@@ -230,6 +243,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     verticalGoalX = nil
     lastHorizontalOffset = 0
     composition = nil
+    // A save in flight (if any) was for the previous buffer; let its completion
+    // mark that buffer saved, but the new document starts editable and clean.
+    isSaving = false
     updateLayout()
     // A new document always opens at the top-left; otherwise a reused scroll view
     // would keep the previous file's scroll position.
@@ -423,7 +439,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     case ("z", true) where isEditable:
       redoEdit()
     case ("s", false) where isEditable:
-      onSaveRequested?()
+      requestSave()
     default:
       return super.performKeyEquivalent(with: event)
     }
@@ -764,7 +780,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// coalesces consecutive typing into a single undo step.
   @discardableResult
   private func replace(globalStart start: Int, globalEnd end: Int, with string: String) -> Bool {
-    guard let buffer else { return false }
+    guard !isSaving, let buffer else { return false }
     do {
       if end > start {
         try buffer.replace(string, fromUTF16: start, toUTF16: end)
@@ -839,7 +855,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// (true while editable), regardless of whether anything was undone.
   @discardableResult
   func undoEdit() -> Bool {
-    guard isEditable, let buffer else { return false }
+    guard isEditable, !isSaving, let buffer else { return false }
     composition = nil
     if (try? buffer.undo()) == true {
       afterUndoRedo()
@@ -850,7 +866,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Re-applies the most recently undone edit. See `undoEdit` for the return value.
   @discardableResult
   func redoEdit() -> Bool {
-    guard isEditable, let buffer else { return false }
+    guard isEditable, !isSaving, let buffer else { return false }
     composition = nil
     if (try? buffer.redo()) == true {
       afterUndoRedo()
@@ -891,7 +907,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Deletes the UTF-16 range between two endpoints and collapses the caret to
   /// the start. Endpoints must already be ordered (`from` before `to`).
   private func deleteRange(from start: TextSelection.Endpoint, to end: TextSelection.Endpoint) {
-    guard let buffer, let startOffset = utf16Offset(of: start),
+    guard !isSaving, let buffer, let startOffset = utf16Offset(of: start),
       let endOffset = utf16Offset(of: end), endOffset > startOffset
     else {
       return
@@ -947,6 +963,68 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Reports the buffer's current dirty state to the host (after an edit/undo).
   private func notifyDirtyChanged() {
     onDirtyChange?(buffer?.isDirty ?? false)
+  }
+
+  // MARK: Save
+
+  /// Saves the buffer to `saveURL` on a background thread so the write never
+  /// blocks the UI. `isSaving` is set synchronously here (before any await) to
+  /// pause buffer mutations for the write's duration; rendering keeps reading the
+  /// buffer concurrently, which is sound because the core buffer is `Sync`.
+  func requestSave() {
+    guard isEditable, !isSaving, let buffer, buffer.isDirty, let saveURL else {
+      return
+    }
+    isSaving = true
+    invalidateVisibleArea()
+
+    // Capture everything the completion needs at save start. The view may be
+    // reused for another buffer/entry before the write finishes (reload, file
+    // switch), so completion must act on the buffer that was actually saved and
+    // route to the entry that requested it — never the current one.
+    let savedBuffer = buffer
+    let pending = SendableTextBuffer(buffer)
+    let store = bufferStore
+    let completion = onSaveCompletion
+    Task { [weak self] in
+      let result: Result<DocumentFileFingerprint?, Error>
+      do {
+        let fingerprint = try await Task.detached {
+          try store.save(pending.buffer, to: saveURL)
+          // Read the new fingerprint here, still off-main, so the host can record
+          // the post-save state before the change monitor's debounced event.
+          return DocumentFileFingerprint.read(at: saveURL)
+        }.value
+        result = .success(fingerprint)
+      } catch {
+        result = .failure(error)
+      }
+      self?.finishSave(result, savedBuffer: savedBuffer, completion: completion)
+    }
+  }
+
+  /// Main-actor continuation after the background write. Marks the buffer that was
+  /// saved (not whatever the view shows now) and reports to the save's own
+  /// completion. Live view state (`isSaving`, dirty, repaint) is touched only if
+  /// that buffer is still the current one — a buffer swap during the save already
+  /// reset `isSaving` and must not be clobbered.
+  private func finishSave(
+    _ result: Result<DocumentFileFingerprint?, Error>,
+    savedBuffer: TextBuffer,
+    completion: ((Result<DocumentFileFingerprint?, Error>) -> Void)?
+  ) {
+    switch result {
+    case .success:
+      savedBuffer.markSaved()
+    case .failure:
+      NSSound.beep()
+    }
+    if savedBuffer === buffer {
+      isSaving = false
+      notifyDirtyChanged()
+      invalidateVisibleArea()
+    }
+    completion?(result)
   }
 
   /// Text-relative x of the caret at `endpoint`.
@@ -1239,7 +1317,9 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
   /// Commit path: insert (replacing the selection, or `replacementRange`) and end
   /// any composition. Also the plain typing path when not composing.
   func insertText(_ string: Any, replacementRange: NSRange) {
-    guard let text = Self.plainText(from: string) else { return }
+    // Reject input while saving before touching composition, so a save in
+    // progress does not silently drop a keystroke mid-composition.
+    guard !isSaving, let text = Self.plainText(from: string) else { return }
     let wasComposing = composition != nil
     composition = nil
     guard isEditable, buffer != nil else {
@@ -1260,7 +1340,9 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
   /// Updates the in-progress composition. The marked text is not written to the
   /// buffer; it is drawn inline at a collapsed caret until committed.
   func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-    guard isEditable, buffer != nil, let text = Self.plainText(from: string) else { return }
+    guard isEditable, !isSaving, buffer != nil, let text = Self.plainText(from: string) else {
+      return
+    }
 
     if composition == nil {
       // Begin composing: clear whatever the marked text replaces so it sits at a
@@ -1410,7 +1492,8 @@ struct LargeTextViewport: NSViewRepresentable {
   let accessibilityLabel: String
   let syntax: TextDocumentSyntax
   let isEditable: Bool
-  let onSaveRequested: () -> Void
+  let saveURL: URL
+  let onSaveCompletion: (Result<DocumentFileFingerprint?, Error>) -> Void
   let onDirtyChange: (Bool) -> Void
 
   func makeNSView(context: Context) -> NSScrollView {
@@ -1432,7 +1515,8 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.syntax = syntax
     documentView.showsLineNumbers = syntax.supportsLineNumbers
     documentView.isEditable = isEditable
-    documentView.onSaveRequested = onSaveRequested
+    documentView.saveURL = saveURL
+    documentView.onSaveCompletion = onSaveCompletion
     documentView.onDirtyChange = onDirtyChange
     scrollView.documentView = documentView
 
@@ -1466,7 +1550,8 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.syntax = syntax
     documentView.showsLineNumbers = syntax.supportsLineNumbers
     documentView.isEditable = isEditable
-    documentView.onSaveRequested = onSaveRequested
+    documentView.saveURL = saveURL
+    documentView.onSaveCompletion = onSaveCompletion
     documentView.onDirtyChange = onDirtyChange
     if documentView.buffer !== buffer {
       documentView.setBuffer(buffer)
@@ -1499,7 +1584,7 @@ struct LargeTextViewport: NSViewRepresentable {
 /// Viewer for text files too large for the editable string path. It opens the
 /// file through the Rust [`TextBuffer`] off the main thread, then renders it
 /// with [`LargeTextViewport`]. Editing (when `isEditable`) is routed to the
-/// buffer in memory; saving large-file edits is a later slice.
+/// buffer; Cmd+S saves it (off the main thread, in the viewer).
 struct VirtualizedTextDocumentView: View {
   let url: URL
   let accessibilityLabel: String
@@ -1517,7 +1602,6 @@ struct VirtualizedTextDocumentView: View {
   var onDirtyChange: (Bool) -> Void = { _ in }
 
   @State private var phase: Phase = .loading
-  private let bufferStore = TextBufferStore()
 
   private enum Phase {
     case loading
@@ -1536,7 +1620,8 @@ struct VirtualizedTextDocumentView: View {
           accessibilityLabel: accessibilityLabel,
           syntax: syntax,
           isEditable: isEditable,
-          onSaveRequested: { save(buffer) },
+          saveURL: url,
+          onSaveCompletion: onSaveCompletion,
           onDirtyChange: onDirtyChange
         )
       case .failed(let message):
@@ -1579,27 +1664,6 @@ struct VirtualizedTextDocumentView: View {
     }
   }
 
-  /// Writes the buffer to disk (Cmd+S). Runs synchronously on the main actor:
-  /// the bytes stream through the core so memory stays bounded, but a multi-
-  /// gigabyte write briefly blocks the UI. This is acceptable for the current
-  /// Debug-only validation (and fine for the realistic large-file range); a
-  /// non-blocking save needs a Rust snapshot / save handle so the background
-  /// write cannot race live edits — that is part of enabling editing for Release.
-  /// The outcome is reported to the host via `onSaveCompletion`.
-  private func save(_ buffer: TextBuffer) {
-    do {
-      try bufferStore.save(buffer, to: url)
-      buffer.markSaved()
-      onDirtyChange(false)
-      // Read the fingerprint synchronously while still on the main actor, so the
-      // host records the post-save state before the change monitor fires.
-      onSaveCompletion(.success(DocumentFileFingerprint.read(at: url)))
-    } catch {
-      NSSound.beep()
-      onSaveCompletion(.failure(error))
-    }
-  }
-
   /// Maps an open failure to a user-facing message. Large non-UTF-8 files are
   /// called out explicitly: the editable path decodes legacy encodings, but this
   /// large-file viewer is UTF-8 only for now, so the narrowing is not silent.
@@ -1624,4 +1688,15 @@ private struct TextViewportLoad: Equatable {
 /// actor, so the unchecked conformance is sound (mirrors `ImageDocument`).
 private struct OpenedTextBuffer: @unchecked Sendable {
   let buffer: TextBuffer
+}
+
+/// Carries the `TextBuffer` to the background save thread. Sound because the
+/// save only *reads* the buffer (`write_to`) and the main thread pauses buffer
+/// mutations (`isSaving`) for the write's duration; concurrent reads are safe
+/// because the core buffer is `Sync`.
+private struct SendableTextBuffer: @unchecked Sendable {
+  let buffer: TextBuffer
+  init(_ buffer: TextBuffer) {
+    self.buffer = buffer
+  }
 }

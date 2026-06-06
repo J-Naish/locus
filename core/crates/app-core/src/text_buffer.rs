@@ -208,6 +208,15 @@ pub struct TextBuffer {
     revision: u64,
 }
 
+// A background save reads the buffer (`write_to`, `&self`) on another thread
+// while the main thread keeps rendering (also `&self` reads). That is sound only
+// because `TextBuffer` is `Sync`; this assertion fails the build if a future
+// field breaks that (mutations stay exclusive — they are paused during a save).
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<TextBuffer>();
+};
+
 impl TextBuffer {
     /// Builds a buffer from owned UTF-8 bytes.
     pub fn from_utf8_bytes(bytes: impl Into<Box<[u8]>>) -> Result<Self, TextBufferError> {

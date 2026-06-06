@@ -44,9 +44,11 @@ enum TextBufferError: LocalizedError, Equatable, Sendable {
 /// Wraps the `locus_text_buffer_*` C ABI, copying borrowed snapshot text into
 /// Swift `String`s before releasing it and freeing the handle on `deinit`.
 ///
-/// Not `Sendable`: the underlying handle is not internally synchronized, so all
-/// access to a single instance must be serialized by the caller (confined to
-/// one thread or actor).
+/// Not `Sendable`. The underlying Rust buffer is `Send + Sync`, so concurrent
+/// *immutable* reads are safe (the background save reads it while the main thread
+/// keeps rendering). Mutations (`insert`/`replace`/`delete`/`undo`/`redo`/
+/// `markSaved`) must not overlap any other access; the caller serializes them by
+/// pausing edits for the save's duration and keeping all mutation on one actor.
 final class TextBuffer {
   private let handle: OpaquePointer
   private static let logger = Logger(subsystem: "com.nash.locus", category: "TextBuffer")
