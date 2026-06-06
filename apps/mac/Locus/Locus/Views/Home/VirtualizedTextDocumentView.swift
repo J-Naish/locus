@@ -263,6 +263,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Much lower bound for the selection text handed to assistive technology, which
   /// may poll it repeatedly. Over this, accessibility reports no selected text.
   var maximumAccessibilitySelectedTextByteCount = 1 * 1024 * 1024
+  /// Upper bound (UTF-16 units) on a single accessibility text-range request, so a
+  /// request for a huge span never materializes a gigabyte. Assistive technology
+  /// asks for the visible/line ranges, which stay well under this.
+  var maximumAccessibilityStringLength = 1 * 1024 * 1024
   /// Upper bound on a single paste, so an enormous clipboard cannot freeze the
   /// main thread being inserted. Over this, the paste is refused with a beep.
   /// Internal so tests can lower it.
@@ -525,10 +529,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   // MARK: Accessibility
 
   // Expose the viewer as a text area so it resolves to `textViews` (matching the
-  // editable editor) for XCUITest and is announced as a text region. The value is
-  // deliberately *not* the whole document — it could be gigabytes — so only the
-  // bounded selected text is exposed (for copy). Full VoiceOver text-range reading
-  // of the body is a later accessibility pass.
+  // editable editor) for XCUITest and is announced as a text region. The whole
+  // document is never returned at once (it could be gigabytes); instead VoiceOver
+  // reads it through the range/line APIs below, each bounded so no single request
+  // materializes more than `maximumAccessibilityStringLength`.
 
   override func accessibilityRole() -> NSAccessibility.Role? { .textArea }
 
@@ -546,6 +550,102 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   override func accessibilityNumberOfCharacters() -> Int { buffer?.utf16Length ?? 0 }
+
+  /// The selection as a global UTF-16 range (a collapsed range at the caret when
+  /// nothing is selected).
+  override func accessibilitySelectedTextRange() -> NSRange {
+    guard let range = currentSelectionUTF16Range() else {
+      return NSRange(location: 0, length: 0)
+    }
+    return NSRange(location: range.start, length: max(0, range.end - range.start))
+  }
+
+  /// The text for a UTF-16 range, in the same full-document coordinates as
+  /// `accessibilityNumberOfCharacters`/`accessibilityRange(forLine:)` (so a line
+  /// longer than the display clip still reads correctly). Returns `nil` for an
+  /// invalid or over-budget range — including when the spanned lines are too long
+  /// to read without materializing a huge string — so VoiceOver asks for a smaller
+  /// span. The bounds are computed without adding `location + length`, which could
+  /// overflow on a hostile range from the accessibility client.
+  override func accessibilityString(for range: NSRange) -> String? {
+    guard let buffer, range.location >= 0, range.length >= 0,
+      range.location <= buffer.utf16Length,
+      range.length <= buffer.utf16Length - range.location,
+      range.length <= maximumAccessibilityStringLength,
+      let start = try? buffer.position(forUTF16: range.location),
+      let end = try? buffer.position(forUTF16: range.location + range.length),
+      spannedLineLength(fromLine: start.line, toLine: end.line) <= maximumAccessibilityStringLength
+    else {
+      return nil
+    }
+    return bufferText(
+      fromLine: start.line, fromColumn: start.columnUTF16,
+      toLine: end.line, toColumn: end.columnUTF16)
+  }
+
+  /// Total UTF-16 length of lines `[fromLine, toLine]` (including terminators),
+  /// used to bound an unclipped read.
+  private func spannedLineLength(fromLine: Int, toLine: Int) -> Int {
+    let start = lineUTF16Range(fromLine).location
+    return max(0, NSMaxRange(lineUTF16Range(toLine)) - start)
+  }
+
+  /// The line index containing a UTF-16 character offset.
+  override func accessibilityLine(for index: Int) -> Int {
+    guard let buffer, index >= 0, index <= buffer.utf16Length,
+      let position = try? buffer.position(forUTF16: index)
+    else {
+      return 0
+    }
+    return position.line
+  }
+
+  /// The UTF-16 range of a line, including its trailing newline.
+  override func accessibilityRange(forLine line: Int) -> NSRange {
+    lineUTF16Range(line)
+  }
+
+  /// The line the caret currently sits on.
+  override func accessibilityInsertionPointLineNumber() -> Int {
+    selection?.head.line ?? 0
+  }
+
+  /// The UTF-16 range of the text currently on screen, so VoiceOver can read the
+  /// visible band without scanning the whole document.
+  override func accessibilityVisibleCharacterRange() -> NSRange {
+    visibleUTF16Range() ?? NSRange(location: 0, length: 0)
+  }
+
+  /// The UTF-16 range of `line` including its trailing newline; empty when out of
+  /// range.
+  private func lineUTF16Range(_ line: Int) -> NSRange {
+    guard let buffer, line >= 0, line < buffer.lineCount,
+      let start = (try? buffer.position(forLine: line, columnUTF16: 0))?.utf16
+    else {
+      return NSRange(location: 0, length: 0)
+    }
+    let end: Int
+    if line + 1 < buffer.lineCount,
+      let next = (try? buffer.position(forLine: line + 1, columnUTF16: 0))?.utf16
+    {
+      end = next
+    } else {
+      end = buffer.utf16Length
+    }
+    return NSRange(location: start, length: max(0, end - start))
+  }
+
+  /// The UTF-16 range spanned by the visible visual rows' logical lines.
+  private func visibleUTF16Range() -> NSRange? {
+    guard buffer != nil else { return nil }
+    let rows = visibleVisualRowRange(in: visibleRect)
+    guard !rows.isEmpty else { return NSRange(location: 0, length: 0) }
+    let firstLine = lineLocation(ofVisualRow: rows.lowerBound).line
+    let lastLine = lineLocation(ofVisualRow: rows.upperBound - 1).line
+    let start = lineUTF16Range(firstLine).location
+    let lastRange = lineUTF16Range(lastLine)
+    return NSRange(location: start, length: max(0, NSMaxRange(lastRange) - start))
+  }
 
   // MARK: First responder & focus
 
@@ -933,25 +1033,50 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
     let lower = selection.start
     let upper = selection.end
-    let count = upper.line - lower.line + 1
-    var lines = displayLineStrings(forLineRange: lower.line, count: count)
-    guard !lines.isEmpty else {
-      return ""
-    }
+    return displayText(
+      fromLine: lower.line, fromColumn: lower.columnUTF16,
+      toLine: upper.line, toColumn: upper.columnUTF16)
+  }
 
+  /// The clipped display text spanning `[(fromLine, fromColumn), (toLine, toColumn))`,
+  /// joined with LF. Uses the same per-line clipping as display and copy, so those
+  /// share one coordinate system. Endpoints must be ordered.
+  private func displayText(fromLine: Int, fromColumn: Int, toLine: Int, toColumn: Int) -> String {
+    let count = toLine - fromLine + 1
+    return Self.sliceLines(
+      displayLineStrings(forLineRange: fromLine, count: count),
+      fromColumn: fromColumn, toColumn: toColumn)
+  }
+
+  /// The unclipped buffer text spanning `[(fromLine, fromColumn), (toLine, toColumn))`,
+  /// joined with LF. Unlike `displayText`, lines are not clipped to the display
+  /// limit, so accessibility reads the real document in full-document coordinates.
+  /// Callers bound the spanned length first.
+  private func bufferText(fromLine: Int, fromColumn: Int, toLine: Int, toColumn: Int) -> String {
+    guard let buffer else { return "" }
+    let count = toLine - fromLine + 1
+    let lines = buffer.text(forLineRange: fromLine, count: count).components(separatedBy: "\n")
+    return Self.sliceLines(lines, fromColumn: fromColumn, toColumn: toColumn)
+  }
+
+  /// Joins `lines` with LF after trimming the first line to start at `fromColumn`
+  /// and the last to end at `toColumn` (clamped). For a single line, returns the
+  /// `[fromColumn, toColumn)` slice.
+  private static func sliceLines(_ lines: [String], fromColumn: Int, toColumn: Int) -> String {
+    guard !lines.isEmpty else { return "" }
     if lines.count == 1 {
       let line = lines[0] as NSString
-      let from = min(lower.columnUTF16, line.length)
-      let to = min(upper.columnUTF16, line.length)
+      let from = min(fromColumn, line.length)
+      let to = min(toColumn, line.length)
       guard to > from else { return "" }
       return line.substring(with: NSRange(location: from, length: to - from))
     }
-
-    let first = lines[0] as NSString
-    lines[0] = first.substring(from: min(lower.columnUTF16, first.length))
-    let last = lines[lines.count - 1] as NSString
-    lines[lines.count - 1] = last.substring(to: min(upper.columnUTF16, last.length))
-    return lines.joined(separator: "\n")
+    var result = lines
+    let first = result[0] as NSString
+    result[0] = first.substring(from: min(fromColumn, first.length))
+    let last = result[result.count - 1] as NSString
+    result[result.count - 1] = last.substring(to: min(toColumn, last.length))
+    return result.joined(separator: "\n")
   }
 
   /// Byte length of the current selection, computed cheaply from its endpoints'

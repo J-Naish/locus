@@ -368,6 +368,80 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertNil(view.caretBlinkTimer)
   }
 
+  // MARK: Accessibility (range-based reading)
+
+  @MainActor
+  func testAccessibilityStringReturnsTextForRange() throws {
+    let view = try makeViewer("ab\ncde\nf")
+    XCTAssertEqual(view.accessibilityString(for: NSRange(location: 3, length: 3)), "cde")
+    XCTAssertEqual(view.accessibilityString(for: NSRange(location: 0, length: 8)), "ab\ncde\nf")
+  }
+
+  @MainActor
+  func testAccessibilityStringRefusesOverBudgetRange() throws {
+    let view = try makeViewer("ab\ncde\nf")
+    view.maximumAccessibilityStringLength = 2
+    XCTAssertNil(view.accessibilityString(for: NSRange(location: 0, length: 3)))
+  }
+
+  @MainActor
+  func testAccessibilityStringRefusesRangePastEnd() throws {
+    let view = try makeViewer("ab\ncde\nf")  // length 8
+    XCTAssertNil(view.accessibilityString(for: NSRange(location: 6, length: 5)))
+  }
+
+  @MainActor
+  func testAccessibilityStringRefusesOverflowingRange() throws {
+    // A hostile range whose location + length would overflow must be rejected, not
+    // trap.
+    let view = try makeViewer("ab\ncde\nf")
+    XCTAssertNil(view.accessibilityString(for: NSRange(location: Int.max - 1, length: 10)))
+  }
+
+  @MainActor
+  func testAccessibilityStringReadsBeyondTheDisplayClip() throws {
+    // A line longer than the display clip must still read in full-document
+    // coordinates: the offsets exposed by numberOfCharacters/rangeForLine and the
+    // text returned by accessibilityString must agree past the clip.
+    let longLine = String(repeating: "a", count: 6_000)
+    let view = try makeViewer(longLine)
+    XCTAssertEqual(view.accessibilityNumberOfCharacters(), 6_000)
+    let whole = view.accessibilityString(for: NSRange(location: 0, length: 6_000))
+    XCTAssertEqual(whole?.count, 6_000)
+    // A slice past the 5000-char display clip returns the real characters.
+    XCTAssertEqual(view.accessibilityString(for: NSRange(location: 5_500, length: 3)), "aaa")
+  }
+
+  @MainActor
+  func testAccessibilityLineForCharacterOffset() throws {
+    let view = try makeViewer("ab\ncde\nf")
+    XCTAssertEqual(view.accessibilityLine(for: 0), 0)  // in "ab"
+    XCTAssertEqual(view.accessibilityLine(for: 3), 1)  // start of "cde"
+    XCTAssertEqual(view.accessibilityLine(for: 7), 2)  // "f"
+  }
+
+  @MainActor
+  func testAccessibilityRangeForLineIncludesNewline() throws {
+    let view = try makeViewer("ab\ncde\nf")
+    XCTAssertEqual(view.accessibilityRange(forLine: 0), NSRange(location: 0, length: 3))  // "ab\n"
+    XCTAssertEqual(view.accessibilityRange(forLine: 1), NSRange(location: 3, length: 4))  // "cde\n"
+    XCTAssertEqual(view.accessibilityRange(forLine: 2), NSRange(location: 7, length: 1))  // "f"
+  }
+
+  @MainActor
+  func testAccessibilitySelectedTextRangeMatchesSelection() throws {
+    let view = try makeViewer("ab\ncde\nf")
+    view.selectLine(at: 1)  // "cde" → UTF-16 [3, 6)
+    XCTAssertEqual(view.accessibilitySelectedTextRange(), NSRange(location: 3, length: 3))
+  }
+
+  @MainActor
+  func testAccessibilityInsertionPointLineNumberFollowsCaret() throws {
+    let view = try makeViewer("ab\ncde\nf")
+    view.beginCaretSelection(at: .init(line: 2, columnUTF16: 0))
+    XCTAssertEqual(view.accessibilityInsertionPointLineNumber(), 2)
+  }
+
   // MARK: Scroll rendering stability
 
   func testViewerOptsOutOfResponsiveScrolling() {
