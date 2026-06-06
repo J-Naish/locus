@@ -88,6 +88,17 @@ struct TextSelection: Equatable {
   }
 }
 
+/// Physical (keyboard-layout-independent) key codes for the navigation keys the
+/// read-only viewer handles in `keyDown`.
+private enum NavigationKeyCode {
+  static let leftArrow: UInt16 = 123
+  static let rightArrow: UInt16 = 124
+  static let downArrow: UInt16 = 125
+  static let upArrow: UInt16 = 126
+  static let home: UInt16 = 115
+  static let end: UInt16 = 119
+}
+
 /// Custom flipped `NSView` document view that draws only the visible band of a
 /// [`TextBuffer`], fetching that band from the Rust core on demand. The document
 /// height is synthesized from the line count, so a multi-gigabyte file never has
@@ -153,6 +164,15 @@ final class LineRenderingTextView: NSView {
   /// Extra highlight width drawn past a fully selected line to signal that the
   /// line's trailing newline is part of the selection.
   private let newlineSelectionWidth: CGFloat = 6
+  /// Horizontal margin kept around the caret when scrolling it into view.
+  private let caretScrollMargin: CGFloat = 8
+  /// Smallest horizontal scroll change that counts as a horizontal scroll (and so
+  /// triggers a gutter repaint); below this is treated as a pure vertical scroll.
+  private let horizontalScrollEpsilon: CGFloat = 0.01
+  /// Preferred horizontal offset (text-relative) the caret keeps while moving up
+  /// or down, so vertical motion does not drift in/out on short lines. Reset by
+  /// any non-vertical move.
+  private var verticalGoalX: CGFloat?
   /// Last seen horizontal scroll offset, to detect horizontal scrolling (which
   /// requires repainting the pinned gutter) versus vertical scrolling (handled by
   /// copy-on-scroll).
@@ -186,6 +206,7 @@ final class LineRenderingTextView: NSView {
     maxObservedLineWidth = 0
     selection = nil
     isSelecting = false
+    verticalGoalX = nil
     lastHorizontalOffset = 0
     updateLayout()
     // A new document always opens at the top-left; otherwise a reused scroll view
@@ -209,7 +230,7 @@ final class LineRenderingTextView: NSView {
   /// repaint, to re-pin the gutter and caret at the new offset.
   func viewportDidScroll() {
     let offsetX = enclosingScrollView?.contentView.bounds.origin.x ?? 0
-    guard abs(offsetX - lastHorizontalOffset) > 0.01 else { return }
+    guard abs(offsetX - lastHorizontalOffset) > horizontalScrollEpsilon else { return }
     lastHorizontalOffset = offsetX
     invalidateVisibleArea()
   }
@@ -344,6 +365,219 @@ final class LineRenderingTextView: NSView {
     let last = lines[lines.count - 1] as NSString
     lines[lines.count - 1] = last.substring(to: min(upper.columnUTF16, last.length))
     return lines.joined(separator: "\n")
+  }
+
+  // MARK: Keyboard navigation
+
+  // Arrow keys, with Option (word), Command (line/document), and Shift (extend).
+  // Keyed off physical key codes (layout-independent) rather than
+  // `interpretKeyEvents`, so a read-only viewer can swallow text-producing keys
+  // without beeping while still navigating.
+  override func keyDown(with event: NSEvent) {
+    guard buffer != nil else {
+      super.keyDown(with: event)
+      return
+    }
+    let flags = event.modifierFlags
+    let extend = flags.contains(.shift)
+    let command = flags.contains(.command)
+    let option = flags.contains(.option)
+
+    switch event.keyCode {
+    case NavigationKeyCode.leftArrow:
+      if command {
+        moveToLineEdge(end: false, extend: extend)
+      } else if option {
+        moveByWord(forward: false, extend: extend)
+      } else {
+        moveHorizontally(forward: false, extend: extend)
+      }
+    case NavigationKeyCode.rightArrow:
+      if command {
+        moveToLineEdge(end: true, extend: extend)
+      } else if option {
+        moveByWord(forward: true, extend: extend)
+      } else {
+        moveHorizontally(forward: true, extend: extend)
+      }
+    case NavigationKeyCode.downArrow:
+      if command {
+        moveToDocumentEdge(end: true, extend: extend)
+      } else {
+        moveVertically(down: true, extend: extend)
+      }
+    case NavigationKeyCode.upArrow:
+      if command {
+        moveToDocumentEdge(end: false, extend: extend)
+      } else {
+        moveVertically(down: false, extend: extend)
+      }
+    case NavigationKeyCode.home: moveToDocumentEdge(end: false, extend: extend)
+    case NavigationKeyCode.end: moveToDocumentEdge(end: true, extend: extend)
+    default:
+      // Read-only: ignore text-producing keys (no beep); pass control keys on so
+      // the scroll view can still handle Page Up/Down etc.
+      if let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first,
+        scalar.value >= 0x20, !command
+      {
+        return
+      }
+      super.keyDown(with: event)
+    }
+  }
+
+  /// The caret/extension origin, defaulting to the document start when nothing is
+  /// selected yet so the keys work before the first click.
+  private var navigationHead: TextSelection.Endpoint {
+    selection?.head ?? TextSelection.Endpoint(line: 0, columnUTF16: 0)
+  }
+
+  private func applyMovedHead(
+    _ newHead: TextSelection.Endpoint, extend: Bool, keepGoalX: Bool = false
+  ) {
+    if !keepGoalX { verticalGoalX = nil }
+    if extend, let current = selection {
+      selection = TextSelection(anchor: current.anchor, head: newHead)
+    } else {
+      selection = TextSelection(caretAt: newHead)
+    }
+    scrollCaretToVisible(newHead)
+    invalidateVisibleArea()
+  }
+
+  func moveHorizontally(forward: Bool, extend: Bool) {
+    if !extend, let current = selection, !current.isEmpty {
+      applyMovedHead(forward ? current.end : current.start, extend: false)
+      return
+    }
+    applyMovedHead(steppedCharacterEndpoint(from: navigationHead, forward: forward), extend: extend)
+  }
+
+  func moveByWord(forward: Bool, extend: Bool) {
+    // Match `moveHorizontally`: a non-extending move with an existing selection
+    // starts from the directional edge, not the head (which may be the trailing
+    // end of a reversed selection), then steps one word.
+    let origin: TextSelection.Endpoint
+    if !extend, let current = selection, !current.isEmpty {
+      origin = forward ? current.end : current.start
+    } else {
+      origin = navigationHead
+    }
+    applyMovedHead(steppedWordEndpoint(from: origin, forward: forward), extend: extend)
+  }
+
+  func moveToLineEdge(end: Bool, extend: Bool) {
+    let head = navigationHead
+    applyMovedHead(
+      TextSelection.Endpoint(line: head.line, columnUTF16: end ? lineLengthUTF16(head.line) : 0),
+      extend: extend)
+  }
+
+  func moveToDocumentEdge(end: Bool, extend: Bool) {
+    let line = end ? max(0, lineCount - 1) : 0
+    applyMovedHead(
+      TextSelection.Endpoint(line: line, columnUTF16: end ? lineLengthUTF16(line) : 0),
+      extend: extend)
+  }
+
+  func moveVertically(down: Bool, extend: Bool) {
+    let head = navigationHead
+    let goalX = verticalGoalX ?? caretX(for: head)
+    let targetLine = down ? min(head.line + 1, max(0, lineCount - 1)) : max(head.line - 1, 0)
+    let newHead: TextSelection.Endpoint
+    if targetLine == head.line {
+      // Already at the first/last line: go to its start/end instead.
+      newHead = TextSelection.Endpoint(
+        line: head.line, columnUTF16: down ? lineLengthUTF16(head.line) : 0)
+    } else {
+      newHead = TextSelection.Endpoint(
+        line: targetLine, columnUTF16: columnUTF16(forX: goalX, in: targetLine))
+    }
+    applyMovedHead(newHead, extend: extend, keepGoalX: true)
+    verticalGoalX = goalX
+  }
+
+  /// One composed-character step left/right, wrapping across line boundaries.
+  private func steppedCharacterEndpoint(from endpoint: TextSelection.Endpoint, forward: Bool)
+    -> TextSelection.Endpoint
+  {
+    let line = attributedLine(forLine: endpoint.line).string as NSString
+    if forward {
+      if endpoint.columnUTF16 < line.length {
+        let range = line.rangeOfComposedCharacterSequence(at: endpoint.columnUTF16)
+        return .init(line: endpoint.line, columnUTF16: NSMaxRange(range))
+      }
+      if endpoint.line < lineCount - 1 { return .init(line: endpoint.line + 1, columnUTF16: 0) }
+      return endpoint
+    }
+    if endpoint.columnUTF16 > 0 {
+      let range = line.rangeOfComposedCharacterSequence(at: endpoint.columnUTF16 - 1)
+      return .init(line: endpoint.line, columnUTF16: range.location)
+    }
+    if endpoint.line > 0 {
+      return .init(line: endpoint.line - 1, columnUTF16: lineLengthUTF16(endpoint.line - 1))
+    }
+    return endpoint
+  }
+
+  /// One word step, advancing by whole composed character sequences (so the caret
+  /// never lands inside a surrogate pair, emoji, or combining sequence) using a
+  /// simple alphanumeric-run heuristic. Wraps across line boundaries at the ends.
+  private func steppedWordEndpoint(from endpoint: TextSelection.Endpoint, forward: Bool)
+    -> TextSelection.Endpoint
+  {
+    let line = attributedLine(forLine: endpoint.line).string as NSString
+    // Classify the composed character that begins at `index` (a valid boundary).
+    func isWordCharacter(at index: Int) -> Bool {
+      let range = line.rangeOfComposedCharacterSequence(at: index)
+      guard let scalar = line.substring(with: range).unicodeScalars.first else { return false }
+      return CharacterSet.alphanumerics.contains(scalar)
+    }
+    func boundary(after index: Int) -> Int {
+      NSMaxRange(line.rangeOfComposedCharacterSequence(at: index))
+    }
+    func boundary(before index: Int) -> Int {
+      line.rangeOfComposedCharacterSequence(at: index - 1).location
+    }
+
+    if forward {
+      var index = endpoint.columnUTF16
+      if index >= line.length {
+        return endpoint.line < lineCount - 1
+          ? .init(line: endpoint.line + 1, columnUTF16: 0) : endpoint
+      }
+      while index < line.length, !isWordCharacter(at: index) { index = boundary(after: index) }
+      while index < line.length, isWordCharacter(at: index) { index = boundary(after: index) }
+      return .init(line: endpoint.line, columnUTF16: index)
+    }
+
+    var index = endpoint.columnUTF16
+    if index <= 0 {
+      return endpoint.line > 0
+        ? .init(line: endpoint.line - 1, columnUTF16: lineLengthUTF16(endpoint.line - 1)) : endpoint
+    }
+    while index > 0, !isWordCharacter(at: boundary(before: index)) {
+      index = boundary(before: index)
+    }
+    while index > 0, isWordCharacter(at: boundary(before: index)) {
+      index = boundary(before: index)
+    }
+    return .init(line: endpoint.line, columnUTF16: index)
+  }
+
+  /// Text-relative x of the caret at `endpoint`.
+  private func caretX(for endpoint: TextSelection.Endpoint) -> CGFloat {
+    xOffset(forColumn: endpoint.columnUTF16, in: attributedLine(forLine: endpoint.line))
+  }
+
+  private func scrollCaretToVisible(_ endpoint: TextSelection.Endpoint) {
+    let x = gutterWidth + horizontalPadding + caretX(for: endpoint)
+    let rect = NSRect(
+      x: x - caretScrollMargin,
+      y: layout.yOffset(forLine: endpoint.line),
+      width: caretScrollMargin * 2,
+      height: layout.lineHeight)
+    scrollToVisible(rect)
   }
 
   /// Resizes the document to fit the line count (height) and the widest line seen

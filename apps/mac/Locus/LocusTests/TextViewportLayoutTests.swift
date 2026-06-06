@@ -232,4 +232,115 @@ final class TextViewportLayoutTests: XCTestCase {
     let view = try makeViewer("alpha\nbravo")
     XCTAssertNil(view.selectedText())
   }
+
+  // MARK: Keyboard navigation
+
+  @MainActor
+  func testMoveRightAdvancesAndWrapsToNextLine() throws {
+    let view = try makeViewer("ab\ncd")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 1))
+    view.moveHorizontally(forward: true, extend: false)  // (0,2) = end of "ab"
+    view.moveHorizontally(forward: true, extend: false)  // wraps to (1,0)
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testMoveLeftAtDocumentStartStaysPut() throws {
+    let view = try makeViewer("ab")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: false, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testMoveDownKeepsGoalColumnAcrossShortLine() throws {
+    let view = try makeViewer("abcd\nef\nghij")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: false)
+    view.moveHorizontally(forward: true, extend: false)
+    view.moveHorizontally(forward: true, extend: false)  // (0,3)
+    view.moveVertically(down: true, extend: false)  // "ef" is shorter, clamps to its end
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 2))
+    view.moveVertically(down: true, extend: false)  // goal column restores on the longer line
+    XCTAssertEqual(view.selection?.head, .init(line: 2, columnUTF16: 3))
+  }
+
+  @MainActor
+  func testShiftMoveExtendsSelectionFromAnchor() throws {
+    let view = try makeViewer("hello")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: true)
+    view.moveHorizontally(forward: true, extend: true)
+    XCTAssertEqual(view.selection?.anchor, .init(line: 0, columnUTF16: 0))
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 2))
+    XCTAssertEqual(view.selectedText(), "he")
+  }
+
+  @MainActor
+  func testMoveToEndOfLineAndDocument() throws {
+    let view = try makeViewer("hello\nworld!")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveToLineEdge(end: true, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 5))
+    view.moveToDocumentEdge(end: true, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 6))
+  }
+
+  @MainActor
+  func testMoveWordRightStopsAtWordEnd() throws {
+    let view = try makeViewer("foo bar")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveByWord(forward: true, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 3))  // end of "foo"
+    view.moveByWord(forward: true, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 7))  // end of "bar"
+  }
+
+  @MainActor
+  func testPlainMoveCollapsesExistingSelectionToEdge() throws {
+    let view = try makeViewer("hello")
+    view.selectAll(nil)  // (0,0)..(0,5)
+    view.moveHorizontally(forward: false, extend: false)  // collapses to start
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+    XCTAssertTrue(view.selection?.isEmpty == true)
+  }
+
+  @MainActor
+  func testMoveRightOverEmojiSkipsWholeGrapheme() throws {
+    // 😀 is a surrogate pair (two UTF-16 units); the caret must step over it whole
+    // and never land between the surrogates.
+    let view = try makeViewer("a😀b")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 1))
+    view.moveHorizontally(forward: true, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 3))  // skipped the pair
+    view.moveHorizontally(forward: false, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 1))  // back over the pair
+  }
+
+  @MainActor
+  func testWordMoveLandsOnComposedBoundaryAroundEmoji() throws {
+    let view = try makeViewer("a😀b")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveByWord(forward: true, extend: false)  // end of "a" / start of 😀
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 1))
+    view.moveByWord(forward: true, extend: false)  // end of "b"
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 4))
+  }
+
+  @MainActor
+  func testWordMoveCollapsesReversedSelectionToDirectionalEdge() throws {
+    // A right-to-left selection has its head before its anchor; a non-extending
+    // word move must start from the directional edge (the end, here), not the head.
+    let view = try makeViewer("one two three")
+    view.moveToDocumentEdge(end: true, extend: false)  // caret at (0,13)
+    for _ in 0..<9 { view.moveHorizontally(forward: false, extend: true) }
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 4))  // reversed selection
+    view.moveByWord(forward: true, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 13))  // collapsed to end edge
+    XCTAssertTrue(view.selection?.isEmpty == true)
+  }
 }
