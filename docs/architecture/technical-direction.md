@@ -47,6 +47,8 @@ The Rust core owns behavior that should be shared, tested, and reused across pla
 
 - file scanning
 - lightweight listing metadata, with richer file metadata loaded lazily
+- the UTF-8 text buffer for editing any-size text: piece tree, line index and
+  snapshots, position lookups, and edit/undo primitives exposed through the C ABI
 - hashing
 - diffing
 - search indexes
@@ -55,6 +57,9 @@ The Rust core owns behavior that should be shared, tested, and reused across pla
 - workspace state
 - Markdown parsing and serialization where useful
 - CLI tools for debugging and benchmarking
+
+The macOS app keeps the UI, input/IME, text drawing, selection, and text
+encoding detection/conversion; the Rust buffer stores and edits UTF-8 bytes.
 
 ## FFI Boundary
 

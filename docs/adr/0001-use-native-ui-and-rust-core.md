@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Accepted. The text-editing portion (TextKit 2 / NSTextView) is superseded by
+ADR 0006: text editing now uses a custom Core Text engine over the Rust buffer.
 
 ## Context
 
