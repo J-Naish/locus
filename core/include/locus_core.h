@@ -409,6 +409,14 @@ LocusStatus locus_text_buffer_replace(
 LocusStatus locus_text_buffer_undo(LocusTextBuffer *buffer, bool *out_did_undo);
 LocusStatus locus_text_buffer_redo(LocusTextBuffer *buffer, bool *out_did_redo);
 
+/*
+ * Writes the buffer's full content to the file at `path` (created/truncated),
+ * streaming it so a multi-gigabyte document is not assembled in memory. The
+ * caller owns any atomic-rename / symlink policy; this writes directly to `path`.
+ */
+LocusStatus locus_text_buffer_write_path(
+    const LocusTextBuffer *buffer, const char *path);
+
 #ifdef __cplusplus
 }
 #endif

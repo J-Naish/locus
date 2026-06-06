@@ -818,6 +818,28 @@ impl TextBuffer {
         &buffer[start..start + len]
     }
 
+    /// Writes the full document content to `writer` in document order, walking the
+    /// tree in place and writing each piece's bytes as it is visited. No
+    /// full-document buffer and no piece list are materialized, so save memory is
+    /// O(tree height) regardless of document or edit-history size.
+    pub fn write_to(&self, writer: &mut dyn std::io::Write) -> std::io::Result<()> {
+        self.write_subtree(self.root, writer)
+    }
+
+    fn write_subtree(
+        &self,
+        id: Option<NodeId>,
+        writer: &mut dyn std::io::Write,
+    ) -> std::io::Result<()> {
+        let Some(id) = id else {
+            return Ok(());
+        };
+        self.write_subtree(self.nodes[id].left, writer)?;
+        let piece = self.nodes[id].piece;
+        writer.write_all(self.piece_bytes(piece.source, piece.start, piece.len))?;
+        self.write_subtree(self.nodes[id].right, writer)
+    }
+
     // MARK: - Navigation
 
     /// Logical byte range of a line including its trailing terminator.
@@ -1433,6 +1455,33 @@ mod tests {
             buffer.replace(3, 1, "x").err(),
             Some(TextBufferError::InvalidRange { start: 3, end: 1 })
         );
+    }
+
+    #[test]
+    fn write_to_streams_full_content_after_edits() {
+        let mut buffer = buffer("hello world");
+        buffer.replace(0, 5, "goodbye").expect("replace");
+        buffer.insert(13, "!").expect("insert");
+        let mut out = Vec::new();
+        buffer.write_to(&mut out).expect("write");
+        assert_eq!(String::from_utf8(out).unwrap(), "goodbye world!");
+    }
+
+    #[test]
+    fn write_to_empty_buffer_writes_nothing() {
+        let buffer = buffer("");
+        let mut out = Vec::new();
+        buffer.write_to(&mut out).expect("write");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn write_to_preserves_crlf_bytes() {
+        // The buffer stores raw bytes, so a CRLF document round-trips exactly.
+        let buffer = buffer("a\r\nb\r\n");
+        let mut out = Vec::new();
+        buffer.write_to(&mut out).expect("write");
+        assert_eq!(out, b"a\r\nb\r\n");
     }
 
     #[test]

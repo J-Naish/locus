@@ -99,6 +99,16 @@ final class TextBuffer {
     locus_text_buffer_mark_saved(handle)
   }
 
+  /// Writes the full content to the file at `path` (created/truncated), streaming
+  /// it through the core so a multi-gigabyte document is not assembled in memory.
+  /// The caller owns any atomic-rename / symlink handling.
+  func write(toPath path: String) throws {
+    let status = path.withCString { locus_text_buffer_write_path(handle, $0) }
+    guard status == LOCUS_STATUS_OK else {
+      throw Self.error(for: status)
+    }
+  }
+
   /// Text of lines `[start, start + count)` (clamped), joined by `\n` with each
   /// line's terminator stripped. The borrowed snapshot is copied before free.
   func text(forLineRange start: Int, count: Int) -> String {

@@ -127,11 +127,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
   }
 
-  /// Whether the viewer accepts edits. Read-only entries (and the not-yet-saved
-  /// large-file path before its save story exists) keep this false; the host
-  /// enables it for writable text. Editing is routed to the Rust buffer; saving
-  /// is a later slice, so edits are in-memory until then.
+  /// Whether the viewer accepts edits. Read-only entries keep this false; the
+  /// host enables it for writable text. Editing is routed to the Rust buffer.
   var isEditable = false
+
+  /// Invoked when the user requests a save (Cmd+S) while editing. The host owns
+  /// the actual write (it has the file URL and the atomic/symlink policy).
+  var onSaveRequested: (() -> Void)?
 
   /// Bytes fetched per line for the visible band; longer lines are truncated for
   /// the fetch so one enormous line never crosses the FFI in full.
@@ -415,6 +417,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       undoEdit()
     case ("z", true) where isEditable:
       redoEdit()
+    case ("s", false) where isEditable:
+      onSaveRequested?()
     default:
       return super.performKeyEquivalent(with: event)
     }
@@ -1394,6 +1398,7 @@ struct LargeTextViewport: NSViewRepresentable {
   let accessibilityLabel: String
   let syntax: TextDocumentSyntax
   let isEditable: Bool
+  let onSaveRequested: () -> Void
 
   func makeNSView(context: Context) -> NSScrollView {
     let scrollView = NSScrollView()
@@ -1414,6 +1419,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.syntax = syntax
     documentView.showsLineNumbers = syntax.supportsLineNumbers
     documentView.isEditable = isEditable
+    documentView.onSaveRequested = onSaveRequested
     scrollView.documentView = documentView
 
     documentView.setBuffer(buffer)
@@ -1446,6 +1452,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.syntax = syntax
     documentView.showsLineNumbers = syntax.supportsLineNumbers
     documentView.isEditable = isEditable
+    documentView.onSaveRequested = onSaveRequested
     if documentView.buffer !== buffer {
       documentView.setBuffer(buffer)
     }
@@ -1486,8 +1493,12 @@ struct VirtualizedTextDocumentView: View {
   let isEditable: Bool
   /// Changing this (e.g. on external file change) re-opens the buffer.
   let reloadToken: Int
+  /// Reports a save outcome (nil = success) so the host can refresh its
+  /// file fingerprint (avoiding a self-triggered reload) or surface the error.
+  var onSaveCompletion: (Error?) -> Void = { _ in }
 
   @State private var phase: Phase = .loading
+  private let bufferStore = TextBufferStore()
 
   private enum Phase {
     case loading
@@ -1505,7 +1516,8 @@ struct VirtualizedTextDocumentView: View {
           buffer: buffer,
           accessibilityLabel: accessibilityLabel,
           syntax: syntax,
-          isEditable: isEditable
+          isEditable: isEditable,
+          onSaveRequested: { save(buffer) }
         )
       case .failed(let message):
         ContentUnavailableView {
@@ -1543,6 +1555,24 @@ struct VirtualizedTextDocumentView: View {
         return
       }
       phase = .failed(Self.failureMessage(for: error))
+    }
+  }
+
+  /// Writes the buffer to disk (Cmd+S). Runs synchronously on the main actor:
+  /// the bytes stream through the core so memory stays bounded, but a multi-
+  /// gigabyte write briefly blocks the UI. This is acceptable for the current
+  /// Debug-only validation (and fine for the realistic large-file range); a
+  /// non-blocking save needs a Rust snapshot / save handle so the background
+  /// write cannot race live edits — that is part of enabling editing for Release.
+  /// The outcome is reported to the host via `onSaveCompletion`.
+  private func save(_ buffer: TextBuffer) {
+    do {
+      try bufferStore.save(buffer, to: url)
+      buffer.markSaved()
+      onSaveCompletion(nil)
+    } catch {
+      NSSound.beep()
+      onSaveCompletion(error)
     }
   }
 

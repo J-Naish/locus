@@ -11,6 +11,7 @@
 //! `app_core`'s `ContentBytes` seam and with no ABI change.
 
 use std::ffi::c_char;
+use std::io::Write;
 
 use app_core::text_buffer::{Position, TextBuffer, TextBufferError};
 
@@ -313,6 +314,52 @@ pub unsafe extern "C" fn locus_text_buffer_mark_saved(buffer: *mut LocusTextBuff
     // SAFETY: buffer is NULL or a live handle the caller still owns.
     if let Some(handle) = unsafe { buffer.as_mut() } {
         handle.buffer.mark_saved();
+    }
+}
+
+/// Writes the buffer's full content to the file at `path`, creating or
+/// truncating it. The content is streamed through a buffered writer, so even a
+/// multi-gigabyte document is written without being assembled in memory. The
+/// caller is responsible for any atomic-rename / symlink policy (this writes
+/// directly to `path`).
+///
+/// # Safety
+/// `buffer` must be NULL or a live handle. `path` must be a NUL-terminated UTF-8
+/// C string.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_write_path(
+    buffer: *const LocusTextBuffer,
+    path: *const c_char,
+) -> u32 {
+    clear_last_error_message();
+    // SAFETY: buffer is NULL or a live handle the caller still owns.
+    let Some(handle) = (unsafe { buffer.as_ref() }) else {
+        set_last_error_message("buffer must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    };
+    let Some(path) = string_from_c_str(path) else {
+        set_last_error_message("path must be non-NULL UTF-8");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    };
+
+    let file = match std::fs::File::create(&path) {
+        Ok(file) => file,
+        Err(error) => {
+            set_last_error_message(error.to_string());
+            return LOCUS_TEXT_STATUS_IO;
+        }
+    };
+    let mut writer = std::io::BufWriter::new(file);
+    match handle
+        .buffer
+        .write_to(&mut writer)
+        .and_then(|()| writer.flush())
+    {
+        Ok(()) => LOCUS_STATUS_OK,
+        Err(error) => {
+            set_last_error_message(error.to_string());
+            LOCUS_TEXT_STATUS_IO
+        }
     }
 }
 
@@ -1000,6 +1047,24 @@ mod tests {
             unsafe { locus_text_buffer_replace(handle, 3, 1, bytes.as_ptr(), bytes.len()) },
             LOCUS_TEXT_STATUS_INVALID_RANGE
         );
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn write_path_writes_edited_content_to_disk() {
+        let handle = open("hello");
+        let bytes = "bye".as_bytes();
+        unsafe { locus_text_buffer_replace(handle, 0, 5, bytes.as_ptr(), bytes.len()) };
+
+        let mut path = std::env::temp_dir();
+        path.push("locus-ffi-write-path-test.txt");
+        let c_path = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe { locus_text_buffer_write_path(handle, c_path.as_ptr()) },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), "bye");
+        let _ = std::fs::remove_file(&path);
         unsafe { locus_text_buffer_free(handle) };
     }
 

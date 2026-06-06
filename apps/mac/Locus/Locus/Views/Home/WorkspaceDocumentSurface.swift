@@ -148,7 +148,8 @@ struct WorkspaceDocumentSurface: View {
           accessibilityLabel: "\(entry.name) text",
           syntax: WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText,
           isEditable: Self.largeFileEditingEnabled && !entry.isReadOnly,
-          reloadToken: documentReloadGeneration
+          reloadToken: documentReloadGeneration,
+          onSaveCompletion: { error in handleLargeDocumentSaveResult(error, for: entry) }
         )
       }
     }
@@ -158,11 +159,13 @@ struct WorkspaceDocumentSurface: View {
     DocumentReloadTrigger(entryID: entry.id, generation: documentReloadGeneration)
   }
 
-  /// Whether the large-file viewer accepts edits. It has no save path yet
-  /// (saving, dirty tracking, and external-change conflict handling are a later
-  /// slice), so editing is limited to Debug builds for on-device validation;
-  /// shipped (Release) builds keep large files read-only until those exist, so
-  /// no editable-but-unsaveable surface can reach users.
+  /// Whether the large-file viewer accepts edits. The whole editable large-file
+  /// path — including Cmd+S save — is Debug-only validation for now: save is
+  /// synchronous (briefly blocks on huge files), dirty state is not surfaced, and
+  /// an external change to an unsaved buffer still reloads it. Before this is
+  /// enabled for shipped (Release) builds it needs non-blocking save, dirty
+  /// tracking, and external-change conflict handling. Until then Release keeps
+  /// large files read-only so no editable-but-unsaveable surface reaches users.
   private static var largeFileEditingEnabled: Bool {
     #if DEBUG
       return true
@@ -317,6 +320,29 @@ struct WorkspaceDocumentSurface: View {
         saveErrorMessage = error.localizedDescription
         loadState = .loaded
       }
+    }
+  }
+
+  /// Reconciles a large-file viewer save. On success the file fingerprint is
+  /// refreshed so the change monitor does not treat our own write as an external
+  /// change and reload the buffer (the 250 ms debounce leaves ample time for this
+  /// to land first). On failure the error is surfaced like an editable-text save.
+  @MainActor
+  private func handleLargeDocumentSaveResult(_ error: Error?, for entry: WorkspaceEntry) {
+    guard self.entry?.id == entry.id else {
+      return
+    }
+    if let error {
+      saveErrorMessage = error.localizedDescription
+      return
+    }
+    saveErrorMessage = nil
+    Task {
+      let fingerprint = await DocumentFileFingerprint.load(at: entry.url)
+      guard self.entry?.id == entry.id else {
+        return
+      }
+      knownDocumentFingerprint = fingerprint
     }
   }
 

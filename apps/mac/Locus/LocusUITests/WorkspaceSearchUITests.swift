@@ -1232,6 +1232,45 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testLargeFileViewerSavesEditsWithCommandS() throws {
+    // Use a throwaway workspace so the edited file can be written safely (the
+    // repo fixtures are never modified), then verify Cmd+S reaches disk.
+    let workspace = FileManager.default.temporaryDirectory
+      .appendingPathComponent("locus-save-uitest-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: workspace) }
+    let fileURL = workspace.appendingPathComponent("Notes.txt")
+    try Data("Meeting notes".utf8).write(to: fileURL)
+
+    let app = try launchApp(
+      workspacePath: workspace.path,
+      extraArguments: ["--ui-test-max-text-bytes", "5"]
+    )
+
+    let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
+    XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+    row.click()
+
+    let viewer = app.textViews["document-large-text-viewer"]
+    XCTAssertTrue(viewer.waitForExistence(timeout: 5), app.debugDescription)
+    viewer.click()
+
+    app.typeKey("a", modifierFlags: [.command])  // select all
+    app.typeText("Saved!")  // replace the document
+    app.typeKey("s", modifierFlags: [.command])  // save to disk
+
+    var contents = ""
+    let deadline = Date().addingTimeInterval(3)
+    repeat {
+      contents = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
+      if contents == "Saved!" { break }
+      Thread.sleep(forTimeInterval: 0.05)
+    } while Date() < deadline
+
+    XCTAssertEqual(contents, "Saved!", "on-disk contents=\(contents)")
+  }
+
+  @MainActor
   private func launchAppWithBasicWorkspace() throws -> XCUIApplication {
     try launchApp(workspacePath: fixtureWorkspacePath("basic"))
   }
