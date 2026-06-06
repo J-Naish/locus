@@ -34,26 +34,19 @@ struct TextViewportLayout: Equatable {
   }
 }
 
-/// Custom flipped `NSView` that draws only the visible band of a
-/// [`TextBuffer`], fetching that band from the Rust core on demand. The
-/// document height is synthesized from the line count, so a multi-gigabyte file
-/// never has its text assembled in memory — scrolling redraws exposed bands.
-///
-/// Lines are not wrapped; the view widens to the widest line it has drawn so
-/// the scroll view can scroll horizontally. The line-number gutter is a
-/// separate pinned view ([`LineNumberGutterView`]), so it is not part of this
-/// view and does not scroll horizontally with the text.
+/// Custom flipped `NSView` document view that draws only the visible band of a
+/// [`TextBuffer`], fetching that band from the Rust core on demand. The document
+/// height is synthesized from the line count, so a multi-gigabyte file never has
+/// its text assembled in memory — scrolling redraws exposed bands. Lines are not
+/// wrapped; the view widens to the widest line it has drawn.
 final class LineRenderingTextView: NSView {
   private(set) var buffer: TextBuffer?
   /// Exposed so the pinned gutter can align numbers to the same lines.
   let layout: TextViewportLayout
   private let font: NSFont
   private let horizontalPadding: CGFloat = 8
-  private let backgroundColor: NSColor = .textBackgroundColor
+  private let viewportBackgroundColor: NSColor = .textBackgroundColor
 
-  /// The document's syntax: drives per-band highlighting. Unlike the editable
-  /// path there is no large-document cutoff — this view works one visible band
-  /// at a time, never styling the whole string.
   var syntax: TextDocumentSyntax = .plainText {
     didSet {
       guard syntax != oldValue else { return }
@@ -62,23 +55,15 @@ final class LineRenderingTextView: NSView {
     }
   }
 
-  /// Upper bound on the bytes the core returns for any one line. Caps the FFI
-  /// fetch so a file that is one enormous line never crosses the boundary in
-  /// full; comfortably larger than anything the view can show.
+  /// Bytes fetched per line for the visible band; longer lines are truncated for
+  /// the fetch so one enormous line never crosses the FFI in full.
   private let maximumFetchedBytesPerLine = 16_384
-  /// A long line is also truncated before layout to bound highlighting/drawing,
-  /// since horizontal scrolling can still bring much of a line into view.
+  /// Characters actually drawn per line. Lines longer than this are clipped for
+  /// display (this is a read-only viewer, not a full horizontal renderer), which
+  /// also bounds the document's width.
   private let maximumDrawnCharactersPerLine = 5_000
-  /// One-entry cache of the last band's highlighted lines so repeated draws of
-  /// the same range (overlapping dirty rects, redraws without scrolling) skip
-  /// both the FFI fetch and the regex highlighting. Keyed by revision so any
-  /// future edit invalidates it.
   private var cachedBand: (revision: UInt64, range: Range<Int>, lines: [NSAttributedString])?
-  /// Widest line measured so far. The document grows to fit it (grow-only) so a
-  /// wide line can be scrolled to horizontally without measuring every line.
   private var maxObservedLineWidth: CGFloat = 0
-  /// Set while an async `updateLayout` is queued, so a run of draws that each
-  /// widen the document coalesces into a single layout pass.
   private var pendingLayoutUpdate = false
 
   var lineCount: Int { buffer?.lineCount ?? 1 }
@@ -96,13 +81,7 @@ final class LineRenderingTextView: NSView {
     fatalError("init(coder:) is not used")
   }
 
-  // Flipped so line 0 sits at the top and y grows downward, matching the
-  // line-index math in `TextViewportLayout`.
   override var isFlipped: Bool { true }
-
-  // Each draw fills its dirty rect with the background, so the view is opaque;
-  // declaring it lets AppKit use responsive (banded) scrolling.
-  override var isOpaque: Bool { true }
 
   func setBuffer(_ buffer: TextBuffer?) {
     self.buffer = buffer
@@ -113,16 +92,18 @@ final class LineRenderingTextView: NSView {
     needsDisplay = true
   }
 
-  /// Resizes the document to fit the line count (height) and the widest line
-  /// seen so far (width), but never narrower than the clip view.
+  /// Resizes the document to fit the line count (height) and the widest line seen
+  /// so far (width), but never narrower than the clip view. The width follows the
+  /// widest drawn line, which is bounded by `maximumDrawnCharactersPerLine`; the
+  /// scroll view only backs the visible region, so a tall/wide document does not
+  /// allocate a full-size layer.
   func updateLayout() {
     let clipWidth = enclosingScrollView?.contentView.bounds.width ?? frame.width
-    let width = max(clipWidth, maxObservedLineWidth + horizontalPadding * 2)
+    let contentWidth = maxObservedLineWidth + horizontalPadding * 2
+    let width = max(clipWidth, contentWidth)
     setFrameSize(NSSize(width: width, height: layout.contentHeight(lineCount: lineCount)))
   }
 
-  /// Returns the visible band's lines, already highlighted, reusing the cache
-  /// when the same `(revision, range)` is requested again.
   private func attributedBandLines(for buffer: TextBuffer, range: Range<Int>)
     -> [NSAttributedString]
   {
@@ -130,14 +111,6 @@ final class LineRenderingTextView: NSView {
     if let cachedBand, cachedBand.revision == revision, cachedBand.range == range {
       return cachedBand.lines
     }
-    // Fetch + highlight runs synchronously on each new band. The work is bounded
-    // by the visible band (a screenful of lines) and the per-line cap, so it is
-    // small for normal text; on-device profiling is the acceptance gate, and the
-    // fallbacks if it ever hitches are base-only styling or async highlighting.
-    //
-    // The capped read bounds each line so even a one-enormous-line file never
-    // crosses the FFI in full. The result joins lines with "\n" (terminators
-    // stripped), so splitting on "\n" recovers exactly `range.count` lines.
     let lines = buffer.text(
       forLineRange: range.lowerBound, count: range.count,
       maxBytesPerLine: maximumFetchedBytesPerLine
@@ -148,9 +121,6 @@ final class LineRenderingTextView: NSView {
     return lines
   }
 
-  /// Builds a highlighted line: syntax rules supply colors, then the font is
-  /// forced uniform so a styled token cannot change the fixed line height. The
-  /// char cap bounds layout/highlighting/drawing on top of the core's byte cap.
   private func highlightedLine(_ line: String) -> NSAttributedString {
     let visible =
       line.count > maximumDrawnCharactersPerLine
@@ -165,7 +135,7 @@ final class LineRenderingTextView: NSView {
   }
 
   override func draw(_ dirtyRect: NSRect) {
-    backgroundColor.setFill()
+    viewportBackgroundColor.setFill()
     dirtyRect.fill()
 
     guard let buffer else {
@@ -182,16 +152,11 @@ final class LineRenderingTextView: NSView {
       let y = layout.yOffset(forLine: range.lowerBound + offset)
       let size = attributedLine.size()
       widest = max(widest, size.width)
-      // The line is already highlighted and capped; `.usesLineFragmentOrigin`
-      // makes the rect origin its top-left, which is what we want when flipped.
       attributedLine.draw(
         with: NSRect(x: horizontalPadding, y: y, width: size.width, height: layout.lineHeight),
         options: [.usesLineFragmentOrigin]
       )
     }
-    // Grow the document (and thus the horizontal scroll range) if a wider line
-    // appeared. Deferred so the frame is not mutated mid-draw, and coalesced so
-    // a run of widening draws triggers a single layout pass.
     if widest > maxObservedLineWidth {
       maxObservedLineWidth = widest
       if !pendingLayoutUpdate {
@@ -206,62 +171,90 @@ final class LineRenderingTextView: NSView {
   }
 }
 
-/// A pinned line-number gutter drawn beside (not inside) the scrolling text, so
-/// it stays fixed during horizontal scrolling while tracking vertical scroll.
-final class LineNumberGutterView: NSView {
-  weak var textView: LineRenderingTextView?
-  weak var clipView: NSClipView?
-  var showsLineNumbers = true
+/// A native line-number gutter implemented as the scroll view's vertical ruler.
+///
+/// Living inside the scroll view's own view tree — rather than as a sibling laid
+/// over the document — keeps the document view the scroll view's sole child. An
+/// earlier design overlaid an opaque gutter view on top of the scroll view, and
+/// the document view then rendered blank in SwiftUI's layer-backed host; using
+/// the native ruler avoids that arrangement entirely. The ruler stays pinned
+/// during horizontal scrolling and tracks vertical scrolling automatically.
+final class LineNumberRulerView: NSRulerView {
+  weak var lineTextView: LineRenderingTextView?
+  var showsLineNumbers = true {
+    didSet {
+      guard showsLineNumbers != oldValue else { return }
+      updateThickness()
+      needsDisplay = true
+    }
+  }
 
-  private let font = GutterMetrics.lineNumberFont
+  private let numberFont = GutterMetrics.lineNumberFont
   private let textColor: NSColor = .secondaryLabelColor
   private let backgroundColor: NSColor = .textBackgroundColor
   private let separatorColor: NSColor = .separatorColor
 
-  override var isFlipped: Bool { true }
-  override var isOpaque: Bool { true }
-
-  /// Width needed to show the current line count's digits, or 0 when hidden.
-  func preferredWidth() -> CGFloat {
-    guard showsLineNumbers, let textView else {
-      return 0
-    }
-    return GutterMetrics.width(lineCount: textView.lineCount, font: font)
+  init(scrollView: NSScrollView, textView: LineRenderingTextView) {
+    self.lineTextView = textView
+    super.init(scrollView: scrollView, orientation: .verticalRuler)
+    clientView = textView
+    reservedThicknessForMarkers = 0
+    reservedThicknessForAccessoryView = 0
+    ruleThickness = GutterMetrics.minimumWidth
   }
 
-  override func draw(_ dirtyRect: NSRect) {
+  @available(*, unavailable)
+  required init(coder: NSCoder) {
+    fatalError("init(coder:) is not used")
+  }
+
+  // Match the flipped document view so converted line offsets share the same
+  // top-left origin and downward y.
+  override var isFlipped: Bool { true }
+
+  /// Sizes the gutter to fit the current line count's digits, or hides it.
+  func updateThickness() {
+    let width: CGFloat
+    if showsLineNumbers, let textView = lineTextView {
+      width = GutterMetrics.width(lineCount: textView.lineCount, font: numberFont)
+    } else {
+      width = 0
+    }
+    if abs(ruleThickness - width) > 0.5 {
+      ruleThickness = width
+    }
+  }
+
+  override func drawHashMarksAndLabels(in rect: NSRect) {
     backgroundColor.setFill()
-    dirtyRect.fill()
-    guard showsLineNumbers, let textView, let clipView else {
+    bounds.fill()
+    guard showsLineNumbers, let textView = lineTextView else {
       return
     }
 
-    // Hairline at the gutter's right edge.
     separatorColor.setStroke()
     let separator = NSBezierPath()
-    separator.move(to: NSPoint(x: bounds.maxX - 0.5, y: dirtyRect.minY))
-    separator.line(to: NSPoint(x: bounds.maxX - 0.5, y: dirtyRect.maxY))
+    separator.move(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.minY))
+    separator.line(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.maxY))
     separator.lineWidth = 1
     separator.stroke()
 
-    // The clip view's bounds origin is the vertical scroll offset in document
-    // coordinates; map each visible line's document y into the (unscrolled)
-    // gutter by subtracting it.
-    let visibleRect = clipView.bounds
     let layout = textView.layout
-    let range = layout.visibleLineRange(in: visibleRect, lineCount: textView.lineCount)
+    let range = layout.visibleLineRange(in: textView.visibleRect, lineCount: textView.lineCount)
     let attributes: [NSAttributedString.Key: Any] = [
-      .font: font,
+      .font: numberFont,
       .foregroundColor: textColor,
     ]
     for line in range {
-      let gutterY = layout.yOffset(forLine: line) - visibleRect.minY
+      // Convert the line's top from the document view's coordinates into the
+      // ruler's, so AppKit handles the scroll offset and flippedness for us.
+      let y = convert(NSPoint(x: 0, y: layout.yOffset(forLine: line)), from: textView).y
       let number = NSAttributedString(string: "\(line + 1)", attributes: attributes)
       let numberWidth = number.size().width
       number.draw(
         with: NSRect(
           x: max(0, bounds.width - GutterMetrics.trailingPadding - numberWidth),
-          y: gutterY,
+          y: y,
           width: numberWidth,
           height: layout.lineHeight
         ),
@@ -271,51 +264,16 @@ final class LineNumberGutterView: NSView {
   }
 }
 
-/// Lays out a pinned [`LineNumberGutterView`] to the left of a scrolling text
-/// `NSScrollView`, sizing the gutter to its preferred width.
-final class GutteredViewport: NSView {
-  let gutter: LineNumberGutterView
-  let scrollView: NSScrollView
-
-  init(gutter: LineNumberGutterView, scrollView: NSScrollView) {
-    self.gutter = gutter
-    self.scrollView = scrollView
-    super.init(frame: .zero)
-    addSubview(scrollView)
-    addSubview(gutter)
-  }
-
-  @available(*, unavailable)
-  required init?(coder: NSCoder) {
-    fatalError("init(coder:) is not used")
-  }
-
-  override func layout() {
-    super.layout()
-    let gutterWidth = gutter.preferredWidth()
-    gutter.isHidden = gutterWidth == 0
-    gutter.frame = NSRect(x: 0, y: 0, width: gutterWidth, height: bounds.height)
-    scrollView.frame = NSRect(
-      x: gutterWidth, y: 0, width: max(bounds.width - gutterWidth, 0), height: bounds.height)
-    // The text view tracks the clip width itself (no autoresizing), and the
-    // gutter band changed with the new height.
-    (scrollView.documentView as? LineRenderingTextView)?.updateLayout()
-    gutter.needsDisplay = true
-  }
-
-  func refresh() {
-    needsLayout = true
-    gutter.needsDisplay = true
-  }
-}
-
-/// Hosts the text view + pinned gutter for SwiftUI, with horizontal scrolling.
+/// Hosts the virtualized text view for SwiftUI. The scroll view is returned
+/// directly (its sole child is the document view) and the line-number gutter is
+/// the scroll view's native vertical ruler, so nothing is overlaid on top of the
+/// document — which is what makes it composite reliably in the layer-backed host.
 struct LargeTextViewport: NSViewRepresentable {
   let buffer: TextBuffer
   let accessibilityLabel: String
   let syntax: TextDocumentSyntax
 
-  func makeNSView(context: Context) -> GutteredViewport {
+  func makeNSView(context: Context) -> NSScrollView {
     let scrollView = NSScrollView()
     scrollView.hasVerticalScroller = true
     scrollView.hasHorizontalScroller = true
@@ -323,48 +281,57 @@ struct LargeTextViewport: NSViewRepresentable {
     scrollView.borderType = .noBorder
     scrollView.drawsBackground = true
     scrollView.backgroundColor = .textBackgroundColor
-    scrollView.contentView.postsBoundsChangedNotifications = true
 
     let documentView = LineRenderingTextView()
     documentView.setAccessibilityIdentifier("document-large-text-viewer")
     documentView.setAccessibilityLabel(accessibilityLabel)
+    documentView.syntax = syntax
     scrollView.documentView = documentView
 
-    let gutter = LineNumberGutterView()
-    gutter.textView = documentView
-    gutter.clipView = scrollView.contentView
-    gutter.showsLineNumbers = syntax.supportsLineNumbers
+    let ruler = LineNumberRulerView(scrollView: scrollView, textView: documentView)
+    ruler.showsLineNumbers = syntax.supportsLineNumbers
+    scrollView.verticalRulerView = ruler
+    scrollView.hasVerticalRuler = true
+    scrollView.rulersVisible = true
 
-    documentView.syntax = syntax
     documentView.setBuffer(buffer)
+    ruler.updateThickness()
 
-    let container = GutteredViewport(gutter: gutter, scrollView: scrollView)
-
-    // Redraw the gutter as the document scrolls vertically.
+    let clipView = scrollView.contentView
+    clipView.postsBoundsChangedNotifications = true
+    clipView.postsFrameChangedNotifications = true
     NotificationCenter.default.addObserver(
       context.coordinator,
       selector: #selector(Coordinator.viewportScrolled),
       name: NSView.boundsDidChangeNotification,
-      object: scrollView.contentView
+      object: clipView
     )
-    context.coordinator.gutter = gutter
+    NotificationCenter.default.addObserver(
+      context.coordinator,
+      selector: #selector(Coordinator.viewportResized),
+      name: NSView.frameDidChangeNotification,
+      object: clipView
+    )
+    context.coordinator.ruler = ruler
+    context.coordinator.documentView = documentView
 
-    container.refresh()
-    return container
+    return scrollView
   }
 
-  func updateNSView(_ container: GutteredViewport, context: Context) {
-    guard let documentView = container.scrollView.documentView as? LineRenderingTextView else {
+  func updateNSView(_ scrollView: NSScrollView, context: Context) {
+    guard let documentView = scrollView.documentView as? LineRenderingTextView else {
       return
     }
     documentView.setAccessibilityLabel(accessibilityLabel)
     documentView.syntax = syntax
-    container.gutter.showsLineNumbers = syntax.supportsLineNumbers
-    // A new buffer (e.g. after an external-change reload) replaces the content.
     if documentView.buffer !== buffer {
       documentView.setBuffer(buffer)
     }
-    container.refresh()
+    if let ruler = scrollView.verticalRulerView as? LineNumberRulerView {
+      ruler.showsLineNumbers = syntax.supportsLineNumbers
+      ruler.updateThickness()
+      ruler.needsDisplay = true
+    }
   }
 
   func makeCoordinator() -> Coordinator {
@@ -373,10 +340,16 @@ struct LargeTextViewport: NSViewRepresentable {
 
   @MainActor
   final class Coordinator: NSObject {
-    weak var gutter: LineNumberGutterView?
+    weak var ruler: LineNumberRulerView?
+    weak var documentView: LineRenderingTextView?
 
     @objc func viewportScrolled(_ notification: Notification) {
-      gutter?.needsDisplay = true
+      ruler?.needsDisplay = true
+    }
+
+    @objc func viewportResized(_ notification: Notification) {
+      documentView?.updateLayout()
+      ruler?.needsDisplay = true
     }
 
     deinit {
@@ -407,8 +380,6 @@ struct VirtualizedTextDocumentView: View {
     Group {
       switch phase {
       case .loading:
-        // Matches the editable surface: no spinner, just a blank canvas until
-        // the buffer finishes opening off the main thread.
         Color(nsColor: .textBackgroundColor)
       case .loaded(let buffer):
         LargeTextViewport(
@@ -435,9 +406,6 @@ struct VirtualizedTextDocumentView: View {
     let target = url
     do {
       let loaded = try await Task.detached(priority: .userInitiated) {
-        // Balance security-scoped access like `TextDocumentStore`, keeping the
-        // path ready for bookmark-backed access; the buffer holds its own
-        // reference to the file once opened.
         let didStartAccess = target.startAccessingSecurityScopedResource()
         defer {
           if didStartAccess {
@@ -446,9 +414,6 @@ struct VirtualizedTextDocumentView: View {
         }
         return OpenedTextBuffer(buffer: try TextBuffer.open(at: target))
       }.value
-      // The detached open is not itself cancellable, so a slow open for a file
-      // the user already navigated away from can still finish. Drop the result
-      // rather than clobber the newer document.
       guard !Task.isCancelled else {
         return
       }
@@ -462,9 +427,8 @@ struct VirtualizedTextDocumentView: View {
   }
 
   /// Maps an open failure to a user-facing message. Large non-UTF-8 files are
-  /// called out explicitly: the editable path decodes legacy encodings, but
-  /// this large-file viewer is UTF-8 only for now, so the narrowing is not
-  /// silent.
+  /// called out explicitly: the editable path decodes legacy encodings, but this
+  /// large-file viewer is UTF-8 only for now, so the narrowing is not silent.
   static func failureMessage(for error: Error) -> String {
     if let bufferError = error as? TextBufferError, bufferError == .notUTF8 {
       return

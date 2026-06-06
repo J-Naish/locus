@@ -115,4 +115,37 @@ final class TextViewportLayoutTests: XCTestCase {
       GutterMetrics.width(lineCount: 1, font: font)
     )
   }
+
+  @MainActor
+  func testRulerThicknessIsZeroWhenLineNumbersHidden() {
+    // A hidden gutter must take no horizontal space so the document fills the
+    // scroll view.
+    let scrollView = NSScrollView()
+    let textView = LineRenderingTextView()
+    scrollView.documentView = textView
+    let ruler = LineNumberRulerView(scrollView: scrollView, textView: textView)
+
+    ruler.showsLineNumbers = false
+    ruler.updateThickness()
+
+    XCTAssertEqual(ruler.ruleThickness, 0)
+  }
+
+  @MainActor
+  func testRulerThicknessMatchesGutterMetricsWhenShown() {
+    // With line numbers shown the ruler reserves the gutter's metric width. An
+    // empty buffer reports one line, so the width is the minimum.
+    let scrollView = NSScrollView()
+    let textView = LineRenderingTextView()
+    scrollView.documentView = textView
+    let ruler = LineNumberRulerView(scrollView: scrollView, textView: textView)
+
+    ruler.showsLineNumbers = true
+    ruler.updateThickness()
+
+    XCTAssertEqual(
+      ruler.ruleThickness,
+      GutterMetrics.width(lineCount: textView.lineCount, font: GutterMetrics.lineNumberFont)
+    )
+  }
 }
