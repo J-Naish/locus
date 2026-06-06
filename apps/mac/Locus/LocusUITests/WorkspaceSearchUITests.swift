@@ -1245,6 +1245,96 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testInactiveCleanDocumentReloadsExternalChangeOnReturn() throws {
+    // A clean document kept open while another is shown must reflect an external
+    // change made while it was inactive when the user switches back to it.
+    let workspace = FileManager.default.temporaryDirectory
+      .appendingPathComponent("locus-retention-clean-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: workspace) }
+    let aURL = workspace.appendingPathComponent("Notes.txt")
+    let bURL = workspace.appendingPathComponent("Other.txt")
+    try Data("ORIGINAL".utf8).write(to: aURL)
+    try Data("OTHER".utf8).write(to: bURL)
+
+    let app = try launchApp(workspacePath: workspace.path)
+    let viewer = app.textViews["document-large-text-viewer"]
+
+    func open(_ name: String) {
+      let row = workspaceSidebarLabel(named: name, in: app)
+      XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+      row.click()
+      XCTAssertTrue(viewer.waitForExistence(timeout: 5), app.debugDescription)
+    }
+    func copyAll() -> String? {
+      NSPasteboard.general.clearContents()
+      viewer.click()
+      app.typeKey("a", modifierFlags: [.command])
+      app.typeKey("c", modifierFlags: [.command])
+      return NSPasteboard.general.string(forType: .string)
+    }
+
+    open("Notes.txt")
+    XCTAssertEqual(copyAll(), "ORIGINAL")
+    open("Other.txt")  // leave A open but inactive
+    try Data("EXTERNAL".utf8).write(to: aURL)  // A changes while inactive
+    open("Notes.txt")  // return to A
+
+    var shown: String?
+    let deadline = Date().addingTimeInterval(3)
+    repeat {
+      shown = copyAll()
+      if shown == "EXTERNAL" { break }
+      Thread.sleep(forTimeInterval: 0.1)
+    } while Date() < deadline
+    XCTAssertEqual(shown, "EXTERNAL", app.debugDescription)
+  }
+
+  @MainActor
+  func testInactiveDirtyDocumentConflictsWithExternalChangeOnReturn() throws {
+    // A document with unsaved edits kept open while another is shown must keep its
+    // edits and surface a conflict (not silently reload) when an external change
+    // happened while it was inactive and the user switches back.
+    let workspace = FileManager.default.temporaryDirectory
+      .appendingPathComponent("locus-retention-dirty-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: workspace) }
+    let aURL = workspace.appendingPathComponent("Notes.txt")
+    let bURL = workspace.appendingPathComponent("Other.txt")
+    try Data("ORIGINAL".utf8).write(to: aURL)
+    try Data("OTHER".utf8).write(to: bURL)
+
+    let app = try launchApp(workspacePath: workspace.path)
+    let viewer = app.textViews["document-large-text-viewer"]
+
+    func open(_ name: String) {
+      let row = workspaceSidebarLabel(named: name, in: app)
+      XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+      row.click()
+      XCTAssertTrue(viewer.waitForExistence(timeout: 5), app.debugDescription)
+    }
+    func copyAll() -> String? {
+      NSPasteboard.general.clearContents()
+      viewer.click()
+      app.typeKey("a", modifierFlags: [.command])
+      app.typeKey("c", modifierFlags: [.command])
+      return NSPasteboard.general.string(forType: .string)
+    }
+
+    open("Notes.txt")
+    viewer.click()
+    app.typeKey("a", modifierFlags: [.command])
+    app.typeText("DIRTYEDIT")  // unsaved edits in A
+    open("Other.txt")  // leave A open and dirty but inactive
+    try Data("EXTERNAL".utf8).write(to: aURL)  // A changes while inactive
+    open("Notes.txt")  // return to A
+
+    let reload = app.buttons["Reload"]
+    XCTAssertTrue(reload.waitForExistence(timeout: 5), app.debugDescription)  // conflict banner
+    XCTAssertEqual(copyAll(), "DIRTYEDIT", app.debugDescription)  // edits preserved
+  }
+
+  @MainActor
   func testLargeFileViewerKeepsConflictWhenUndoneToClean() throws {
     // Regression: undoing edits back to a clean buffer must not hide a pending
     // external-change conflict (the file on disk is still divergent).

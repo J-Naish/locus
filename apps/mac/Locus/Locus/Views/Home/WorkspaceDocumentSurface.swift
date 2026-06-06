@@ -27,6 +27,9 @@ struct WorkspaceDocumentSurface: View {
   /// here.
   @State private var documentSaveRequest = 0
   @StateObject private var documentChangeMonitor = DocumentChangeMonitor()
+  /// Retains opened buffers across file switches so unsaved edits survive
+  /// navigating away and back (persists for the surface's lifetime).
+  @StateObject private var openDocuments = OpenDocumentCache()
 
   var body: some View {
     VStack(spacing: 0) {
@@ -143,7 +146,8 @@ struct WorkspaceDocumentSurface: View {
         saveRequest: documentSaveRequest,
         onSaveCompletion: { result in handleDocumentSaveResult(result, for: entry) },
         onDirtyChange: { isDirty in handleDocumentDirtyChange(isDirty) },
-        onFocusChange: { isFocused in isEditorFocused = isFocused }
+        onFocusChange: { isFocused in isEditorFocused = isFocused },
+        documentCache: openDocuments
       )
     }
   }
@@ -161,9 +165,12 @@ struct WorkspaceDocumentSurface: View {
     return !documentDirty
   }
 
-  /// Records the on-disk fingerprint for a freshly selected text document so a
-  /// later external change can be detected. The editor itself opens the file; the
-  /// surface only needs the baseline fingerprint (and clears any stale error).
+  /// Establishes the external-change baseline for a freshly selected text
+  /// document. For a document already open in the cache (switching back to it),
+  /// the baseline is the disk state it was last in sync with, so a change made
+  /// while it was inactive — and therefore unmonitored — is detected now
+  /// (reload if clean, conflict if it has unsaved edits). Otherwise the current
+  /// disk state is the baseline.
   @MainActor
   private func prepareSelectedDocument() async {
     saveErrorMessage = nil
@@ -173,11 +180,30 @@ struct WorkspaceDocumentSurface: View {
       return
     }
 
-    let fingerprint = await DocumentFileFingerprint.load(at: entry.url)
+    let key = entry.url.locusStandardizedPath
+    let baseline =
+      openDocuments.contains(forKey: key) ? openDocuments.fingerprint(forKey: key) : nil
+    let current = await DocumentFileFingerprint.load(at: entry.url)
     guard self.entry?.id == entry.id else {
       return
     }
-    knownDocumentFingerprint = fingerprint
+    knownDocumentFingerprint = current
+
+    // Switching back to a still-open document: it was unmonitored while inactive,
+    // so reconcile any external change now, using the cached buffer's own dirty
+    // state (not the lagging surface mirror, which the editor has not re-reported
+    // yet).
+    guard openDocuments.contains(forKey: key), baseline != current else {
+      return
+    }
+    openDocuments.setFingerprint(current, forKey: key)
+    if openDocuments.isDirty(forKey: key) {
+      documentConflict = true  // keep the unsaved edits; warn about the divergence
+    } else {
+      documentConflict = false
+      openDocuments.drop(forKey: key)  // clean → reopen to show the new disk content
+      documentReloadGeneration &+= 1
+    }
   }
 
   @MainActor
@@ -221,6 +247,9 @@ struct WorkspaceDocumentSurface: View {
       saveErrorMessage = nil
       documentConflict = false
       knownDocumentFingerprint = fingerprint
+      // Keep the retained buffer's baseline current so switching back later does
+      // not mistake our own save for an external change.
+      openDocuments.setFingerprint(fingerprint, forKey: entry.url.locusStandardizedPath)
     case .failure(let error):
       saveErrorMessage = error.localizedDescription
     }
@@ -245,6 +274,10 @@ struct WorkspaceDocumentSurface: View {
   private func reloadDocumentDiscardingEdits() {
     documentConflict = false
     documentDirty = false
+    // Drop the retained (edited) buffer so the reopen reads fresh disk content.
+    if let entry {
+      openDocuments.drop(forKey: entry.url.locusStandardizedPath)
+    }
     documentReloadGeneration &+= 1
   }
 
@@ -269,8 +302,10 @@ extension WorkspaceDocumentSurface {
     }
 
     // Accept this disk state as known either way, so the same external change is
-    // not re-detected on every later sync.
+    // not re-detected on every later sync — including after switching away and
+    // back to a still-open document.
     knownDocumentFingerprint = fingerprint
+    openDocuments.setFingerprint(fingerprint, forKey: entry.url.locusStandardizedPath)
 
     if WorkspaceTextDocumentSupport.canEdit(entry), documentDirty {
       // Editable text with unsaved edits: do not reopen (that would discard them).
@@ -279,8 +314,10 @@ extension WorkspaceDocumentSurface {
     } else {
       // Clean text, or a non-editable preview (image/PDF/media): reopen to show the
       // new content. This also reconciles to disk, resolving any earlier conflict
-      // (e.g. one made clean by undo).
+      // (e.g. one made clean by undo). Drop the retained buffer first so the reopen
+      // reads fresh disk content (a no-op for non-text entries).
       documentConflict = false
+      openDocuments.drop(forKey: entry.url.locusStandardizedPath)
       documentReloadGeneration &+= 1
     }
   }

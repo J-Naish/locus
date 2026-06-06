@@ -2317,6 +2317,10 @@ struct VirtualizedTextDocumentView: View {
   /// Reports focus changes so the host can pause navigation shortcuts while the
   /// editor has the keyboard.
   var onFocusChange: (Bool) -> Void = { _ in }
+  /// Holds opened buffers across file switches so unsaved edits survive navigating
+  /// away and back; the view reads from and populates it instead of always opening
+  /// a fresh buffer.
+  let documentCache: OpenDocumentCache
 
   @State private var phase: Phase = .loading
   private let bufferStore = TextBufferStore()
@@ -2360,19 +2364,34 @@ struct VirtualizedTextDocumentView: View {
   }
 
   private func open() async {
+    let key = url.locusStandardizedPath
+    // Reuse a retained buffer (with any unsaved edits) when switching back to a
+    // file that is still open; otherwise open it fresh and retain it.
+    if let cached = documentCache.cached(forKey: key) {
+      phase = .loaded(cached.buffer, encoding: cached.encoding)
+      onDirtyChange(cached.buffer.isDirty)
+      return
+    }
     phase = .loading
     let target = url
     let store = bufferStore
     do {
       let loaded = try await Task.detached(priority: .userInitiated) {
         let opened = try store.open(at: target)
-        return OpenedTextBuffer(buffer: opened.buffer, encoding: opened.encoding)
+        // Read the fingerprint alongside the open so the cache records the exact
+        // disk state this buffer matches.
+        let fingerprint = DocumentFileFingerprint.read(at: target)
+        return OpenedTextBuffer(
+          buffer: opened.buffer, encoding: opened.encoding, fingerprint: fingerprint)
       }.value
       guard !Task.isCancelled else {
         return
       }
+      documentCache.store(
+        buffer: loaded.buffer, encoding: loaded.encoding, fingerprint: loaded.fingerprint,
+        forKey: key)
       phase = .loaded(loaded.buffer, encoding: loaded.encoding)
-      onDirtyChange(false)  // a freshly opened buffer is clean
+      onDirtyChange(loaded.buffer.isDirty)  // a freshly opened buffer is clean
     } catch {
       guard !Task.isCancelled else {
         return
@@ -2406,6 +2425,7 @@ private struct TextViewportLoad: Equatable {
 private struct OpenedTextBuffer: @unchecked Sendable {
   let buffer: TextBuffer
   let encoding: String.Encoding
+  let fingerprint: DocumentFileFingerprint?
 }
 
 /// Carries the `TextBuffer` to the background save thread. Sound because the
