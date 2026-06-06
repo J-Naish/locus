@@ -62,6 +62,108 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(range, 3..<5)
   }
 
+  // MARK: WrapIndex (soft-wrap row mapping)
+
+  func testWrapIndexTotalsAndLineStarts() {
+    let index = WrapIndex(visualRowsPerLine: [1, 3, 1, 2])
+    XCTAssertEqual(index.lineCount, 4)
+    XCTAssertEqual(index.totalVisualRows, 7)
+    XCTAssertEqual(index.firstVisualRow(ofLine: 0), 0)
+    XCTAssertEqual(index.firstVisualRow(ofLine: 1), 1)
+    XCTAssertEqual(index.firstVisualRow(ofLine: 2), 4)
+    XCTAssertEqual(index.firstVisualRow(ofLine: 3), 5)
+    XCTAssertEqual(index.visualRowCount(ofLine: 1), 3)
+  }
+
+  func testWrapIndexMapsVisualRowToLineAndSubRow() {
+    let index = WrapIndex(visualRowsPerLine: [1, 3, 1, 2])  // rows: 0|1 2 3|4|5 6
+    let expected: [(Int, Int)] = [(0, 0), (1, 0), (1, 1), (1, 2), (2, 0), (3, 0), (3, 1)]
+    for (row, want) in expected.enumerated() {
+      let location = index.location(ofVisualRow: row)
+      XCTAssertEqual(location.line, want.0, "row \(row)")
+      XCTAssertEqual(location.rowInLine, want.1, "row \(row)")
+    }
+  }
+
+  func testWrapIndexClampsOutOfRangeRows() {
+    let index = WrapIndex(visualRowsPerLine: [2, 2])  // total 4
+    XCTAssertEqual(index.location(ofVisualRow: -5).line, 0)
+    let last = index.location(ofVisualRow: 999)
+    XCTAssertEqual(last.line, 1)
+    XCTAssertEqual(last.rowInLine, 1)  // clamped to the final visual row
+  }
+
+  func testWrapIndexTreatsEmptyLineAsOneRow() {
+    let index = WrapIndex(visualRowsPerLine: [0, 0])  // each clamped to 1
+    XCTAssertEqual(index.totalVisualRows, 2)
+  }
+
+  // MARK: LineWrap (Core Text line breaking)
+
+  @MainActor
+  func testLineWrapReturnsSingleRowWhenItFits() {
+    let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    let line = NSAttributedString(string: "hello", attributes: [.font: font])
+    XCTAssertEqual(LineWrap.visualRowStartOffsets(of: line, width: 10_000), [0])
+  }
+
+  @MainActor
+  func testLineWrapRowCountMatchesWidthForFixedWidthFont() {
+    let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    let charWidth = ("x" as NSString).size(withAttributes: [.font: font]).width
+    // No spaces, so Core Text breaks on character boundaries.
+    let line = NSAttributedString(
+      string: String(repeating: "x", count: 100), attributes: [.font: font])
+
+    // A width fitting ~10 characters should wrap 100 characters into ~10 rows,
+    // each starting later than the last.
+    let starts = LineWrap.visualRowStartOffsets(of: line, width: charWidth * 10)
+    XCTAssertEqual(starts.first, 0)
+    XCTAssertEqual(starts, starts.sorted())
+    XCTAssertEqual(Set(starts).count, starts.count)  // strictly increasing
+    XCTAssert((9...11).contains(starts.count), "expected ~10 rows, got \(starts.count)")
+  }
+
+  @MainActor
+  func testLineWrapHonorsMaximumRowsCap() {
+    let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    let charWidth = ("x" as NSString).size(withAttributes: [.font: font]).width
+    let line = NSAttributedString(
+      string: String(repeating: "x", count: 1000), attributes: [.font: font])
+
+    // A one-character width would wrap into ~1000 rows; the cap bounds it.
+    let starts = LineWrap.visualRowStartOffsets(of: line, width: charWidth, maximumRows: 8)
+    XCTAssertEqual(starts.count, 8)
+  }
+
+  @MainActor
+  func testLineWrapReturnsSingleRowForNonPositiveWidth() {
+    let line = NSAttributedString(string: "anything")
+    XCTAssertEqual(LineWrap.visualRowStartOffsets(of: line, width: 0), [0])
+  }
+
+  // MARK: View-level wrapping (document height)
+
+  @MainActor
+  func testWrappingMakesALongLineTallerThanOneRow() throws {
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 140, height: 400)  // narrow viewport
+    // One logical line, far wider than the viewport: it must wrap to many rows,
+    // so the document is several rows tall.
+    let buffer = try TextBuffer.open(bytes: Data(String(repeating: "word ", count: 200).utf8))
+    view.setBuffer(buffer)
+    XCTAssertGreaterThan(view.frame.height, view.layout.lineHeight * 3)
+  }
+
+  @MainActor
+  func testShortContentStaysOneRowTall() throws {
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+    let buffer = try TextBuffer.open(bytes: Data("hi".utf8))
+    view.setBuffer(buffer)
+    XCTAssertEqual(view.frame.height, view.layout.lineHeight)  // fits one visual row
+  }
+
   @MainActor
   func testFailureMessageCallsOutLargeNonUTF8() {
     // A large non-UTF-8 file is rejected by the UTF-8-only buffer; the message
