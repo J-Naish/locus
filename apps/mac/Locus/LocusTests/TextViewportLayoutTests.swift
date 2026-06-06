@@ -326,6 +326,48 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(view.selectedText(), "two\nthree")  // whole words across the line boundary
   }
 
+  // MARK: Caret blink
+
+  func testCaretBlinksOnlyWhenFocusedWithCollapsedSelection() {
+    // Blinks with a caret (focused, collapsed, not composing); never blinks when
+    // unfocused, composing, or while a range is selected.
+    XCTAssertTrue(
+      LineRenderingTextView.caretShouldBlink(
+        isFirstResponder: true, isComposing: false, selectionIsEmpty: true))
+    XCTAssertFalse(
+      LineRenderingTextView.caretShouldBlink(
+        isFirstResponder: false, isComposing: false, selectionIsEmpty: true))
+    XCTAssertFalse(
+      LineRenderingTextView.caretShouldBlink(
+        isFirstResponder: true, isComposing: true, selectionIsEmpty: true))
+    XCTAssertFalse(
+      LineRenderingTextView.caretShouldBlink(
+        isFirstResponder: true, isComposing: false, selectionIsEmpty: false))
+  }
+
+  @MainActor
+  func testActivityReschedulesBlinkTimerSoTheCaretStaysSolid() throws {
+    // While blinking, user activity must restart the timer (not just flip the
+    // flag), so a toggle that was about to fire cannot hide the caret right after
+    // the action.
+    let view = try makeViewer("hi")
+    view.startCaretBlinking()
+    let before = try XCTUnwrap(view.caretBlinkTimer)
+    view.showCaretSolid()
+    XCTAssertTrue(view.caretBlinkOn)
+    XCTAssertFalse(before === view.caretBlinkTimer)  // a fresh full interval
+    view.stopCaretBlinking()
+  }
+
+  @MainActor
+  func testShowCaretSolidWithoutTimerKeepsPhaseSolidAndUnscheduled() throws {
+    // When not blinking (unfocused: no timer), forcing solid must not start a timer.
+    let view = try makeViewer("hi")
+    view.showCaretSolid()
+    XCTAssertTrue(view.caretBlinkOn)
+    XCTAssertNil(view.caretBlinkTimer)
+  }
+
   // MARK: Scroll rendering stability
 
   func testViewerOptsOutOfResponsiveScrolling() {

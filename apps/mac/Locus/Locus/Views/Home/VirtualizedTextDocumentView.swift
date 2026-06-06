@@ -293,6 +293,17 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// any non-vertical move.
   private var verticalGoalX: CGFloat?
 
+  // MARK: Caret blink
+  /// Whether the insertion caret is in its visible blink phase. The caret is shown
+  /// while true and hidden while false; activity (typing, moving, clicking) forces
+  /// it solid again so it never disappears right when the user acts.
+  private(set) var caretBlinkOn = true
+  /// Repeating timer that toggles the blink phase while focused. `nil` when not
+  /// blinking (unfocused or detached from a window).
+  private(set) var caretBlinkTimer: Timer?
+  /// Half-period of the caret blink.
+  private let caretBlinkInterval: TimeInterval = 0.5
+
   /// In-progress input-method composition (marked text). The uncommitted text is
   /// held here and drawn inline at `anchor`; it is not written to the buffer
   /// until the input method commits it. `nil` when not composing.
@@ -542,7 +553,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   override func becomeFirstResponder() -> Bool {
     let didBecome = super.becomeFirstResponder()
-    if didBecome { invalidateVisibleArea() }
+    if didBecome {
+      startCaretBlinking()
+      invalidateVisibleArea()
+    }
     return didBecome
   }
 
@@ -552,9 +566,76 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       // Abandon any in-progress composition rather than committing it on a focus
       // change; the input context deactivates with the responder.
       composition = nil
+      stopCaretBlinking()
       invalidateVisibleArea()
     }
     return didResign
+  }
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    // Stop the timer when detached so it does not keep the view alive.
+    if window == nil { stopCaretBlinking() }
+  }
+
+  // MARK: Caret blink
+
+  /// Whether the plain insertion caret should be blinking right now: focused, not
+  /// composing (the marked-text caret stays solid), and a collapsed selection.
+  /// Pure for testability.
+  static func caretShouldBlink(isFirstResponder: Bool, isComposing: Bool, selectionIsEmpty: Bool)
+    -> Bool
+  {
+    isFirstResponder && !isComposing && selectionIsEmpty
+  }
+
+  private var showsBlinkingCaret: Bool {
+    Self.caretShouldBlink(
+      isFirstResponder: window?.firstResponder === self,
+      isComposing: composition != nil,
+      selectionIsEmpty: selection?.isEmpty == true)
+  }
+
+  /// (Re)starts the blink in the solid phase. Uses target/action (not a closure) to
+  /// avoid a `Sendable` capture of this non-`Sendable` view; the strong reference
+  /// the timer holds is released by `stopCaretBlinking`.
+  func startCaretBlinking() {
+    caretBlinkTimer?.invalidate()
+    caretBlinkOn = true
+    caretBlinkTimer = Timer.scheduledTimer(
+      timeInterval: caretBlinkInterval, target: self,
+      selector: #selector(caretBlinkTimerFired), userInfo: nil, repeats: true)
+  }
+
+  func stopCaretBlinking() {
+    caretBlinkTimer?.invalidate()
+    caretBlinkTimer = nil
+    caretBlinkOn = true
+  }
+
+  /// Keeps the caret solid right after the user acts (typing, moving, clicking). It
+  /// restarts the blink timer (not just the phase flag) so a toggle that was about
+  /// to fire cannot hide the caret a few milliseconds after the action. When not
+  /// blinking (unfocused, no timer) it only records the solid phase for next focus.
+  func showCaretSolid() {
+    if caretBlinkTimer != nil {
+      startCaretBlinking()
+    } else {
+      caretBlinkOn = true
+    }
+  }
+
+  @objc private func caretBlinkTimerFired() {
+    guard showsBlinkingCaret else {
+      // Nothing to blink (e.g. a range is selected): make sure the caret is solid.
+      if !caretBlinkOn {
+        caretBlinkOn = true
+        invalidateVisibleArea()
+      }
+      return
+    }
+    caretBlinkOn.toggle()
+    invalidateVisibleArea()
   }
 
   // MARK: Mouse selection
@@ -576,6 +657,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     default:
       beginCaretSelection(at: endpoint)
     }
+    showCaretSolid()
     invalidateVisibleArea()
   }
 
@@ -993,6 +1075,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     } else {
       selection = TextSelection(caretAt: newHead)
     }
+    showCaretSolid()
     scrollCaretToVisible(newHead)
     invalidateVisibleArea()
   }
@@ -1268,6 +1351,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     verticalGoalX = nil
     rebuildWrapIndex()
     clampSelectionToBounds()
+    showCaretSolid()
     updateLayout()
     if let head = selection?.head {
       scrollCaretToVisible(head)
@@ -1349,6 +1433,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     } else {
       rebuildWrapIndex()
     }
+    showCaretSolid()
     updateLayout()
     if let head = selection?.head {
       scrollCaretToVisible(head)
@@ -1674,7 +1759,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       drawCompositionCaret(composition, lines: lines, range: range, textX: textX)
       return
     }
-    guard let selection, selection.isEmpty else { return }
+    // The plain caret is hidden during the blink's off phase; the composing caret
+    // (handled above) is always solid.
+    guard let selection, selection.isEmpty, caretBlinkOn else { return }
     let line = selection.head.line
     guard range.contains(line) else { return }
     // Caret on the displayed line (which may include in-progress marked text only
