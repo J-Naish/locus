@@ -669,6 +669,51 @@ pub unsafe extern "C" fn locus_text_buffer_delete(
     }
 }
 
+/// Replaces the UTF-16 range `[start_utf16, end_utf16)` with `len` UTF-8 `bytes`
+/// in one undo step. The bytes may contain embedded NUL; invalid UTF-8 is
+/// rejected with `LOCUS_TEXT_STATUS_NOT_UTF8`.
+///
+/// # Safety
+///
+/// `buffer` must be NULL or a live handle. `bytes` must point to `len` readable
+/// bytes, or be NULL when `len` is 0.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_replace(
+    buffer: *mut LocusTextBuffer,
+    start_utf16: usize,
+    end_utf16: usize,
+    bytes: *const u8,
+    len: usize,
+) -> u32 {
+    clear_last_error_message();
+    // SAFETY: buffer is NULL or a live handle the caller still owns.
+    let Some(handle) = (unsafe { buffer.as_mut() }) else {
+        set_last_error_message("buffer must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    };
+    let slice = if len == 0 {
+        &[][..]
+    } else if bytes.is_null() {
+        set_last_error_message("bytes must not be NULL when len > 0");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    } else {
+        // SAFETY: the caller guarantees `bytes` points to `len` readable bytes
+        // for the duration of the call.
+        unsafe { std::slice::from_raw_parts(bytes, len) }
+    };
+    let Ok(text) = std::str::from_utf8(slice) else {
+        set_last_error_message("replacement bytes must be valid UTF-8");
+        return LOCUS_TEXT_STATUS_NOT_UTF8;
+    };
+    match handle.buffer.replace(start_utf16, end_utf16, text) {
+        Ok(()) => LOCUS_STATUS_OK,
+        Err(error) => {
+            set_last_error_message(error.to_string());
+            status_from_error(&error)
+        }
+    }
+}
+
 /// Undoes the most recent edit, writing whether anything was undone to
 /// `out_did_undo` (which may be NULL).
 ///
@@ -927,6 +972,34 @@ mod tests {
 
         unsafe { locus_text_buffer_mark_saved(handle) };
         assert!(!unsafe { locus_text_buffer_is_dirty(handle) });
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn replace_swaps_a_range_in_one_undo_step() {
+        let handle = open("hello");
+        let bytes = "bye".as_bytes();
+        assert_eq!(
+            unsafe { locus_text_buffer_replace(handle, 0, 5, bytes.as_ptr(), bytes.len()) },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(snapshot_all(handle), "bye");
+
+        let mut did = false;
+        unsafe { locus_text_buffer_undo(handle, &mut did) };
+        assert!(did);
+        assert_eq!(snapshot_all(handle), "hello"); // one undo restores the whole range
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn replace_reversed_range_reports_invalid_range() {
+        let handle = open("hello");
+        let bytes = "x".as_bytes();
+        assert_eq!(
+            unsafe { locus_text_buffer_replace(handle, 3, 1, bytes.as_ptr(), bytes.len()) },
+            LOCUS_TEXT_STATUS_INVALID_RANGE
+        );
         unsafe { locus_text_buffer_free(handle) };
     }
 

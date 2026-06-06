@@ -1184,6 +1184,54 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testLargeFileViewerUndoesTypingWithCommandZ() throws {
+    // Verifies Cmd+Z reaches the viewer (rather than the Edit menu's undo
+    // manager): type a marker, confirm it appears, undo, confirm it is gone.
+    let app = try launchApp(
+      workspacePath: fixtureWorkspacePath("basic"),
+      extraArguments: ["--ui-test-max-text-bytes", "10"]
+    )
+
+    let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
+    XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+    row.click()
+
+    let viewer = app.textViews["document-large-text-viewer"]
+    XCTAssertTrue(viewer.waitForExistence(timeout: 5), app.debugDescription)
+    viewer.click()
+
+    // Insert a marker character that the original document does not contain.
+    app.typeText("Q")
+
+    func copyAll() -> String? {
+      NSPasteboard.general.clearContents()
+      app.typeKey("a", modifierFlags: [.command])
+      app.typeKey("c", modifierFlags: [.command])
+      return NSPasteboard.general.string(forType: .string)
+    }
+
+    var copied: String?
+    var deadline = Date().addingTimeInterval(2)
+    repeat {
+      copied = copyAll()
+      if copied?.contains("Q") == true { break }
+      Thread.sleep(forTimeInterval: 0.05)
+    } while Date() < deadline
+    XCTAssertEqual(copied?.contains("Q"), true, "after typing: \(copied ?? "nil")")
+
+    app.typeKey("z", modifierFlags: [.command])  // undo the insert
+
+    deadline = Date().addingTimeInterval(2)
+    repeat {
+      copied = copyAll()
+      if copied?.contains("Q") == false { break }
+      Thread.sleep(forTimeInterval: 0.05)
+    } while Date() < deadline
+    XCTAssertEqual(copied?.contains("Q"), false, "after undo: \(copied ?? "nil")")
+    XCTAssertEqual(copied?.contains("Meeting notes"), true, "after undo: \(copied ?? "nil")")
+  }
+
+  @MainActor
   private func launchAppWithBasicWorkspace() throws -> XCUIApplication {
     try launchApp(workspacePath: fixtureWorkspacePath("basic"))
   }

@@ -505,6 +505,45 @@ impl TextBuffer {
         Ok(())
     }
 
+    /// Replaces the UTF-16 range `[start_utf16, end_utf16)` with `text` in a
+    /// single splice recorded as one undo step (the record holds both the removed
+    /// and inserted pieces), so undoing a typed-over selection restores it in one
+    /// step rather than two. Unlike `insert`, a replace never coalesces with a
+    /// previous edit.
+    pub fn replace(
+        &mut self,
+        start_utf16: usize,
+        end_utf16: usize,
+        text: &str,
+    ) -> Result<(), TextBufferError> {
+        if end_utf16 < start_utf16 {
+            return Err(TextBufferError::InvalidRange {
+                start: start_utf16,
+                end: end_utf16,
+            });
+        }
+        let start_byte = self.utf16_to_byte(start_utf16)?;
+        let end_byte = self.utf16_to_byte(end_utf16)?;
+        if start_byte == end_byte && text.is_empty() {
+            return Ok(());
+        }
+
+        let inserted = self.build_inserted(text);
+        // One splice: drop the old range and put the new pieces in its place,
+        // capturing the removed pieces for a single undo record.
+        let removed = self.replace_range(start_byte, end_byte - start_byte, &inserted);
+        self.redo_stack.clear();
+
+        let seq = self.next_seq();
+        self.undo_stack.push(EditRecord {
+            seq,
+            at_byte: start_byte,
+            removed,
+            inserted,
+        });
+        Ok(())
+    }
+
     /// Reverts the most recent edit. Returns `false` if there is nothing to undo.
     pub fn undo(&mut self) -> bool {
         let Some(record) = self.undo_stack.pop() else {
@@ -530,26 +569,32 @@ impl TextBuffer {
 
     // MARK: - Edit internals
 
+    /// Appends `text` to the add buffer and returns the piece(s) representing it
+    /// (an empty vec for empty text). Does not splice it into the tree.
+    fn build_inserted(&mut self, text: &str) -> Vec<Piece> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+        let start = self.add.len();
+        self.add.extend_from_slice(text.as_bytes());
+        let (chars, utf16, line_breaks) = count_text(text.as_bytes());
+        vec![Piece {
+            source: PieceSource::Add,
+            start,
+            len: text.len(),
+            chars,
+            utf16,
+            line_breaks,
+        }]
+    }
+
     /// Appends `insert` to the add buffer and splices it in at `at_byte`,
     /// returning the inserted pieces for the undo record. Used by `insert`,
-    /// which never removes (`remove_len` is always 0 here); `delete` calls
-    /// [`replace_range`](Self::replace_range) directly to capture removed pieces.
+    /// which never removes (`remove_len` is always 0 here); `delete` and
+    /// `replace` call [`replace_range`](Self::replace_range) directly to capture
+    /// removed pieces.
     fn apply_replace(&mut self, at_byte: usize, remove_len: usize, insert: &str) -> Vec<Piece> {
-        let inserted = if insert.is_empty() {
-            Vec::new()
-        } else {
-            let start = self.add.len();
-            self.add.extend_from_slice(insert.as_bytes());
-            let (chars, utf16, line_breaks) = count_text(insert.as_bytes());
-            vec![Piece {
-                source: PieceSource::Add,
-                start,
-                len: insert.len(),
-                chars,
-                utf16,
-                line_breaks,
-            }]
-        };
+        let inserted = self.build_inserted(insert);
         self.replace_range(at_byte, remove_len, &inserted);
         inserted
     }
@@ -1351,6 +1396,43 @@ mod tests {
         buffer.delete(0, 3).expect("delete");
         assert_eq!(contents(&buffer), "");
         assert_eq!(buffer.line_count(), 1);
+    }
+
+    #[test]
+    fn replace_swaps_a_range_in_one_undo_step() {
+        let mut buffer = buffer("hello");
+        buffer.replace(0, 5, "bye").expect("replace");
+        assert_eq!(contents(&buffer), "bye");
+        // A single undo restores the whole replaced range (not just the insert).
+        assert!(buffer.undo());
+        assert_eq!(contents(&buffer), "hello");
+        assert!(buffer.redo());
+        assert_eq!(contents(&buffer), "bye");
+    }
+
+    #[test]
+    fn replace_in_the_middle_keeps_surrounding_text() {
+        let mut buffer = buffer("abcdef");
+        buffer.replace(2, 4, "XY").expect("replace");
+        assert_eq!(contents(&buffer), "abXYef");
+    }
+
+    #[test]
+    fn replace_with_empty_text_deletes_the_range() {
+        let mut buffer = buffer("hello");
+        buffer.replace(1, 3, "").expect("replace");
+        assert_eq!(contents(&buffer), "hlo");
+        assert!(buffer.undo());
+        assert_eq!(contents(&buffer), "hello");
+    }
+
+    #[test]
+    fn replace_rejects_a_reversed_range() {
+        let mut buffer = buffer("hello");
+        assert_eq!(
+            buffer.replace(3, 1, "x").err(),
+            Some(TextBufferError::InvalidRange { start: 3, end: 1 })
+        );
     }
 
     #[test]

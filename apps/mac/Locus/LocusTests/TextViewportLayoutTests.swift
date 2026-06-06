@@ -646,4 +646,154 @@ final class TextViewportLayoutTests: XCTestCase {
     view.doCommand(by: #selector(NSStandardKeyBindingResponding.moveRight(_:)))
     XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 1))
   }
+
+  // MARK: Undo / redo / cut / paste
+
+  @MainActor
+  func testUndoRevertsInsertAndRedoReapplies() throws {
+    let view = try makeEditableViewer("abc")
+    view.moveToDocumentEdge(end: true, extend: false)  // caret (0,3)
+    view.insertText("X")
+    XCTAssertEqual(content(of: view), "abcX")
+    view.undoEdit()
+    XCTAssertEqual(content(of: view), "abc")
+    view.redoEdit()
+    XCTAssertEqual(content(of: view), "abcX")
+  }
+
+  @MainActor
+  func testUndoRestoresDeletedText() throws {
+    let view = try makeEditableViewer("abc")
+    view.moveToDocumentEdge(end: true, extend: false)
+    view.deleteBackward()  // "ab"
+    XCTAssertEqual(content(of: view), "ab")
+    view.undoEdit()
+    XCTAssertEqual(content(of: view), "abc")
+  }
+
+  @MainActor
+  func testUndoAndRedoAreIgnoredWhenReadOnly() throws {
+    let view = try makeViewer("abc")  // read-only
+    XCTAssertFalse(view.undoEdit())
+    XCTAssertFalse(view.redoEdit())
+    XCTAssertEqual(content(of: view), "abc")
+  }
+
+  @MainActor
+  func testCutCopiesSelectionAndRemovesIt() throws {
+    let view = try makeEditableViewer("hello")
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveHorizontally(forward: true, extend: true)
+    view.moveHorizontally(forward: true, extend: true)  // select "he"
+    NSPasteboard.general.clearContents()
+    view.cut(nil)
+    XCTAssertEqual(content(of: view), "llo")
+    XCTAssertEqual(NSPasteboard.general.string(forType: .string), "he")
+  }
+
+  @MainActor
+  func testCutWithoutSelectionLeavesBufferAndPasteboardUntouched() throws {
+    let view = try makeEditableViewer("abc")
+    view.moveToDocumentEdge(end: true, extend: false)  // caret, no selection
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString("KEEP", forType: .string)
+    view.cut(nil)
+    XCTAssertEqual(content(of: view), "abc")
+    XCTAssertEqual(NSPasteboard.general.string(forType: .string), "KEEP")
+  }
+
+  @MainActor
+  func testPasteInsertsClipboardTextAtCaret() throws {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString("XY", forType: .string)
+    let view = try makeEditableViewer("ab")
+    view.moveToDocumentEdge(end: true, extend: false)  // caret (0,2)
+    view.paste(nil)
+    XCTAssertEqual(content(of: view), "abXY")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 4))
+  }
+
+  @MainActor
+  func testPasteReplacesSelection() throws {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString("Z", forType: .string)
+    let view = try makeEditableViewer("hello")
+    view.selectAll(nil)
+    view.paste(nil)
+    XCTAssertEqual(content(of: view), "Z")
+  }
+
+  @MainActor
+  func testPasteIsIgnoredWhenReadOnly() throws {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString("XY", forType: .string)
+    let view = try makeViewer("ab")  // read-only
+    view.paste(nil)
+    XCTAssertEqual(content(of: view), "ab")
+  }
+
+  @MainActor
+  func testTypingOverSelectionIsASingleUndoStep() throws {
+    // The atomic buffer replace records one undo entry, so a typed-over selection
+    // is restored in a single undo (not two: delete then insert).
+    let view = try makeEditableViewer("hello")
+    view.selectAll(nil)
+    view.insertText("Z")
+    XCTAssertEqual(content(of: view), "Z")
+    view.undoEdit()
+    XCTAssertEqual(content(of: view), "hello")
+  }
+
+  @MainActor
+  func testPasteOverSelectionIsASingleUndoStep() throws {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString("XY", forType: .string)
+    let view = try makeEditableViewer("hello")
+    view.selectAll(nil)
+    view.paste(nil)
+    XCTAssertEqual(content(of: view), "XY")
+    view.undoEdit()
+    XCTAssertEqual(content(of: view), "hello")
+  }
+
+  @MainActor
+  func testUndoAndRedoResponderMethodsDriveTheBuffer() throws {
+    // The Edit-menu `undo:`/`redo:` selectors route to the same buffer stack.
+    let view = try makeEditableViewer("abc")
+    view.moveToDocumentEdge(end: true, extend: false)
+    view.insertText("X")
+    XCTAssertEqual(content(of: view), "abcX")
+    view.undo(nil)
+    XCTAssertEqual(content(of: view), "abc")
+    view.redo(nil)
+    XCTAssertEqual(content(of: view), "abcX")
+  }
+
+  @MainActor
+  func testPasteRefusesOverBudgetClipboard() throws {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString("abcdef", forType: .string)
+    let view = try makeEditableViewer("")
+    view.maximumPastedByteCount = 3
+    view.paste(nil)
+    XCTAssertEqual(content(of: view), "")  // refused: clipboard exceeds the budget
+  }
+
+  @MainActor
+  func testCutMenuItemValidationTracksSelection() throws {
+    let view = try makeEditableViewer("hello")
+    let cutItem = NSMenuItem(
+      title: "Cut", action: #selector(LineRenderingTextView.cut(_:)), keyEquivalent: "")
+    XCTAssertFalse(view.validateUserInterfaceItem(cutItem))  // no selection
+    view.selectAll(nil)
+    XCTAssertTrue(view.validateUserInterfaceItem(cutItem))  // selection present
+  }
+
+  @MainActor
+  func testPasteMenuItemValidationRequiresEditable() throws {
+    let pasteItem = NSMenuItem(
+      title: "Paste", action: #selector(LineRenderingTextView.paste(_:)), keyEquivalent: "")
+    XCTAssertTrue(try makeEditableViewer("ab").validateUserInterfaceItem(pasteItem))
+    XCTAssertFalse(try makeViewer("ab").validateUserInterfaceItem(pasteItem))  // read-only
+  }
 }

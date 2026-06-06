@@ -199,6 +199,22 @@ final class TextBuffer {
     }
   }
 
+  /// Replaces the UTF-16 range `[start, end)` with `text` in a single undo step.
+  /// Uses the byte API so text containing a NUL is handled, and `withUTF8` to
+  /// avoid an extra full copy.
+  func replace(_ text: String, fromUTF16 start: Int, toUTF16 end: Int) throws {
+    guard start >= 0, end >= 0 else {
+      throw TextBufferError.invalidRange
+    }
+    var text = text
+    let status = text.withUTF8 { buffer in
+      locus_text_buffer_replace(handle, start, end, buffer.baseAddress, buffer.count)
+    }
+    guard status == LOCUS_STATUS_OK else {
+      throw Self.error(for: status)
+    }
+  }
+
   /// Reverts the most recent edit. Returns whether anything was undone.
   @discardableResult
   func undo() throws -> Bool {

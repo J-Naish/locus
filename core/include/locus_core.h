@@ -396,6 +396,15 @@ LocusStatus locus_text_buffer_insert_bytes(
 LocusStatus locus_text_buffer_delete(
     LocusTextBuffer *buffer, size_t start_utf16, size_t end_utf16);
 
+/*
+ * Replaces the UTF-16 range [start_utf16, end_utf16) with a length-counted UTF-8
+ * buffer (which may contain NUL) in a single undo step. Invalid UTF-8 ->
+ * LOCUS_TEXT_STATUS_NOT_UTF8.
+ */
+LocusStatus locus_text_buffer_replace(
+    LocusTextBuffer *buffer, size_t start_utf16, size_t end_utf16,
+    const uint8_t *bytes, size_t len);
+
 /* Undo/redo. out_did_* (which may be NULL) receives whether anything changed. */
 LocusStatus locus_text_buffer_undo(LocusTextBuffer *buffer, bool *out_did_undo);
 LocusStatus locus_text_buffer_redo(LocusTextBuffer *buffer, bool *out_did_redo);

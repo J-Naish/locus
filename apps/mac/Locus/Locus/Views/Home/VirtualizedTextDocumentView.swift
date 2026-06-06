@@ -93,7 +93,7 @@ struct TextSelection: Equatable {
 /// height is synthesized from the line count, so a multi-gigabyte file never has
 /// its text assembled in memory — scrolling redraws exposed bands. Lines are not
 /// wrapped; the view widens to the widest line it has drawn.
-final class LineRenderingTextView: NSView {
+final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private(set) var buffer: TextBuffer?
   let layout: TextViewportLayout
   private let font: NSFont
@@ -150,6 +150,10 @@ final class LineRenderingTextView: NSView {
   /// Much lower bound for the selection text handed to assistive technology, which
   /// may poll it repeatedly. Over this, accessibility reports no selected text.
   var maximumAccessibilitySelectedTextByteCount = 1 * 1024 * 1024
+  /// Upper bound on a single paste, so an enormous clipboard cannot freeze the
+  /// main thread being inserted. Over this, the paste is refused with a beep.
+  /// Internal so tests can lower it.
+  var maximumPastedByteCount = 64 * 1024 * 1024
   private var cachedBand: (revision: UInt64, range: Range<Int>, lines: [NSAttributedString])?
   private var maxObservedLineWidth: CGFloat = 0
   private var pendingLayoutUpdate = false
@@ -342,25 +346,102 @@ final class LineRenderingTextView: NSView {
     ClipboardService().copyPlainText(text)
   }
 
+  /// Copies the selection (bounded like `copy`) and deletes it. The copy happens
+  /// only after the delete succeeds, so a failed cut never leaves the clipboard
+  /// holding text that is still in the document. A no-op without a selection or
+  /// when read-only.
+  @objc func cut(_ sender: Any?) {
+    guard isEditable, let text = selectedText(), !text.isEmpty,
+      let range = currentSelectionUTF16Range(), range.end > range.start
+    else {
+      return
+    }
+    if replace(globalStart: range.start, globalEnd: range.end, with: "") {
+      ClipboardService().copyPlainText(text)
+    }
+  }
+
+  /// Replaces the selection (or inserts at the caret) with the pasteboard's plain
+  /// text. A no-op when read-only or the pasteboard has no string; an over-budget
+  /// clipboard is refused with a beep so a giant paste cannot freeze the main
+  /// thread.
+  @objc func paste(_ sender: Any?) {
+    guard isEditable, let string = NSPasteboard.general.string(forType: .string),
+      !string.isEmpty
+    else {
+      return
+    }
+    if string.utf8.count > maximumPastedByteCount {
+      NSSound.beep()
+      return
+    }
+    insertText(string)
+  }
+
+  // Edit-menu (`undo:` / `redo:`) dispatch. Cmd+Z is intercepted in
+  // `performKeyEquivalent`, but the menu sends these action selectors to the
+  // first responder, so route them to the same buffer undo stack.
+  @objc func undo(_ sender: Any?) { undoEdit() }
+  @objc func redo(_ sender: Any?) { redoEdit() }
+
+  // Editing shortcuts are intercepted here (rather than relying on the Edit
+  // menu's validation) so they work whenever the viewer is focused. Cmd+Z routes
+  // to the buffer's own undo stack, which is the single source of truth (and
+  // coalesces typing), so the system undo manager is intentionally not used.
   override func performKeyEquivalent(with event: NSEvent) -> Bool {
     // Only act while focused; otherwise let the focused responder (e.g. the
     // editable editor) handle the shortcut.
-    guard window?.firstResponder === self,
-      event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-      let key = event.charactersIgnoringModifiers
+    guard window?.firstResponder === self else {
+      return super.performKeyEquivalent(with: event)
+    }
+    let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    // Command, optionally with Shift; ignore Control/Option chords.
+    guard modifiers.contains(.command), modifiers.subtracting([.command, .shift]).isEmpty,
+      let key = event.charactersIgnoringModifiers?.lowercased()
     else {
       return super.performKeyEquivalent(with: event)
     }
-    switch key {
-    case "a":
+    let shift = modifiers.contains(.shift)
+    switch (key, shift) {
+    case ("a", false):
       selectAll(nil)
-      return true
-    case "c":
+    case ("c", false):
       copy(nil)
-      return true
+    case ("x", false) where isEditable:
+      cut(nil)
+    case ("v", false) where isEditable:
+      paste(nil)
+    case ("z", false) where isEditable:
+      undoEdit()
+    case ("z", true) where isEditable:
+      redoEdit()
     default:
       return super.performKeyEquivalent(with: event)
     }
+    return true
+  }
+
+  /// Enables/disables the editing menu items this view handles. Undo/redo are
+  /// enabled whenever editable (the buffer owns the actual undo stack and no-ops
+  /// when empty); copy/cut need a selection; paste needs editing.
+  func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+    switch item.action {
+    case #selector(copy(_:)):
+      return hasNonEmptySelection
+    case #selector(cut(_:)):
+      return isEditable && hasNonEmptySelection
+    case #selector(paste(_:)), #selector(undo(_:)), #selector(redo(_:)):
+      return isEditable
+    case #selector(selectAll(_:)):
+      return buffer != nil
+    default:
+      return true
+    }
+  }
+
+  private var hasNonEmptySelection: Bool {
+    if let selection { return !selection.isEmpty }
+    return false
   }
 
   /// The selected text for copying. Returns `nil` for an empty/absent selection,
@@ -659,11 +740,6 @@ final class LineRenderingTextView: NSView {
 
   /// Inserts `string`, replacing the current selection if any, and leaves the
   /// caret after the inserted text. A no-op when read-only, empty, or absent.
-  ///
-  /// A selection replace is two buffer ops (delete then insert). To keep it
-  /// atomic, a failed insert rolls the delete back via the buffer's own undo so
-  /// the selected text is never silently lost. (A single coalesced `replace`
-  /// also matters for undo granularity and is a later slice.)
   func insertText(_ string: String) {
     guard isEditable, !string.isEmpty, let range = currentSelectionUTF16Range() else {
       return
@@ -672,33 +748,28 @@ final class LineRenderingTextView: NSView {
   }
 
   /// Replaces the global UTF-16 range `[start, end)` with `string`, leaving the
-  /// caret after the inserted text. The two ops (delete then insert) are kept
-  /// atomic: a failed insert rolls the delete back via the buffer's undo so text
-  /// is never silently lost.
-  private func replace(globalStart start: Int, globalEnd end: Int, with string: String) {
-    guard let buffer else { return }
-    let deleting = end > start
-    if deleting {
-      do {
-        try buffer.delete(fromUTF16: start, toUTF16: end)
-      } catch {
-        NSSound.beep()
-        return
-      }
-    }
-    if !string.isEmpty {
-      do {
+  /// caret after the inserted text. Returns whether the buffer was changed.
+  ///
+  /// A range replace goes through the buffer's atomic `replace` (one undo step,
+  /// no partial state). A pure insert (empty range) uses `insert`, which
+  /// coalesces consecutive typing into a single undo step.
+  @discardableResult
+  private func replace(globalStart start: Int, globalEnd end: Int, with string: String) -> Bool {
+    guard let buffer else { return false }
+    do {
+      if end > start {
+        try buffer.replace(string, fromUTF16: start, toUTF16: end)
+      } else if !string.isEmpty {
         try buffer.insert(string, atUTF16: start)
-      } catch {
-        if deleting {
-          _ = try? buffer.undo()  // restore the just-deleted range
-        }
-        NSSound.beep()
-        finishEdit(caretUTF16: start)
-        return
+      } else {
+        return false
       }
+    } catch {
+      NSSound.beep()
+      return false
     }
     finishEdit(caretUTF16: start + (string as NSString).length)
+    return true
   }
 
   /// Deletes the selection, or one composed character before the caret (merging
@@ -753,6 +824,58 @@ final class LineRenderingTextView: NSView {
     let next = steppedWordEndpoint(from: caret, forward: true)
     guard next != caret else { return }
     deleteRange(from: caret, to: next)
+  }
+
+  /// Reverts the most recent buffer edit. Returns whether the request was handled
+  /// (true while editable), regardless of whether anything was undone.
+  @discardableResult
+  func undoEdit() -> Bool {
+    guard isEditable, let buffer else { return false }
+    composition = nil
+    if (try? buffer.undo()) == true {
+      afterUndoRedo()
+    }
+    return true
+  }
+
+  /// Re-applies the most recently undone edit. See `undoEdit` for the return value.
+  @discardableResult
+  func redoEdit() -> Bool {
+    guard isEditable, let buffer else { return false }
+    composition = nil
+    if (try? buffer.redo()) == true {
+      afterUndoRedo()
+    }
+    return true
+  }
+
+  /// Refresh after undo/redo replaced buffer content beneath the current
+  /// selection: drop caches, clamp the (possibly now out-of-range) selection,
+  /// re-measure, and repaint.
+  private func afterUndoRedo() {
+    cachedBand = nil
+    maxObservedLineWidth = 0
+    verticalGoalX = nil
+    clampSelectionToBounds()
+    updateLayout()
+    if let head = selection?.head {
+      scrollCaretToVisible(head)
+    }
+    invalidateVisibleArea()
+  }
+
+  /// Clamps the selection endpoints into the current document bounds, since
+  /// undo/redo can shrink the content beneath a stale selection.
+  private func clampSelectionToBounds() {
+    guard let selection else { return }
+    self.selection = TextSelection(
+      anchor: clampedEndpoint(selection.anchor), head: clampedEndpoint(selection.head))
+  }
+
+  private func clampedEndpoint(_ endpoint: TextSelection.Endpoint) -> TextSelection.Endpoint {
+    let line = min(max(0, endpoint.line), max(0, lineCount - 1))
+    let column = min(max(0, endpoint.columnUTF16), lineLengthUTF16(line))
+    return TextSelection.Endpoint(line: line, columnUTF16: column)
   }
 
   /// Deletes the UTF-16 range between two endpoints and collapses the caret to
