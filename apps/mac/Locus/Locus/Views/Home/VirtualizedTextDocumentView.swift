@@ -491,6 +491,27 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   // every scroll instead, which stays correct.
   override class var isCompatibleWithResponsiveScrolling: Bool { false }
 
+  // Text-editing I-beam over the text body, like a typical editor; the
+  // line-number gutter keeps the default arrow. Cursor rects are declarative —
+  // AppKit switches the cursor automatically as the pointer crosses the region
+  // boundary and re-evaluates them even when the pointer is already inside, so
+  // the cursor is correct without depending on a scroll to refresh it. The
+  // gutter is pinned to the left of the visible area (it tracks horizontal
+  // scroll), so its right edge sits at the scroll origin plus the gutter width;
+  // the I-beam covers the visible band to the right of it. `viewportDidScroll`
+  // and `updateLayout` invalidate these rects so the boundary stays aligned as
+  // the document scrolls horizontally or the gutter width changes.
+  override func resetCursorRects() {
+    let visible = visibleRect
+    guard !visible.isEmpty else { return }
+    let gutterEdge = (enclosingScrollView?.contentView.bounds.origin.x ?? 0) + gutterWidth
+    let textMinX = max(visible.minX, gutterEdge)
+    let textRect = NSRect(
+      x: textMinX, y: visible.minY, width: visible.maxX - textMinX, height: visible.height)
+    guard textRect.width > 0 else { return }
+    addCursorRect(textRect, cursor: .iBeam)
+  }
+
   func setBuffer(_ buffer: TextBuffer?) {
     self.buffer = buffer
     cachedBand = nil
@@ -528,6 +549,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// so this stays cheap even for a multi-gigabyte document.
   func viewportDidScroll() {
     invalidateVisibleArea()
+    // The gutter is viewport-pinned, so its right edge (the I-beam boundary)
+    // shifts with horizontal scroll; re-establish the cursor rects for it.
+    window?.invalidateCursorRects(for: self)
   }
 
   // MARK: Accessibility
@@ -1682,6 +1706,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         gutterWidth + horizontalPadding + maxObservedLineWidth + trailingContentMargin
       setFrameSize(NSSize(width: max(visibleWidth, contentWidth), height: height))
     }
+    // The visible band and gutter width may have changed; re-establish the
+    // I-beam cursor rect so its boundary stays aligned with the gutter edge.
+    window?.invalidateCursorRects(for: self)
   }
 
   private func attributedBandLines(for buffer: TextBuffer, range: Range<Int>)
