@@ -79,7 +79,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(linkedFileRow.waitForExistence(timeout: 5), app.debugDescription)
     linkedFileRow.click()
 
-    let editor = app.textViews["document-text-editor"]
+    let editor = app.textViews["document-large-text-viewer"]
     XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
     editor.click()
 
@@ -286,7 +286,7 @@ final class WorkspaceSearchUITests: XCTestCase {
       app.staticTexts["Alpha Note.md"].waitForExistence(timeout: 5), app.debugDescription)
     app.staticTexts["Alpha Note.md"].click()
 
-    let editor = app.textViews["document-text-editor"]
+    let editor = app.textViews["document-large-text-viewer"]
     XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
     editor.click()
     editor.typeText("Draft ")
@@ -642,7 +642,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     projectBriefRow.doubleClick()
 
     XCTAssertTrue(
-      app.textViews["document-text-editor"].waitForExistence(timeout: 5), app.debugDescription)
+      app.textViews["document-large-text-viewer"].waitForExistence(timeout: 5), app.debugDescription)
   }
 
   @MainActor
@@ -655,7 +655,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     projectBriefRow.click()
 
     XCTAssertTrue(
-      app.textViews["document-text-editor"].waitForExistence(timeout: 5), app.debugDescription)
+      app.textViews["document-large-text-viewer"].waitForExistence(timeout: 5), app.debugDescription)
     assertTableRow(named: "Project Brief.md", isSelectedIn: app)
 
     let sidebarList = workspaceSidebarList(in: app)
@@ -667,7 +667,7 @@ final class WorkspaceSearchUITests: XCTestCase {
       app.textFields["workspace-sidebar-creation-name-field"].exists,
       app.debugDescription
     )
-    XCTAssertTrue(app.textViews["document-text-editor"].exists, app.debugDescription)
+    XCTAssertTrue(app.textViews["document-large-text-viewer"].exists, app.debugDescription)
   }
 
   @MainActor
@@ -710,14 +710,14 @@ final class WorkspaceSearchUITests: XCTestCase {
     projectBriefRow.click()
 
     XCTAssertTrue(
-      app.textViews["document-text-editor"].waitForExistence(timeout: 5), app.debugDescription)
+      app.textViews["document-large-text-viewer"].waitForExistence(timeout: 5), app.debugDescription)
 
     let reportsRow = workspaceSidebarLabel(named: "Reports", in: app)
     XCTAssertTrue(reportsRow.waitForExistence(timeout: 5), app.debugDescription)
     reportsRow.click()
 
     assertTableRow(named: "Reports", isSelectedIn: app)
-    XCTAssertTrue(app.textViews["document-text-editor"].exists, app.debugDescription)
+    XCTAssertTrue(app.textViews["document-large-text-viewer"].exists, app.debugDescription)
     XCTAssertFalse(app.staticTexts["Select a File"].exists, app.debugDescription)
   }
 
@@ -881,7 +881,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
     projectBriefRow.click()
 
-    let editor = app.textViews["document-text-editor"]
+    let editor = app.textViews["document-large-text-viewer"]
     XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
     editor.click()
 
@@ -905,44 +905,6 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
-  func testUnsavedMarkdownDraftSurvivesRowSelectionChanges() throws {
-    let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
-    let projectBriefURL = workspaceURL.appending(path: "Project Brief.md")
-    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
-
-    let projectBriefRow = app.outlines.firstMatch.cells
-      .containing(NSPredicate(format: "value == %@", "Project Brief.md"))
-      .firstMatch
-    XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
-    projectBriefRow.click()
-
-    let editor = app.textViews["document-text-editor"]
-    XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
-    editor.click()
-
-    let updatedText = "# Draft Survives\n\nThis edit is not saved yet.\n"
-    NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(updatedText, forType: .string)
-    app.typeKey("a", modifierFlags: [.command])
-    app.typeKey("v", modifierFlags: [.command])
-    XCTAssertTrue(waitForEditorContents(updatedText, in: app, timeout: 5), app.debugDescription)
-
-    let notesRow = app.outlines.firstMatch.cells
-      .containing(NSPredicate(format: "value == %@", "Notes.txt"))
-      .firstMatch
-    XCTAssertTrue(notesRow.waitForExistence(timeout: 5), app.debugDescription)
-    notesRow.click()
-
-    XCTAssertFalse(waitForFileContents(updatedText, at: projectBriefURL, timeout: 0.5))
-
-    projectBriefRow.click()
-    XCTAssertTrue(waitForEditorContents(updatedText, in: app, timeout: 5), app.debugDescription)
-    app.typeKey("s", modifierFlags: [.command])
-
-    XCTAssertTrue(waitForFileContents(updatedText, at: projectBriefURL), app.debugDescription)
-  }
-
-  @MainActor
   func testOpenTextDocumentSyncsExternalChangeAutomatically() throws {
     let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
     let projectBriefURL = workspaceURL.appending(path: "Project Brief.md")
@@ -954,7 +916,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
     projectBriefRow.click()
 
-    let editor = app.textViews["document-text-editor"]
+    let editor = app.textViews["document-large-text-viewer"]
     XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
 
     let externalText = "# External Update\n\nChanged outside Locus.\n"
@@ -967,39 +929,6 @@ final class WorkspaceSearchUITests: XCTestCase {
 
     XCTAssertFalse(app.buttons["document-save-button"].exists, app.debugDescription)
     XCTAssertFalse(app.buttons["Save"].exists, app.debugDescription)
-  }
-
-  @MainActor
-  func testExternalTextChangeReplacesUnsavedEditorText() throws {
-    let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
-    let projectBriefURL = workspaceURL.appending(path: "Project Brief.md")
-    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
-
-    let projectBriefRow = app.outlines.firstMatch.cells
-      .containing(NSPredicate(format: "value == %@", "Project Brief.md"))
-      .firstMatch
-    XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
-    projectBriefRow.click()
-
-    let editor = app.textViews["document-text-editor"]
-    XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
-    editor.click()
-
-    let userText = "# User Draft\n\nKeep this Locus edit.\n"
-    NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(userText, forType: .string)
-    app.typeKey("a", modifierFlags: [.command])
-    app.typeKey("v", modifierFlags: [.command])
-    XCTAssertTrue(waitForEditorContents(userText, in: app, timeout: 5), app.debugDescription)
-
-    let externalText = "# External Update\n\nChanged outside Locus.\n"
-    try externalText.write(to: projectBriefURL, atomically: true, encoding: .utf8)
-
-    XCTAssertTrue(
-      waitForEditorContents(externalText, in: app, timeout: 5),
-      app.debugDescription
-    )
-    XCTAssertFalse(app.buttons["document-save-button"].exists, app.debugDescription)
   }
 
   @MainActor
@@ -1585,7 +1514,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     in app: XCUIApplication,
     timeout: TimeInterval = 2
   ) -> Bool {
-    let editor = app.textViews["document-text-editor"]
+    let editor = app.textViews["document-large-text-viewer"]
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
       NSPasteboard.general.clearContents()

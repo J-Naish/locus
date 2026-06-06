@@ -64,7 +64,6 @@ struct HomeView: View {
   @State private var isWorkspaceDeletionErrorPresented = false
 
   private let coreBridge: CoreBridge
-  private let textDocumentStore: any TextDocumentStoring
   private let imageDocumentStore: any ImageDocumentStoring
   private let pdfDocumentStore: any PDFDocumentStoring
   private let mediaDocumentStore: any MediaDocumentStoring
@@ -79,7 +78,6 @@ struct HomeView: View {
 
   init(
     coreBridge: CoreBridge = CoreBridge(),
-    textDocumentStore: any TextDocumentStoring = TextDocumentStore(),
     imageDocumentStore: any ImageDocumentStoring = ImageDocumentStore(),
     pdfDocumentStore: any PDFDocumentStoring = PDFDocumentStore(),
     mediaDocumentStore: any MediaDocumentStoring = MediaDocumentStore(),
@@ -93,7 +91,6 @@ struct HomeView: View {
     homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser
   ) {
     self.coreBridge = coreBridge
-    self.textDocumentStore = textDocumentStore
     self.imageDocumentStore = imageDocumentStore
     self.pdfDocumentStore = pdfDocumentStore
     self.mediaDocumentStore = mediaDocumentStore
@@ -123,7 +120,6 @@ struct HomeView: View {
       rootURL: workspaceRootURL,
       recentFiles: recentFiles,
       recentFolders: recentFolders,
-      textDocumentStore: textDocumentStore,
       imageDocumentStore: imageDocumentStore,
       pdfDocumentStore: pdfDocumentStore,
       mediaDocumentStore: mediaDocumentStore,
@@ -919,7 +915,6 @@ private struct WorkspaceContentView: View {
   let rootURL: URL?
   let recentFiles: [RecentFile]
   let recentFolders: [RecentFolder]
-  let textDocumentStore: any TextDocumentStoring
   let imageDocumentStore: any ImageDocumentStoring
   let pdfDocumentStore: any PDFDocumentStoring
   let mediaDocumentStore: any MediaDocumentStoring
@@ -952,7 +947,6 @@ private struct WorkspaceContentView: View {
           rootURL: rootURL,
           recentFiles: recentFiles,
           recentFolders: recentFolders,
-          textDocumentStore: textDocumentStore,
           imageDocumentStore: imageDocumentStore,
           pdfDocumentStore: pdfDocumentStore,
           mediaDocumentStore: mediaDocumentStore,
@@ -1094,7 +1088,6 @@ private struct WorkspaceBrowserView: View {
   let rootURL: URL?
   let recentFiles: [RecentFile]
   let recentFolders: [RecentFolder]
-  let textDocumentStore: any TextDocumentStoring
   let imageDocumentStore: any ImageDocumentStoring
   let pdfDocumentStore: any PDFDocumentStoring
   let mediaDocumentStore: any MediaDocumentStoring
@@ -1132,7 +1125,6 @@ private struct WorkspaceBrowserView: View {
     rootURL: URL?,
     recentFiles: [RecentFile],
     recentFolders: [RecentFolder],
-    textDocumentStore: any TextDocumentStoring,
     imageDocumentStore: any ImageDocumentStoring,
     pdfDocumentStore: any PDFDocumentStoring,
     mediaDocumentStore: any MediaDocumentStoring,
@@ -1148,7 +1140,6 @@ private struct WorkspaceBrowserView: View {
     self.rootURL = rootURL
     self.recentFiles = recentFiles
     self.recentFolders = recentFolders
-    self.textDocumentStore = textDocumentStore
     self.imageDocumentStore = imageDocumentStore
     self.pdfDocumentStore = pdfDocumentStore
     self.mediaDocumentStore = mediaDocumentStore
@@ -2034,7 +2025,6 @@ private struct WorkspaceBrowserView: View {
       } else {
         WorkspaceDocumentSurface(
           entry: openDocumentEntry,
-          textDocumentStore: textDocumentStore,
           imageDocumentStore: imageDocumentStore,
           pdfDocumentStore: pdfDocumentStore,
           mediaDocumentStore: mediaDocumentStore,

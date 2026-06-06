@@ -243,6 +243,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// with unsaved edits.
   var onDirtyChange: ((Bool) -> Void)?
 
+  /// Reports focus changes so the host can pause document navigation shortcuts
+  /// (e.g. Cmd+[ / Cmd+]) while the editor has the keyboard.
+  var onFocusChange: ((Bool) -> Void)?
+
   private let bufferStore = TextBufferStore()
 
   /// Bytes fetched per line for the visible band; longer lines are truncated for
@@ -656,6 +660,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if didBecome {
       startCaretBlinking()
       invalidateVisibleArea()
+      onFocusChange?(true)
     }
     return didBecome
   }
@@ -668,6 +673,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       composition = nil
       stopCaretBlinking()
       invalidateVisibleArea()
+      onFocusChange?(false)
     }
     return didResign
   }
@@ -2183,6 +2189,7 @@ struct LargeTextViewport: NSViewRepresentable {
   let saveRequest: Int
   let onSaveCompletion: (Result<DocumentFileFingerprint?, Error>) -> Void
   let onDirtyChange: (Bool) -> Void
+  let onFocusChange: (Bool) -> Void
 
   func makeNSView(context: Context) -> NSScrollView {
     let scrollView = NSScrollView()
@@ -2203,6 +2210,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.saveEncoding = saveEncoding
     documentView.onSaveCompletion = onSaveCompletion
     documentView.onDirtyChange = onDirtyChange
+    documentView.onFocusChange = onFocusChange
     scrollView.documentView = documentView
 
     documentView.setBuffer(buffer)
@@ -2249,6 +2257,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.saveEncoding = saveEncoding
     documentView.onSaveCompletion = onSaveCompletion
     documentView.onDirtyChange = onDirtyChange
+    documentView.onFocusChange = onFocusChange
     if documentView.buffer !== buffer {
       documentView.setBuffer(buffer)
     }
@@ -2306,6 +2315,9 @@ struct VirtualizedTextDocumentView: View {
   /// Reports the buffer's dirty state so the host can decide whether an external
   /// change may safely reload or conflicts with unsaved edits.
   var onDirtyChange: (Bool) -> Void = { _ in }
+  /// Reports focus changes so the host can pause navigation shortcuts while the
+  /// editor has the keyboard.
+  var onFocusChange: (Bool) -> Void = { _ in }
 
   @State private var phase: Phase = .loading
   private let bufferStore = TextBufferStore()
@@ -2331,7 +2343,8 @@ struct VirtualizedTextDocumentView: View {
           saveEncoding: encoding,
           saveRequest: saveRequest,
           onSaveCompletion: onSaveCompletion,
-          onDirtyChange: onDirtyChange
+          onDirtyChange: onDirtyChange,
+          onFocusChange: onFocusChange
         )
       case .failed(let message):
         ContentUnavailableView {

@@ -6,33 +6,26 @@ import SwiftUI
 
 struct WorkspaceDocumentSurface: View {
   let entry: WorkspaceEntry?
-  let textDocumentStore: any TextDocumentStoring
   let imageDocumentStore: any ImageDocumentStoring
   let pdfDocumentStore: any PDFDocumentStoring
   let mediaDocumentStore: any MediaDocumentStoring
   let quickLookDocumentStore: any QuickLookDocumentStoring
   let onTextInputFocusChange: (Bool) -> Void
 
-  @State private var loadState: TextDocumentLoadState = .empty
-  @State private var text = ""
-  @State private var savedText = ""
-  @State private var encoding: String.Encoding = .utf8
-  @State private var activeDocumentID: WorkspaceEntry.ID?
-  @State private var drafts: [WorkspaceEntry.ID: TextDocumentDraft] = [:]
   @State private var saveErrorMessage: String?
   @State private var knownDocumentFingerprint: DocumentFileFingerprint?
   @State private var documentReloadGeneration = 0
   @State private var isEditorFocused = false
-  /// Whether the large-file viewer has unsaved edits, mirrored from it so an
-  /// external change can be reconciled without losing edits.
-  @State private var largeDocumentDirty = false
-  /// Set when an external change arrives while the large-file viewer is dirty:
-  /// the buffer is kept (not reloaded) and a conflict banner is shown.
-  @State private var largeDocumentConflict = false
-  /// Bumped to ask the large-file viewer to save. The viewer owns the buffer and
-  /// its off-main write, so the menu/Cmd+S command routes through this token
-  /// rather than saving here.
-  @State private var largeDocumentSaveRequest = 0
+  /// Whether the text editor has unsaved edits, mirrored from it so an external
+  /// change can be reconciled without losing edits.
+  @State private var documentDirty = false
+  /// Set when an external change arrives while the editor is dirty: the buffer is
+  /// kept (not reloaded) and a conflict banner is shown.
+  @State private var documentConflict = false
+  /// Bumped to ask the editor to save. The editor owns the buffer and its off-main
+  /// write, so the menu/Cmd+S command routes through this token rather than saving
+  /// here.
+  @State private var documentSaveRequest = 0
   @StateObject private var documentChangeMonitor = DocumentChangeMonitor()
 
   var body: some View {
@@ -86,28 +79,25 @@ struct WorkspaceDocumentSurface: View {
       DocumentSaveCommand(canSave: !isSaveDisabled, save: saveSelectedDocument)
     )
     .task(id: entry?.id) {
-      // Start before and after loading so external writes during the load path
-      // still trigger a sync without relying on the later refresh token.
+      // Start before and after preparing so external writes during the prepare
+      // path still trigger a sync without relying on the later refresh token.
       startDocumentMonitoringIfNeeded(for: entry)
-      await loadSelectedDocumentIfNeeded()
+      await prepareSelectedDocument()
       guard !Task.isCancelled else {
         return
       }
       startDocumentMonitoringIfNeeded(for: entry)
     }
     .onChange(of: entry?.id) {
-      persistActiveDraftIfNeeded()
       isEditorFocused = false
       knownDocumentFingerprint = nil
-      largeDocumentDirty = false
-      largeDocumentConflict = false
+      documentDirty = false
+      documentConflict = false
+      saveErrorMessage = nil
       onTextInputFocusChange(false)
     }
     .onChange(of: isEditorFocused) {
       onTextInputFocusChange(isEditorFocused)
-    }
-    .onChange(of: text) {
-      persistActiveDraftIfNeeded()
     }
     .onDisappear {
       documentChangeMonitor.stopMonitoring()
@@ -125,62 +115,36 @@ struct WorkspaceDocumentSurface: View {
           .accessibilityIdentifier("document-save-error")
       }
 
-      if largeDocumentConflict {
+      if documentConflict {
         HStack(spacing: 12) {
           Label("This file changed on disk.", systemImage: "exclamationmark.triangle")
             .font(.caption)
           Spacer(minLength: 0)
           // Dismiss the warning and keep editing the in-memory version; the
           // divergence from disk is resolved on the next save.
-          Button("Keep Editing") { largeDocumentConflict = false }
-          Button("Reload") { reloadLargeDocumentDiscardingEdits() }
+          Button("Keep Editing") { documentConflict = false }
+          Button("Reload") { reloadDocumentDiscardingEdits() }
         }
         .padding(12)
         .background(.thinMaterial)
         .accessibilityIdentifier("document-conflict-banner")
       }
 
-      switch loadState {
-      case .empty, .loading:
-        // No loading indicator: documents load fast enough that a spinner would
-        // only flash. Keep the surface blank until the content is ready.
-        Color.clear
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-      case .failed(let message):
-        ContentUnavailableView {
-          Label("Document Could Not Be Opened", systemImage: "exclamationmark.triangle")
-        } description: {
-          Text(message)
-        } actions: {
-          Button("Try Again") {
-            Task {
-              await loadSelectedDocumentIfNeeded()
-            }
-          }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-      case .loaded:
-        TextDocumentEditorView(
-          text: $text,
-          syntax: WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText,
-          isReadOnly: entry.isReadOnly,
-          accessibilityLabel: "\(entry.name) text",
-          onFocusChange: { isFocused in
-            isEditorFocused = isFocused
-          }
-        )
-      case .tooLargeForEditing(let url):
-        VirtualizedTextDocumentView(
-          url: url,
-          accessibilityLabel: "\(entry.name) text",
-          syntax: WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText,
-          isEditable: Self.largeFileEditingEnabled && !entry.isReadOnly,
-          reloadToken: documentReloadGeneration,
-          saveRequest: largeDocumentSaveRequest,
-          onSaveCompletion: { result in handleLargeDocumentSaveResult(result, for: entry) },
-          onDirtyChange: { isDirty in handleLargeDocumentDirtyChange(isDirty) }
-        )
-      }
+      // Every editable text file — any size, any build — opens in the virtualized
+      // engine, which streams the visible band from the Rust buffer and owns its
+      // own loading, failure UI, editing, save, dirty state, and external-change
+      // reconciliation.
+      VirtualizedTextDocumentView(
+        url: entry.url,
+        accessibilityLabel: "\(entry.name) text",
+        syntax: WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText,
+        isEditable: !entry.isReadOnly,
+        reloadToken: documentReloadGeneration,
+        saveRequest: documentSaveRequest,
+        onSaveCompletion: { result in handleDocumentSaveResult(result, for: entry) },
+        onDirtyChange: { isDirty in handleDocumentDirtyChange(isDirty) },
+        onFocusChange: { isFocused in isEditorFocused = isFocused }
+      )
     }
   }
 
@@ -188,92 +152,32 @@ struct WorkspaceDocumentSurface: View {
     DocumentReloadTrigger(entryID: entry.id, generation: documentReloadGeneration)
   }
 
-  /// Whether the large-file viewer accepts edits. The editable large-file path —
-  /// edit, Cmd+S save (off the main thread), and external-change conflict
-  /// handling — is Debug-only validation for now. Remaining before it can be
-  /// enabled for shipped (Release) builds: routing all sizes through this engine
-  /// and preserving the original text encoding on save. Until then Release keeps
-  /// large files read-only so no half-finished editing surface reaches users.
-  private static var largeFileEditingEnabled: Bool {
-    #if DEBUG
-      return true
-    #else
-      return false
-    #endif
-  }
-
   private var isSaveDisabled: Bool {
-    guard let entry, !entry.isReadOnly else {
+    // The editor owns its dirty state; Save is enabled only for a writable text
+    // document with unsaved edits.
+    guard let entry, !entry.isReadOnly, WorkspaceTextDocumentSupport.canEdit(entry) else {
       return true
     }
-
-    switch loadState {
-    case .loaded:
-      return text == savedText
-    case .tooLargeForEditing:
-      // The large-file viewer owns its dirty state; Save is enabled only when it
-      // is editable (Debug) and has unsaved edits.
-      return !(Self.largeFileEditingEnabled && largeDocumentDirty)
-    default:
-      return true
-    }
+    return !documentDirty
   }
 
+  /// Records the on-disk fingerprint for a freshly selected text document so a
+  /// later external change can be detected. The editor itself opens the file; the
+  /// surface only needs the baseline fingerprint (and clears any stale error).
   @MainActor
-  private func loadSelectedDocumentIfNeeded() async {
-    persistActiveDraftIfNeeded()
+  private func prepareSelectedDocument() async {
     saveErrorMessage = nil
 
     guard let entry, WorkspaceTextDocumentSupport.canEdit(entry) else {
-      resetInactiveTextDocument()
+      knownDocumentFingerprint = nil
       return
     }
 
-    activeDocumentID = entry.id
-
-    if let draft = drafts[entry.id] {
-      restoreDraft(draft, for: entry)
+    let fingerprint = await DocumentFileFingerprint.load(at: entry.url)
+    guard self.entry?.id == entry.id else {
       return
     }
-
-    prepareTextDocumentLoad()
-
-    do {
-      let document = try await textDocumentStore.loadText(at: entry.url)
-      let fingerprint = await DocumentFileFingerprint.load(at: entry.url)
-      guard self.entry?.id == entry.id else {
-        return
-      }
-
-      applyLoadedTextDocument(document, fingerprint: fingerprint)
-    } catch TextDocumentStoreError.fileTooLarge {
-      guard self.entry?.id == entry.id else {
-        return
-      }
-      // Too large to edit as a string: open it in the virtualized viewer, which
-      // streams the visible band from the Rust buffer. In Debug it also edits in
-      // place for on-device validation; Release stays read-only until the save /
-      // dirty / external-change-conflict slice (see `largeFileEditingEnabled`).
-      knownDocumentFingerprint = await DocumentFileFingerprint.load(at: entry.url)
-      loadState = .tooLargeForEditing(entry.url)
-    } catch {
-      guard self.entry?.id == entry.id else {
-        return
-      }
-
-      loadState = .failed(error.localizedDescription)
-    }
-  }
-
-  @MainActor
-  private func resetInactiveTextDocument() {
-    activeDocumentID = nil
-    loadState = .empty
-    text = ""
-    savedText = ""
-    encoding = .utf8
-    saveErrorMessage = nil
-    knownDocumentFingerprint = nil
+    knownDocumentFingerprint = fingerprint
   }
 
   @MainActor
@@ -290,87 +194,23 @@ struct WorkspaceDocumentSurface: View {
     }
   }
 
-  @MainActor
-  private func restoreDraft(_ draft: TextDocumentDraft, for entry: WorkspaceEntry) {
-    savedText = draft.savedText
-    text = draft.text
-    encoding = draft.encoding
-    loadState = .loaded
-    knownDocumentFingerprint = draft.knownDocumentFingerprint
-    Task {
-      await syncDisplayedDocumentIfChanged()
-    }
-  }
-
-  @MainActor
-  private func prepareTextDocumentLoad() {
-    loadState = .loading
-    text = ""
-    savedText = ""
-    encoding = .utf8
-    knownDocumentFingerprint = nil
-  }
-
-  @MainActor
-  private func applyLoadedTextDocument(
-    _ document: TextDocument,
-    fingerprint: DocumentFileFingerprint?
-  ) {
-    savedText = document.text
-    text = document.text
-    encoding = document.encoding
-    knownDocumentFingerprint = fingerprint
-    loadState = .loaded
-  }
-
+  /// Asks the editor to save (it owns the buffer and writes off the main thread)
+  /// by bumping a token it observes.
   @MainActor
   private func saveSelectedDocument() {
-    guard let entry,
-      !isSaveDisabled
-    else {
+    guard !isSaveDisabled else {
       return
     }
-
-    if case .tooLargeForEditing = loadState {
-      // The large-file viewer holds the buffer and performs the write off the main
-      // thread; ask it to save by bumping a token it observes.
-      largeDocumentSaveRequest &+= 1
-      return
-    }
-
-    let textToSave = text
-    let encodingToSave = encoding
-    Task {
-      do {
-        try await textDocumentStore.saveText(textToSave, to: entry.url, encoding: encodingToSave)
-        guard self.entry?.id == entry.id else {
-          return
-        }
-
-        let fingerprint = await DocumentFileFingerprint.load(at: entry.url)
-        savedText = textToSave
-        knownDocumentFingerprint = fingerprint
-        drafts.removeValue(forKey: entry.id)
-        saveErrorMessage = nil
-        loadState = .loaded
-      } catch {
-        guard self.entry?.id == entry.id else {
-          return
-        }
-
-        saveErrorMessage = error.localizedDescription
-        loadState = .loaded
-      }
-    }
+    documentSaveRequest &+= 1
   }
 
-  /// Reconciles a large-file viewer save. On success the file fingerprint is
-  /// recorded synchronously from the save result (the viewer read it right after
-  /// writing), so the change monitor never treats our own write as an external
-  /// change — no async window to race. A save also resolves any pending conflict,
-  /// since the file now holds our content. On failure the error is surfaced.
+  /// Reconciles a save. On success the file fingerprint is recorded synchronously
+  /// from the save result (the editor read it right after writing), so the change
+  /// monitor never treats our own write as an external change — no async window to
+  /// race. A save also resolves any pending conflict, since the file now holds our
+  /// content. On failure the error is surfaced.
   @MainActor
-  private func handleLargeDocumentSaveResult(
+  private func handleDocumentSaveResult(
     _ result: Result<DocumentFileFingerprint?, Error>, for entry: WorkspaceEntry
   ) {
     guard self.entry?.id == entry.id else {
@@ -379,52 +219,33 @@ struct WorkspaceDocumentSurface: View {
     switch result {
     case .success(let fingerprint):
       saveErrorMessage = nil
-      largeDocumentConflict = false
+      documentConflict = false
       knownDocumentFingerprint = fingerprint
     case .failure(let error):
       saveErrorMessage = error.localizedDescription
     }
   }
 
-  /// Mirrors the large-file viewer's dirty state. A pending conflict is *not*
-  /// cleared just because the buffer became clean (e.g. undoing edits): the
-  /// external change is still unreconciled, so the banner stays until the user
-  /// reloads/keeps or a reload/save resolves it.
+  /// Mirrors the editor's dirty state. A pending conflict is *not* cleared just
+  /// because the buffer became clean (e.g. undoing edits): the external change is
+  /// still unreconciled, so the banner stays until the user reloads/keeps or a
+  /// reload/save resolves it.
   @MainActor
-  private func handleLargeDocumentDirtyChange(_ isDirty: Bool) {
-    guard largeDocumentDirty != isDirty else {
+  private func handleDocumentDirtyChange(_ isDirty: Bool) {
+    guard documentDirty != isDirty else {
       return
     }
-    largeDocumentDirty = isDirty
+    documentDirty = isDirty
   }
 
   /// Resolves an external-change conflict by discarding in-memory edits and
   /// reopening the file from disk. The fingerprint was already updated when the
   /// conflict was detected, so the reopen does not immediately re-conflict.
   @MainActor
-  private func reloadLargeDocumentDiscardingEdits() {
-    largeDocumentConflict = false
-    largeDocumentDirty = false
+  private func reloadDocumentDiscardingEdits() {
+    documentConflict = false
+    documentDirty = false
     documentReloadGeneration &+= 1
-  }
-
-  @MainActor
-  private func persistActiveDraftIfNeeded() {
-    guard let activeDocumentID else {
-      return
-    }
-
-    if text == savedText {
-      drafts.removeValue(forKey: activeDocumentID)
-    } else {
-      drafts[activeDocumentID] = TextDocumentDraft(
-        text: text,
-        savedText: savedText,
-        encoding: encoding,
-        knownDocumentFingerprint: knownDocumentFingerprint
-          ?? drafts[activeDocumentID]?.knownDocumentFingerprint
-      )
-    }
   }
 
 }
@@ -447,83 +268,27 @@ extension WorkspaceDocumentSurface {
       return
     }
 
-    if case .tooLargeForEditing = loadState {
-      // Accept this disk state as known either way, so the same external change
-      // is not re-detected on every later sync.
-      knownDocumentFingerprint = fingerprint
-      if largeDocumentDirty {
-        // Unsaved edits: do not reopen (that would discard them). Surface a
-        // conflict so the user chooses to reload or keep their changes.
-        largeDocumentConflict = true
-      } else {
-        // Clean: reopen on a fresh memory map to show the new content. This also
-        // reconciles to disk, so any earlier conflict (e.g. one made clean by
-        // undo) is resolved.
-        largeDocumentConflict = false
-        documentReloadGeneration &+= 1
-      }
-    } else if WorkspaceTextDocumentSupport.canEdit(entry) {
-      await syncTextDocumentFromDisk(entry, fingerprint: fingerprint)
+    // Accept this disk state as known either way, so the same external change is
+    // not re-detected on every later sync.
+    knownDocumentFingerprint = fingerprint
+
+    if WorkspaceTextDocumentSupport.canEdit(entry), documentDirty {
+      // Editable text with unsaved edits: do not reopen (that would discard them).
+      // Surface a conflict so the user chooses to reload or keep their changes.
+      documentConflict = true
     } else {
-      knownDocumentFingerprint = fingerprint
+      // Clean text, or a non-editable preview (image/PDF/media): reopen to show the
+      // new content. This also reconciles to disk, resolving any earlier conflict
+      // (e.g. one made clean by undo).
+      documentConflict = false
       documentReloadGeneration &+= 1
     }
   }
-
-  @MainActor
-  fileprivate func syncTextDocumentFromDisk(
-    _ entry: WorkspaceEntry,
-    fingerprint: DocumentFileFingerprint?
-  ) async {
-    guard activeDocumentID == entry.id else {
-      return
-    }
-
-    do {
-      let document = try await textDocumentStore.loadText(at: entry.url)
-      guard self.entry?.id == entry.id, activeDocumentID == entry.id else {
-        return
-      }
-
-      if text != savedText, document.text == savedText {
-        knownDocumentFingerprint = fingerprint
-        saveErrorMessage = nil
-        return
-      }
-
-      applyLoadedTextDocument(document, fingerprint: fingerprint)
-      saveErrorMessage = nil
-      drafts.removeValue(forKey: entry.id)
-    } catch {
-      guard self.entry?.id == entry.id, activeDocumentID == entry.id else {
-        return
-      }
-
-      saveErrorMessage = error.localizedDescription
-    }
-  }
-}
-
-private enum TextDocumentLoadState: Equatable {
-  case empty
-  case loading
-  case loaded
-  /// The file exceeds the editable-string size limit; it is shown read-only in
-  /// the virtualized viewer instead, opened by URL.
-  case tooLargeForEditing(URL)
-  case failed(String)
 }
 
 private struct DocumentReloadTrigger: Equatable {
   let entryID: String
   let generation: Int
-}
-
-private struct TextDocumentDraft: Equatable {
-  let text: String
-  let savedText: String
-  let encoding: String.Encoding
-  let knownDocumentFingerprint: DocumentFileFingerprint?
 }
 
 private struct EmptyDocumentSurface: View {

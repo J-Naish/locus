@@ -15,6 +15,15 @@ enum TextDocumentSyntax: Equatable {
       return .monospacedSystemFont(ofSize: 13, weight: .regular)
     }
   }
+
+  /// Whether the text viewer shows a line-number gutter for this syntax. Every
+  /// text kind currently does.
+  var supportsLineNumbers: Bool {
+    switch self {
+    case .markdown, .plainText, .structuredText, .code:
+      return true
+    }
+  }
 }
 
 enum TextDocumentSyntaxHighlighter {
