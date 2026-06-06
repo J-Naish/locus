@@ -5,12 +5,16 @@ enum TextBufferStoreError: LocalizedError {
   /// must read the whole file into memory. Large files are supported only as
   /// UTF-8 (memory-mapped). Editing in a legacy encoding stays a small-file path.
   case tooLargeForEncoding
+  /// The bytes do not look like text in any supported encoding.
+  case notRecognizedAsText
 
   var errorDescription: String? {
     switch self {
     case .tooLargeForEncoding:
       return
         "This file is too large to open in its (non-UTF-8) encoding. Large files are supported only as UTF-8."
+    case .notRecognizedAsText:
+      return "The file does not appear to be a text document."
     }
   }
 }
@@ -25,16 +29,16 @@ enum TextBufferStoreError: LocalizedError {
 ///
 /// Saving streams UTF-8 straight to disk (still zero-copy for huge files); a
 /// non-UTF-8 file is re-encoded to its original encoding (refusing, rather than
-/// losing, characters that cannot be represented). The atomic-vs-symlink write
-/// policy matches `TextDocumentStore.saveText`.
+/// losing, characters that cannot be represented). It writes atomically for a
+/// regular file and in place through a symlink (so the link target is updated).
 struct TextBufferStore {
   /// Largest file the decode (non-UTF-8 / BOM) path will read into memory. UTF-8
   /// files bypass this via memory-mapping, so only legacy-encoded files are
-  /// bounded — matching the editable-string path's materialization limit.
-  /// Injectable so tests can exercise the boundary cheaply.
+  /// bounded. Injectable so tests can exercise the boundary cheaply.
+  static let defaultMaximumDecodedByteCount = 64 * 1024 * 1024
   let maximumDecodedByteCount: Int
 
-  init(maximumDecodedByteCount: Int = TextDocumentStore.defaultMaximumLoadedTextByteCount) {
+  init(maximumDecodedByteCount: Int = TextBufferStore.defaultMaximumDecodedByteCount) {
     self.maximumDecodedByteCount = maximumDecodedByteCount
   }
 
@@ -93,7 +97,7 @@ struct TextBufferStore {
     }
     let data = try Data(contentsOf: url)
     guard let document = TextEncoding.decode(data) else {
-      throw TextDocumentStoreError.notRecognizedAsText
+      throw TextBufferStoreError.notRecognizedAsText
     }
     return (try TextBuffer.open(bytes: Data(document.text.utf8)), document.encoding)
   }

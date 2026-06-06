@@ -642,7 +642,8 @@ final class WorkspaceSearchUITests: XCTestCase {
     projectBriefRow.doubleClick()
 
     XCTAssertTrue(
-      app.textViews["document-large-text-viewer"].waitForExistence(timeout: 5), app.debugDescription)
+      app.textViews["document-large-text-viewer"].waitForExistence(timeout: 5), app.debugDescription
+    )
   }
 
   @MainActor
@@ -655,7 +656,8 @@ final class WorkspaceSearchUITests: XCTestCase {
     projectBriefRow.click()
 
     XCTAssertTrue(
-      app.textViews["document-large-text-viewer"].waitForExistence(timeout: 5), app.debugDescription)
+      app.textViews["document-large-text-viewer"].waitForExistence(timeout: 5), app.debugDescription
+    )
     assertTableRow(named: "Project Brief.md", isSelectedIn: app)
 
     let sidebarList = workspaceSidebarList(in: app)
@@ -710,7 +712,8 @@ final class WorkspaceSearchUITests: XCTestCase {
     projectBriefRow.click()
 
     XCTAssertTrue(
-      app.textViews["document-large-text-viewer"].waitForExistence(timeout: 5), app.debugDescription)
+      app.textViews["document-large-text-viewer"].waitForExistence(timeout: 5), app.debugDescription
+    )
 
     let reportsRow = workspaceSidebarLabel(named: "Reports", in: app)
     XCTAssertTrue(reportsRow.waitForExistence(timeout: 5), app.debugDescription)
@@ -1045,13 +1048,8 @@ final class WorkspaceSearchUITests: XCTestCase {
 
   @MainActor
   func testLargeFileViewerExposesSelectAllAndCopy() throws {
-    // Lower the editable-size limit so a small fixture routes to the large-file
-    // viewer (which otherwise needs a 64 MB+ file), then verify the viewer
-    // resolves as a text view and supports select-all + copy.
-    let app = try launchApp(
-      workspacePath: fixtureWorkspacePath("basic"),
-      extraArguments: ["--ui-test-max-text-bytes", "10"]
-    )
+    // The text viewer resolves as a text view and supports select-all + copy.
+    let app = try launchApp(workspacePath: fixtureWorkspacePath("basic"))
 
     let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
     XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
@@ -1082,10 +1080,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     // marker to replace it, then read it back through select-all + copy (the AX
     // value intentionally never materializes the whole document). Edits stay in
     // memory — there is no save here — so the fixture on disk is untouched.
-    let app = try launchApp(
-      workspacePath: fixtureWorkspacePath("basic"),
-      extraArguments: ["--ui-test-max-text-bytes", "10"]
-    )
+    let app = try launchApp(workspacePath: fixtureWorkspacePath("basic"))
 
     let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
     XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
@@ -1116,10 +1111,7 @@ final class WorkspaceSearchUITests: XCTestCase {
   func testLargeFileViewerUndoesTypingWithCommandZ() throws {
     // Verifies Cmd+Z reaches the viewer (rather than the Edit menu's undo
     // manager): type a marker, confirm it appears, undo, confirm it is gone.
-    let app = try launchApp(
-      workspacePath: fixtureWorkspacePath("basic"),
-      extraArguments: ["--ui-test-max-text-bytes", "10"]
-    )
+    let app = try launchApp(workspacePath: fixtureWorkspacePath("basic"))
 
     let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
     XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
@@ -1171,10 +1163,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     let fileURL = workspace.appendingPathComponent("Notes.txt")
     try Data("Meeting notes".utf8).write(to: fileURL)
 
-    let app = try launchApp(
-      workspacePath: workspace.path,
-      extraArguments: ["--ui-test-max-text-bytes", "5"]
-    )
+    let app = try launchApp(workspacePath: workspace.path)
 
     let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
     XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
@@ -1208,10 +1197,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     let fileURL = workspace.appendingPathComponent("Notes.txt")
     try Data("ORIGINAL".utf8).write(to: fileURL)
 
-    let app = try launchApp(
-      workspacePath: workspace.path,
-      extraArguments: ["--ui-test-max-text-bytes", "3"]
-    )
+    let app = try launchApp(workspacePath: workspace.path)
 
     let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
     XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
@@ -1269,10 +1255,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     let fileURL = workspace.appendingPathComponent("Notes.txt")
     try Data("ORIGINAL".utf8).write(to: fileURL)
 
-    let app = try launchApp(
-      workspacePath: workspace.path,
-      extraArguments: ["--ui-test-max-text-bytes", "3"]
-    )
+    let app = try launchApp(workspacePath: workspace.path)
 
     let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
     XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)

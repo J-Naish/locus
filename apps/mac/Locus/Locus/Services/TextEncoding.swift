@@ -1,8 +1,14 @@
 import Foundation
 
-/// Shared text-encoding detection / round-trip used by both the editable-string
-/// path (`TextDocumentStore`) and the buffer-backed path (`TextBufferStore`), so
-/// both recognize, preserve, and re-encode the same set of encodings identically.
+/// Decoded text plus the encoding it should be re-encoded with on save.
+struct TextDocument: Equatable, Sendable {
+  let text: String
+  let encoding: String.Encoding
+}
+
+/// Shared text-encoding detection / round-trip used by the buffer-backed text
+/// path (`TextBufferStore`): it recognizes, preserves, and re-encodes a fixed set
+/// of encodings.
 ///
 /// Decoding mirrors the historical rules: UTF-8 (with or without a BOM, BOM
 /// stripped), UTF-16 (LE/BE distinguished by the BOM), then a Shift JIS / Latin-1
