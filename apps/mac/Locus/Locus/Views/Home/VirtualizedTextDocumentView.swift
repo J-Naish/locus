@@ -135,6 +135,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// run it off the main thread without blocking the UI.
   var saveURL: URL?
 
+  /// The file's original text encoding, restored on save (so a Shift JIS / UTF-16
+  /// file is not silently rewritten as UTF-8).
+  var saveEncoding: String.Encoding = .utf8
+
   /// Reports a save outcome to the host: on success the post-write file
   /// fingerprint (so the host records it before the change monitor reacts), on
   /// failure the error to surface.
@@ -986,11 +990,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let pending = SendableTextBuffer(buffer)
     let store = bufferStore
     let completion = onSaveCompletion
+    let encoding = saveEncoding
     Task { [weak self] in
       let result: Result<DocumentFileFingerprint?, Error>
       do {
         let fingerprint = try await Task.detached {
-          try store.save(pending.buffer, to: saveURL)
+          try store.save(pending.buffer, to: saveURL, encoding: encoding)
           // Read the new fingerprint here, still off-main, so the host can record
           // the post-save state before the change monitor's debounced event.
           return DocumentFileFingerprint.read(at: saveURL)
@@ -1493,6 +1498,7 @@ struct LargeTextViewport: NSViewRepresentable {
   let syntax: TextDocumentSyntax
   let isEditable: Bool
   let saveURL: URL
+  let saveEncoding: String.Encoding
   let onSaveCompletion: (Result<DocumentFileFingerprint?, Error>) -> Void
   let onDirtyChange: (Bool) -> Void
 
@@ -1516,6 +1522,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.showsLineNumbers = syntax.supportsLineNumbers
     documentView.isEditable = isEditable
     documentView.saveURL = saveURL
+    documentView.saveEncoding = saveEncoding
     documentView.onSaveCompletion = onSaveCompletion
     documentView.onDirtyChange = onDirtyChange
     scrollView.documentView = documentView
@@ -1551,6 +1558,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.showsLineNumbers = syntax.supportsLineNumbers
     documentView.isEditable = isEditable
     documentView.saveURL = saveURL
+    documentView.saveEncoding = saveEncoding
     documentView.onSaveCompletion = onSaveCompletion
     documentView.onDirtyChange = onDirtyChange
     if documentView.buffer !== buffer {
@@ -1602,10 +1610,11 @@ struct VirtualizedTextDocumentView: View {
   var onDirtyChange: (Bool) -> Void = { _ in }
 
   @State private var phase: Phase = .loading
+  private let bufferStore = TextBufferStore()
 
   private enum Phase {
     case loading
-    case loaded(TextBuffer)
+    case loaded(TextBuffer, encoding: String.Encoding)
     case failed(String)
   }
 
@@ -1614,13 +1623,14 @@ struct VirtualizedTextDocumentView: View {
       switch phase {
       case .loading:
         Color(nsColor: .textBackgroundColor)
-      case .loaded(let buffer):
+      case .loaded(let buffer, let encoding):
         LargeTextViewport(
           buffer: buffer,
           accessibilityLabel: accessibilityLabel,
           syntax: syntax,
           isEditable: isEditable,
           saveURL: url,
+          saveEncoding: encoding,
           onSaveCompletion: onSaveCompletion,
           onDirtyChange: onDirtyChange
         )
@@ -1641,20 +1651,16 @@ struct VirtualizedTextDocumentView: View {
   private func open() async {
     phase = .loading
     let target = url
+    let store = bufferStore
     do {
       let loaded = try await Task.detached(priority: .userInitiated) {
-        let didStartAccess = target.startAccessingSecurityScopedResource()
-        defer {
-          if didStartAccess {
-            target.stopAccessingSecurityScopedResource()
-          }
-        }
-        return OpenedTextBuffer(buffer: try TextBuffer.open(at: target))
+        let opened = try store.open(at: target)
+        return OpenedTextBuffer(buffer: opened.buffer, encoding: opened.encoding)
       }.value
       guard !Task.isCancelled else {
         return
       }
-      phase = .loaded(loaded.buffer)
+      phase = .loaded(loaded.buffer, encoding: loaded.encoding)
       onDirtyChange(false)  // a freshly opened buffer is clean
     } catch {
       guard !Task.isCancelled else {
@@ -1664,13 +1670,13 @@ struct VirtualizedTextDocumentView: View {
     }
   }
 
-  /// Maps an open failure to a user-facing message. Large non-UTF-8 files are
-  /// called out explicitly: the editable path decodes legacy encodings, but this
-  /// large-file viewer is UTF-8 only for now, so the narrowing is not silent.
+  /// Maps an open failure to a user-facing message. A large non-UTF-8 file is
+  /// called out explicitly: legacy encodings are decoded in memory (so they are
+  /// bounded), and above that bound only UTF-8 (memory-mapped) is supported, so
+  /// the narrowing is not silent.
   static func failureMessage(for error: Error) -> String {
-    if let bufferError = error as? TextBufferError, bufferError == .notUTF8 {
-      return
-        "This file is too large to open as non-UTF-8 text. Large files currently open only in UTF-8."
+    if let storeError = error as? TextBufferStoreError, case .tooLargeForEncoding = storeError {
+      return storeError.errorDescription ?? error.localizedDescription
     }
     return error.localizedDescription
   }
@@ -1683,11 +1689,12 @@ private struct TextViewportLoad: Equatable {
   let token: Int
 }
 
-/// Carries the non-`Sendable` `TextBuffer` from the loader task to the main
-/// actor. It is only handed across once and then used exclusively on the main
-/// actor, so the unchecked conformance is sound (mirrors `ImageDocument`).
+/// Carries the non-`Sendable` `TextBuffer` (and its detected file encoding) from
+/// the loader task to the main actor. It is only handed across once and then used
+/// exclusively on the main actor, so the unchecked conformance is sound.
 private struct OpenedTextBuffer: @unchecked Sendable {
   let buffer: TextBuffer
+  let encoding: String.Encoding
 }
 
 /// Carries the `TextBuffer` to the background save thread. Sound because the

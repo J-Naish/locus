@@ -80,6 +80,25 @@ final class TextDocumentStoreTests: XCTestCase {
     XCTAssertEqual(String(data: savedData, encoding: .shiftJIS), "title: 請求書\n")
   }
 
+  func testPreservesUTF16BigEndianByteOrderWhenSaving() async throws {
+    var data = Data([0xFE, 0xFF])  // UTF-16 BE BOM
+    data.append(try XCTUnwrap("hi\n".data(using: .utf16BigEndian)))
+    let url = try temporaryFile(named: "be.txt", data: data)
+    let store = TextDocumentStore()
+
+    let loaded = try await store.loadText(at: url)
+    XCTAssertEqual(loaded.encoding, .utf16BigEndian)
+    try await store.saveText(
+      loaded.text.replacingOccurrences(of: "hi", with: "やあ"),
+      to: url,
+      encoding: loaded.encoding
+    )
+
+    let saved = try Data(contentsOf: url)
+    XCTAssertEqual(saved.prefix(2), Data([0xFE, 0xFF]))  // byte order + BOM preserved
+    XCTAssertEqual(String(data: saved, encoding: .utf16), "やあ\n")
+  }
+
   func testLoadsExtensionlessUTF8TextDocument() async throws {
     let url = try temporaryFile(named: ".customignore", contents: "target/\n*.tmp\n")
     let store = TextDocumentStore()

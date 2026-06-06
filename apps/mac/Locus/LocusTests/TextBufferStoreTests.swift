@@ -53,4 +53,117 @@ final class TextBufferStoreTests: XCTestCase {
     XCTAssertNotNil(try? FileManager.default.destinationOfSymbolicLink(atPath: link.path))
     XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "updated!")
   }
+
+  // MARK: Encoding round-trip
+
+  func testOpensPlainUTF8ViaTheZeroCopyPath() throws {
+    let url = temporaryFileURL()
+    try Data("héllo\n".utf8).write(to: url)  // multibyte UTF-8, no BOM
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let opened = try TextBufferStore().open(at: url)
+    XCTAssertEqual(opened.encoding, .utf8)
+    XCTAssertEqual(opened.buffer.utf16Length, ("héllo\n" as NSString).length)
+  }
+
+  func testOpensAndStripsUTF8ByteOrderMark() throws {
+    let url = temporaryFileURL()
+    var data = Data([0xEF, 0xBB, 0xBF])
+    data.append(Data("hello\n".utf8))
+    try data.write(to: url)
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let opened = try TextBufferStore().open(at: url)
+    XCTAssertEqual(opened.encoding, .utf8)
+    XCTAssertEqual(opened.buffer.utf16Length, 6)  // "hello\n" — BOM stripped
+  }
+
+  func testRoundTripsShiftJISPreservingEncoding() throws {
+    let url = temporaryFileURL()
+    try XCTUnwrap("あ\n".data(using: .shiftJIS)).write(to: url)
+    defer { try? FileManager.default.removeItem(at: url) }
+    let store = TextBufferStore()
+
+    let opened = try store.open(at: url)
+    XCTAssertEqual(opened.encoding, .shiftJIS)
+
+    try opened.buffer.replace("請求書\n", fromUTF16: 0, toUTF16: opened.buffer.utf16Length)
+    try store.save(opened.buffer, to: url, encoding: opened.encoding)
+
+    let data = try Data(contentsOf: url)
+    XCTAssertNil(String(data: data, encoding: .utf8))  // not rewritten as UTF-8
+    XCTAssertEqual(String(data: data, encoding: .shiftJIS), "請求書\n")
+  }
+
+  func testRoundTripsUTF16PreservingEncoding() throws {
+    let url = temporaryFileURL()
+    var data = Data([0xFF, 0xFE])  // UTF-16 LE BOM
+    data.append(try XCTUnwrap("hi\n".data(using: .utf16LittleEndian)))
+    try data.write(to: url)
+    defer { try? FileManager.default.removeItem(at: url) }
+    let store = TextBufferStore()
+
+    let opened = try store.open(at: url)
+    XCTAssertEqual(opened.encoding, .utf16LittleEndian)
+
+    try opened.buffer.replace("やあ\n", fromUTF16: 0, toUTF16: opened.buffer.utf16Length)
+    try store.save(opened.buffer, to: url, encoding: opened.encoding)
+
+    let saved = try Data(contentsOf: url)
+    XCTAssertEqual(saved.prefix(2), Data([0xFF, 0xFE]))  // LE BOM preserved
+    XCTAssertEqual(String(data: saved, encoding: .utf16), "やあ\n")
+  }
+
+  func testRoundTripsUTF16BigEndianPreservingByteOrder() throws {
+    let url = temporaryFileURL()
+    var data = Data([0xFE, 0xFF])  // UTF-16 BE BOM
+    data.append(try XCTUnwrap("hi\n".data(using: .utf16BigEndian)))
+    try data.write(to: url)
+    defer { try? FileManager.default.removeItem(at: url) }
+    let store = TextBufferStore()
+
+    let opened = try store.open(at: url)
+    XCTAssertEqual(opened.encoding, .utf16BigEndian)
+
+    try opened.buffer.replace("ねこ\n", fromUTF16: 0, toUTF16: opened.buffer.utf16Length)
+    try store.save(opened.buffer, to: url, encoding: opened.encoding)
+
+    let saved = try Data(contentsOf: url)
+    XCTAssertEqual(saved.prefix(2), Data([0xFE, 0xFF]))  // big-endian byte order kept
+    XCTAssertEqual(String(data: saved, encoding: .utf16), "ねこ\n")
+  }
+
+  func testSaveRefusesCharactersUnrepresentableInOriginalEncoding() throws {
+    let url = temporaryFileURL()
+    try XCTUnwrap("あ\n".data(using: .shiftJIS)).write(to: url)
+    defer { try? FileManager.default.removeItem(at: url) }
+    let store = TextBufferStore()
+
+    let opened = try store.open(at: url)
+    try opened.buffer.replace("😀\n", fromUTF16: 0, toUTF16: opened.buffer.utf16Length)
+
+    XCTAssertThrowsError(try store.save(opened.buffer, to: url, encoding: opened.encoding)) {
+      error in
+      guard case TextEncoding.CodingError.unrepresentable = error else {
+        return XCTFail("expected unrepresentable, got \(error)")
+      }
+    }
+    // The refused save left the original file untouched.
+    XCTAssertEqual(String(data: try Data(contentsOf: url), encoding: .shiftJIS), "あ\n")
+  }
+
+  func testRejectsLegacyEncodedFileLargerThanDecodeCap() throws {
+    let url = temporaryFileURL()
+    try XCTUnwrap("あいうえお\n".data(using: .shiftJIS)).write(to: url)  // ~11 bytes
+    defer { try? FileManager.default.removeItem(at: url) }
+    // UTF-8 files bypass this via mmap; a legacy-encoded file over the cap is
+    // refused rather than read fully into memory.
+    let store = TextBufferStore(maximumDecodedByteCount: 4)
+
+    XCTAssertThrowsError(try store.open(at: url)) { error in
+      guard case TextBufferStoreError.tooLargeForEncoding = error else {
+        return XCTFail("expected tooLargeForEncoding, got \(error)")
+      }
+    }
+  }
 }

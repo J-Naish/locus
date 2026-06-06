@@ -66,7 +66,8 @@ final class TextViewportLayoutTests: XCTestCase {
   func testFailureMessageCallsOutLargeNonUTF8() {
     // A large non-UTF-8 file is rejected by the UTF-8-only buffer; the message
     // must explain the narrowing rather than surface a raw error.
-    let message = VirtualizedTextDocumentView.failureMessage(for: TextBufferError.notUTF8)
+    let message = VirtualizedTextDocumentView.failureMessage(
+      for: TextBufferStoreError.tooLargeForEncoding)
     XCTAssertTrue(message.contains("UTF-8"))
     XCTAssertTrue(message.lowercased().contains("large"))
   }

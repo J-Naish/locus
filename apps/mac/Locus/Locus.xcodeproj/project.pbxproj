@@ -52,6 +52,7 @@
 		1A00000100000000000000BE /* TextDocumentSyntaxHighlighter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */; };
 		1A0000010000000000000096 /* TextDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000097 /* TextDocumentStore.swift */; };
 		1A0000010000000000000F00 /* TextBufferStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F01 /* TextBufferStore.swift */; };
+		1A0000010000000000000F04 /* TextEncoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F05 /* TextEncoding.swift */; };
 		1A0000010000000000000F02 /* TextBufferStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F03 /* TextBufferStoreTests.swift */; };
 		1A000001000000000000009C /* TextDocumentStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000009D /* TextDocumentStoreTests.swift */; };
 		1A0000010000000000000080 /* RecentFileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000081 /* RecentFileStore.swift */; };
@@ -146,6 +147,7 @@
 		1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentSyntaxHighlighter.swift; sourceTree = "<group>"; };
 		1A0000010000000000000097 /* TextDocumentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentStore.swift; sourceTree = "<group>"; };
 		1A0000010000000000000F01 /* TextBufferStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextBufferStore.swift; sourceTree = "<group>"; };
+		1A0000010000000000000F05 /* TextEncoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextEncoding.swift; sourceTree = "<group>"; };
 		1A0000010000000000000F03 /* TextBufferStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextBufferStoreTests.swift; sourceTree = "<group>"; };
 		1A000001000000000000009D /* TextDocumentStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentStoreTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000081 /* RecentFileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentFileStore.swift; sourceTree = "<group>"; };
@@ -312,6 +314,7 @@
 				1A0000010000000000000073 /* RecentFolderStore.swift */,
 				1A0000010000000000000097 /* TextDocumentStore.swift */,
 				1A0000010000000000000F01 /* TextBufferStore.swift */,
+				1A0000010000000000000F05 /* TextEncoding.swift */,
 				1A000001000000000000008B /* WorkspaceDirectoryMonitor.swift */,
 			);
 			path = Services;
@@ -526,6 +529,7 @@
 				1A00000100000000000000BE /* TextDocumentSyntaxHighlighter.swift in Sources */,
 				1A0000010000000000000096 /* TextDocumentStore.swift in Sources */,
 				1A0000010000000000000F00 /* TextBufferStore.swift in Sources */,
+				1A0000010000000000000F04 /* TextEncoding.swift in Sources */,
 				1A000001000000000000008A /* WorkspaceDirectoryMonitor.swift in Sources */,
 				1A0000010000000000000098 /* WorkspaceDocumentSurface.swift in Sources */,
 				1A00000100000000000000E6 /* VirtualizedTextDocumentView.swift in Sources */,
