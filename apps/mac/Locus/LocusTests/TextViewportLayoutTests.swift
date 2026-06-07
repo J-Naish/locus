@@ -195,6 +195,59 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(view.frame.height, view.layout.lineHeight)  // fits one visual row
   }
 
+  @MainActor
+  func testExceedingLineCountFallsBackToNoWrap() throws {
+    // Past the line-count safety valve the synchronous wrap-index build is
+    // skipped, so even a long line does not wrap — keeping open/resize bounded.
+    let longLine = String(repeating: "word ", count: 200)  // would wrap if allowed
+    let buffer = try TextBuffer.open(bytes: Data("short\n\(longLine)\nshort".utf8))  // 3 lines
+
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 140, height: 400)  // narrow viewport
+    view.maximumWrappableLineCount = 2  // below this buffer's 3 lines
+    view.setBuffer(buffer)
+    XCTAssertEqual(view.frame.height, view.layout.lineHeight * 3)  // no wrap: 3 rows
+  }
+
+  @MainActor
+  func testNonProseKeepsLineBelowThresholdSingleRowEvenWhenWide() throws {
+    // Non-prose (code/data) does not wrap a line under the long-line threshold,
+    // even when it is far wider than the viewport — it stays one row and scrolls
+    // horizontally (Cursor-like). One row proves it did not wrap.
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 140, height: 400)  // narrow viewport
+    view.wrapsLines = false
+    view.longLineWrapThreshold = 10_000
+    let buffer = try TextBuffer.open(bytes: Data(String(repeating: "word ", count: 50).utf8))
+    view.setBuffer(buffer)  // 250 chars: would wrap to many rows if it wrapped
+    XCTAssertEqual(view.frame.height, view.layout.lineHeight)
+  }
+
+  @MainActor
+  func testNonProseWrapsLinePastThreshold() throws {
+    // A line past the threshold wraps, so the very long line is foldable rather
+    // than only horizontally scrollable.
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 140, height: 400)  // narrow viewport
+    view.wrapsLines = false
+    view.longLineWrapThreshold = 20
+    let buffer = try TextBuffer.open(bytes: Data(String(repeating: "word ", count: 50).utf8))
+    view.setBuffer(buffer)  // 250 chars > threshold
+    XCTAssertGreaterThan(view.frame.height, view.layout.lineHeight * 3)
+  }
+
+  @MainActor
+  func testProseWrapsBelowThresholdRegardlessOfLength() throws {
+    // Prose wraps every line; the long-line threshold only governs non-prose.
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 140, height: 400)  // narrow viewport
+    view.wrapsLines = true
+    view.longLineWrapThreshold = 10_000  // would suppress wrap for non-prose
+    let buffer = try TextBuffer.open(bytes: Data(String(repeating: "word ", count: 50).utf8))
+    view.setBuffer(buffer)
+    XCTAssertGreaterThan(view.frame.height, view.layout.lineHeight * 3)
+  }
+
   /// A viewer whose frame is set *before* the buffer, so soft wrap is active.
   @MainActor
   private func makeWrappingViewer(_ contents: String, width: CGFloat) throws
@@ -434,13 +487,13 @@ final class TextViewportLayoutTests: XCTestCase {
     // A line longer than the display clip must still read in full-document
     // coordinates: the offsets exposed by numberOfCharacters/rangeForLine and the
     // text returned by accessibilityString must agree past the clip.
-    let longLine = String(repeating: "a", count: 6_000)
+    let longLine = String(repeating: "a", count: 25_000)
     let view = try makeViewer(longLine)
-    XCTAssertEqual(view.accessibilityNumberOfCharacters(), 6_000)
-    let whole = view.accessibilityString(for: NSRange(location: 0, length: 6_000))
-    XCTAssertEqual(whole?.count, 6_000)
-    // A slice past the 5000-char display clip returns the real characters.
-    XCTAssertEqual(view.accessibilityString(for: NSRange(location: 5_500, length: 3)), "aaa")
+    XCTAssertEqual(view.accessibilityNumberOfCharacters(), 25_000)
+    let whole = view.accessibilityString(for: NSRange(location: 0, length: 25_000))
+    XCTAssertEqual(whole?.count, 25_000)
+    // A slice past the 20000-char display clip returns the real characters.
+    XCTAssertEqual(view.accessibilityString(for: NSRange(location: 22_000, length: 3)), "aaa")
   }
 
   @MainActor
@@ -655,9 +708,9 @@ final class TextViewportLayoutTests: XCTestCase {
   func testSelectedTextClipsLongLineToDisplayLimit() throws {
     // Selection and copy share the displayed (clipped) text, so a copy of an
     // over-long line is bounded to what is shown/selectable.
-    let view = try makeViewer(String(repeating: "x", count: 6000))
+    let view = try makeViewer(String(repeating: "x", count: 25_000))
     view.selectAll(nil)
-    XCTAssertEqual(view.selectedText()?.count, 5000)
+    XCTAssertEqual(view.selectedText()?.count, 20_000)
   }
 
   @MainActor

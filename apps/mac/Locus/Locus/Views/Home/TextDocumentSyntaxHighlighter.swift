@@ -57,7 +57,8 @@ enum TextDocumentSyntaxHighlighter {
     text: String,
     syntax: TextDocumentSyntax,
     font: NSFont,
-    range: NSRange
+    range: NSRange,
+    applyRules: Bool = true
   ) {
     let textLength = (text as NSString).length
     let highlightedRange = range.clamped(toTextLength: textLength)
@@ -70,7 +71,10 @@ enum TextDocumentSyntaxHighlighter {
       textStorage.endEditing()
     }
     textStorage.setAttributes(baseAttributes(font: font), range: highlightedRange)
-    guard textLength <= maximumHighlightedUTF16Length else {
+    // Base styling (font/color) is always applied; rule highlighting is skipped
+    // when the caller opts out (e.g. a pathologically long line) or the text is
+    // too large to scan on the main thread.
+    guard applyRules, textLength <= maximumHighlightedUTF16Length else {
       return
     }
 

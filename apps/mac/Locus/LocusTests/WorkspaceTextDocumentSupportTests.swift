@@ -198,6 +198,26 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       NSColor.secondaryLabelColor)
   }
 
+  func testApplyRulesFalseKeepsBaseStylingButSkipsRuleColors() {
+    // The long-line path opts out of rule highlighting: base styling (default
+    // label color) is applied, but keyword/string colors are not.
+    let storage = NSTextStorage(string: "let name = \"Locus\"")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .code,
+      font: TextDocumentSyntax.code.font,
+      range: NSRange(location: 0, length: (storage.string as NSString).length),
+      applyRules: false
+    )
+
+    XCTAssertEqual(
+      storage.foregroundColor(in: storage.string, matching: "let"), NSColor.labelColor)
+    XCTAssertEqual(
+      storage.foregroundColor(in: storage.string, matching: "\"Locus\""), NSColor.labelColor)
+  }
+
   func testCodeSyntaxDoesNotTreatURLSlashesAsComment() {
     let storage = NSTextStorage(string: "let url = \"https://example.com\"")
 
