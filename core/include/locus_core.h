@@ -258,9 +258,20 @@ void locus_workspace_snapshot_free(LocusWorkspaceSnapshot *snapshot);
  * Statuses live in a 100+ band so they never collide with the workspace
  * statuses above. LOCUS_STATUS_OK (0) remains the only success value.
  *
- * Thread-safety: a given LocusTextBuffer handle is NOT internally synchronized.
- * All calls operating on the same handle must be serialized by the caller
- * (e.g. confined to one thread/actor); concurrent use is undefined behavior.
+ * Thread-safety: a given LocusTextBuffer handle is not internally synchronized,
+ * but it obeys the standard readers-writer (shared-XOR-exclusive) rule, so a
+ * caller may run any number of read-only calls on one handle concurrently from
+ * different threads. The read-only calls are every accessor and snapshot getter
+ * (line count, byte/UTF-16 length, revision, is-dirty, the position queries, and
+ * the line-range and UTF-16-range snapshots) plus locus_text_buffer_write_path,
+ * which only reads the buffer to stream it out. The mutating calls --
+ * locus_text_buffer_insert_bytes, locus_text_buffer_delete,
+ * locus_text_buffer_replace, locus_text_buffer_undo, locus_text_buffer_redo, and
+ * locus_text_buffer_mark_saved -- plus locus_text_buffer_free require exclusive
+ * access: the caller must ensure no other call on the same handle (read or
+ * write) overlaps them. Overlapping a mutation with any other access is
+ * undefined behavior. This is what lets a background save read the buffer while
+ * the UI thread keeps rendering, as long as edits are paused for the save.
  */
 #define LOCUS_TEXT_STATUS_INVALID_ARGUMENT ((LocusStatus)100u)
 #define LOCUS_TEXT_STATUS_IO ((LocusStatus)101u)
