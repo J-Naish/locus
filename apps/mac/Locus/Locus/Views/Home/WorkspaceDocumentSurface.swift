@@ -141,6 +141,7 @@ struct WorkspaceDocumentSurface: View {
         url: entry.url,
         accessibilityLabel: "\(entry.name) text",
         syntax: WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText,
+        wrapsLines: WorkspaceTextDocumentSupport.wrapsLines(for: entry),
         isEditable: !entry.isReadOnly,
         reloadToken: documentReloadGeneration,
         saveRequest: documentSaveRequest,

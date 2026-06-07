@@ -28,6 +28,40 @@ enum WorkspaceTextDocumentSupport {
       return nil
     }
   }
+
+  /// Whether the text viewer soft-wraps long lines to the viewport instead of
+  /// scrolling horizontally. Wrapping is reserved for prose documents — where a
+  /// line is a paragraph and its length is incidental — and turned off wherever
+  /// a line is itself a unit of meaning: structured config, code, tabular/log
+  /// data, dotfile lists, and environment files (whose values can be long but
+  /// belong on one line). Prose is an explicit allowlist, so unrecognized files
+  /// default to no-wrap, preserving their exact line structure.
+  static func wrapsLines(for entry: WorkspaceEntry) -> Bool {
+    if entry.fileType == .markdown {
+      return true
+    }
+    // Only plain text can be prose; structured text, code, and binaries never wrap.
+    guard entry.fileType == .plainText else {
+      return false
+    }
+    let fileExtension = entry.url.pathExtension.lowercased()
+    if proseTextExtensions.contains(fileExtension) {
+      return true
+    }
+    // Extensionless prose documents (README, LICENSE, …). Dotfiles like
+    // `.gitignore` and `.env` also have no extension, so match the document name
+    // itself rather than treating every extensionless file as prose.
+    guard fileExtension.isEmpty else {
+      return false
+    }
+    return proseDocumentNames.contains(entry.url.lastPathComponent.lowercased())
+  }
+
+  private static let proseTextExtensions: Set<String> = ["txt", "text"]
+
+  private static let proseDocumentNames: Set<String> = [
+    "readme", "license", "notice", "changelog", "contributing", "authors",
+  ]
 }
 
 enum WorkspaceFileTypeLabel {

@@ -156,6 +156,37 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testLargeFileOfFewLinesStillWraps() throws {
+    // A multi-megabyte file (well past the former 2 MiB wrap cap) made of only a
+    // couple of enormous lines must still wrap: wrapping is bounded per line, so
+    // byte size alone no longer disables it.
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 140, height: 400)  // narrow viewport
+    let giantLine = String(repeating: "word ", count: 800_000)  // ~4 MB on one line
+    let buffer = try TextBuffer.open(bytes: Data("\(giantLine)\n\(giantLine)".utf8))
+    XCTAssertGreaterThan(buffer.byteLength, 2 * 1024 * 1024)
+    view.setBuffer(buffer)
+    XCTAssertGreaterThan(view.frame.height, view.layout.lineHeight * 3)
+  }
+
+  @MainActor
+  func testExceedingFetchedByteBudgetFallsBackToNoWrap() throws {
+    // Over the aggregate fetched-byte budget, the wrap-index build is skipped and
+    // the long line scrolls horizontally instead of wrapping — the safety valve
+    // that keeps the main-thread build bounded.
+    let longLine = String(repeating: "word ", count: 200)  // wraps when allowed
+    let contents = "\(longLine)\n\(longLine)"
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 140, height: 400)  // narrow viewport
+    view.maximumWrappableFetchedByteBudget = 16  // below this buffer's bytes
+    view.setBuffer(buffer)
+    // No wrap: two logical lines, one visual row each.
+    XCTAssertEqual(view.frame.height, view.layout.lineHeight * 2)
+  }
+
+  @MainActor
   func testShortContentStaysOneRowTall() throws {
     let view = LineRenderingTextView()
     view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)

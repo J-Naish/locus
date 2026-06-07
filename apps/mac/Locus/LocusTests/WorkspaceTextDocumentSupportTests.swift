@@ -81,6 +81,69 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       WorkspaceTextDocumentSupport.syntax(for: makeEntry(name: "image.png", fileType: .image)))
   }
 
+  func testProseDocumentsSoftWrap() {
+    // Markdown and plain prose read as documents, so lines wrap to the viewport.
+    XCTAssertTrue(
+      WorkspaceTextDocumentSupport.wrapsLines(for: makeEntry(name: "draft.md", fileType: .markdown))
+    )
+    XCTAssertTrue(
+      WorkspaceTextDocumentSupport.wrapsLines(
+        for: makeEntry(name: "notes.txt", fileType: .plainText)))
+    XCTAssertTrue(
+      WorkspaceTextDocumentSupport.wrapsLines(
+        for: makeEntry(name: "outline.text", fileType: .plainText)))
+    // Extensionless prose documents (matched by name, case-insensitively).
+    XCTAssertTrue(
+      WorkspaceTextDocumentSupport.wrapsLines(
+        for: makeEntry(name: "README", fileType: .plainText)))
+    XCTAssertTrue(
+      WorkspaceTextDocumentSupport.wrapsLines(
+        for: makeEntry(name: "LICENSE", fileType: .plainText)))
+    XCTAssertTrue(
+      WorkspaceTextDocumentSupport.wrapsLines(
+        for: makeEntry(name: "changelog", fileType: .plainText)))
+  }
+
+  func testStructuredCodeAndDataFilesDoNotWrap() {
+    // A line is itself a unit of meaning here, so it is preserved (no wrap).
+    XCTAssertFalse(
+      WorkspaceTextDocumentSupport.wrapsLines(
+        for: makeEntry(name: "settings.yaml", fileType: .structuredText)))
+    XCTAssertFalse(
+      WorkspaceTextDocumentSupport.wrapsLines(
+        for: makeEntry(name: "script.swift", fileType: .code)))
+    XCTAssertFalse(
+      WorkspaceTextDocumentSupport.wrapsLines(
+        for: makeEntry(name: "records.csv", fileType: .plainText)))
+    XCTAssertFalse(
+      WorkspaceTextDocumentSupport.wrapsLines(
+        for: makeEntry(name: "table.tsv", fileType: .plainText)))
+    XCTAssertFalse(
+      WorkspaceTextDocumentSupport.wrapsLines(
+        for: makeEntry(name: "app.log", fileType: .plainText)))
+  }
+
+  func testDotfileConfigDoesNotWrap() {
+    // Ignore lists and environment files are line-oriented config: a long .env
+    // value should stay on its own line rather than wrap.
+    XCTAssertFalse(
+      WorkspaceTextDocumentSupport.wrapsLines(
+        for: makeEntry(name: ".gitignore", fileType: .plainText)))
+    XCTAssertFalse(
+      WorkspaceTextDocumentSupport.wrapsLines(
+        for: makeEntry(name: ".env", fileType: .plainText)))
+    XCTAssertFalse(
+      WorkspaceTextDocumentSupport.wrapsLines(
+        for: makeEntry(name: ".env.local", fileType: .plainText)))
+  }
+
+  func testUnknownFilesDoNotWrap() {
+    // Unrecognized files default to no-wrap, preserving their exact lines.
+    XCTAssertFalse(
+      WorkspaceTextDocumentSupport.wrapsLines(
+        for: makeEntry(name: ".customignore", fileType: .unknown)))
+  }
+
   func testMarkdownSyntaxHighlightsHeadingsAndInlineCode() {
     let storage = NSTextStorage(string: "# Title\nUse `value` here")
 

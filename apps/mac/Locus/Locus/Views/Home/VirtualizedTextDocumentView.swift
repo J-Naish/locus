@@ -178,9 +178,12 @@ struct TextSelection: Equatable {
 /// [`TextBuffer`], fetching that band from the Rust core on demand. The document
 /// height is synthesized from the visual-row count, so a multi-gigabyte file
 /// never has its text assembled in memory — scrolling redraws exposed bands.
-/// Documents within the wrap budget soft-wrap to the viewport width (no
-/// horizontal scroll); larger/huge files stay no-wrap and the view widens to the
-/// widest line it has drawn.
+/// When the host enables wrapping (prose) the lines soft-wrap to the viewport
+/// width (no horizontal scroll); when it does not (structured/code/data), the
+/// view widens to the widest line it has drawn and scrolls horizontally.
+/// Document size alone never disables wrapping — only a pathological line count
+/// or aggregate byte estimate (the work the wrap-index build would do on the
+/// main thread) falls back to no-wrap, to keep open and resize responsive.
 final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private(set) var buffer: TextBuffer?
   let layout: TextViewportLayout
@@ -326,16 +329,33 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   // MARK: Soft wrap
   /// Whether soft wrapping is desired. When off — or for files past the wrappable
-  /// budget — the view scrolls horizontally instead, as before.
-  var wrapsLines = true
-  /// Budgets for soft wrapping. Building the wrap index reads the whole document
-  /// once (and re-reads it on edit/resize), so wrapping is limited to documents
-  /// small enough that the read stays cheap and bounded. Larger files — and huge
-  /// files (logs, data), which do not need wrapping — stay no-wrap (horizontal
-  /// scroll), preserving the read-only-band, zero-copy path. The byte budget
-  /// bounds memory; the line budget bounds the index size and rebuild work.
-  private let maximumWrappableByteCount = 2 * 1024 * 1024
-  private let maximumWrappableLineCount = 50_000
+  /// budget — the view scrolls horizontally instead, as before. The host sets
+  /// this per document (prose wraps; structured/code/data scroll); toggling it
+  /// rebuilds the wrap index and relays out.
+  var wrapsLines = true {
+    didSet {
+      guard wrapsLines != oldValue else { return }
+      rebuildWrapIndex()
+      updateLayout()
+      invalidateVisibleArea()
+    }
+  }
+  /// Safety valves for soft wrapping. Building the wrap index holds one entry per
+  /// logical line and is rebuilt on open and resize, reading the document once
+  /// through the per-line fetch cap and laying each line out with Core Text on
+  /// the main thread. Two bounds keep that pass responsive without limiting
+  /// document size as such:
+  /// - line count caps the number of index entries and Core Text layouts, and
+  /// - the aggregate *fetched*-byte estimate caps the bytes that pass the FFI and
+  ///   get laid out in one pass.
+  /// The byte estimate uses the per-line fetch cap (`maximumFetchedBytesPerLine`),
+  /// not the raw file size, so a file of a few enormous lines (tiny aggregate)
+  /// still wraps; only a file of very many medium-or-long lines — which would
+  /// read hundreds of megabytes and run that many layouts at once — falls back to
+  /// no-wrap (horizontal scroll). Realistic prose is far below both. `var` so
+  /// tests can lower the budget.
+  private let maximumWrappableLineCount = 200_000
+  var maximumWrappableFetchedByteBudget = 64 * 1024 * 1024
   /// Per-logical-line → visual-row mapping while wrapping is active; `nil` when not
   /// wrapping. Rebuilt fully on open, width change, and undo/redo; updated for the
   /// single changed line on ordinary typing/deletion within a line.
@@ -361,8 +381,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// depend only on the font, so highlighting is skipped here.
   private func rebuildWrapIndex() {
     lastWrapWidth = wrapContentWidth
-    guard wrapsLines, let buffer, buffer.byteLength <= maximumWrappableByteCount,
-      buffer.lineCount <= maximumWrappableLineCount, wrapContentWidth > 0
+    guard wrapsLines, let buffer, wrapContentWidth > 0,
+      buffer.lineCount <= maximumWrappableLineCount,
+      // Estimate the bytes the build pulls across the FFI: at most the per-line
+      // fetch cap times the line count, but never more than the file. A few huge
+      // lines stay tiny here and still wrap; very many long lines do not.
+      min(buffer.byteLength, buffer.lineCount * maximumFetchedBytesPerLine)
+        <= maximumWrappableFetchedByteBudget
     else {
       wrapIndex = nil
       wrapRowCounts = nil
@@ -2208,6 +2233,9 @@ struct LargeTextViewport: NSViewRepresentable {
   let buffer: TextBuffer
   let accessibilityLabel: String
   let syntax: TextDocumentSyntax
+  /// Whether long lines soft-wrap to the viewport (prose) or scroll horizontally
+  /// (structured/code/data). Decided per document by the host.
+  let wrapsLines: Bool
   let isEditable: Bool
   let saveURL: URL
   let saveEncoding: String.Encoding
@@ -2232,6 +2260,8 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.setAccessibilityLabel(accessibilityLabel)
     documentView.syntax = syntax
     documentView.showsLineNumbers = syntax.supportsLineNumbers
+    // Set before the buffer so the first wrap-index build uses the right mode.
+    documentView.wrapsLines = wrapsLines
     documentView.isEditable = isEditable
     documentView.saveURL = saveURL
     documentView.saveEncoding = saveEncoding
@@ -2278,6 +2308,8 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.setAccessibilityLabel(accessibilityLabel)
     documentView.syntax = syntax
     documentView.showsLineNumbers = syntax.supportsLineNumbers
+    // Set before any buffer swap so the rebuilt wrap index uses the right mode.
+    documentView.wrapsLines = wrapsLines
     documentView.isEditable = isEditable
     documentView.saveURL = saveURL
     documentView.saveEncoding = saveEncoding
@@ -2327,6 +2359,9 @@ struct VirtualizedTextDocumentView: View {
   let url: URL
   let accessibilityLabel: String
   let syntax: TextDocumentSyntax
+  /// Whether long lines soft-wrap to the viewport (prose) or scroll horizontally
+  /// (structured/code/data). Decided per document by the host.
+  let wrapsLines: Bool
   /// Whether the viewer accepts edits (false for read-only entries).
   let isEditable: Bool
   /// Changing this (e.g. on external file change) re-opens the buffer.
@@ -2368,6 +2403,7 @@ struct VirtualizedTextDocumentView: View {
           buffer: buffer,
           accessibilityLabel: accessibilityLabel,
           syntax: syntax,
+          wrapsLines: wrapsLines,
           isEditable: isEditable,
           saveURL: url,
           saveEncoding: encoding,
