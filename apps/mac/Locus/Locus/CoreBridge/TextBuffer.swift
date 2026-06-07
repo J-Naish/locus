@@ -153,7 +153,7 @@ final class TextBuffer {
 
   /// Copies a borrowed snapshot's text into a Swift `String` and frees it,
   /// decoding by the length-counted ABI contract (not a NUL terminator).
-  private static func decodeSnapshot(
+  fileprivate static func decodeSnapshot(
     _ status: UInt32, _ snapshot: OpaquePointer?, context: String
   ) -> String {
     guard status == LOCUS_STATUS_OK, let snapshot else {
@@ -265,7 +265,7 @@ final class TextBuffer {
 
   // MARK: - Internals
 
-  private static func ensureABICompatible() throws {
+  fileprivate static func ensureABICompatible() throws {
     guard locus_core_is_abi_compatible(CoreBridge.expectedABIVersion) else {
       throw CoreBridgeError.incompatibleABI(
         expected: CoreBridge.expectedABIVersion,
@@ -274,7 +274,7 @@ final class TextBuffer {
     }
   }
 
-  private static func error(for status: UInt32) -> TextBufferError {
+  fileprivate static func error(for status: UInt32) -> TextBufferError {
     switch status {
     case LOCUS_TEXT_STATUS_INVALID_ARGUMENT:
       return .invalidArgument(lastErrorMessage())
@@ -312,5 +312,73 @@ extension TextPosition {
       line: raw.line,
       columnUTF16: raw.column_utf16
     )
+  }
+}
+
+/// Swift owner of a Rust-backed, read-only, line-indexed large file.
+///
+/// Wraps the `locus_large_file_*` C ABI for files too large to load into an
+/// editable ``TextBuffer``: the file is scanned once for a sparse line index,
+/// then line ranges are read on demand by window, so the whole file is never
+/// resident and an external truncation surfaces as a short read rather than a
+/// crash. Frees the handle on `deinit`.
+///
+/// Read-only by design — there is no editing, saving, or position-mapping API.
+/// Reuses ``TextBuffer``'s snapshot decoding and status-to-error mapping, since
+/// it returns the same C ABI snapshot type.
+/// `@unchecked Sendable`: the handle is used only for read-only `&self` FFI calls
+/// (the Rust line index is `Sync`); it is built off the main thread, then read on
+/// the main actor, so handing it across that hop is safe.
+final class LargeFile: @unchecked Sendable {
+  private let handle: OpaquePointer
+  /// Security-scoped access held for the file's lifetime: unlike the editable
+  /// buffer (read fully at open), the windowed reads happen after open, so the
+  /// scope must outlive `open`. Non-nil only when access was started; released on
+  /// `deinit`.
+  private let securityScopedURL: URL?
+
+  private init(handle: OpaquePointer, securityScopedURL: URL?) {
+    self.handle = handle
+    self.securityScopedURL = securityScopedURL
+  }
+
+  deinit {
+    locus_large_file_free(handle)
+    securityScopedURL?.stopAccessingSecurityScopedResource()
+  }
+
+  /// Opens `path` as a read-only line-indexed large file, building its line index.
+  static func open(at url: URL) throws -> LargeFile {
+    try TextBuffer.ensureABICompatible()
+    let didStartAccess = url.startAccessingSecurityScopedResource()
+    var handle: OpaquePointer?
+    let status = url.path(percentEncoded: false).withCString { path in
+      locus_large_file_open(path, &handle)
+    }
+    guard status == LOCUS_STATUS_OK, let handle else {
+      if didStartAccess {
+        url.stopAccessingSecurityScopedResource()
+      }
+      throw TextBuffer.error(for: status)
+    }
+    return LargeFile(handle: handle, securityScopedURL: didStartAccess ? url : nil)
+  }
+
+  var lineCount: Int { locus_large_file_line_count(handle) }
+  var byteLength: Int { Int(locus_large_file_byte_length(handle)) }
+  /// Length in bytes of the longest line (including its terminator).
+  var maxLineByteLength: Int { Int(locus_large_file_max_line_byte_length(handle)) }
+
+  /// Text of lines `[start, start + count)` (clamped), read as one window from the
+  /// file. The borrowed snapshot is copied into a Swift `String` before free.
+  func text(forLineRange start: Int, count: Int) -> String {
+    // A viewport read clamps, so treat invalid input as empty rather than letting
+    // a negative wrap to a huge size_t.
+    guard start >= 0, count >= 0 else {
+      return ""
+    }
+    var snapshot: OpaquePointer?
+    let status = locus_large_file_snapshot_line_range(handle, start, count, &snapshot)
+    return TextBuffer.decodeSnapshot(status, snapshot, context: "LargeFile.text(forLineRange:)")
   }
 }

@@ -79,4 +79,38 @@ enum WorkspaceDocumentSurfaceSupport {
     "tiff",
     "webp",
   ]
+
+  /// A text file larger than this opens read-only in the windowed viewer instead
+  /// of the in-memory editable buffer. Mirrors `TextBufferStore`'s editable cap.
+  static var editableTextByteLimit: Int { TextBufferStore.defaultMaximumOpenByteCount }
+
+  /// Whether a text file of `byteCount` bytes is too large to edit in memory and
+  /// should open in the read-only windowed viewer.
+  static func isLargeText(byteCount: Int) -> Bool {
+    byteCount > editableTextByteLimit
+  }
+
+  /// A single line longer than this (bytes) makes the file unrenderable in the
+  /// windowed viewer, which reads one whole line per row: a pathologically long
+  /// line would read a huge window. Such a file is shown as unsupported instead.
+  /// Checked against the longest line (not the average), so one giant line in an
+  /// otherwise normal file is still caught.
+  static let maxRenderableLineByteCount = 1024 * 1024  // 1 MiB
+
+  static func hasUnreadablyLongLines(maxLineByteCount: Int) -> Bool {
+    maxLineByteCount > maxRenderableLineByteCount
+  }
+
+  /// Logical size of `url` in bytes, read inside a balanced security scope so it
+  /// resolves the same way the document open does (which holds the scope before
+  /// reading). Returns nil when the size is unavailable.
+  static func fileByteCount(at url: URL) -> Int? {
+    let didStartAccess = url.startAccessingSecurityScopedResource()
+    defer {
+      if didStartAccess {
+        url.stopAccessingSecurityScopedResource()
+      }
+    }
+    return (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+  }
 }

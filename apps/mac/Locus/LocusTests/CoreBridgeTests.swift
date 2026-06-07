@@ -184,6 +184,29 @@ final class CoreBridgeTests: XCTestCase {
     XCTAssertFalse(missingURL.locusIsReadOnly(fallback: false))
   }
 
+  // MARK: - LargeFile
+
+  func testLargeFileOpensAndReadsWindowedLineRanges() throws {
+    let directory = try temporaryDirectory()
+    let fileURL = directory.appending(path: "large.txt")
+    try "alpha\nbeta\ngamma".write(to: fileURL, atomically: true, encoding: .utf8)
+
+    let file = try LargeFile.open(at: fileURL)
+
+    XCTAssertEqual(file.lineCount, 3)
+    XCTAssertEqual(file.byteLength, 16)
+    XCTAssertEqual(file.text(forLineRange: 0, count: 3), "alpha\nbeta\ngamma")
+    XCTAssertEqual(file.text(forLineRange: 1, count: 1), "beta\n")
+    XCTAssertEqual(file.text(forLineRange: 2, count: 9), "gamma")  // clamped past the end
+  }
+
+  func testLargeFileOpenThrowsForMissingFile() {
+    let missingURL = FileManager.default.temporaryDirectory.appending(
+      path: "locus-large-missing-\(UUID().uuidString).txt")
+
+    XCTAssertThrowsError(try LargeFile.open(at: missingURL))
+  }
+
   private func temporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appending(
       path: "locus-corebridge-tests-\(UUID().uuidString)",

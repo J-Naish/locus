@@ -129,6 +129,25 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
     )
   }
 
+  func testLargeTextThresholdRoutesOversizedFilesToTheReadOnlyViewer() {
+    XCTAssertFalse(WorkspaceDocumentSurfaceSupport.isLargeText(byteCount: 0))
+    XCTAssertFalse(
+      WorkspaceDocumentSurfaceSupport.isLargeText(
+        byteCount: WorkspaceDocumentSurfaceSupport.editableTextByteLimit))
+    XCTAssertTrue(
+      WorkspaceDocumentSurfaceSupport.isLargeText(
+        byteCount: WorkspaceDocumentSurfaceSupport.editableTextByteLimit + 1))
+  }
+
+  func testUnreadablyLongLinesGuardTripsOnMaxLineLength() {
+    // A reasonable longest line renders fine.
+    XCTAssertFalse(WorkspaceDocumentSurfaceSupport.hasUnreadablyLongLines(maxLineByteCount: 4096))
+    // One pathologically long line trips the guard — the case an average-based
+    // check missed (a giant line in an otherwise normal file).
+    XCTAssertTrue(
+      WorkspaceDocumentSurfaceSupport.hasUnreadablyLongLines(maxLineByteCount: 300_000_000))
+  }
+
   private func makeEntry(
     name: String,
     kind: WorkspaceEntryKind = .file,

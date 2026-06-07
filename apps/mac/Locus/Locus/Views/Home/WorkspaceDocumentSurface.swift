@@ -31,6 +31,9 @@ struct WorkspaceDocumentSurface: View {
   /// Seeded from the core's mode-bit `readonly` so the common case is correct
   /// immediately, then refined for read-only volumes, ACLs, and immutable flags.
   @State private var selectedDocumentReadOnly = false
+  /// Whether the selected text file is too large to edit in memory and is shown
+  /// read-only in the windowed viewer instead. Resolved per selection.
+  @State private var selectedTextIsLarge = false
   @StateObject private var documentChangeMonitor = DocumentChangeMonitor()
   /// Retains opened buffers across file switches so unsaved edits survive
   /// navigating away and back (persists for the surface's lifetime).
@@ -44,7 +47,7 @@ struct WorkspaceDocumentSurface: View {
         if let entry {
           switch WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry) {
           case .editableText:
-            editableDocumentSurface(for: entry)
+            textDocumentSurface(for: entry)
           case .image:
             ImageDocumentSurface(
               entry: entry,
@@ -105,6 +108,9 @@ struct WorkspaceDocumentSurface: View {
       // Seed from the core's mode-bit readonly so editability is right immediately;
       // prepareSelectedDocument refines it for volume/ACL/immutable cases.
       selectedDocumentReadOnly = entry?.isReadOnly ?? false
+      // Resolve synchronously so the first render already routes a large file to
+      // the read-only viewer instead of flashing (and failing in) the editor.
+      selectedTextIsLarge = resolveLargeText(for: entry)
       onTextInputFocusChange(false)
     }
     .onChange(of: isEditorFocused) {
@@ -114,6 +120,29 @@ struct WorkspaceDocumentSurface: View {
       documentChangeMonitor.stopMonitoring()
       onTextInputFocusChange(false)
     }
+  }
+
+  /// Routes a text file to the editable buffer view, or to the read-only windowed
+  /// viewer when it is too large to load into memory.
+  @ViewBuilder
+  private func textDocumentSurface(for entry: WorkspaceEntry) -> some View {
+    if selectedTextIsLarge {
+      LargeTextDocumentSurface(
+        url: entry.url, reloadTrigger: documentReloadTrigger(for: entry))
+    } else {
+      editableDocumentSurface(for: entry)
+    }
+  }
+
+  /// Whether `entry` is a text file too large to edit in memory — resolved
+  /// synchronously (one stat) so selection routes to the read-only viewer on the
+  /// first render rather than flashing (and failing in) the editor.
+  private func resolveLargeText(for entry: WorkspaceEntry?) -> Bool {
+    guard let entry, WorkspaceTextDocumentSupport.isRecognizedTextType(entry) else {
+      return false
+    }
+    let byteCount = WorkspaceDocumentSurfaceSupport.fileByteCount(at: entry.url)
+    return byteCount.map(WorkspaceDocumentSurfaceSupport.isLargeText(byteCount:)) ?? false
   }
 
   private func editableDocumentSurface(for entry: WorkspaceEntry) -> some View {
@@ -186,8 +215,20 @@ struct WorkspaceDocumentSurface: View {
 
     guard let entry, WorkspaceTextDocumentSupport.canEdit(entry) else {
       knownDocumentFingerprint = nil
+      selectedTextIsLarge = false
       return
     }
+
+    // A text file too large to edit in memory opens read-only in the windowed
+    // viewer; skip the editable read-only/fingerprint/monitoring baseline.
+    if resolveLargeText(for: entry) {
+      selectedTextIsLarge = true
+      // The windowed viewer is read-only: mark it so Save is definitively disabled.
+      selectedDocumentReadOnly = true
+      knownDocumentFingerprint = nil
+      return
+    }
+    selectedTextIsLarge = false
 
     // Resolve effective read-only state once for the opened document (read-only
     // volume, ACL, ownership, immutable flags) rather than per entry at listing.
@@ -741,5 +782,103 @@ private struct UnsupportedDocumentSurface: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .accessibilityIdentifier("document-unsupported-surface")
+  }
+}
+
+private enum LargeTextDocumentLoadState {
+  case loading
+  case loaded(LargeFile)
+  case failed(String)
+}
+
+/// Read-only viewer for a text file too large to load into the editable buffer.
+/// Builds a line index off the main thread, then renders lines on demand from a
+/// windowed read so the whole file is never resident (and an external truncation
+/// surfaces as a short read, never a crash).
+private struct LargeTextDocumentSurface: View {
+  let url: URL
+  let reloadTrigger: DocumentReloadTrigger
+
+  @State private var loadState: LargeTextDocumentLoadState = .loading
+
+  var body: some View {
+    Group {
+      switch loadState {
+      case .loading:
+        ProgressView()
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+      case .loaded(let file):
+        if WorkspaceDocumentSurfaceSupport.hasUnreadablyLongLines(
+          maxLineByteCount: file.maxLineByteLength)
+        {
+          ContentUnavailableView {
+            Label("Lines Too Long to Preview", systemImage: "doc.text.magnifyingglass")
+          } description: {
+            Text("This file has extremely long lines and can't be previewed yet.")
+          }
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .accessibilityIdentifier("document-large-text-long-lines")
+        } else {
+          LargeTextLineList(file: file)
+        }
+      case .failed(let message):
+        ContentUnavailableView {
+          Label("File Could Not Be Opened", systemImage: "exclamationmark.triangle")
+        } description: {
+          Text(message)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("document-large-text-error")
+      }
+    }
+    .task(id: reloadTrigger) {
+      loadState = .loading
+      do {
+        let file = try await Task.detached(priority: .userInitiated) {
+          try LargeFile.open(at: url)
+        }.value
+        // The detached open is not cancelled when the selection changes; drop a
+        // stale result so it never replaces the newly selected document.
+        guard !Task.isCancelled else { return }
+        loadState = .loaded(file)
+      } catch {
+        guard !Task.isCancelled else { return }
+        loadState = .failed(error.localizedDescription)
+      }
+    }
+  }
+}
+
+/// Virtualized read-only list of a large file's lines. On macOS `List` is backed
+/// by `NSTableView`, so a multi-million-line file renders lazily and scrolls
+/// natively; each visible row reads just its own line from the windowed source.
+/// Selection is per line (enough to copy a line); cross-line selection and
+/// horizontal scrolling of very long lines are later refinements.
+private struct LargeTextLineList: View {
+  let file: LargeFile
+
+  var body: some View {
+    List(0..<file.lineCount, id: \.self) { index in
+      Text(displayLine(at: index))
+        .font(.system(.body, design: .monospaced))
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .listRowInsets(EdgeInsets(top: 1, leading: 8, bottom: 1, trailing: 8))
+        .listRowSeparator(.hidden)
+    }
+    .listStyle(.plain)
+    .accessibilityIdentifier("document-readonly-large-text-viewer")
+  }
+
+  /// One line's text with its trailing newline removed for display.
+  private func displayLine(at index: Int) -> String {
+    var line = file.text(forLineRange: index, count: 1)
+    if line.hasSuffix("\n") {
+      line.removeLast()
+    }
+    if line.hasSuffix("\r") {
+      line.removeLast()
+    }
+    return line
   }
 }

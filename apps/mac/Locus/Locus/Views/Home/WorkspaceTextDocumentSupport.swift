@@ -14,6 +14,24 @@ enum WorkspaceTextDocumentSupport {
     }
   }
 
+  /// Recognized text types eligible for the read-only large-file viewer. Unlike
+  /// `canEdit`, this excludes `.unknown`: a large file of an unrecognized type may
+  /// be binary, and the windowed viewer would scan it and show mojibake. A large
+  /// unknown file therefore falls to the editable path (which refuses it) rather
+  /// than to the lossy viewer.
+  static func isRecognizedTextType(_ entry: WorkspaceEntry) -> Bool {
+    guard entry.kind.isFileLike else {
+      return false
+    }
+
+    switch entry.fileType {
+    case .markdown, .structuredText, .plainText, .code:
+      return true
+    case .unknown, .pdf, .office, .image, .audio, .video:
+      return false
+    }
+  }
+
   static func syntax(for entry: WorkspaceEntry) -> TextDocumentSyntax? {
     switch entry.fileType {
     case .markdown:

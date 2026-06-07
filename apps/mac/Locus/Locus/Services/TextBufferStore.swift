@@ -38,12 +38,11 @@ enum TextBufferStoreError: LocalizedError {
 /// losing, characters that cannot be represented). It writes atomically for a
 /// regular file and in place through a symlink (so the link target is updated).
 struct TextBufferStore {
-  /// Largest plain-UTF-8 file `open` will read into memory; a larger file is
-  /// refused. Set to 1 GiB so a ~1 GB file still opens — it is read fully into
-  /// memory, so worst-case RAM is roughly the file size — while a pathologically
-  /// larger file is refused rather than risk exhausting memory. Injectable so
-  /// tests can exercise the boundary cheaply.
-  static let defaultMaximumOpenByteCount = 1024 * 1024 * 1024  // 1 GiB
+  /// Largest plain-UTF-8 file `open` loads into the editable in-memory buffer
+  /// (worst-case editable RAM ≈ this size). A larger file is refused here; the
+  /// document surface routes it to the read-only windowed viewer instead.
+  /// Injectable so tests can exercise the boundary cheaply.
+  static let defaultMaximumOpenByteCount = 256 * 1024 * 1024  // 256 MiB
   /// Largest file the decode (non-UTF-8 / BOM) path will read into memory. Lower
   /// than the UTF-8 bound because decoding allocates more; legacy-encoded files
   /// are small in practice. Injectable so tests can exercise the boundary cheaply.
