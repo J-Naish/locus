@@ -399,6 +399,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// horizontally. Mirrors whether a wrap index is active.
   var isSoftWrapping: Bool { wrapIndex != nil }
 
+  /// Total visual rows the document occupies — the row count the layout is built
+  /// from, independent of the frame being padded to fill the viewport. Exposed
+  /// for tests/inspection.
+  var visualRowCount: Int { totalVisualRows }
+
   /// Whether a line of `length` UTF-16 units gets rule-based syntax highlighting:
   /// prose always does; non-prose skips it for lines past the long-line threshold
   /// (the same lines that drive wrapping), matching a code editor's long lines.
@@ -1148,10 +1153,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   /// Maps a point in this view's coordinates to the nearest (line, UTF-16 column)
-  /// endpoint, clamped to the document.
-  private func endpoint(at point: NSPoint) -> TextSelection.Endpoint {
-    let row = min(
-      max(0, totalVisualRows - 1), max(0, Int((point.y / layout.lineHeight).rounded(.down))))
+  /// endpoint, clamped to the document. Internal so hit-testing can be tested.
+  func endpoint(at point: NSPoint) -> TextSelection.Endpoint {
+    let rawRow = Int((point.y / layout.lineHeight).rounded(.down))
+    // A click in the empty area padded below the last row lands at the document
+    // end, regardless of x — not at the column nearest the click on the last line.
+    if rawRow >= totalVisualRows {
+      let lastLine = max(0, lineCount - 1)
+      return TextSelection.Endpoint(line: lastLine, columnUTF16: lineLengthUTF16(lastLine))
+    }
+    let row = min(max(0, totalVisualRows - 1), max(0, rawRow))
     let (line, rowInLine) = lineLocation(ofVisualRow: row)
     let textRelativeX = point.x - (gutterWidth + horizontalPadding)
     if let length = hugeLength(line) {
@@ -1989,8 +2000,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if lastWrapWidth != wrapContentWidth {
       rebuildWrapIndex(recomputeLongLine: false)
     }
-    let visibleWidth = enclosingScrollView?.documentVisibleRect.width ?? frame.width
-    let height = CGFloat(max(totalVisualRows, 1)) * layout.lineHeight
+    let visibleSize = enclosingScrollView?.documentVisibleRect.size
+    let visibleWidth = visibleSize?.width ?? frame.width
+    // Fill at least the viewport height so a short document's empty area below the
+    // last line is still part of the text view: it shows the editor background,
+    // takes the I-beam cursor, and accepts a click (which lands at the document
+    // end). A tall document keeps its content height, so virtualization is intact.
+    let contentHeight = CGFloat(max(totalVisualRows, 1)) * layout.lineHeight
+    let height = max(contentHeight, visibleSize?.height ?? frame.height)
     if wrapIndex != nil {
       // Wrapped: fill the viewport width; no horizontal scrolling.
       setFrameSize(NSSize(width: visibleWidth, height: height))

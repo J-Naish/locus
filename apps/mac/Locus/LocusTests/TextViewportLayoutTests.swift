@@ -152,7 +152,7 @@ final class TextViewportLayoutTests: XCTestCase {
     // so the document is several rows tall.
     let buffer = try TextBuffer.open(bytes: Data(String(repeating: "word ", count: 200).utf8))
     view.setBuffer(buffer)
-    XCTAssertGreaterThan(view.frame.height, view.layout.lineHeight * 3)
+    XCTAssertGreaterThan(view.visualRowCount, 3)
   }
 
   @MainActor
@@ -166,7 +166,7 @@ final class TextViewportLayoutTests: XCTestCase {
     let buffer = try TextBuffer.open(bytes: Data("\(giantLine)\n\(giantLine)".utf8))
     XCTAssertGreaterThan(buffer.byteLength, 2 * 1024 * 1024)
     view.setBuffer(buffer)
-    XCTAssertGreaterThan(view.frame.height, view.layout.lineHeight * 3)
+    XCTAssertGreaterThan(view.visualRowCount, 3)
   }
 
   @MainActor
@@ -198,7 +198,7 @@ final class TextViewportLayoutTests: XCTestCase {
     // 20_000 == the clip, so this line is laid out in full (not virtualized).
     atClip.setBuffer(try TextBuffer.open(bytes: Data(String(repeating: "x", count: 20_000).utf8)))
 
-    XCTAssertGreaterThan(huge.frame.height, atClip.frame.height * 2)
+    XCTAssertGreaterThan(huge.visualRowCount, atClip.visualRowCount * 2)
   }
 
   @MainActor
@@ -259,7 +259,7 @@ final class TextViewportLayoutTests: XCTestCase {
     view.maximumWrappableFetchedByteBudget = 16  // below this buffer's bytes
     view.setBuffer(buffer)
     // No wrap: two logical lines, one visual row each.
-    XCTAssertEqual(view.frame.height, view.layout.lineHeight * 2)
+    XCTAssertEqual(view.visualRowCount, 2)
   }
 
   @MainActor
@@ -268,7 +268,38 @@ final class TextViewportLayoutTests: XCTestCase {
     view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
     let buffer = try TextBuffer.open(bytes: Data("hi".utf8))
     view.setBuffer(buffer)
-    XCTAssertEqual(view.frame.height, view.layout.lineHeight)  // fits one visual row
+    XCTAssertEqual(view.visualRowCount, 1)  // fits one visual row
+  }
+
+  @MainActor
+  func testClickBelowContentLandsAtDocumentEnd() throws {
+    // Clicking the empty area below the last line places the caret at the document
+    // end regardless of x — not at the column nearest the click on the last line.
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+    let buffer = try TextBuffer.open(bytes: Data("@AGENTS.md".utf8))
+    view.setBuffer(buffer)
+    let end = TextSelection.Endpoint(line: 0, columnUTF16: 10)  // after the final "d"
+
+    // Far below the single line, at a left-ish x that sits over "S".
+    let below = view.endpoint(at: NSPoint(x: 60, y: 300))
+    XCTAssertEqual(below, end)
+    // A click that is genuinely to the right of the text on the line's own row
+    // also resolves to the end.
+    let right = view.endpoint(at: NSPoint(x: 5000, y: 1))
+    XCTAssertEqual(right, end)
+  }
+
+  @MainActor
+  func testShortDocumentFillsTheViewportHeight() throws {
+    // A short document's view fills at least the viewport height, so the empty
+    // area below the last line is still part of the text view (takes the I-beam
+    // and accepts a click) even though the content is a single row.
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+    view.setBuffer(try TextBuffer.open(bytes: Data("hi".utf8)))
+    XCTAssertEqual(view.visualRowCount, 1)  // content is one row…
+    XCTAssertEqual(view.frame.height, 400)  // …but the view fills the viewport
   }
 
   @MainActor
@@ -282,7 +313,7 @@ final class TextViewportLayoutTests: XCTestCase {
     view.frame = NSRect(x: 0, y: 0, width: 140, height: 400)  // narrow viewport
     view.maximumWrappableLineCount = 2  // below this buffer's 3 lines
     view.setBuffer(buffer)
-    XCTAssertEqual(view.frame.height, view.layout.lineHeight * 3)  // no wrap: 3 rows
+    XCTAssertEqual(view.visualRowCount, 3)  // no wrap: 3 rows
   }
 
   @MainActor
@@ -296,7 +327,7 @@ final class TextViewportLayoutTests: XCTestCase {
     let buffer = try TextBuffer.open(bytes: Data(String(repeating: "word ", count: 50).utf8))
     view.setBuffer(buffer)  // 250 chars: would wrap to many rows if it wrapped
     XCTAssertFalse(view.isSoftWrapping)
-    XCTAssertEqual(view.frame.height, view.layout.lineHeight)
+    XCTAssertEqual(view.visualRowCount, 1)
   }
 
   @MainActor
@@ -332,7 +363,7 @@ final class TextViewportLayoutTests: XCTestCase {
     let buffer = try TextBuffer.open(bytes: Data("short\n\(longLine)".utf8))
     view.setBuffer(buffer)
     XCTAssertTrue(view.isSoftWrapping)
-    XCTAssertGreaterThan(view.frame.height, view.layout.lineHeight * 3)
+    XCTAssertGreaterThan(view.visualRowCount, 3)
   }
 
   @MainActor
@@ -344,7 +375,7 @@ final class TextViewportLayoutTests: XCTestCase {
     view.longLineWrapThreshold = 10_000  // would suppress wrap for non-prose
     let buffer = try TextBuffer.open(bytes: Data(String(repeating: "word ", count: 50).utf8))
     view.setBuffer(buffer)
-    XCTAssertGreaterThan(view.frame.height, view.layout.lineHeight * 3)
+    XCTAssertGreaterThan(view.visualRowCount, 3)
   }
 
   /// A viewer whose frame is set *before* the buffer, so soft wrap is active.
@@ -372,9 +403,9 @@ final class TextViewportLayoutTests: XCTestCase {
     view.insertText(" eeee ffff gggg hhhh")  // single-line insert: lengthens it
 
     let reference = try makeWrappingViewer(content(of: view), width: width)
-    XCTAssertEqual(view.frame.height, reference.frame.height)
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
     // Sanity: the middle line actually wraps (document is taller than 3 rows).
-    XCTAssertGreaterThan(view.frame.height, view.layout.lineHeight * 3)
+    XCTAssertGreaterThan(view.visualRowCount, 3)
   }
 
   @MainActor
@@ -407,7 +438,7 @@ final class TextViewportLayoutTests: XCTestCase {
     view.insertText("\nsplit")  // adds a line → not single-line
 
     let reference = try makeWrappingViewer(content(of: view), width: width)
-    XCTAssertEqual(view.frame.height, reference.frame.height)
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
   }
 
   // MARK: Multi-click selection
