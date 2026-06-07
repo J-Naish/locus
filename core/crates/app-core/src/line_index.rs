@@ -54,6 +54,18 @@ const SCAN_CHUNK_BYTES: usize = 256 * 1024;
 
 const NEWLINE: u8 = b'\n';
 
+/// Truncates `content` to at most `cap` bytes, ending on a char boundary.
+fn floor_to_byte_cap(content: &str, cap: usize) -> &str {
+    if content.len() <= cap {
+        return content;
+    }
+    let mut end = cap;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    &content[..end]
+}
+
 /// Cumulative byte/char/UTF-16 counts at the start of a line, recorded every
 /// `checkpoint_lines` lines. Sorted ascending in every dimension.
 #[derive(Clone, Copy)]
@@ -134,17 +146,82 @@ impl<S: ByteSource> LineIndex<S> {
         self.max_line_byte_count
     }
 
-    /// The text of lines `start..end`, decoded lossily as UTF-8: the contiguous
-    /// bytes from the start of line `start` up to the start of line `end` (or end
-    /// of input). `start` and `end` are clamped to `line_count`, and an empty or
-    /// reversed range yields an empty string.
-    pub fn text_for_line_range(&self, start: usize, end: usize) -> io::Result<String> {
-        let start = start.min(self.line_count);
-        let end = end.min(self.line_count).max(start);
+    /// The content of lines `[start_line, start_line + count)` joined by `\n`, with
+    /// each line's own terminator (`\n` or `\r\n`) stripped — the editor's band
+    /// read. Matches [`crate::text_buffer::TextBuffer::text_for_line_range`]; an
+    /// out-of-range request is clamped so scrolling never errors.
+    pub fn text_for_line_range(&self, start_line: usize, count: usize) -> io::Result<String> {
+        let total = self.line_count;
+        if start_line >= total || count == 0 {
+            return Ok(String::new());
+        }
+        let end_line = start_line.saturating_add(count).min(total);
+        let start_byte = self.cumulative_at_line_start(start_line)?.byte;
+        let end_byte = self.band_end_byte(end_line)?;
+        self.format_band(
+            start_byte,
+            end_byte,
+            end_line - start_line,
+            end_line < total,
+            None,
+        )
+    }
 
-        let start_byte = self.cumulative_at_line_start(start)?.byte;
-        let end_byte = self.cumulative_at_line_start(end)?.byte;
-        self.read_window(start_byte, end_byte)
+    /// Like [`text_for_line_range`](Self::text_for_line_range), but never returns
+    /// more than `max_bytes_per_line` bytes of any single line's content, so one
+    /// enormous line is not materialized just to paint a band.
+    pub fn text_for_line_range_capped(
+        &self,
+        start_line: usize,
+        count: usize,
+        max_bytes_per_line: usize,
+    ) -> io::Result<String> {
+        let total = self.line_count;
+        if start_line >= total || count == 0 {
+            return Ok(String::new());
+        }
+        let end_line = start_line.saturating_add(count).min(total);
+        let line_count = end_line - start_line;
+        let start_byte = self.cumulative_at_line_start(start_line)?.byte;
+        let end_byte = self.band_end_byte(end_line)?;
+
+        // Fast path: the band fits roughly the cap budget — read it once and cap
+        // each line in the assembled string (the per-line cap is still enforced;
+        // the budget bounds the total, not any one line).
+        let budget = line_count
+            .saturating_mul(max_bytes_per_line.saturating_add(2))
+            .saturating_add(2) as u64;
+        if end_byte - start_byte <= budget {
+            return self.format_band(
+                start_byte,
+                end_byte,
+                line_count,
+                end_line < total,
+                Some(max_bytes_per_line),
+            );
+        }
+
+        // Slow path: at least one line is very long. Read only a capped prefix of
+        // each line so the giant line never fully materializes.
+        let mut out = String::new();
+        for line in start_line..end_line {
+            if line > start_line {
+                out.push('\n');
+            }
+            let line_start = self.cumulative_at_line_start(line)?.byte;
+            // Cap plus slack for a trailing multi-byte char and a CRLF terminator.
+            let want = max_bytes_per_line.saturating_add(4);
+            let bytes = self.source.read_at(line_start, want)?;
+            let chunk = String::from_utf8_lossy(&bytes);
+            let content = match chunk.find('\n') {
+                Some(newline) => chunk[..newline]
+                    .strip_suffix('\r')
+                    .unwrap_or(&chunk[..newline]),
+                None => &chunk,
+            };
+            out.push_str(floor_to_byte_cap(content, max_bytes_per_line));
+        }
+        Ok(out)
     }
 
     /// The raw text of the UTF-16 range `[start, end)`, decoded lossily. Used to
@@ -274,6 +351,49 @@ impl<S: ByteSource> LineIndex<S> {
         let len = (end_byte - start_byte) as usize;
         let bytes = self.source.read_at(start_byte, len)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Byte offset where a band ending just before `end_line` stops: the start of
+    /// `end_line`, or end of input when the band reaches the last line.
+    fn band_end_byte(&self, end_line: usize) -> io::Result<u64> {
+        if end_line < self.line_count {
+            Ok(self.cumulative_at_line_start(end_line)?.byte)
+        } else {
+            Ok(self.byte_len)
+        }
+    }
+
+    /// Formats an already-located byte band into `line_count` lines joined by `\n`,
+    /// each terminator stripped (a `\r` right before a `\n` is part of the
+    /// terminator). The final line keeps a genuine trailing `\r` only when it is
+    /// the buffer's last line (`strip_final == false`). `cap`, when set, truncates
+    /// each line's content on a char boundary. Mirrors `TextBuffer::format_band`.
+    fn format_band(
+        &self,
+        start_byte: u64,
+        end_byte: u64,
+        line_count: usize,
+        strip_final: bool,
+        cap: Option<usize>,
+    ) -> io::Result<String> {
+        let raw = self.read_window(start_byte, end_byte)?;
+        let mut out = String::with_capacity(raw.len());
+        for (index, segment) in raw.split('\n').take(line_count).enumerate() {
+            if index > 0 {
+                out.push('\n');
+            }
+            let is_final = index + 1 == line_count;
+            let content = if is_final && !strip_final {
+                segment
+            } else {
+                segment.strip_suffix('\r').unwrap_or(segment)
+            };
+            match cap {
+                Some(cap) => out.push_str(floor_to_byte_cap(content, cap)),
+                None => out.push_str(content),
+            }
+        }
+        Ok(out)
     }
 
     /// Cumulative counts at the start of `line`; for a line at or past the end,
@@ -442,11 +562,11 @@ mod tests {
     }
 
     #[test]
-    fn returns_individual_lines_with_their_terminators() {
+    fn returns_individual_lines_with_terminators_stripped() {
         let idx = index("a\nb\nc", 1024);
-        assert_eq!(idx.text_for_line_range(0, 1).unwrap(), "a\n");
-        assert_eq!(idx.text_for_line_range(1, 2).unwrap(), "b\n");
-        assert_eq!(idx.text_for_line_range(2, 3).unwrap(), "c"); // last line, no terminator
+        assert_eq!(idx.text_for_line_range(0, 1).unwrap(), "a");
+        assert_eq!(idx.text_for_line_range(1, 1).unwrap(), "b");
+        assert_eq!(idx.text_for_line_range(2, 1).unwrap(), "c");
     }
 
     #[test]
@@ -454,7 +574,7 @@ mod tests {
         let idx = index("a\n", 1024);
         assert_eq!(idx.line_count(), 2);
         assert_eq!(idx.text_for_line_range(0, 2).unwrap(), "a\n");
-        assert_eq!(idx.text_for_line_range(1, 2).unwrap(), "");
+        assert_eq!(idx.text_for_line_range(1, 1).unwrap(), "");
     }
 
     #[test]
@@ -462,28 +582,28 @@ mod tests {
         // checkpoint every 2 lines exercises the checkpoint + forward-scan path.
         let idx = index("L0\nL1\nL2\nL3\nL4", 2);
         assert_eq!(idx.line_count(), 5);
-        assert_eq!(idx.text_for_line_range(3, 5).unwrap(), "L3\nL4");
-        assert_eq!(idx.text_for_line_range(2, 3).unwrap(), "L2\n");
-        assert_eq!(idx.text_for_line_range(0, 1).unwrap(), "L0\n");
-        // A range spanning several checkpoints returns the full span.
-        assert_eq!(idx.text_for_line_range(1, 4).unwrap(), "L1\nL2\nL3\n");
+        assert_eq!(idx.text_for_line_range(3, 2).unwrap(), "L3\nL4");
+        assert_eq!(idx.text_for_line_range(2, 1).unwrap(), "L2");
+        assert_eq!(idx.text_for_line_range(0, 1).unwrap(), "L0");
+        // A count spanning several checkpoints returns the joined span.
+        assert_eq!(idx.text_for_line_range(1, 3).unwrap(), "L1\nL2\nL3");
     }
 
     #[test]
     fn clamps_out_of_range_requests() {
         let idx = index("a\nb\nc", 1024);
-        assert_eq!(idx.text_for_line_range(0, 99).unwrap(), "a\nb\nc");
-        assert_eq!(idx.text_for_line_range(5, 9).unwrap(), "");
-        assert_eq!(idx.text_for_line_range(2, 1).unwrap(), ""); // reversed
+        assert_eq!(idx.text_for_line_range(0, 99).unwrap(), "a\nb\nc"); // count clamped
+        assert_eq!(idx.text_for_line_range(5, 9).unwrap(), ""); // start past the end
+        assert_eq!(idx.text_for_line_range(1, 0).unwrap(), ""); // zero count
     }
 
     #[test]
     fn windows_never_split_multibyte_code_points() {
         let idx = index("あ\nい\nう", 1);
         assert_eq!(idx.line_count(), 3);
-        assert_eq!(idx.text_for_line_range(0, 1).unwrap(), "あ\n");
-        assert_eq!(idx.text_for_line_range(1, 2).unwrap(), "い\n");
-        assert_eq!(idx.text_for_line_range(2, 3).unwrap(), "う");
+        assert_eq!(idx.text_for_line_range(0, 1).unwrap(), "あ");
+        assert_eq!(idx.text_for_line_range(1, 1).unwrap(), "い");
+        assert_eq!(idx.text_for_line_range(2, 1).unwrap(), "う");
     }
 
     #[test]
@@ -492,16 +612,17 @@ mod tests {
         let idx = LineIndex::build_with_checkpoint(source, 1024).expect("build index");
         assert_eq!(idx.line_count(), 2);
         let first = idx.text_for_line_range(0, 1).unwrap();
-        assert!(first.starts_with('a') && first.ends_with('\n'));
+        assert!(first.starts_with('a'));
         assert!(first.contains('\u{FFFD}')); // 0xFF rendered as replacement char
-        assert_eq!(idx.text_for_line_range(1, 2).unwrap(), "b");
+        assert!(!first.contains('\n')); // the line's own terminator is stripped
+        assert_eq!(idx.text_for_line_range(1, 1).unwrap(), "b");
     }
 
     #[test]
     fn default_checkpoint_build_reads_correctly() {
         let idx = LineIndex::build(VecSource(b"one\ntwo\nthree".to_vec())).expect("build index");
         assert_eq!(idx.line_count(), 3);
-        assert_eq!(idx.text_for_line_range(1, 2).unwrap(), "two\n");
+        assert_eq!(idx.text_for_line_range(1, 1).unwrap(), "two");
     }
 
     #[test]
@@ -516,11 +637,11 @@ mod tests {
         }
         let idx = LineIndex::build(VecSource(text.into_bytes())).expect("build index");
         assert_eq!(idx.line_count(), line_count + 1); // trailing newline → empty last line
-        assert_eq!(idx.text_for_line_range(0, 1).unwrap(), "line-0\n");
-        assert_eq!(idx.text_for_line_range(4999, 5000).unwrap(), "line-4999\n");
+        assert_eq!(idx.text_for_line_range(0, 1).unwrap(), "line-0");
+        assert_eq!(idx.text_for_line_range(4999, 1).unwrap(), "line-4999");
         assert_eq!(
-            idx.text_for_line_range(2500, 2502).unwrap(),
-            "line-2500\nline-2501\n"
+            idx.text_for_line_range(2500, 2).unwrap(),
+            "line-2500\nline-2501"
         );
     }
 
@@ -644,5 +765,36 @@ mod tests {
         let stray = LineIndex::build_with_checkpoint(VecSource(vec![0xF0, b'a']), 1024)
             .expect("build index");
         assert_eq!(stray.utf16_len(), 3);
+    }
+
+    #[test]
+    fn band_strips_crlf_terminators_and_keeps_a_final_lone_cr() {
+        // CRLF terminators are stripped from each line's content.
+        let crlf = index("a\r\nb\r\nc", 1024);
+        assert_eq!(crlf.text_for_line_range(0, 3).unwrap(), "a\nb\nc");
+        // A trailing \r on the buffer's final line (no following \n) is content.
+        let trailing = index("a\nb\r", 1024);
+        assert_eq!(trailing.text_for_line_range(0, 2).unwrap(), "a\nb\r");
+    }
+
+    #[test]
+    fn capped_band_truncates_long_lines_on_a_char_boundary() {
+        // Fast path: the band fits the budget; line 0 is capped to 4 bytes.
+        let fast = index("abcdef\ng", 1024);
+        assert_eq!(fast.text_for_line_range_capped(0, 2, 4).unwrap(), "abcd\ng");
+        // A multi-byte char is never split: a 4-byte cap on "あい" floors to "あ".
+        let multibyte = index("あい\nz", 1024);
+        assert_eq!(multibyte.text_for_line_range_capped(0, 1, 4).unwrap(), "あ");
+    }
+
+    #[test]
+    fn capped_band_slow_path_caps_a_very_long_line() {
+        // The middle line far exceeds the cap, forcing the per-line slow path; it
+        // is still capped, and the giant line never fully materializes.
+        let idx = index("short\nthis-is-a-much-longer-line\nx", 1024);
+        assert_eq!(
+            idx.text_for_line_range_capped(0, 3, 4).unwrap(),
+            "shor\nthis\nx"
+        );
     }
 }

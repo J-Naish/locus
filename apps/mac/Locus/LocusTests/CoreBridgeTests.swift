@@ -196,7 +196,7 @@ final class CoreBridgeTests: XCTestCase {
     XCTAssertEqual(file.lineCount, 3)
     XCTAssertEqual(file.byteLength, 16)
     XCTAssertEqual(file.text(forLineRange: 0, count: 3), "alpha\nbeta\ngamma")
-    XCTAssertEqual(file.text(forLineRange: 1, count: 1), "beta\n")
+    XCTAssertEqual(file.text(forLineRange: 1, count: 1), "beta")  // terminator stripped
     XCTAssertEqual(file.text(forLineRange: 2, count: 9), "gamma")  // clamped past the end
   }
 

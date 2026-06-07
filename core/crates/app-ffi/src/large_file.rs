@@ -217,8 +217,7 @@ pub unsafe extern "C" fn locus_large_file_snapshot_line_range(
     };
 
     let total = handle.index.line_count();
-    let end_line = start_line.saturating_add(count);
-    let text = match handle.index.text_for_line_range(start_line, end_line) {
+    let text = match handle.index.text_for_line_range(start_line, count) {
         Ok(text) => text,
         Err(error) => {
             set_last_error_message(format!("failed to read line range: {error}"));
@@ -295,7 +294,7 @@ mod tests {
             assert_eq!(locus_large_file_byte_length(handle), 16);
             assert_eq!(locus_large_file_max_line_byte_length(handle), 6); // "alpha\n"
             assert_eq!(snapshot_text(handle, 0, 3), "alpha\nbeta\ngamma");
-            assert_eq!(snapshot_text(handle, 1, 1), "beta\n");
+            assert_eq!(snapshot_text(handle, 1, 1), "beta"); // terminator stripped
             assert_eq!(snapshot_text(handle, 2, 9), "gamma"); // clamped past the end
             locus_large_file_free(handle);
         }
