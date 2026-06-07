@@ -677,6 +677,7 @@ final class TextViewportLayoutTests: XCTestCase {
 
   // MARK: Scroll rendering stability
 
+  @MainActor
   func testViewerOptsOutOfResponsiveScrolling() {
     // The synthesized-height view draws viewport-relative chrome (pinned gutter,
     // caret, selection). Responsive scrolling's overdraw cache renders those at a

@@ -955,9 +955,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Whether the plain insertion caret should be blinking right now: focused, not
   /// composing (the marked-text caret stays solid), and a collapsed selection.
   /// Pure for testability.
-  static func caretShouldBlink(isFirstResponder: Bool, isComposing: Bool, selectionIsEmpty: Bool)
-    -> Bool
-  {
+  nonisolated static func caretShouldBlink(
+    isFirstResponder: Bool, isComposing: Bool, selectionIsEmpty: Bool
+  ) -> Bool {
     isFirstResponder && !isComposing && selectionIsEmpty
   }
 
