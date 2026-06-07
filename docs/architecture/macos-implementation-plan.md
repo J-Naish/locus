@@ -11,7 +11,7 @@ The implementation should keep the product native, local-first, fast, and docume
 - `apps/mac/Locus/` contains the active native macOS prototype.
 - The app launches into the home folder when available, supports explicit folder opening, shows a name-first sidebar file browser, expands folders inline, colors Git-changed entries passively when available, keeps session folder history, and tracks recent files/folders.
 - The document surface supports editable Markdown, structured text, plain text, and common source files, plus native previews for images, PDFs, media, and Office files through Quick Look where macOS can render them.
-- `core/` contains the Rust workspace with `app-core`, `app-ffi`, and `app-cli`; the current core covers file type classification, shallow folder listing, lightweight listing metadata, ignored-name policy, FFI snapshots, a UTF-8 piece-tree text buffer (line snapshots, position lookups, insert/delete/replace, undo/redo, memory-mapped open, encoded save), and a performance-listing CLI.
+- `core/` contains the Rust workspace with `app-core`, `app-ffi`, and `app-cli`; the current core covers file type classification, shallow folder listing, lightweight listing metadata, ignored-name policy, FFI snapshots, a UTF-8 piece-tree text buffer (line snapshots, position lookups, insert/delete/replace, undo/redo, file open, encoded save), and a performance-listing CLI.
 - The Rust FFI surface exposes ABI/version checks, folder listing with explicit options, stable status codes, partial listing errors, Rust-owned snapshot release functions, and opaque text-buffer handle APIs (open/free, visible-band line snapshots, edits, undo/redo, save).
 - Product scope and architecture are defined in:
   - `docs/product/mvp-roadmap.md`
@@ -75,14 +75,16 @@ core/crates/app-core/src/
   text_buffer.rs
 ```
 
-The `app-ffi` crate adds `mmap.rs` (its only `unsafe`, isolating the
-memory-mapped file source) alongside the `text_buffer.rs` C ABI layer.
+The `app-ffi` crate holds the C ABI layer (`text_buffer.rs` and the workspace
+bridge in `lib.rs`); its `unsafe` is confined to opaque-handle and pointer
+marshaling at the boundary, and files are read into owned buffers rather than
+memory-mapped.
 
 Current ownership:
 
 - `file_type`: extension and MIME-ish classification used by both app and CLI.
 - `workspace`: open a folder, list child entries, apply shallow filters, sort folders/files.
-- `text_buffer`: UTF-8 piece tree backing text editing at any size — line index and snapshots, byte/char/UTF-16/line/column position lookups, insert/delete/replace and undo/redo, dirty tracking, and streaming save. Opened from a memory-mapped (zero-copy) UTF-8 file or owned bytes. Text encoding detection/conversion and all UI, IME, drawing, and selection stay in the macOS app.
+- `text_buffer`: UTF-8 piece tree backing text editing at any size — line index and snapshots, byte/char/UTF-16/line/column position lookups, insert/delete/replace and undo/redo, dirty tracking, and streaming save. Opened by reading a UTF-8 file into an owned buffer, or from already-decoded bytes. Text encoding detection/conversion and all UI, IME, drawing, and selection stay in the macOS app.
 
 Deferred modules and boundaries:
 
@@ -104,7 +106,7 @@ Keep the C ABI coarse and explicit. Early APIs should support:
 - reading lightweight listing metadata, with size and modified time loaded lazily when needed
 - listing with explicit options through FFI when contextual surfaces request
   extended metadata
-- opening a text buffer (memory-mapped) and operating on it through an opaque
+- opening a text buffer (read into memory) and operating on it through an opaque
   handle: visible line-range snapshots, position lookups, insert/delete/replace,
   undo/redo, dirty state, and streaming save
 - releasing Rust-allocated strings, arrays, snapshots, and buffer handles

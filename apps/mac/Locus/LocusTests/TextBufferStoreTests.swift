@@ -156,13 +156,27 @@ final class TextBufferStoreTests: XCTestCase {
     let url = temporaryFileURL()
     try XCTUnwrap("あいうえお\n".data(using: .shiftJIS)).write(to: url)  // ~11 bytes
     defer { try? FileManager.default.removeItem(at: url) }
-    // UTF-8 files bypass this via mmap; a legacy-encoded file over the cap is
-    // refused rather than read fully into memory.
+    // A larger budget applies to plain UTF-8; a legacy-encoded file over the
+    // decode cap is refused rather than read fully into memory.
     let store = TextBufferStore(maximumDecodedByteCount: 4)
 
     XCTAssertThrowsError(try store.open(at: url)) { error in
       guard case TextBufferStoreError.tooLargeForEncoding = error else {
         return XCTFail("expected tooLargeForEncoding, got \(error)")
+      }
+    }
+  }
+
+  func testRefusesToOpenUTF8FileLargerThanOpenCap() throws {
+    let url = temporaryFileURL()
+    try Data("hello".utf8).write(to: url)  // 5 bytes, plain UTF-8 (no BOM)
+    defer { try? FileManager.default.removeItem(at: url) }
+    // A file over the open cap is refused rather than read into memory.
+    let store = TextBufferStore(maximumOpenByteCount: 4)
+
+    XCTAssertThrowsError(try store.open(at: url)) { error in
+      guard case TextBufferStoreError.tooLargeToOpen = error else {
+        return XCTFail("expected tooLargeToOpen, got \(error)")
       }
     }
   }

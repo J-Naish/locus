@@ -3,13 +3,12 @@
 //! The buffer works exclusively in canonical UTF-8. Encoding detection and
 //! transcoding for non-UTF-8 files stay on the platform side (Foundation),
 //! which hands already-decoded UTF-8 bytes here; this keeps the core free of
-//! external encoding dependencies while still letting UTF-8 files (the common
-//! case) be mapped without copying.
+//! external encoding dependencies; UTF-8 files (the common case) are read
+//! straight into the buffer without transcoding.
 //!
-//! Content is modeled as a piece table: an immutable original (owned now,
-//! memory-mapped from the FFI layer later) plus an append-only add buffer,
-//! referenced by pieces. Edits never touch the original; they trim pieces and
-//! append inserted text to the add buffer.
+//! Content is modeled as a piece table: an immutable, heap-owned original plus
+//! an append-only add buffer, referenced by pieces. Edits never touch the
+//! original; they trim pieces and append inserted text to the add buffer.
 //!
 //! The pieces live in a balanced binary tree (a treap) whose nodes cache
 //! subtree aggregates (`bytes`, `chars`, `utf16`, `line_breaks`). That makes
@@ -37,9 +36,9 @@ const PRIORITY_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// Borrowed access to the buffer's original content bytes.
 ///
-/// The platform bridge supplies a memory-mapped implementation for large
-/// files; tests and small files use [`OwnedBytes`]. Keeping this a trait lets
-/// the core stay free of `unsafe` (the memory mapping lives in the FFI layer).
+/// Every buffer uses [`OwnedBytes`] (heap-owned) today. Keeping this a trait
+/// decouples `TextBuffer` from how those bytes are stored and lets the core
+/// stay free of `unsafe`.
 ///
 /// Implementations must return the same bytes for the lifetime of the value:
 /// the buffer caches indexes over them. `Send + Sync` lets a buffer be built

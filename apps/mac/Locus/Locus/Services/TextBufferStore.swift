@@ -2,9 +2,12 @@ import Foundation
 
 enum TextBufferStoreError: LocalizedError {
   /// A non-UTF-8 (or BOM-prefixed) file is too large to decode, since that path
-  /// must read the whole file into memory. Large files are supported only as
-  /// UTF-8 (memory-mapped). Editing in a legacy encoding stays a small-file path.
+  /// must read the whole file into memory. A larger budget applies to plain
+  /// UTF-8; editing in a legacy encoding stays a small-file path.
   case tooLargeForEncoding
+  /// The file is larger than the buffer will read into memory, so it is refused
+  /// rather than opened. Realistic documents sit far below this bound.
+  case tooLargeToOpen
   /// The bytes do not look like text in any supported encoding.
   case notRecognizedAsText
 
@@ -12,7 +15,9 @@ enum TextBufferStoreError: LocalizedError {
     switch self {
     case .tooLargeForEncoding:
       return
-        "This file is too large to open in its (non-UTF-8) encoding. Large files are supported only as UTF-8."
+        "This file is too large to open in its (non-UTF-8) encoding. A larger limit applies to plain UTF-8 files."
+    case .tooLargeToOpen:
+      return "This file is too large to open."
     case .notRecognizedAsText:
       return "The file does not appear to be a text document."
     }
@@ -21,24 +26,36 @@ enum TextBufferStoreError: LocalizedError {
 
 /// Opens and saves a `TextBuffer`, preserving the file's original text encoding.
 ///
-/// Opening keeps the zero-copy path for the common case: a UTF-8 file (without a
-/// BOM) is memory-mapped, so a multi-gigabyte file is never read onto the heap.
-/// A byte-order mark, or bytes that are not valid UTF-8, route to a Foundation
-/// decode (Shift JIS / UTF-16 / Latin-1), which materializes the file — those
-/// legacy-encoded files are small in practice.
+/// Opening reads the file into the buffer, which owns its bytes — there is no
+/// memory map, so an external truncation can never fault the process. A plain
+/// UTF-8 file takes the direct path; a byte-order mark, or bytes that are not
+/// valid UTF-8, route to a Foundation decode (Shift JIS / UTF-16 / Latin-1).
+/// Both paths are bounded by a maximum size so a pathologically large file is
+/// refused rather than read into memory; realistic documents sit far below it.
 ///
-/// Saving streams UTF-8 straight to disk (still zero-copy for huge files); a
+/// Saving streams UTF-8 straight to disk without materializing a full copy; a
 /// non-UTF-8 file is re-encoded to its original encoding (refusing, rather than
 /// losing, characters that cannot be represented). It writes atomically for a
 /// regular file and in place through a symlink (so the link target is updated).
 struct TextBufferStore {
-  /// Largest file the decode (non-UTF-8 / BOM) path will read into memory. UTF-8
-  /// files bypass this via memory-mapping, so only legacy-encoded files are
-  /// bounded. Injectable so tests can exercise the boundary cheaply.
+  /// Largest plain-UTF-8 file `open` will read into memory; a larger file is
+  /// refused. Set to 1 GiB so a ~1 GB file still opens — it is read fully into
+  /// memory, so worst-case RAM is roughly the file size — while a pathologically
+  /// larger file is refused rather than risk exhausting memory. Injectable so
+  /// tests can exercise the boundary cheaply.
+  static let defaultMaximumOpenByteCount = 1024 * 1024 * 1024  // 1 GiB
+  /// Largest file the decode (non-UTF-8 / BOM) path will read into memory. Lower
+  /// than the UTF-8 bound because decoding allocates more; legacy-encoded files
+  /// are small in practice. Injectable so tests can exercise the boundary cheaply.
   static let defaultMaximumDecodedByteCount = 64 * 1024 * 1024
+  let maximumOpenByteCount: Int
   let maximumDecodedByteCount: Int
 
-  init(maximumDecodedByteCount: Int = TextBufferStore.defaultMaximumDecodedByteCount) {
+  init(
+    maximumOpenByteCount: Int = TextBufferStore.defaultMaximumOpenByteCount,
+    maximumDecodedByteCount: Int = TextBufferStore.defaultMaximumDecodedByteCount
+  ) {
+    self.maximumOpenByteCount = maximumOpenByteCount
     self.maximumDecodedByteCount = maximumDecodedByteCount
   }
 
@@ -50,12 +67,17 @@ struct TextBufferStore {
       }
     }
 
-    // A BOM would otherwise be mapped as content, so decode it explicitly.
+    // A BOM is decoded explicitly rather than landing in the buffer as content.
     if Self.hasByteOrderMark(at: url) {
       return try decodeFully(at: url)
     }
-    // No BOM: try the zero-copy UTF-8 memory-map; fall back to a decode only when
-    // the bytes are not valid UTF-8 (legacy encodings).
+    // No BOM: read the file as UTF-8 into the buffer, which owns its bytes (no
+    // memory map, so an external truncation can't fault the process). Bound the
+    // size first so a pathologically large file is refused, not read into memory.
+    let fileSize = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize
+    if let fileSize, fileSize > maximumOpenByteCount {
+      throw TextBufferStoreError.tooLargeToOpen
+    }
     do {
       return (try TextBuffer.open(at: url), .utf8)
     } catch TextBufferError.notUTF8 {
@@ -88,8 +110,8 @@ struct TextBufferStore {
   }
 
   /// Reads `data` from disk and decodes it to UTF-8-backed buffer bytes. Bounded
-  /// by `maximumDecodedByteCount`, since this path reads the whole file into
-  /// memory (unlike the memory-mapped UTF-8 path).
+  /// by `maximumDecodedByteCount`, lower than the UTF-8 read bound because
+  /// decoding allocates more than a direct read.
   private func decodeFully(at url: URL) throws -> (buffer: TextBuffer, encoding: String.Encoding) {
     let fileSize = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize
     if let fileSize, fileSize > maximumDecodedByteCount {

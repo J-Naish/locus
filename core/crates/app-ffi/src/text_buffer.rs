@@ -6,19 +6,14 @@
 //! and `u32` status codes. Text-buffer statuses live in a 100+ band so a Swift
 //! `switch` never confuses them with workspace statuses.
 //!
-//! `open` memory-maps files at or above [`MMAP_THRESHOLD_BYTES`] (so a huge
-//! file is not copied onto the heap) and reads smaller files normally, behind
-//! `app_core`'s `ContentBytes` seam and with no ABI change.
+//! `open` reads a file into an owned buffer (so the buffer owns its bytes and
+//! an external truncation can never fault the process); the platform layer
+//! bounds the file size before calling in.
 
 use std::ffi::c_char;
 use std::io::Write;
 
 use app_core::text_buffer::{Position, TextBuffer, TextBufferError};
-
-#[cfg(unix)]
-use crate::mmap::MmapBytes;
-#[cfg(unix)]
-use std::path::Path;
 
 use crate::{clear_last_error_message, set_last_error_message, string_from_c_str, LOCUS_STATUS_OK};
 
@@ -117,14 +112,6 @@ pub unsafe extern "C" fn locus_text_buffer_open(
     }
 }
 
-/// Files at least this large are memory-mapped instead of read onto the heap,
-/// so opening a multi-gigabyte file does not allocate its bytes. The threshold
-/// is deliberately high: files below it read comfortably onto the heap, and
-/// keeping them off mmap shrinks exposure to the SIGBUS a concurrent truncation
-/// of a mapped file would cause. Only genuinely large files — where the heap
-/// copy actually hurts — are mapped.
-const MMAP_THRESHOLD_BYTES: u64 = 128 << 20; // 128 MiB
-
 /// Why opening a file as a text buffer failed: a filesystem error (reported as
 /// `LOCUS_TEXT_STATUS_IO`) versus the buffer rejecting the content (e.g. not
 /// UTF-8), which maps to a specific text status.
@@ -134,38 +121,10 @@ enum OpenError {
     Buffer(TextBufferError),
 }
 
+/// Reads `path` into an owned buffer. The buffer owns its bytes, so a later
+/// external truncation or rewrite of the file cannot fault the process; the
+/// platform layer is responsible for bounding the file size before opening.
 fn open_text_buffer(path: &str) -> Result<TextBuffer, OpenError> {
-    open_text_buffer_with_threshold(path, MMAP_THRESHOLD_BYTES)
-}
-
-/// Opens `path`, memory-mapping it when it is at least `mmap_threshold` bytes
-/// and falling back to an owned read for smaller files or if mapping fails.
-fn open_text_buffer_with_threshold(
-    path: &str,
-    mmap_threshold: u64,
-) -> Result<TextBuffer, OpenError> {
-    #[cfg(unix)]
-    {
-        let metadata = std::fs::metadata(path)
-            .map_err(|error| OpenError::Io(format!("failed to read {path}: {error}")))?;
-        if metadata.len() >= mmap_threshold {
-            match MmapBytes::open(Path::new(path)) {
-                Ok(Some(mapped)) => {
-                    return TextBuffer::from_source(Box::new(mapped)).map_err(OpenError::Buffer);
-                }
-                // Empty file: nothing to map; fall through to a cheap owned read.
-                Ok(None) => {}
-                // Mapping a large file failed: surface it rather than fall back
-                // to an owned read that could exhaust memory on a huge file.
-                Err(error) => {
-                    return Err(OpenError::Io(format!("failed to map {path}: {error}")));
-                }
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = mmap_threshold;
-
     let bytes = std::fs::read(path)
         .map_err(|error| OpenError::Io(format!("failed to read {path}: {error}")))?;
     TextBuffer::from_utf8_bytes(bytes).map_err(OpenError::Buffer)
@@ -1045,49 +1004,31 @@ mod tests {
     }
 
     #[test]
-    fn open_maps_file_at_or_above_threshold() {
-        // Threshold 0 forces the mmap path even for a tiny file. A non-empty
-        // file never falls back to an owned read (mapping failure returns an
-        // error), so a successful open here means the mmap path was taken.
-        let path = temp_file("mapped.txt", "alpha\nbeta\ngamma");
-        let buffer =
-            open_text_buffer_with_threshold(&path.to_string_lossy(), 0).expect("opens via mmap");
+    fn open_reads_a_multiline_file() {
+        let path = temp_file("read.txt", "alpha\nbeta\ngamma");
+        let buffer = open_text_buffer(&path.to_string_lossy()).expect("opens file");
         assert_eq!(buffer.line_count(), 3);
         assert_eq!(buffer.text_for_line_range(0, 3), "alpha\nbeta\ngamma");
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn open_reads_file_below_threshold() {
-        // A huge threshold forces the owned-read path; content must match.
-        let path = temp_file("owned.txt", "alpha\nbeta\ngamma");
-        let buffer = open_text_buffer_with_threshold(&path.to_string_lossy(), u64::MAX)
-            .expect("opens via owned read");
-        assert_eq!(buffer.line_count(), 3);
-        assert_eq!(buffer.text_for_line_range(0, 3), "alpha\nbeta\ngamma");
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn open_empty_file_falls_back_from_mmap() {
-        // An empty file cannot be mapped; the threshold-0 path must fall back to
-        // an owned read and yield a single empty line.
+    fn open_empty_file_yields_a_single_empty_line() {
         let path = temp_file("empty.txt", "");
-        let buffer =
-            open_text_buffer_with_threshold(&path.to_string_lossy(), 0).expect("opens empty file");
+        let buffer = open_text_buffer(&path.to_string_lossy()).expect("opens empty file");
         assert_eq!(buffer.line_count(), 1);
         assert_eq!(buffer.byte_len(), 0);
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn open_rejects_non_utf8_via_mmap_path() {
+    fn open_rejects_non_utf8() {
         let path = temp_file("binary.bin", "");
         std::fs::write(&path, [0xFFu8, 0xFE, 0x00]).unwrap();
-        let result = open_text_buffer_with_threshold(&path.to_string_lossy(), 0);
+        let result = open_text_buffer(&path.to_string_lossy());
         assert!(
             matches!(result, Err(OpenError::Buffer(TextBufferError::NotUtf8))),
-            "expected NotUtf8 from the mmap path"
+            "expected NotUtf8"
         );
         let _ = std::fs::remove_file(&path);
     }
