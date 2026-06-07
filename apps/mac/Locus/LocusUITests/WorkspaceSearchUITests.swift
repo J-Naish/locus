@@ -1075,6 +1075,63 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testReadOnlyLargeViewerSupportsSelectionAndStaysReadOnly() throws {
+    // Force the large-text threshold low so a small fixture routes through the
+    // windowed read-only viewer (a real >256 MiB file is impractical as a
+    // fixture). The file then opens read-only via `LargeFile`, not the editable
+    // buffer — the path that used to be a plain line list.
+    let app = try launchApp(
+      workspacePath: fixtureWorkspacePath("basic"),
+      extraArguments: ["--ui-test-large-text-byte-limit", "16"]
+    )
+
+    let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
+    XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+    row.click()
+
+    // It resolves as the read-only viewer, not the editable one.
+    let viewer = app.textViews["document-readonly-large-text-viewer"]
+    XCTAssertTrue(viewer.waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertFalse(app.textViews["document-large-text-viewer"].exists, app.debugDescription)
+    viewer.click()
+
+    // Select-all + copy reads the windowed content.
+    func copyAll() -> String? {
+      NSPasteboard.general.clearContents()
+      var copied: String?
+      let deadline = Date().addingTimeInterval(2)
+      repeat {
+        app.typeKey("a", modifierFlags: [.command])
+        app.typeKey("c", modifierFlags: [.command])
+        copied = NSPasteboard.general.string(forType: .string)
+        if copied?.contains("Meeting notes") == true { break }
+        Thread.sleep(forTimeInterval: 0.05)
+      } while Date() < deadline
+      return copied
+    }
+    XCTAssertEqual(copyAll()?.contains("Avoid startup indexing."), true, app.debugDescription)
+
+    // Editing is inert: a paste over the selection changes nothing.
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString("OVERWRITE", forType: .string)
+    app.typeKey("a", modifierFlags: [.command])
+    app.typeKey("v", modifierFlags: [.command])
+    // The original content survives — the paste was ignored.
+    XCTAssertEqual(copyAll()?.contains("Meeting notes"), true, app.debugDescription)
+
+    // The real Save affordance is the File > Save menu command (not a button), so
+    // assert it directly: it must stay disabled for a read-only document, which is
+    // the `WorkspaceDocumentSurface.isSaveDisabled` contract.
+    let fileMenu = app.menuBars.menuBarItems["File"]
+    XCTAssertTrue(fileMenu.waitForExistence(timeout: 5), app.debugDescription)
+    fileMenu.click()
+    let saveItem = app.menuBars.menuItems["Save"]
+    XCTAssertTrue(saveItem.waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertFalse(saveItem.isEnabled, app.debugDescription)
+    app.typeKey(.escape, modifierFlags: [])  // close the menu
+  }
+
+  @MainActor
   func testLargeFileViewerAcceptsBasicTyping() throws {
     // The large-file viewer is editable: select the whole document, type a known
     // marker to replace it, then read it back through select-all + copy (the AX

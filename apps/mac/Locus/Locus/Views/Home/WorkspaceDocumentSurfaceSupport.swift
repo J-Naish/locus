@@ -82,7 +82,20 @@ enum WorkspaceDocumentSurfaceSupport {
 
   /// A text file larger than this opens read-only in the windowed viewer instead
   /// of the in-memory editable buffer. Mirrors `TextBufferStore`'s editable cap.
-  static var editableTextByteLimit: Int { TextBufferStore.defaultMaximumOpenByteCount }
+  ///
+  /// A UI test may lower it with `--ui-test-large-text-byte-limit` (honored only
+  /// under the `LOCUS_UI_TESTING` hook) so a small fixture routes to the read-only
+  /// viewer without a multi-hundred-megabyte file.
+  static var editableTextByteLimit: Int {
+    if ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1",
+      let raw = LaunchArgumentValues.value(
+        named: "--ui-test-large-text-byte-limit", in: ProcessInfo.processInfo.arguments),
+      let limit = Int(raw)
+    {
+      return limit
+    }
+    return TextBufferStore.defaultMaximumOpenByteCount
+  }
 
   /// Whether a text file of `byteCount` bytes is too large to edit in memory and
   /// should open in the read-only windowed viewer.
