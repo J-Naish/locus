@@ -14,7 +14,10 @@ use app_core::workspace::{
 pub mod large_file;
 pub mod text_buffer;
 
-pub const ABI_VERSION: u32 = 2;
+// Version 3 dropped the unused `locus_large_file_max_line_byte_length` export;
+// removing a symbol is a breaking change, so the version is bumped per the
+// contract in `locus_core.h`.
+pub const ABI_VERSION: u32 = 3;
 
 static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 

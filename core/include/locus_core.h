@@ -468,7 +468,6 @@ void locus_large_file_free(LocusLargeFile *file);
 /* Scalar queries. NULL returns 0. */
 size_t locus_large_file_line_count(const LocusLargeFile *file);
 uint64_t locus_large_file_byte_length(const LocusLargeFile *file);
-uint64_t locus_large_file_max_line_byte_length(const LocusLargeFile *file);
 /* Total UTF-16 code units (size_t, mirroring locus_text_buffer_utf16_length). */
 size_t locus_large_file_utf16_length(const LocusLargeFile *file);
 

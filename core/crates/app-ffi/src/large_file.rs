@@ -170,22 +170,6 @@ pub unsafe extern "C" fn locus_large_file_byte_length(file: *const LocusLargeFil
     }
 }
 
-/// Length in bytes of the file's longest line (including its terminator). Lets
-/// the platform refuse a file with a pathologically long single line. Returns 0
-/// for a NULL handle.
-///
-/// # Safety
-///
-/// `file` must be NULL or a live handle.
-#[no_mangle]
-pub unsafe extern "C" fn locus_large_file_max_line_byte_length(file: *const LocusLargeFile) -> u64 {
-    // SAFETY: file is NULL or a live handle the caller still owns.
-    match unsafe { file.as_ref() } {
-        Some(file) => file.index.max_line_byte_count(),
-        None => 0,
-    }
-}
-
 /// Total number of UTF-16 code units in the file. Returned as `usize` to mirror
 /// `locus_text_buffer_utf16_length`, so a viewer maps selections the same way
 /// regardless of backend. Returns 0 for a NULL handle.
@@ -569,7 +553,6 @@ mod tests {
             let handle = open(&path);
             assert_eq!(locus_large_file_line_count(handle), 3);
             assert_eq!(locus_large_file_byte_length(handle), 16);
-            assert_eq!(locus_large_file_max_line_byte_length(handle), 6); // "alpha\n"
             assert_eq!(snapshot_text(handle, 0, 3), "alpha\nbeta\ngamma");
             assert_eq!(snapshot_text(handle, 1, 1), "beta"); // terminator stripped
             assert_eq!(snapshot_text(handle, 2, 9), "gamma"); // clamped past the end

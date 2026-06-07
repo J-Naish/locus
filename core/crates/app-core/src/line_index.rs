@@ -116,7 +116,6 @@ pub struct LineIndex<S> {
     byte_len: u64,
     char_len: u64,
     utf16_len: u64,
-    max_line_byte_count: u64,
 }
 
 /// A mutable scan position carrying every count the index tracks. `line_start_utf16`
@@ -166,13 +165,6 @@ impl<S: ByteSource> LineIndex<S> {
     /// Total number of UTF-16 code units.
     pub fn utf16_len(&self) -> u64 {
         self.utf16_len
-    }
-
-    /// Length in bytes of the longest line (including its terminator). Lets the
-    /// platform refuse a file with a pathologically long single line instead of
-    /// reading a multi-gigabyte window to render one row.
-    pub fn max_line_byte_count(&self) -> u64 {
-        self.max_line_byte_count
     }
 
     /// The content of lines `[start_line, start_line + count)` joined by `\n`, with
@@ -336,12 +328,9 @@ impl<S: ByteSource> LineIndex<S> {
         let mut offset: u64 = 0;
         let mut char_count: u64 = 0;
         let mut utf16_count: u64 = 0;
-        // Start of the line currently being scanned (byte and UTF-16), and the
-        // longest line seen so far (start-of-line to start-of-next-line,
-        // terminator included).
-        let mut line_start_byte: u64 = 0;
+        // UTF-16 count at the start of the line currently being scanned, recorded
+        // in each checkpoint so a mid-line anchor can still report its column.
         let mut line_start_utf16: u64 = 0;
-        let mut max_line_byte_count: u64 = 0;
 
         while offset < byte_len {
             let want = (byte_len - offset).min(SCAN_CHUNK_BYTES as u64) as usize;
@@ -378,9 +367,6 @@ impl<S: ByteSource> LineIndex<S> {
                 if byte == NEWLINE {
                     newlines += 1;
                     let next_line_start = pos + 1;
-                    max_line_byte_count =
-                        max_line_byte_count.max(next_line_start - line_start_byte);
-                    line_start_byte = next_line_start;
                     line_start_utf16 = utf16_count;
                     lines_since_checkpoint += 1;
                     // Line-cadence checkpoint, at the new line's start (skipped if a
@@ -402,9 +388,6 @@ impl<S: ByteSource> LineIndex<S> {
             }
             offset += chunk.len() as u64;
         }
-        // The final line carries no trailing newline; include its length too.
-        max_line_byte_count = max_line_byte_count.max(byte_len - line_start_byte);
-
         Ok(Self {
             source,
             checkpoints,
@@ -412,7 +395,6 @@ impl<S: ByteSource> LineIndex<S> {
             byte_len,
             char_len: char_count,
             utf16_len: utf16_count,
-            max_line_byte_count,
         })
     }
 
@@ -798,20 +780,6 @@ mod tests {
             idx.text_for_line_range(2500, 2).unwrap(),
             "line-2500\nline-2501"
         );
-    }
-
-    #[test]
-    fn tracks_the_longest_line_including_a_single_huge_line() {
-        // Longest line is "bb\n" or the final "ccc": both 3 bytes.
-        assert_eq!(index("a\nbb\nccc", 1024).max_line_byte_count(), 3);
-        // A trailing newline's empty final line never exceeds the real line.
-        assert_eq!(index("a\n", 1024).max_line_byte_count(), 2);
-        // An empty source has no bytes in its single line.
-        assert_eq!(index("", 1024).max_line_byte_count(), 0);
-        // One unterminated line: the whole content counts as that line — this is
-        // the case the average-length heuristic missed.
-        let one_huge_line = "x".repeat(5000);
-        assert_eq!(index(&one_huge_line, 1024).max_line_byte_count(), 5000);
     }
 
     // "ab\n😀x\ncd": 😀 is 4 UTF-8 bytes = 1 char = 2 UTF-16 units.
