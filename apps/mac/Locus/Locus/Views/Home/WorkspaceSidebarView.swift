@@ -1294,7 +1294,11 @@ private struct WorkspaceSidebarEntryRow: View {
     // swallow clicks that include any pointer movement, so drive selection
     // explicitly with a simultaneous tap that survives the drag gesture.
     .simultaneousGesture(TapGesture().onEnded(onSelect))
+    // Merge the icon + name + badge into one labeled element for VoiceOver, and
+    // publish it as static text so it resolves as `app.staticTexts[name]` (not a
+    // generic group) for accessibility tooling and UI tests alike.
     .accessibilityElement(children: .ignore)
+    .accessibilityAddTraits(.isStaticText)
     .accessibilityLabel(Text(verbatim: rowAccessibilityLabel))
   }
 
