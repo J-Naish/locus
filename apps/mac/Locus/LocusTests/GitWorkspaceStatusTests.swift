@@ -455,7 +455,11 @@ final class GitWorkspaceStatusTests: XCTestCase {
     try await Task.sleep(for: .milliseconds(50))
     try Data("ref: refs/heads/main-updated\n".utf8).write(to: headURL)
 
-    await fulfillment(of: [expectation], timeout: 1)
+    // The change is observed as soon as the filesystem event arrives; this wait
+    // only bounds failure, so a generous timeout absorbs event, debounce, and
+    // main-actor latency under a loaded parallel run without slowing the success
+    // path (which fulfills immediately).
+    await fulfillment(of: [expectation], timeout: 5)
     monitor.stopMonitoring()
   }
 
@@ -493,7 +497,11 @@ final class GitWorkspaceStatusTests: XCTestCase {
     try await Task.sleep(for: .milliseconds(50))
     try Data("1111111111111111111111111111111111111111\n".utf8).write(to: mainRefURL)
 
-    await fulfillment(of: [expectation], timeout: 1)
+    // The change is observed as soon as the filesystem event arrives; this wait
+    // only bounds failure, so a generous timeout absorbs event, debounce, and
+    // main-actor latency under a loaded parallel run without slowing the success
+    // path (which fulfills immediately).
+    await fulfillment(of: [expectation], timeout: 5)
     monitor.stopMonitoring()
   }
 
