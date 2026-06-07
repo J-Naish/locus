@@ -139,6 +139,21 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
         byteCount: WorkspaceDocumentSurfaceSupport.editableTextByteLimit + 1))
   }
 
+  func testTextBackendUsesReadOnlyOnlyForRecognizedLargeText() {
+    let limit = WorkspaceDocumentSurfaceSupport.editableTextByteLimit
+    let backend = WorkspaceDocumentSurfaceSupport.textBackend
+
+    // Recognized text over the limit → the read-only windowed backend.
+    XCTAssertEqual(backend(limit + 1, true), .readOnlyWindowed)
+    // Recognized text at/under the limit → editable.
+    XCTAssertEqual(backend(limit, true), .editable)
+    // An unrecognized (possibly binary) file stays editable even when large, so it
+    // is refused there rather than scanned into mojibake by the windowed viewer.
+    XCTAssertEqual(backend(limit + 1, false), .editable)
+    // Unknown size → editable.
+    XCTAssertEqual(backend(nil, true), .editable)
+  }
+
   private func makeEntry(
     name: String,
     kind: WorkspaceEntryKind = .file,

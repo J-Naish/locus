@@ -2807,10 +2807,13 @@ struct LargeTextViewport: NSViewRepresentable {
   }
 }
 
-/// Viewer for text files too large for the editable string path. It opens the
-/// file through the Rust [`TextBuffer`] off the main thread, then renders it
-/// with [`LargeTextViewport`]. Editing (when `isEditable`) is routed to the
-/// buffer; Cmd+S saves it (off the main thread, in the viewer).
+/// The text document view for every recognized text file. It opens the file off
+/// the main thread and chooses the backend by size (see
+/// `WorkspaceDocumentSurfaceSupport.textBackend`): an editable in-memory
+/// [`TextBuffer`] (retained across switches for its unsaved edits), or a read-only
+/// windowed [`LargeFile`] when the file is too large to load. Either renders
+/// through [`LargeTextViewport`]; editing — only with an editable buffer and
+/// `isEditable` — is routed to the buffer, and Cmd+S saves it off the main thread.
 struct VirtualizedTextDocumentView: View {
   let url: URL
   let accessibilityLabel: String
@@ -2820,6 +2823,11 @@ struct VirtualizedTextDocumentView: View {
   let wrapsLines: Bool
   /// Whether the viewer accepts edits (false for read-only entries).
   let isEditable: Bool
+  /// Whether the file is a recognized text type, hence eligible for the windowed
+  /// read-only backend when too large to edit in memory. An unrecognized (possibly
+  /// binary) type is never opened read-only — that would scan it into mojibake — so
+  /// it stays on the editable path, which refuses a too-large file instead.
+  let recognizedTextType: Bool
   /// Changing this (e.g. on external file change) re-opens the buffer.
   let reloadToken: Int
   /// A monotonic counter the host bumps to request a save (e.g. from the Save menu
@@ -2845,7 +2853,8 @@ struct VirtualizedTextDocumentView: View {
 
   private enum Phase {
     case loading
-    case loaded(TextBuffer, encoding: String.Encoding)
+    case editable(TextBuffer, encoding: String.Encoding)
+    case readOnly(LargeFile)
     case failed(String)
   }
 
@@ -2853,8 +2862,11 @@ struct VirtualizedTextDocumentView: View {
     Group {
       switch phase {
       case .loading:
-        Color(nsColor: .textBackgroundColor)
-      case .loaded(let buffer, let encoding):
+        // A very large file's one-time index scan can take a moment; a small file
+        // loads fast enough that the spinner barely shows.
+        ProgressView()
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+      case .editable(let buffer, let encoding):
         LargeTextViewport(
           backend: .editable(buffer),
           accessibilityLabel: accessibilityLabel,
@@ -2866,6 +2878,14 @@ struct VirtualizedTextDocumentView: View {
           saveRequest: saveRequest,
           onSaveCompletion: onSaveCompletion,
           onDirtyChange: onDirtyChange,
+          onFocusChange: onFocusChange
+        )
+      case .readOnly(let file):
+        LargeTextViewport(
+          backend: .readOnly(file),
+          accessibilityLabel: accessibilityLabel,
+          syntax: syntax,
+          wrapsLines: wrapsLines,
           onFocusChange: onFocusChange
         )
       case .failed(let message):
@@ -2882,35 +2902,59 @@ struct VirtualizedTextDocumentView: View {
     }
   }
 
+  /// Loads the document, choosing the backend by size: a file within the editable
+  /// limit opens as an in-memory editable buffer (retained across switches for its
+  /// unsaved edits); a larger one opens read-only through the windowed `LargeFile`
+  /// (never cached — it is immutable and read on demand). The size check honors the
+  /// UI-test threshold override.
   private func open() async {
     let key = url.locusStandardizedPath
-    // Reuse a retained buffer (with any unsaved edits) when switching back to a
-    // file that is still open; otherwise open it fresh and retain it.
+    // Reuse a retained editable buffer (with any unsaved edits) when switching back
+    // to a file that is still open.
     if let cached = documentCache.cached(forKey: key) {
-      phase = .loaded(cached.buffer, encoding: cached.encoding)
+      phase = .editable(cached.buffer, encoding: cached.encoding)
       onDirtyChange(cached.buffer.isDirty)
       return
     }
     phase = .loading
     let target = url
     let store = bufferStore
+    // Only a recognized text type uses the windowed read-only backend; an
+    // unrecognized (maybe binary) file stays on the editable path.
+    let allowsReadOnly = recognizedTextType
     do {
       let loaded = try await Task.detached(priority: .userInitiated) {
-        let opened = try store.open(at: target)
-        // Read the fingerprint alongside the open so the cache records the exact
-        // disk state this buffer matches.
-        let fingerprint = DocumentFileFingerprint.read(at: target)
-        return OpenedTextBuffer(
-          buffer: opened.buffer, encoding: opened.encoding, fingerprint: fingerprint)
+        // Decide the backend off the main thread (see `textBackend`): a recognized
+        // file over the editable limit opens read-only; everything else opens
+        // editable, which refuses a too-large file rather than scanning a binary.
+        switch WorkspaceDocumentSurfaceSupport.textBackend(
+          byteCount: WorkspaceDocumentSurfaceSupport.fileByteCount(at: target),
+          recognizedTextType: allowsReadOnly)
+        {
+        case .readOnlyWindowed:
+          return LoadedDocument.readOnly(try LargeFile.open(at: target))
+        case .editable:
+          let opened = try store.open(at: target)
+          // Read the fingerprint alongside the open so the cache records the exact
+          // disk state this buffer matches.
+          let fingerprint = DocumentFileFingerprint.read(at: target)
+          return LoadedDocument.editable(
+            opened.buffer, encoding: opened.encoding, fingerprint: fingerprint)
+        }
       }.value
       guard !Task.isCancelled else {
         return
       }
-      documentCache.store(
-        buffer: loaded.buffer, encoding: loaded.encoding, fingerprint: loaded.fingerprint,
-        forKey: key)
-      phase = .loaded(loaded.buffer, encoding: loaded.encoding)
-      onDirtyChange(loaded.buffer.isDirty)  // a freshly opened buffer is clean
+      switch loaded {
+      case .readOnly(let file):
+        onDirtyChange(false)  // read-only is never dirty; keep the host's Save off
+        phase = .readOnly(file)
+      case .editable(let buffer, let encoding, let fingerprint):
+        documentCache.store(
+          buffer: buffer, encoding: encoding, fingerprint: fingerprint, forKey: key)
+        phase = .editable(buffer, encoding: encoding)
+        onDirtyChange(buffer.isDirty)  // a freshly opened buffer is clean
+      }
     } catch {
       guard !Task.isCancelled else {
         return
@@ -2938,13 +2982,13 @@ private struct TextViewportLoad: Equatable {
   let token: Int
 }
 
-/// Carries the non-`Sendable` `TextBuffer` (and its detected file encoding) from
-/// the loader task to the main actor. It is only handed across once and then used
-/// exclusively on the main actor, so the unchecked conformance is sound.
-private struct OpenedTextBuffer: @unchecked Sendable {
-  let buffer: TextBuffer
-  let encoding: String.Encoding
-  let fingerprint: DocumentFileFingerprint?
+/// Carries a freshly opened document from the loader task to the main actor: a
+/// non-`Sendable` editable `TextBuffer` (with its encoding and disk fingerprint),
+/// or a read-only `LargeFile`. Handed across once and then used only on the main
+/// actor, so the unchecked conformance is sound.
+private enum LoadedDocument: @unchecked Sendable {
+  case editable(TextBuffer, encoding: String.Encoding, fingerprint: DocumentFileFingerprint?)
+  case readOnly(LargeFile)
 }
 
 /// Carries the `TextBuffer` to the background save thread. Sound because the

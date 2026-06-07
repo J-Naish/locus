@@ -103,6 +103,26 @@ enum WorkspaceDocumentSurfaceSupport {
     byteCount > editableTextByteLimit
   }
 
+  /// Which backend the text view should open a file with.
+  enum TextDocumentBackend: Equatable {
+    /// The in-memory editable buffer (also the path that refuses a too-large file).
+    case editable
+    /// The read-only windowed `LargeFile`, for a file too big to edit in memory.
+    case readOnlyWindowed
+  }
+
+  /// Chooses the text backend for a file. Only a *recognized* text type over the
+  /// editable limit opens read-only in the windowed viewer; everything else — a
+  /// small file, an unknown size, or an unrecognized (possibly binary) file of any
+  /// size — opens on the editable path, which refuses a too-large file rather than
+  /// scanning a binary into mojibake.
+  static func textBackend(byteCount: Int?, recognizedTextType: Bool) -> TextDocumentBackend {
+    if recognizedTextType, let byteCount, isLargeText(byteCount: byteCount) {
+      return .readOnlyWindowed
+    }
+    return .editable
+  }
+
   /// Logical size of `url` in bytes, read inside a balanced security scope so it
   /// resolves the same way the document open does (which holds the scope before
   /// reading). Returns nil when the size is unavailable.

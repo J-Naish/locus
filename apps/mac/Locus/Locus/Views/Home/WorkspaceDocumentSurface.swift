@@ -31,9 +31,6 @@ struct WorkspaceDocumentSurface: View {
   /// Seeded from the core's mode-bit `readonly` so the common case is correct
   /// immediately, then refined for read-only volumes, ACLs, and immutable flags.
   @State private var selectedDocumentReadOnly = false
-  /// Whether the selected text file is too large to edit in memory and is shown
-  /// read-only in the windowed viewer instead. Resolved per selection.
-  @State private var selectedTextIsLarge = false
   @StateObject private var documentChangeMonitor = DocumentChangeMonitor()
   /// Retains opened buffers across file switches so unsaved edits survive
   /// navigating away and back (persists for the surface's lifetime).
@@ -108,9 +105,6 @@ struct WorkspaceDocumentSurface: View {
       // Seed from the core's mode-bit readonly so editability is right immediately;
       // prepareSelectedDocument refines it for volume/ACL/immutable cases.
       selectedDocumentReadOnly = entry?.isReadOnly ?? false
-      // Resolve synchronously so the first render already routes a large file to
-      // the read-only viewer instead of flashing (and failing in) the editor.
-      selectedTextIsLarge = resolveLargeText(for: entry)
       onTextInputFocusChange(false)
     }
     .onChange(of: isEditorFocused) {
@@ -122,36 +116,13 @@ struct WorkspaceDocumentSurface: View {
     }
   }
 
-  /// Routes a text file to the editable buffer view, or to the read-only windowed
-  /// viewer when it is too large to load into memory.
-  @ViewBuilder
+  /// The text-document surface. Every recognized text file opens in the
+  /// virtualized engine, which picks its own backend by size — an editable
+  /// in-memory buffer, or the read-only windowed `LargeFile` for a file too big to
+  /// load — and owns loading, failure UI, editing, save, and dirty reporting. The
+  /// surface (not the engine) owns external-change detection and the
+  /// conflict/reload decision, driving a reload through `reloadToken`.
   private func textDocumentSurface(for entry: WorkspaceEntry) -> some View {
-    if selectedTextIsLarge {
-      LargeTextDocumentSurface(
-        url: entry.url,
-        accessibilityLabel: "\(entry.name) text",
-        syntax: WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText,
-        wrapsLines: WorkspaceTextDocumentSupport.wrapsLines(for: entry),
-        reloadTrigger: documentReloadTrigger(for: entry),
-        onFocusChange: { isFocused in isEditorFocused = isFocused }
-      )
-    } else {
-      editableDocumentSurface(for: entry)
-    }
-  }
-
-  /// Whether `entry` is a text file too large to edit in memory — resolved
-  /// synchronously (one stat) so selection routes to the read-only viewer on the
-  /// first render rather than flashing (and failing in) the editor.
-  private func resolveLargeText(for entry: WorkspaceEntry?) -> Bool {
-    guard let entry, WorkspaceTextDocumentSupport.isRecognizedTextType(entry) else {
-      return false
-    }
-    let byteCount = WorkspaceDocumentSurfaceSupport.fileByteCount(at: entry.url)
-    return byteCount.map(WorkspaceDocumentSurfaceSupport.isLargeText(byteCount:)) ?? false
-  }
-
-  private func editableDocumentSurface(for entry: WorkspaceEntry) -> some View {
     VStack(alignment: .leading, spacing: 0) {
       if let saveErrorMessage {
         Label(saveErrorMessage, systemImage: "exclamationmark.triangle")
@@ -176,16 +147,13 @@ struct WorkspaceDocumentSurface: View {
         .accessibilityIdentifier("document-conflict-banner")
       }
 
-      // Every editable text file — any size, any build — opens in the virtualized
-      // engine, which streams the visible band from the Rust buffer and owns its
-      // own loading, failure UI, editing, save, dirty state, and external-change
-      // reconciliation.
       VirtualizedTextDocumentView(
         url: entry.url,
         accessibilityLabel: "\(entry.name) text",
         syntax: WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText,
         wrapsLines: WorkspaceTextDocumentSupport.wrapsLines(for: entry),
         isEditable: !selectedDocumentReadOnly,
+        recognizedTextType: WorkspaceTextDocumentSupport.isRecognizedTextType(entry),
         reloadToken: documentReloadGeneration,
         saveRequest: documentSaveRequest,
         onSaveCompletion: { result in handleDocumentSaveResult(result, for: entry) },
@@ -221,23 +189,14 @@ struct WorkspaceDocumentSurface: View {
 
     guard let entry, WorkspaceTextDocumentSupport.canEdit(entry) else {
       knownDocumentFingerprint = nil
-      selectedTextIsLarge = false
       return
     }
-
-    // A text file too large to edit in memory opens read-only in the windowed
-    // viewer; skip the editable read-only/fingerprint/monitoring baseline.
-    if resolveLargeText(for: entry) {
-      selectedTextIsLarge = true
-      // The windowed viewer is read-only: mark it so Save is definitively disabled.
-      selectedDocumentReadOnly = true
-      knownDocumentFingerprint = nil
-      return
-    }
-    selectedTextIsLarge = false
 
     // Resolve effective read-only state once for the opened document (read-only
-    // volume, ACL, ownership, immutable flags) rather than per entry at listing.
+    // volume, ACL, ownership, immutable flags) rather than per entry at listing. A
+    // file too large to edit in memory opens read-only regardless (the viewer picks
+    // the windowed backend); its fingerprint baseline below is cheap (size + mtime)
+    // and lets an external change reload it.
     selectedDocumentReadOnly = entry.url.locusIsReadOnly(fallback: entry.isReadOnly)
 
     let key = entry.url.locusStandardizedPath
@@ -788,73 +747,5 @@ private struct UnsupportedDocumentSurface: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .accessibilityIdentifier("document-unsupported-surface")
-  }
-}
-
-private enum LargeTextDocumentLoadState {
-  case loading
-  case loaded(LargeFile)
-  case failed(String)
-}
-
-/// Read-only viewer for a text file too large to load into the editable buffer.
-/// Builds a line index off the main thread, then renders lines on demand from a
-/// windowed read so the whole file is never resident (and an external truncation
-/// surfaces as a short read, never a crash).
-private struct LargeTextDocumentSurface: View {
-  let url: URL
-  let accessibilityLabel: String
-  let syntax: TextDocumentSyntax
-  let wrapsLines: Bool
-  let reloadTrigger: DocumentReloadTrigger
-  let onFocusChange: (Bool) -> Void
-
-  @State private var loadState: LargeTextDocumentLoadState = .loading
-
-  var body: some View {
-    Group {
-      switch loadState {
-      case .loading:
-        ProgressView()
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-      case .loaded(let file):
-        // Render the windowed read-only file through the same editor view as
-        // editable text, so selection, navigation, wrapping, and look match; the
-        // backend has no editable buffer, so editing and saving stay inert. An
-        // extremely long line is handled by the editor's huge-line windowing: the
-        // core index is checkpointed by byte as well as by line, so resolving an
-        // in-line position is bounded regardless of line length.
-        LargeTextViewport(
-          backend: .readOnly(file),
-          accessibilityLabel: accessibilityLabel,
-          syntax: syntax,
-          wrapsLines: wrapsLines,
-          onFocusChange: onFocusChange
-        )
-      case .failed(let message):
-        ContentUnavailableView {
-          Label("File Could Not Be Opened", systemImage: "exclamationmark.triangle")
-        } description: {
-          Text(message)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .accessibilityIdentifier("document-large-text-error")
-      }
-    }
-    .task(id: reloadTrigger) {
-      loadState = .loading
-      do {
-        let file = try await Task.detached(priority: .userInitiated) {
-          try LargeFile.open(at: url)
-        }.value
-        // The detached open is not cancelled when the selection changes; drop a
-        // stale result so it never replaces the newly selected document.
-        guard !Task.isCancelled else { return }
-        loadState = .loaded(file)
-      } catch {
-        guard !Task.isCancelled else { return }
-        loadState = .failed(error.localizedDescription)
-      }
-    }
   }
 }
