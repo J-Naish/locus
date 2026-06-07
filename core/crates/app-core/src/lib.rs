@@ -1,4 +1,5 @@
 pub mod file_type;
+pub mod line_index;
 pub mod text_buffer;
 pub mod workspace;
 

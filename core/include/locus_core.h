@@ -444,6 +444,44 @@ LocusStatus locus_text_buffer_redo(LocusTextBuffer *buffer, bool *out_did_redo);
 LocusStatus locus_text_buffer_write_path(
     const LocusTextBuffer *buffer, const char *path);
 
+/*
+ * Read-only, line-indexed large-file viewer (see app_core::line_index).
+ *
+ * For a file too large to load into an editable buffer: it is scanned once to
+ * build a sparse line index, then line ranges are served by reading only the
+ * needed window via positioned reads. An external truncation surfaces as a short
+ * read, never a fault, so a concurrent rewrite never crashes the process.
+ */
+typedef struct LocusLargeFile LocusLargeFile;
+
+/*
+ * Opens `path` as a read-only line-indexed large file.
+ *
+ * Ownership: on LOCUS_STATUS_OK, writes a Rust-owned handle to *out_file that the
+ * caller releases exactly once with locus_large_file_free.
+ */
+LocusStatus locus_large_file_open(const char *path, LocusLargeFile **out_file);
+
+/* Releases a large-file handle. Passing NULL is allowed and has no effect. */
+void locus_large_file_free(LocusLargeFile *file);
+
+/* Scalar queries. NULL returns 0. */
+size_t locus_large_file_line_count(const LocusLargeFile *file);
+uint64_t locus_large_file_byte_length(const LocusLargeFile *file);
+uint64_t locus_large_file_max_line_byte_length(const LocusLargeFile *file);
+
+/*
+ * Snapshots the text of lines [start_line, start_line + count) (clamped) by
+ * reading only that window from the file, lines joined by '\n'.
+ *
+ * Ownership: on LOCUS_STATUS_OK, writes a Rust-owned snapshot to *out_snapshot;
+ * release it with locus_text_snapshot_free (the shared snapshot type). Its text
+ * pointer is borrowed and invalidated by that free.
+ */
+LocusStatus locus_large_file_snapshot_line_range(
+    const LocusLargeFile *file, size_t start_line, size_t count,
+    LocusTextSnapshot **out_snapshot);
+
 #ifdef __cplusplus
 }
 #endif

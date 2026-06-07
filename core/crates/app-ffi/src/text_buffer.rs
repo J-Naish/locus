@@ -51,6 +51,19 @@ pub struct LocusTextSnapshot {
     line_count: usize,
 }
 
+impl LocusTextSnapshot {
+    /// Builds a snapshot from owned UTF-8 bytes. Lets the read-only large-file
+    /// FFI ([`crate::large_file`]) return this shared snapshot type so the
+    /// platform side has one snapshot to read regardless of the backend.
+    pub(crate) fn new(text: Box<[u8]>, first_line: usize, line_count: usize) -> Self {
+        Self {
+            text,
+            first_line,
+            line_count,
+        }
+    }
+}
+
 fn status_from_error(error: &TextBufferError) -> u32 {
     match error {
         TextBufferError::NotUtf8 => LOCUS_TEXT_STATUS_NOT_UTF8,
