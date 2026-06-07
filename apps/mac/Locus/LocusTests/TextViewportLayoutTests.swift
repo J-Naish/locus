@@ -300,6 +300,26 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testNonProseLongLineWrapsAfterInitialZeroWidthLayout() throws {
+    // The first build can run before the view has a width (wrap content width ≤ 0)
+    // and bail to no-wrap without scanning. The first real layout afterward must
+    // still detect the long line and wrap — not stay one line until a reopen.
+    let view = LineRenderingTextView()
+    view.wrapsLines = false
+    view.longLineWrapThreshold = 20
+    // Force a zero wrap width at the first build (mirrors a not-yet-laid-out
+    // scroll view), set after configuring `wrapsLines` whose didSet resizes.
+    view.frame = NSRect(x: 0, y: 0, width: 0, height: 400)
+    let buffer = try TextBuffer.open(bytes: Data(String(repeating: "word ", count: 50).utf8))
+    view.setBuffer(buffer)
+    XCTAssertFalse(view.isSoftWrapping)  // no width yet → cannot have decided to wrap
+
+    view.frame = NSRect(x: 0, y: 0, width: 140, height: 400)  // now it has a width
+    view.updateLayout()
+    XCTAssertTrue(view.isSoftWrapping)  // long line detected on first real layout
+  }
+
+  @MainActor
   func testNonProseLongLineWrapsEntireDocumentWithoutMixing() throws {
     // A single line past the threshold flips the whole non-prose document to
     // wrapping — folding and horizontal scrolling never mix. The short first line

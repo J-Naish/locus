@@ -384,6 +384,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// only while wrapping a non-prose document (nil for prose, no-wrap, or over
   /// budget). Lets a single-line edit adjust the count without re-scanning.
   private var lineIsLong: [Bool]?
+  /// Whether `longLineCount` reflects a scan at a valid width. The first build can
+  /// run before the view has a width (wrap content width ≤ 0) and bail without
+  /// scanning; until a scan succeeds the cached decision must not be trusted, or a
+  /// non-prose document that should wrap would stay horizontally scrolling.
+  private var longLineDecisionValid = false
 
   /// Whether the whole document soft-wraps (vs. scrolls horizontally): prose
   /// always does; a non-prose document does only while it holds a long line. The
@@ -502,10 +507,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// horizontal scrolling. Reads the whole (bounded) document once; line widths
   /// depend only on the font, so highlighting is skipped here.
   ///
-  /// `recomputeLongLine` re-decides whether a non-prose document has a long line
-  /// — needed only when the content changed (open, multi-line edit, undo). On a
-  /// resize (width changed, content same) the cached decision is reused, so a
-  /// horizontally-scrolling document is not re-scanned just to resize.
+  /// `recomputeLongLine` forces re-deciding whether a non-prose document has a
+  /// long line — passed when the content changed (open, multi-line edit, undo).
+  /// A pure resize passes false and reuses the cached decision, *unless* the
+  /// decision was never computed at a valid width yet (see `longLineDecisionValid`),
+  /// so the first real layout after a width-less open still resolves it.
   private func rebuildWrapIndex(recomputeLongLine: Bool = true) {
     lastWrapWidth = wrapContentWidth
     guard let buffer, wrapContentWidth > 0,
@@ -521,11 +527,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       lineIsLong = nil
       longLineCount = 0
       hugeLineInfo = [:]
+      // Bailed before deciding (no buffer, zero width, or over the line/byte
+      // budget), so the long-line decision is not trustworthy; a later valid
+      // layout or content change must recompute it rather than reuse it.
+      longLineDecisionValid = false
       return
     }
-    // A horizontally-scrolling document needs no index. Decide that without
-    // re-reading the document on resize by reusing the cached long-line count.
-    if !recomputeLongLine, !documentWraps {
+    // A horizontally-scrolling document needs no index. Skip the document read on
+    // a pure resize, but only when the no-wrap decision is actually trustworthy:
+    // not on a content change, and not before a valid-width scan has happened.
+    if !recomputeLongLine, longLineDecisionValid, !documentWraps {
       wrapIndex = nil
       wrapRowCounts = nil
       hugeLineInfo = [:]
@@ -533,11 +544,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     let width = wrapContentWidth
     let lineStrings = displayLineStrings(forLineRange: 0, count: buffer.lineCount)
-    if recomputeLongLine, !wrapsLines {
+    // (Re)scan for long lines when the content changed or the decision has not yet
+    // been made at a valid width. The decision is width-independent, so a plain
+    // resize with a valid decision reuses it.
+    if !wrapsLines, recomputeLongLine || !longLineDecisionValid {
       let flags = lineStrings.map { ($0 as NSString).length > longLineWrapThreshold }
       lineIsLong = flags
       longLineCount = flags.lazy.filter { $0 }.count
     }
+    longLineDecisionValid = true
     guard documentWraps else {
       wrapIndex = nil
       wrapRowCounts = nil
