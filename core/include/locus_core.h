@@ -354,6 +354,22 @@ LocusStatus locus_text_buffer_snapshot_line_range_capped(
     const LocusTextBuffer *buffer, size_t start_line, size_t count,
     size_t max_bytes_per_line, LocusTextSnapshot **out_snapshot);
 
+/**
+ * Snapshots the raw text of the UTF-16 range [start_utf16, end_utf16) with no
+ * line-terminator stripping, for reading just the visible window of one enormous
+ * line (intra-line virtualization). Both endpoints map to byte offsets in
+ * O(log n). As a viewport read it never errors on the offsets: offsets past the
+ * end are clamped, an endpoint inside a surrogate pair is floored to that
+ * character's start (whole characters are returned), and an inverted range
+ * yields empty text. The snapshot's line metadata is not meaningful for a raw
+ * range and is reported as zero. Only a NULL out_snapshot/buffer is rejected.
+ *
+ * Ownership: identical to locus_text_buffer_snapshot_line_range.
+ */
+LocusStatus locus_text_buffer_snapshot_utf16_range(
+    const LocusTextBuffer *buffer, size_t start_utf16, size_t end_utf16,
+    LocusTextSnapshot **out_snapshot);
+
 /*
  * Borrowed UTF-8 text of the snapshot, valid until locus_text_snapshot_free.
  * Length-counted (NOT NUL-terminated): always read locus_text_snapshot_byte_length

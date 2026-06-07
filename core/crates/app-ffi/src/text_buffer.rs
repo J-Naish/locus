@@ -414,6 +414,54 @@ pub unsafe extern "C" fn locus_text_buffer_snapshot_line_range_capped(
     }
 }
 
+/// Snapshots the raw text of the UTF-16 range `[start_utf16, end_utf16)`, with no
+/// line-terminator stripping. This reads just the visible window of one enormous
+/// line (intra-line virtualization): the endpoints map to byte offsets in
+/// `O(log n)`, so a window deep inside a multi-megabyte line is read without
+/// materializing the line before it. The snapshot's line metadata is not
+/// meaningful for a raw range and is reported as zero.
+///
+/// # Safety
+///
+/// `buffer` must be NULL or a live handle. `out_snapshot` must point to
+/// caller-owned writable storage for a `*mut LocusTextSnapshot`; on success the
+/// caller releases it with `locus_text_snapshot_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_snapshot_utf16_range(
+    buffer: *const LocusTextBuffer,
+    start_utf16: usize,
+    end_utf16: usize,
+    out_snapshot: *mut *mut LocusTextSnapshot,
+) -> u32 {
+    clear_last_error_message();
+    if out_snapshot.is_null() {
+        set_last_error_message("out_snapshot must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    }
+    // SAFETY: out_snapshot is non-null (checked above). Clear it so the caller's
+    // pointer is never left stale on a failure path.
+    unsafe {
+        *out_snapshot = std::ptr::null_mut();
+    }
+    // SAFETY: buffer is NULL or a live handle the caller still owns.
+    let Some(handle) = (unsafe { buffer.as_ref() }) else {
+        set_last_error_message("buffer must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    };
+
+    let text = handle.buffer.text_for_utf16_range(start_utf16, end_utf16);
+    let snapshot = LocusTextSnapshot {
+        text: text.into_bytes().into_boxed_slice(),
+        first_line: 0,
+        line_count: 0,
+    };
+    // SAFETY: out_snapshot was checked non-null; ownership transfers to caller.
+    unsafe {
+        *out_snapshot = Box::into_raw(Box::new(snapshot));
+    }
+    LOCUS_STATUS_OK
+}
+
 /// Shared body for the snapshot reads. `max_bytes_per_line` selects the capped
 /// read when `Some`.
 ///
@@ -867,6 +915,52 @@ mod tests {
         assert_eq!(snapshot_bytes(snapshot), b"a\nxxxxx\nb");
         unsafe { locus_text_snapshot_free(snapshot) };
         unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn utf16_range_snapshot_reads_a_window_within_a_huge_line() {
+        // A window deep inside one enormous line, addressed by UTF-16 offsets.
+        let huge = "y".repeat(1_000_000);
+        let handle = open(&format!("head {huge} tail"));
+        let mut snapshot: *mut LocusTextSnapshot = ptr::null_mut();
+        // Read 4 UTF-16 units starting 100 units in (well inside the huge run).
+        let status =
+            unsafe { locus_text_buffer_snapshot_utf16_range(handle, 100, 104, &mut snapshot) };
+        assert_eq!(status, LOCUS_STATUS_OK);
+        assert_eq!(snapshot_bytes(snapshot), b"yyyy");
+        unsafe { locus_text_snapshot_free(snapshot) };
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn utf16_range_snapshot_clamps_instead_of_erroring() {
+        let handle = open("abc");
+        // Inverted range → empty; past-the-end → clamped. Viewport reads clamp.
+        let mut snapshot: *mut LocusTextSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe { locus_text_buffer_snapshot_utf16_range(handle, 3, 1, &mut snapshot) },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(snapshot_bytes(snapshot), b"");
+        unsafe { locus_text_snapshot_free(snapshot) };
+
+        let mut snapshot2: *mut LocusTextSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe { locus_text_buffer_snapshot_utf16_range(handle, 1, 99, &mut snapshot2) },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(snapshot_bytes(snapshot2), b"bc");
+        unsafe { locus_text_snapshot_free(snapshot2) };
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn utf16_range_snapshot_rejects_null_buffer() {
+        let mut snapshot: *mut LocusTextSnapshot = ptr::null_mut();
+        let status =
+            unsafe { locus_text_buffer_snapshot_utf16_range(ptr::null(), 0, 1, &mut snapshot) };
+        assert_eq!(status, LOCUS_TEXT_STATUS_INVALID_ARGUMENT);
+        assert!(snapshot.is_null());
     }
 
     #[test]

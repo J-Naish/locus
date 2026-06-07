@@ -137,6 +137,20 @@ final class TextBuffer {
     return Self.decodeSnapshot(status, snapshot, context: "text(forLineRange:maxBytesPerLine:)")
   }
 
+  /// Raw text of the UTF-16 range `[start, end)`, with no line-terminator
+  /// stripping. Reads just the visible window of one enormous line (intra-line
+  /// virtualization) without materializing the line before it. Returns empty for
+  /// an out-of-range or surrogate-splitting range rather than throwing, since a
+  /// viewport read clamps and must never error.
+  func text(fromUTF16 start: Int, toUTF16 end: Int) -> String {
+    guard start >= 0, end >= start else {
+      return ""
+    }
+    var snapshot: OpaquePointer?
+    let status = locus_text_buffer_snapshot_utf16_range(handle, start, end, &snapshot)
+    return Self.decodeSnapshot(status, snapshot, context: "text(fromUTF16:toUTF16:)")
+  }
+
   /// Copies a borrowed snapshot's text into a Swift `String` and frees it,
   /// decoding by the length-counted ABI contract (not a NUL terminator).
   private static func decodeSnapshot(

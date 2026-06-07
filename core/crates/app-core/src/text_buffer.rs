@@ -407,6 +407,43 @@ impl TextBuffer {
         out
     }
 
+    /// Returns the raw text of the UTF-16 range `[start_utf16, end_utf16)` without
+    /// any line-terminator stripping. Used to read just the visible window of a
+    /// single enormous line (intra-line virtualization): both endpoints map to
+    /// byte offsets in `O(log n)`, so a window deep inside a multi-megabyte line
+    /// is read without materializing the line before it.
+    ///
+    /// This is a viewport read, so it never errors: offsets past the end are
+    /// clamped, an endpoint inside a surrogate pair is floored to the character's
+    /// start (returning whole characters), and an inverted range yields empty.
+    /// Flooring both endpoints the same way keeps adjacent windows consistent —
+    /// a character always belongs to exactly one window.
+    pub fn text_for_utf16_range(&self, start_utf16: usize, end_utf16: usize) -> String {
+        let total = self.utf16_len();
+        let start = self.utf16_to_byte_floor(start_utf16.min(total));
+        let end = self.utf16_to_byte_floor(end_utf16.min(total));
+        if start >= end {
+            return String::new();
+        }
+        self.read_logical(start, end)
+    }
+
+    /// Byte offset of the UTF-16 offset, floored to the enclosing character's
+    /// start when `target` lands between a surrogate pair's two code units (a
+    /// surrogate pair is exactly two units, so the character starts one unit
+    /// before). Assumes `target <= utf16_len`.
+    fn utf16_to_byte_floor(&self, target: usize) -> usize {
+        match self.position_for_utf16(target) {
+            Ok(position) => position.byte,
+            // Only a mid-surrogate offset reaches here; `target - 1` is the high
+            // surrogate, i.e. the character's first code unit.
+            Err(_) => self
+                .position_for_utf16(target.saturating_sub(1))
+                .map(|position| position.byte)
+                .unwrap_or_else(|_| self.byte_len()),
+        }
+    }
+
     /// Formats the byte range of a band (already located) into the public line
     /// shape: `line_count` lines joined by `\n`, each terminator stripped. When
     /// `cap` is `Some`, each line's content is also truncated to that many bytes
@@ -1355,6 +1392,37 @@ mod tests {
         assert_eq!(buffer.text_for_line_range(1, 10), "b");
         assert_eq!(buffer.text_for_line_range(5, 3), "");
         assert_eq!(buffer.text_for_line_range(0, 0), "");
+    }
+
+    #[test]
+    fn utf16_range_reads_a_sub_range_within_a_line() {
+        let buffer = buffer("hello world");
+        // A window in the middle of a single line, addressed by UTF-16 offsets.
+        assert_eq!(buffer.text_for_utf16_range(0, 5), "hello");
+        assert_eq!(buffer.text_for_utf16_range(6, 11), "world");
+        assert_eq!(buffer.text_for_utf16_range(3, 3), "");
+    }
+
+    #[test]
+    fn utf16_range_handles_multibyte_and_surrogate_pairs() {
+        let buffer = buffer("aあ𝄞z"); // utf16: a=0, あ=1, 𝄞=2..4 (pair), z=4
+        assert_eq!(buffer.text_for_utf16_range(1, 2), "あ");
+        assert_eq!(buffer.text_for_utf16_range(2, 4), "𝄞");
+        assert_eq!(buffer.text_for_utf16_range(0, 5), "aあ𝄞z");
+    }
+
+    #[test]
+    fn utf16_range_clamps_and_floors_instead_of_erroring() {
+        let buffer = buffer("𝄞");
+        // Inverted range → empty (viewport reads never error).
+        assert_eq!(buffer.text_for_utf16_range(2, 1), "");
+        // Past the end → clamped.
+        assert_eq!(buffer.text_for_utf16_range(0, 99), "𝄞");
+        // Offset 1 splits the surrogate pair. A mid-surrogate *end* floors back to
+        // the character's start, so [0,1) collapses to empty; a mid-surrogate
+        // *start* floors to the same start, so [1,2) covers the whole character.
+        assert_eq!(buffer.text_for_utf16_range(0, 1), "");
+        assert_eq!(buffer.text_for_utf16_range(1, 2), "𝄞");
     }
 
     #[test]
