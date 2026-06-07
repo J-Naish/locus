@@ -39,6 +39,48 @@ enum TextBufferError: LocalizedError, Equatable, Sendable {
   }
 }
 
+/// The read-only surface the virtualized editor view needs to render and
+/// navigate a document, whether it is backed by an editable ``TextBuffer`` or a
+/// read-only ``LargeFile``. Editing stays off this protocol: the view gates
+/// mutation behind a concrete ``TextBuffer`` and `isEditable`, so a large
+/// read-only file simply has no editable backing.
+///
+/// Coordinates match the core contract: a line range joins lines with `\n` and
+/// strips each line's terminator; a position carries byte/char/UTF-16/line/column;
+/// the UTF-16-range read does no terminator stripping. Reads clamp rather than
+/// trapping — a viewport read must never fail — so the position methods throw
+/// only on an unexpected core/IO error.
+///
+/// Class-bound: both backends are reference types wrapping a Rust handle, and the
+/// view holds one without copying.
+protocol TextDocumentReading: AnyObject {
+  /// Number of logical lines (`newlines + 1`; an empty document is one line).
+  var lineCount: Int { get }
+  /// Total content length in bytes.
+  var byteLength: Int { get }
+  /// Total content length in UTF-16 code units.
+  var utf16Length: Int { get }
+  /// Monotonic content version, bumped on every edit. A read-only document holds a
+  /// constant value, so a cache keyed on it stays valid for the document's life.
+  var revision: UInt64 { get }
+
+  /// Maps a UTF-16 offset to a full position.
+  func position(forUTF16 utf16: Int) throws -> TextPosition
+  /// Maps a 0-based line and UTF-16 column to a full position.
+  func position(forLine line: Int, columnUTF16: Int) throws -> TextPosition
+
+  /// Text of lines `[start, start + count)` (clamped), joined by `\n` with each
+  /// line's terminator stripped.
+  func text(forLineRange start: Int, count: Int) -> String
+  /// Like `text(forLineRange:count:)`, but returns at most `maxBytesPerLine` bytes
+  /// of any single line's content, so one enormous line never crosses the boundary
+  /// in full.
+  func text(forLineRange start: Int, count: Int, maxBytesPerLine: Int) -> String
+  /// Raw text of the UTF-16 range `[start, end)`, with no terminator stripping —
+  /// used to read a window within a long line or to copy a selection.
+  func text(fromUTF16 start: Int, toUTF16 end: Int) -> String
+}
+
 /// Swift owner of a Rust-backed arbitrary-size text buffer.
 ///
 /// Wraps the `locus_text_buffer_*` C ABI, copying borrowed snapshot text into
@@ -303,6 +345,10 @@ final class TextBuffer {
   }
 }
 
+/// ``TextBuffer`` already exposes the full read surface (it is the editable
+/// backend), so its conformance is declaration-only.
+extension TextBuffer: TextDocumentReading {}
+
 extension TextPosition {
   fileprivate init(from raw: LocusTextPosition) {
     self.init(
@@ -323,7 +369,8 @@ extension TextPosition {
 /// resident and an external truncation surfaces as a short read rather than a
 /// crash. Frees the handle on `deinit`.
 ///
-/// Read-only by design — there is no editing, saving, or position-mapping API.
+/// Read-only by design: it provides the full ``TextDocumentReading`` surface —
+/// line and UTF-16 reads plus position mapping — but no editing or saving.
 /// Reuses ``TextBuffer``'s snapshot decoding and status-to-error mapping, since
 /// it returns the same C ABI snapshot type.
 /// `@unchecked Sendable`: the handle is used only for read-only `&self` FFI calls
@@ -366,6 +413,11 @@ final class LargeFile: @unchecked Sendable {
 
   var lineCount: Int { locus_large_file_line_count(handle) }
   var byteLength: Int { Int(locus_large_file_byte_length(handle)) }
+  var utf16Length: Int { locus_large_file_utf16_length(handle) }
+  /// A read-only file's content never changes, so its version is a constant. A
+  /// band cache keyed on `(revision, range)` therefore stays valid for the
+  /// document's whole life — exactly right, since the bytes are immutable.
+  var revision: UInt64 { 0 }
   /// Length in bytes of the longest line (including its terminator).
   var maxLineByteLength: Int { Int(locus_large_file_max_line_byte_length(handle)) }
 
@@ -381,4 +433,69 @@ final class LargeFile: @unchecked Sendable {
     let status = locus_large_file_snapshot_line_range(handle, start, count, &snapshot)
     return TextBuffer.decodeSnapshot(status, snapshot, context: "LargeFile.text(forLineRange:)")
   }
+
+  /// Like `text(forLineRange:count:)`, but never returns more than `maxBytesPerLine`
+  /// bytes of any single line's content, so one enormous line never crosses the FFI
+  /// in full.
+  func text(forLineRange start: Int, count: Int, maxBytesPerLine: Int) -> String {
+    guard start >= 0, count >= 0, maxBytesPerLine >= 0 else {
+      return ""
+    }
+    var snapshot: OpaquePointer?
+    let status = locus_large_file_snapshot_line_range_capped(
+      handle, start, count, maxBytesPerLine, &snapshot)
+    return TextBuffer.decodeSnapshot(
+      status, snapshot, context: "LargeFile.text(forLineRange:maxBytesPerLine:)")
+  }
+
+  /// Raw text of the UTF-16 range `[start, end)`, with no line-terminator stripping
+  /// (used to read a window within a long line or to copy a selection). Returns
+  /// empty for an inverted range rather than throwing, since a viewport read clamps
+  /// and must never error.
+  func text(fromUTF16 start: Int, toUTF16 end: Int) -> String {
+    guard start >= 0, end >= start else {
+      return ""
+    }
+    var snapshot: OpaquePointer?
+    let status = locus_large_file_snapshot_utf16_range(handle, start, end, &snapshot)
+    return TextBuffer.decodeSnapshot(
+      status, snapshot, context: "LargeFile.text(fromUTF16:toUTF16:)")
+  }
+
+  /// Maps a UTF-16 offset to a full position. The core clamps an out-of-range
+  /// offset and floors a mid-surrogate offset, so this throws only on an unexpected
+  /// core/IO error.
+  func position(forUTF16 utf16: Int) throws -> TextPosition {
+    guard utf16 >= 0 else {
+      throw TextBufferError.invalidOffset
+    }
+    var raw = LocusTextPosition()
+    let status = locus_large_file_position_for_utf16(handle, utf16, &raw)
+    guard status == LOCUS_STATUS_OK else {
+      throw TextBuffer.error(for: status)
+    }
+    return TextPosition(from: raw)
+  }
+
+  /// Maps a 0-based line and UTF-16 column to a full position. The core clamps a
+  /// column past the line end and a line past the last line, so this throws only on
+  /// an unexpected core/IO error.
+  func position(forLine line: Int, columnUTF16: Int) throws -> TextPosition {
+    guard line >= 0 else {
+      throw TextBufferError.invalidLine
+    }
+    guard columnUTF16 >= 0 else {
+      throw TextBufferError.invalidOffset
+    }
+    var raw = LocusTextPosition()
+    let status = locus_large_file_position_for_line_column(handle, line, columnUTF16, &raw)
+    guard status == LOCUS_STATUS_OK else {
+      throw TextBuffer.error(for: status)
+    }
+    return TextPosition(from: raw)
+  }
 }
+
+/// A large file is a read-only document peer of ``TextBuffer``: it satisfies the
+/// full read surface, with no editable backing.
+extension LargeFile: TextDocumentReading {}

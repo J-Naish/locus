@@ -215,6 +215,65 @@ final class CoreBridgeTests: XCTestCase {
     XCTAssertEqual(file.text(forLineRange: 0, count: 2), "a\nb\r")
   }
 
+  func testLargeFileExposesFullReadSurfaceForMixedText() throws {
+    let directory = try temporaryDirectory()
+    let fileURL = directory.appending(path: "mixed.txt")
+    // "ab\n😀x\ncd": 😀 is 1 char / 2 UTF-16 units / 4 bytes.
+    try "ab\n😀x\ncd".write(to: fileURL, atomically: true, encoding: .utf8)
+
+    let file = try LargeFile.open(at: fileURL)
+
+    XCTAssertEqual(file.utf16Length, 9)
+    XCTAssertEqual(file.revision, 0)  // read-only: a constant version
+
+    // Offset 5 is just after the emoji on line 1.
+    let mid = try file.position(forUTF16: 5)
+    XCTAssertEqual(mid.line, 1)
+    XCTAssertEqual(mid.columnUTF16, 2)
+    XCTAssertEqual(mid.utf16, 5)
+
+    // An offset past the end clamps instead of throwing.
+    let end = try file.position(forUTF16: 999)
+    XCTAssertEqual(end.line, 2)
+    XCTAssertEqual(end.utf16, 9)
+
+    // A column past the content clamps to the line end (before the newline).
+    let clampedColumn = try file.position(forLine: 1, columnUTF16: 99)
+    XCTAssertEqual(clampedColumn.columnUTF16, 3)
+
+    // A line past the last clamps to the last line.
+    let clampedLine = try file.position(forLine: 99, columnUTF16: 0)
+    XCTAssertEqual(clampedLine.line, 2)
+
+    // A UTF-16 window read (no terminator stripping); an inverted range is empty.
+    XCTAssertEqual(file.text(fromUTF16: 3, toUTF16: 6), "😀x")
+    XCTAssertEqual(file.text(fromUTF16: 6, toUTF16: 3), "")
+  }
+
+  func testLargeFileCappedTextTruncatesLongLines() throws {
+    let directory = try temporaryDirectory()
+    let fileURL = directory.appending(path: "capped.txt")
+    try "short\nthis-is-a-much-longer-line\nx"
+      .write(to: fileURL, atomically: true, encoding: .utf8)
+
+    let file = try LargeFile.open(at: fileURL)
+
+    XCTAssertEqual(file.text(forLineRange: 0, count: 3, maxBytesPerLine: 4), "shor\nthis\nx")
+  }
+
+  func testLargeFileSatisfiesTextDocumentReading() throws {
+    let directory = try temporaryDirectory()
+    let fileURL = directory.appending(path: "reading.txt")
+    try "alpha\nbeta".write(to: fileURL, atomically: true, encoding: .utf8)
+
+    // The editor view holds `any TextDocumentReading`; a large file must drop in
+    // wherever an editable buffer does.
+    let reader: any TextDocumentReading = try LargeFile.open(at: fileURL)
+    XCTAssertEqual(reader.lineCount, 2)
+    XCTAssertEqual(reader.text(forLineRange: 1, count: 1), "beta")
+    XCTAssertEqual(try reader.position(forLine: 1, columnUTF16: 0).utf16, 6)
+  }
+
   func testLargeFileOpenThrowsForMissingFile() {
     let missingURL = FileManager.default.temporaryDirectory.appending(
       path: "locus-large-missing-\(UUID().uuidString).txt")

@@ -188,7 +188,19 @@ struct TextSelection: Equatable {
 /// the synchronous wrap-index build would do on the main thread) does, to keep
 /// open and resize responsive.
 final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
-  private(set) var buffer: TextBuffer?
+  /// The editable backend, present only when the document is writable. Edits,
+  /// dirty tracking, and saving go through this concrete buffer; a read-only
+  /// large file leaves it nil.
+  private(set) var editableBuffer: TextBuffer?
+  /// The read-only backend used when there is no editable buffer — a file too
+  /// large to load into an editable ``TextBuffer``. Nil whenever an editable
+  /// buffer is present.
+  private var readOnlyDocument: (any TextDocumentReading)?
+  /// The active read backend for all rendering, selection, and accessibility: the
+  /// editable buffer when present, else the read-only document. Routing every read
+  /// through this lets the one view render either backend identically; editing
+  /// stays on ``editableBuffer`` and is gated by `isEditable`.
+  private var reader: (any TextDocumentReading)? { editableBuffer ?? readOnlyDocument }
   let layout: TextViewportLayout
   private let font: NSFont
   private let horizontalPadding: CGFloat = 8
@@ -453,10 +465,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   /// A huge line's content start (UTF-16) and content length (terminator
-  /// excluded), via two `O(log n)` position lookups. Used only for lines already
-  /// suspected huge, so normal lines never pay for it.
+  /// excluded), via two position lookups. The cost depends on the backend: the
+  /// editable piece-tree buffer resolves each in `O(log n)`, but the windowed
+  /// large-file index is checkpointed by line, so an in-line lookup scans forward
+  /// from the line start. That scan is bounded by the surface's long-line guard,
+  /// which keeps a file with any line over the renderable byte limit out of this
+  /// path entirely; lifting that guard would require a line-length metadata read
+  /// from the core rather than estimating the end from a huge column here. Used
+  /// only for lines already suspected huge, so normal lines never pay for it.
   private func hugeLineContent(_ line: Int) -> (start: Int, length: Int) {
-    guard let buffer else { return (0, 0) }
+    guard let buffer = reader else { return (0, 0) }
     let start = (try? buffer.position(forLine: line, columnUTF16: 0).utf16) ?? 0
     // A column past the content clamps to the line's content end (terminator
     // excluded), so the difference is the content's UTF-16 length.
@@ -473,7 +491,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let rowEnd = min(utf16Length, rowStart + columns)
     // Use the cached content start so drawing a band of rows does not re-resolve
     // the line's start position once per visible row.
-    guard let buffer, rowEnd > rowStart, let info = hugeLineInfo[line] else {
+    guard let buffer = reader, rowEnd > rowStart, let info = hugeLineInfo[line] else {
       return NSAttributedString(string: "", attributes: hugeRowAttributes)
     }
     let text = buffer.text(fromUTF16: info.start + rowStart, toUTF16: info.start + rowEnd)
@@ -499,7 +517,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// the width actually changes.
   private var lastWrapWidth: CGFloat = -1
 
-  var lineCount: Int { buffer?.lineCount ?? 1 }
+  var lineCount: Int { reader?.lineCount ?? 1 }
 
   /// Width available for wrapped text (viewport minus gutter and padding).
   private var wrapContentWidth: CGFloat {
@@ -519,7 +537,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// so the first real layout after a width-less open still resolves it.
   private func rebuildWrapIndex(recomputeLongLine: Bool = true) {
     lastWrapWidth = wrapContentWidth
-    guard let buffer, wrapContentWidth > 0,
+    guard let buffer = reader, wrapContentWidth > 0,
       buffer.lineCount <= maximumWrappableLineCount,
       // Estimate the bytes the build pulls across the FFI: at most the per-line
       // fetch cap times the line count, but never more than the file. A few huge
@@ -602,7 +620,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     // Already wrapping: update just the changed line's row count. Falls back to a
     // full rebuild when the fast path is not provably safe.
-    guard let buffer, counts.count == buffer.lineCount, line >= 0, line < counts.count,
+    guard let buffer = reader, counts.count == buffer.lineCount, line >= 0, line < counts.count,
       lastWrapWidth == wrapContentWidth
     else {
       rebuildWrapIndex()
@@ -754,8 +772,36 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     addCursorRect(textRect, cursor: .iBeam)
   }
 
+  /// Loads an editable document. Editing and saving are enabled when the host
+  /// also sets `isEditable`.
   func setBuffer(_ buffer: TextBuffer?) {
-    self.buffer = buffer
+    editableBuffer = buffer
+    readOnlyDocument = nil
+    didSetDocument()
+  }
+
+  /// Loads a read-only document — a file too large to load into an editable
+  /// ``TextBuffer``. There is no editable backing, so editing and saving stay
+  /// inert regardless of `isEditable`; the same rendering, selection, and
+  /// navigation paths drive it through ``reader``.
+  func setReadOnlyDocument(_ document: (any TextDocumentReading)?) {
+    editableBuffer = nil
+    readOnlyDocument = document
+    didSetDocument()
+  }
+
+  /// Whether `document` is already the active read-only backend, so a SwiftUI
+  /// update can skip a redundant reset (which would otherwise drop the scroll
+  /// position and selection).
+  func isShowingReadOnlyDocument(_ document: AnyObject) -> Bool {
+    guard let current = readOnlyDocument else { return false }
+    return (current as AnyObject) === document
+  }
+
+  /// Shared reset after swapping the document backend: drop caches and selection,
+  /// rebuild the wrap index for the new content, and scroll back to the top-left
+  /// so a reused scroll view does not keep the previous file's position.
+  private func didSetDocument() {
     cachedBand = nil
     maxObservedLineWidth = 0
     selection = nil
@@ -763,7 +809,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     verticalGoalX = nil
     composition = nil
     // A save in flight (if any) was for the previous buffer; let its completion
-    // mark that buffer saved, but the new document starts editable and clean.
+    // mark that buffer saved, but the new document starts clean.
     isSaving = false
     rebuildWrapIndex()  // the previous buffer's wrap index does not apply
     updateLayout()
@@ -806,7 +852,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   override func accessibilityRole() -> NSAccessibility.Role? { .textArea }
 
-  override func isAccessibilityElement() -> Bool { buffer != nil }
+  override func isAccessibilityElement() -> Bool { reader != nil }
 
   override func accessibilityValue() -> Any? { nil }
 
@@ -819,7 +865,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return selectedText()
   }
 
-  override func accessibilityNumberOfCharacters() -> Int { buffer?.utf16Length ?? 0 }
+  override func accessibilityNumberOfCharacters() -> Int { reader?.utf16Length ?? 0 }
 
   /// The selection as a global UTF-16 range (a collapsed range at the caret when
   /// nothing is selected).
@@ -838,7 +884,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// span. The bounds are computed without adding `location + length`, which could
   /// overflow on a hostile range from the accessibility client.
   override func accessibilityString(for range: NSRange) -> String? {
-    guard let buffer, range.location >= 0, range.length >= 0,
+    guard let buffer = reader, range.location >= 0, range.length >= 0,
       range.location <= buffer.utf16Length,
       range.length <= buffer.utf16Length - range.location,
       range.length <= maximumAccessibilityStringLength,
@@ -862,7 +908,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// The line index containing a UTF-16 character offset.
   override func accessibilityLine(for index: Int) -> Int {
-    guard let buffer, index >= 0, index <= buffer.utf16Length,
+    guard let buffer = reader, index >= 0, index <= buffer.utf16Length,
       let position = try? buffer.position(forUTF16: index)
     else {
       return 0
@@ -889,7 +935,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// The UTF-16 range of `line` including its trailing newline; empty when out of
   /// range.
   private func lineUTF16Range(_ line: Int) -> NSRange {
-    guard let buffer, line >= 0, line < buffer.lineCount,
+    guard let buffer = reader, line >= 0, line < buffer.lineCount,
       let start = (try? buffer.position(forLine: line, columnUTF16: 0))?.utf16
     else {
       return NSRange(location: 0, length: 0)
@@ -907,7 +953,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// The UTF-16 range spanned by the visible visual rows' logical lines.
   private func visibleUTF16Range() -> NSRange? {
-    guard buffer != nil else { return nil }
+    guard reader != nil else { return nil }
     let rows = visibleVisualRowRange(in: visibleRect)
     guard !rows.isEmpty else { return NSRange(location: 0, length: 0) }
     let firstLine = lineLocation(ofVisualRow: rows.lowerBound).line
@@ -919,7 +965,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   // MARK: First responder & focus
 
-  override var acceptsFirstResponder: Bool { buffer != nil }
+  override var acceptsFirstResponder: Bool { reader != nil }
 
   override func becomeFirstResponder() -> Bool {
     let didBecome = super.becomeFirstResponder()
@@ -1013,7 +1059,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   // MARK: Mouse selection
 
   override func mouseDown(with event: NSEvent) {
-    guard buffer != nil else { return }
+    guard reader != nil else { return }
     // Finalize any in-progress composition before moving the caret.
     if hasMarkedText() { unmarkText() }
     window?.makeFirstResponder(self)
@@ -1184,7 +1230,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   // MARK: Selection commands
 
   override func selectAll(_ sender: Any?) {
-    guard let buffer, buffer.lineCount > 0 else { return }
+    guard let buffer = reader, buffer.lineCount > 0 else { return }
     let lastLine = buffer.lineCount - 1
     selection = TextSelection(
       anchor: .init(line: 0, columnUTF16: 0),
@@ -1287,7 +1333,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     case #selector(paste(_:)), #selector(undo(_:)), #selector(redo(_:)):
       return isEditable
     case #selector(selectAll(_:)):
-      return buffer != nil
+      return reader != nil
     default:
       return true
     }
@@ -1307,7 +1353,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// limit. Line terminators are normalized to LF — the view is line-based and
   /// does not retain original terminators, so a CRLF file copies with LF.
   func selectedText() -> String? {
-    guard let buffer, let selection, !selection.isEmpty else {
+    guard let buffer = reader, let selection, !selection.isEmpty else {
       return nil
     }
     if let span = selectionByteSpan(), span > maximumCopiedByteCount {
@@ -1326,7 +1372,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// limit, so accessibility reads the real document in full-document coordinates.
   /// Callers bound the spanned length first.
   private func bufferText(fromLine: Int, fromColumn: Int, toLine: Int, toColumn: Int) -> String {
-    guard let buffer else { return "" }
+    guard let buffer = reader else { return "" }
     let count = toLine - fromLine + 1
     let lines = buffer.text(forLineRange: fromLine, count: count).components(separatedBy: "\n")
     return Self.sliceLines(lines, fromColumn: fromColumn, toColumn: toColumn)
@@ -1356,7 +1402,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// positions, or `nil` when there is no selection or a position lookup fails.
   /// Used to bound how much text copy and accessibility will materialize.
   private func selectionByteSpan() -> Int? {
-    guard let buffer, let selection, !selection.isEmpty,
+    guard let buffer = reader, let selection, !selection.isEmpty,
       let startByte =
         (try? buffer.position(
           forLine: selection.start.line, columnUTF16: selection.start.columnUTF16))?.byte,
@@ -1376,7 +1422,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   // navigation/editing arrive as `doCommand(by:)` selectors. This keeps input
   // generic across every language the OS supports rather than hardcoding keys.
   override func keyDown(with event: NSEvent) {
-    guard buffer != nil else {
+    guard reader != nil else {
       super.keyDown(with: event)
       return
     }
@@ -1584,7 +1630,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // combining marks); a pathologically long cluster at a huge-line boundary is
     // not worth a larger read.
     let window = 16
-    guard let buffer, let info = hugeLineInfo[line] else {
+    guard let buffer = reader, let info = hugeLineInfo[line] else {
       return .init(line: line, columnUTF16: column)
     }
     if forward {
@@ -1693,7 +1739,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// coalesces consecutive typing into a single undo step.
   @discardableResult
   private func replace(globalStart start: Int, globalEnd end: Int, with string: String) -> Bool {
-    guard !isSaving, let buffer else { return false }
+    guard !isSaving, let buffer = editableBuffer else { return false }
     do {
       if end > start {
         try buffer.replace(string, fromUTF16: start, toUTF16: end)
@@ -1718,7 +1764,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Deletes the selection, or one composed character before the caret (merging
   /// lines at a line start). A no-op at the document start.
   func deleteBackward() {
-    guard isEditable, buffer != nil else { return }
+    guard isEditable, editableBuffer != nil else { return }
     if let selection, !selection.isEmpty {
       deleteRange(from: selection.start, to: selection.end)
       return
@@ -1732,7 +1778,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Deletes the selection, or one composed character after the caret (merging
   /// the next line at a line end). A no-op at the document end.
   func deleteForward() {
-    guard isEditable, buffer != nil else { return }
+    guard isEditable, editableBuffer != nil else { return }
     if let selection, !selection.isEmpty {
       deleteRange(from: selection.start, to: selection.end)
       return
@@ -1745,7 +1791,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Deletes the selection, or from the previous word boundary to the caret.
   func deleteWordBackward() {
-    guard isEditable, buffer != nil else { return }
+    guard isEditable, editableBuffer != nil else { return }
     if let selection, !selection.isEmpty {
       deleteRange(from: selection.start, to: selection.end)
       return
@@ -1758,7 +1804,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Deletes the selection, or from the caret to the next word boundary.
   func deleteWordForward() {
-    guard isEditable, buffer != nil else { return }
+    guard isEditable, editableBuffer != nil else { return }
     if let selection, !selection.isEmpty {
       deleteRange(from: selection.start, to: selection.end)
       return
@@ -1773,7 +1819,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// (true while editable), regardless of whether anything was undone.
   @discardableResult
   func undoEdit() -> Bool {
-    guard isEditable, !isSaving, let buffer else { return false }
+    guard isEditable, !isSaving, let buffer = editableBuffer else { return false }
     composition = nil
     if (try? buffer.undo()) == true {
       afterUndoRedo()
@@ -1784,7 +1830,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Re-applies the most recently undone edit. See `undoEdit` for the return value.
   @discardableResult
   func redoEdit() -> Bool {
-    guard isEditable, !isSaving, let buffer else { return false }
+    guard isEditable, !isSaving, let buffer = editableBuffer else { return false }
     composition = nil
     if (try? buffer.redo()) == true {
       afterUndoRedo()
@@ -1827,7 +1873,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Deletes the UTF-16 range between two endpoints and collapses the caret to
   /// the start. Endpoints must already be ordered (`from` before `to`).
   private func deleteRange(from start: TextSelection.Endpoint, to end: TextSelection.Endpoint) {
-    guard !isSaving, let buffer, let startOffset = utf16Offset(of: start),
+    guard !isSaving, let buffer = editableBuffer, let startOffset = utf16Offset(of: start),
       let endOffset = utf16Offset(of: end), endOffset > startOffset
     else {
       return
@@ -1856,7 +1902,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// The global UTF-16 offset of a (line, column) endpoint, or `nil` if the
   /// buffer is absent or the lookup fails.
   private func utf16Offset(of endpoint: TextSelection.Endpoint) -> Int? {
-    guard let buffer else { return nil }
+    guard let buffer = reader else { return nil }
     return (try? buffer.position(forLine: endpoint.line, columnUTF16: endpoint.columnUTF16))?.utf16
   }
 
@@ -1873,7 +1919,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // band rather than keeping a stale, too-wide horizontal extent.
     maxObservedLineWidth = 0
     var changedLine: Int?
-    if let buffer, let position = try? buffer.position(forUTF16: offset) {
+    if let buffer = reader, let position = try? buffer.position(forUTF16: offset) {
       selection = TextSelection(
         caretAt: .init(line: position.line, columnUTF16: position.columnUTF16))
       changedLine = position.line
@@ -1894,7 +1940,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Reports the buffer's current dirty state to the host (after an edit/undo).
   private func notifyDirtyChanged() {
-    onDirtyChange?(buffer?.isDirty ?? false)
+    onDirtyChange?(editableBuffer?.isDirty ?? false)
   }
 
   // MARK: Save
@@ -1904,7 +1950,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// pause buffer mutations for the write's duration; rendering keeps reading the
   /// buffer concurrently, which is sound because the core buffer is `Sync`.
   func requestSave() {
-    guard isEditable, !isSaving, let buffer, buffer.isDirty, let saveURL else {
+    guard isEditable, !isSaving, let buffer = editableBuffer, buffer.isDirty, let saveURL else {
       return
     }
     isSaving = true
@@ -1952,7 +1998,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     case .failure:
       NSSound.beep()
     }
-    if savedBuffer === buffer {
+    if savedBuffer === editableBuffer {
       isSaving = false
       notifyDirtyChanged()
       invalidateVisibleArea()
@@ -2021,7 +2067,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     window?.invalidateCursorRects(for: self)
   }
 
-  private func attributedBandLines(for buffer: TextBuffer, range: Range<Int>)
+  private func attributedBandLines(for buffer: any TextDocumentReading, range: Range<Int>)
     -> [NSAttributedString]
   {
     let revision = buffer.revision
@@ -2049,7 +2095,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// The clipped plain text of lines `[start, start + count)`, matching what the
   /// view displays. Used by copy so the copied text equals the selectable text.
   private func displayLineStrings(forLineRange start: Int, count: Int) -> [String] {
-    guard let buffer else { return [] }
+    guard let buffer = reader else { return [] }
     return
       buffer.text(forLineRange: start, count: count, maxBytesPerLine: maximumFetchedBytesPerLine)
       .components(separatedBy: "\n")
@@ -2078,7 +2124,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if let cachedBand, cachedBand.range.contains(line) {
       return cachedBand.lines[line - cachedBand.range.lowerBound]
     }
-    guard let buffer else { return NSAttributedString() }
+    guard let buffer = reader else { return NSAttributedString() }
     let text =
       buffer.text(forLineRange: line, count: 1, maxBytesPerLine: maximumFetchedBytesPerLine)
       .components(separatedBy: "\n").first ?? ""
@@ -2122,7 +2168,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     viewportBackgroundColor.setFill()
     dirtyRect.fill()
 
-    guard let buffer else {
+    guard let buffer = reader else {
       return
     }
     let rows = visibleVisualRowRange(in: dirtyRect)
@@ -2436,7 +2482,7 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
     guard !isSaving, let text = Self.plainText(from: string) else { return }
     let wasComposing = composition != nil
     composition = nil
-    guard isEditable, buffer != nil else {
+    guard isEditable, editableBuffer != nil else {
       if wasComposing { refreshAfterComposition() }
       return
     }
@@ -2454,7 +2500,8 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
   /// Updates the in-progress composition. The marked text is not written to the
   /// buffer; it is drawn inline at a collapsed caret until committed.
   func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-    guard isEditable, !isSaving, buffer != nil, let text = Self.plainText(from: string) else {
+    guard isEditable, !isSaving, editableBuffer != nil, let text = Self.plainText(from: string)
+    else {
       return
     }
 
@@ -2574,7 +2621,7 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
   }
 
   func characterIndex(for point: NSPoint) -> Int {
-    guard buffer != nil, let window else { return NSNotFound }
+    guard reader != nil, let window else { return NSNotFound }
     let viewPoint = convert(window.convertPoint(fromScreen: point), from: nil)
     return utf16Offset(of: endpoint(at: viewPoint)) ?? NSNotFound
   }
@@ -2601,22 +2648,45 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
 /// directly — its sole child is the document view, which composites reliably in
 /// the layer-backed host. The document view draws its own pinned line-number
 /// gutter, so nothing is overlaid on (or placed beside) the scroll view.
+/// Which backend a ``LargeTextViewport`` renders: an editable buffer (its save
+/// wiring applies) or a read-only large file (editing and saving stay inert).
+enum TextViewportBackend {
+  case editable(TextBuffer)
+  case readOnly(LargeFile)
+}
+
 struct LargeTextViewport: NSViewRepresentable {
-  let buffer: TextBuffer
+  let backend: TextViewportBackend
   let accessibilityLabel: String
   let syntax: TextDocumentSyntax
   /// Whether long lines soft-wrap to the viewport (prose) or scroll horizontally
   /// (structured/code/data). Decided per document by the host.
   let wrapsLines: Bool
-  let isEditable: Bool
-  let saveURL: URL
-  let saveEncoding: String.Encoding
+  /// The editing/saving parameters below apply only to an `.editable` backend; a
+  /// read-only large file ignores them (it is never editable and never saves), so
+  /// they default to inert values and the read-only caller omits them.
+  var isEditable: Bool = false
+  var saveURL: URL?
+  var saveEncoding: String.Encoding = .utf8
   /// A monotonic counter the host bumps to request a save (the viewer owns the
   /// off-main write). A change since the last seen value triggers `requestSave`.
-  let saveRequest: Int
-  let onSaveCompletion: (Result<DocumentFileFingerprint?, Error>) -> Void
-  let onDirtyChange: (Bool) -> Void
-  let onFocusChange: (Bool) -> Void
+  var saveRequest: Int = 0
+  var onSaveCompletion: (Result<DocumentFileFingerprint?, Error>) -> Void = { _ in }
+  var onDirtyChange: (Bool) -> Void = { _ in }
+  var onFocusChange: (Bool) -> Void = { _ in }
+
+  /// A read-only backend is never editable, regardless of the host's `isEditable`.
+  private var resolvedIsEditable: Bool {
+    if case .editable = backend { return isEditable }
+    return false
+  }
+
+  /// Distinct accessibility identifiers so automation can tell the editable viewer
+  /// from the read-only large-file viewer.
+  private var backendAccessibilityIdentifier: String {
+    if case .readOnly = backend { return "document-readonly-large-text-viewer" }
+    return "document-large-text-viewer"
+  }
 
   func makeNSView(context: Context) -> NSScrollView {
     let scrollView = NSScrollView()
@@ -2628,13 +2698,13 @@ struct LargeTextViewport: NSViewRepresentable {
     scrollView.backgroundColor = .textBackgroundColor
 
     let documentView = LineRenderingTextView()
-    documentView.setAccessibilityIdentifier("document-large-text-viewer")
+    documentView.setAccessibilityIdentifier(backendAccessibilityIdentifier)
     documentView.setAccessibilityLabel(accessibilityLabel)
     documentView.syntax = syntax
     documentView.showsLineNumbers = syntax.supportsLineNumbers
-    // Set before the buffer so the first wrap-index build uses the right mode.
+    // Set before the document so the first wrap-index build uses the right mode.
     documentView.wrapsLines = wrapsLines
-    documentView.isEditable = isEditable
+    documentView.isEditable = resolvedIsEditable
     documentView.saveURL = saveURL
     documentView.saveEncoding = saveEncoding
     documentView.onSaveCompletion = onSaveCompletion
@@ -2642,7 +2712,12 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.onFocusChange = onFocusChange
     scrollView.documentView = documentView
 
-    documentView.setBuffer(buffer)
+    switch backend {
+    case .editable(let buffer):
+      documentView.setBuffer(buffer)
+    case .readOnly(let file):
+      documentView.setReadOnlyDocument(file)
+    }
 
     let clipView = scrollView.contentView
     // This view draws viewport-relative chrome (pinned gutter, caret, selection)
@@ -2677,19 +2752,29 @@ struct LargeTextViewport: NSViewRepresentable {
     guard let documentView = scrollView.documentView as? LineRenderingTextView else {
       return
     }
+    // Keep the identifier consistent with the backend in case a swap reuses this
+    // view (makeNSView sets it once; updateNSView handles a backend change).
+    documentView.setAccessibilityIdentifier(backendAccessibilityIdentifier)
     documentView.setAccessibilityLabel(accessibilityLabel)
     documentView.syntax = syntax
     documentView.showsLineNumbers = syntax.supportsLineNumbers
-    // Set before any buffer swap so the rebuilt wrap index uses the right mode.
+    // Set before any document swap so the rebuilt wrap index uses the right mode.
     documentView.wrapsLines = wrapsLines
-    documentView.isEditable = isEditable
+    documentView.isEditable = resolvedIsEditable
     documentView.saveURL = saveURL
     documentView.saveEncoding = saveEncoding
     documentView.onSaveCompletion = onSaveCompletion
     documentView.onDirtyChange = onDirtyChange
     documentView.onFocusChange = onFocusChange
-    if documentView.buffer !== buffer {
-      documentView.setBuffer(buffer)
+    switch backend {
+    case .editable(let buffer):
+      if documentView.editableBuffer !== buffer {
+        documentView.setBuffer(buffer)
+      }
+    case .readOnly(let file):
+      if !documentView.isShowingReadOnlyDocument(file) {
+        documentView.setReadOnlyDocument(file)
+      }
     }
     // A bumped save request (from the menu/Cmd+S command) asks the viewer to save.
     if context.coordinator.lastSaveRequest != saveRequest {
@@ -2772,7 +2857,7 @@ struct VirtualizedTextDocumentView: View {
         Color(nsColor: .textBackgroundColor)
       case .loaded(let buffer, let encoding):
         LargeTextViewport(
-          buffer: buffer,
+          backend: .editable(buffer),
           accessibilityLabel: accessibilityLabel,
           syntax: syntax,
           wrapsLines: wrapsLines,

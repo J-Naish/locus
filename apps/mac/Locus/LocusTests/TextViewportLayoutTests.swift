@@ -838,6 +838,34 @@ final class TextViewportLayoutTests: XCTestCase {
     return view
   }
 
+  /// Builds a viewer over a temporary file through the read-only large-file
+  /// backend, exercising the `setReadOnlyDocument` path the surface uses for files
+  /// too big to edit in memory.
+  @MainActor
+  private func makeReadOnlyViewer(_ contents: String) throws -> LineRenderingTextView {
+    let directory = FileManager.default.temporaryDirectory.appending(
+      path: "locus-readonly-viewer-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appending(path: "large.txt")
+    try contents.write(to: url, atomically: true, encoding: .utf8)
+    let view = LineRenderingTextView()
+    view.setReadOnlyDocument(try LargeFile.open(at: url))
+    return view
+  }
+
+  @MainActor
+  func testReadOnlyDocumentRendersThroughTheReaderWithoutAnEditableBuffer() throws {
+    let view = try makeReadOnlyViewer("alpha\nbeta\ngamma")
+    // Reads flow through the read-only backend; there is no editable buffer.
+    XCTAssertNil(view.editableBuffer)
+    XCTAssertEqual(view.lineCount, 3)
+    // The read paths still drive selection over the large-file backend.
+    view.selectAll(nil)
+    XCTAssertEqual(view.selection?.start, .init(line: 0, columnUTF16: 0))
+    XCTAssertEqual(view.selection?.end.line, 2)
+  }
+
   @MainActor
   func testSelectedTextRoundTripsMultiLineSelection() throws {
     let view = try makeViewer("alpha\nbravo\ncharlie")
@@ -1105,7 +1133,7 @@ final class TextViewportLayoutTests: XCTestCase {
   /// to LF, matching the line-based buffer read).
   @MainActor
   private func content(of view: LineRenderingTextView) -> String {
-    guard let buffer = view.buffer else { return "" }
+    guard let buffer = view.editableBuffer else { return "" }
     return buffer.text(forLineRange: 0, count: buffer.lineCount)
   }
 
@@ -1146,7 +1174,7 @@ final class TextViewportLayoutTests: XCTestCase {
     view.moveHorizontally(forward: true, extend: false)  // caret (0,2)
     view.insertText("\n")
     XCTAssertEqual(content(of: view), "ab\ncd")
-    XCTAssertEqual(view.buffer?.lineCount, 2)
+    XCTAssertEqual(view.editableBuffer?.lineCount, 2)
     XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 0))
   }
 
@@ -1166,7 +1194,7 @@ final class TextViewportLayoutTests: XCTestCase {
     view.moveToLineEdge(end: false, extend: false)  // caret (1,0)
     view.deleteBackward()
     XCTAssertEqual(content(of: view), "abcd")
-    XCTAssertEqual(view.buffer?.lineCount, 1)
+    XCTAssertEqual(view.editableBuffer?.lineCount, 1)
     XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 2))
   }
 
@@ -1338,7 +1366,7 @@ final class TextViewportLayoutTests: XCTestCase {
     view.moveToDocumentEdge(end: true, extend: false)  // caret (0,2)
     view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
     XCTAssertEqual(content(of: view), "ab\n")
-    XCTAssertEqual(view.buffer?.lineCount, 2)
+    XCTAssertEqual(view.editableBuffer?.lineCount, 2)
     XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 0))
   }
 

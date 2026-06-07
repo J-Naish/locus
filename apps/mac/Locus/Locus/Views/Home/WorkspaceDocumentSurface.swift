@@ -128,7 +128,13 @@ struct WorkspaceDocumentSurface: View {
   private func textDocumentSurface(for entry: WorkspaceEntry) -> some View {
     if selectedTextIsLarge {
       LargeTextDocumentSurface(
-        url: entry.url, reloadTrigger: documentReloadTrigger(for: entry))
+        url: entry.url,
+        accessibilityLabel: "\(entry.name) text",
+        syntax: WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText,
+        wrapsLines: WorkspaceTextDocumentSupport.wrapsLines(for: entry),
+        reloadTrigger: documentReloadTrigger(for: entry),
+        onFocusChange: { isFocused in isEditorFocused = isFocused }
+      )
     } else {
       editableDocumentSurface(for: entry)
     }
@@ -797,7 +803,11 @@ private enum LargeTextDocumentLoadState {
 /// surfaces as a short read, never a crash).
 private struct LargeTextDocumentSurface: View {
   let url: URL
+  let accessibilityLabel: String
+  let syntax: TextDocumentSyntax
+  let wrapsLines: Bool
   let reloadTrigger: DocumentReloadTrigger
+  let onFocusChange: (Bool) -> Void
 
   @State private var loadState: LargeTextDocumentLoadState = .loading
 
@@ -808,6 +818,15 @@ private struct LargeTextDocumentSurface: View {
         ProgressView()
           .frame(maxWidth: .infinity, maxHeight: .infinity)
       case .loaded(let file):
+        // Policy: the read-only editor view can window a long line, but the
+        // windowed index is checkpointed by line, so resolving an in-line UTF-16
+        // position scans from the line start — fast for a long-ish line, but a
+        // pathological single line (e.g. one-line gigabyte) would scan on the main
+        // thread during the wrap-index build. Until the core gains byte/UTF-16
+        // checkpoints (or a line-length read), a file whose longest line exceeds
+        // the renderable byte limit is shown as unsupported rather than risking a
+        // hang. The editor view's huge-line path therefore covers long lines up to
+        // that limit, not arbitrarily huge ones.
         if WorkspaceDocumentSurfaceSupport.hasUnreadablyLongLines(
           maxLineByteCount: file.maxLineByteLength)
         {
@@ -819,7 +838,16 @@ private struct LargeTextDocumentSurface: View {
           .frame(maxWidth: .infinity, maxHeight: .infinity)
           .accessibilityIdentifier("document-large-text-long-lines")
         } else {
-          LargeTextLineList(file: file)
+          // Render the windowed read-only file through the same editor view as
+          // editable text, so selection, navigation, wrapping, and look match;
+          // the backend has no editable buffer, so editing and saving stay inert.
+          LargeTextViewport(
+            backend: .readOnly(file),
+            accessibilityLabel: accessibilityLabel,
+            syntax: syntax,
+            wrapsLines: wrapsLines,
+            onFocusChange: onFocusChange
+          )
         }
       case .failed(let message):
         ContentUnavailableView {
@@ -846,30 +874,5 @@ private struct LargeTextDocumentSurface: View {
         loadState = .failed(error.localizedDescription)
       }
     }
-  }
-}
-
-/// Virtualized read-only list of a large file's lines. On macOS `List` is backed
-/// by `NSTableView`, so a multi-million-line file renders lazily and scrolls
-/// natively; each visible row reads just its own line from the windowed source.
-/// Selection is per line (enough to copy a line); cross-line selection and
-/// horizontal scrolling of very long lines are later refinements.
-private struct LargeTextLineList: View {
-  let file: LargeFile
-
-  var body: some View {
-    List(0..<file.lineCount, id: \.self) { index in
-      // The core's line-range read already strips each line's terminator (and
-      // keeps a genuine final lone CR as content), so show the text verbatim;
-      // re-stripping here would delete a real trailing CR on the last line.
-      Text(file.text(forLineRange: index, count: 1))
-        .font(.system(.body, design: .monospaced))
-        .textSelection(.enabled)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .listRowInsets(EdgeInsets(top: 1, leading: 8, bottom: 1, trailing: 8))
-        .listRowSeparator(.hidden)
-    }
-    .listStyle(.plain)
-    .accessibilityIdentifier("document-readonly-large-text-viewer")
   }
 }
