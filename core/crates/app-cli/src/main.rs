@@ -12,8 +12,9 @@ const MAX_ITERATIONS: usize = u32::MAX as usize;
 const DEFAULT_BUFFER_SIZE_BYTES: usize = 1_000_000;
 const DEFAULT_BUFFER_SCROLL_READS: usize = 100;
 const BUFFER_VIEWPORT_LINES: usize = 80;
-// Edits are O(n) on the interim engine (the whole index is recomputed), so the
-// default count is kept modest until the O(log n) tree lands.
+// Each edit is O(log n) in the piece count (the treap caches subtree
+// aggregates), so this modest default just keeps a single benchmark run quick
+// while still exercising the edit path repeatedly.
 const DEFAULT_BUFFER_EDITS: usize = 50;
 
 fn main() {
