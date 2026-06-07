@@ -36,4 +36,24 @@ extension URL {
       .appending(component: lastPathComponent)
       .locusStandardizedPath
   }
+
+  /// Whether the file is effectively read-only: it sits on a read-only volume or
+  /// is otherwise unwritable (mode, ACL, or ownership), or it carries a user or
+  /// system immutable flag. This is more precise than the core's mode-bit
+  /// `readonly`, but it stats the file, so call it once when a document is opened
+  /// rather than for every entry while listing a folder. `fallback` is returned
+  /// when the metadata cannot be read.
+  func locusIsReadOnly(fallback: Bool) -> Bool {
+    guard
+      let values = try? resourceValues(
+        forKeys: [.isWritableKey, .isUserImmutableKey, .isSystemImmutableKey]
+      )
+    else {
+      return fallback
+    }
+    if values.isUserImmutable == true || values.isSystemImmutable == true {
+      return true
+    }
+    return values.isWritable.map { !$0 } ?? fallback
+  }
 }

@@ -152,6 +152,49 @@ final class CoreBridgeTests: XCTestCase {
       XCTAssertFalse(message.isEmpty)
     }
   }
+
+  // MARK: - URL.locusIsReadOnly
+
+  // The folder listing trusts the core's cheap mode-bit `readonly`; this precise
+  // check runs once when a document is opened, so it must override the fallback.
+
+  func testLocusIsReadOnlyReportsWritableFileAsWritable() throws {
+    let directory = try temporaryDirectory()
+    let fileURL = directory.appending(path: "writable.txt")
+    try "content".write(to: fileURL, atomically: true, encoding: .utf8)
+
+    XCTAssertFalse(fileURL.locusIsReadOnly(fallback: true))
+  }
+
+  func testLocusIsReadOnlyReportsReadOnlyFileAsReadOnly() throws {
+    let directory = try temporaryDirectory()
+    let fileURL = directory.appending(path: "locked.txt")
+    try "content".write(to: fileURL, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o444], ofItemAtPath: fileURL.path(percentEncoded: false))
+
+    XCTAssertTrue(fileURL.locusIsReadOnly(fallback: false))
+  }
+
+  func testLocusIsReadOnlyReturnsFallbackWhenMetadataIsUnreadable() {
+    let missingURL = FileManager.default.temporaryDirectory.appending(
+      path: "locus-missing-\(UUID().uuidString).txt")
+
+    XCTAssertTrue(missingURL.locusIsReadOnly(fallback: true))
+    XCTAssertFalse(missingURL.locusIsReadOnly(fallback: false))
+  }
+
+  private func temporaryDirectory() throws -> URL {
+    let url = FileManager.default.temporaryDirectory.appending(
+      path: "locus-corebridge-tests-\(UUID().uuidString)",
+      directoryHint: .isDirectory
+    )
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    addTeardownBlock {
+      try? FileManager.default.removeItem(at: url)
+    }
+    return url
+  }
 }
 
 private final class TestWorkspace {

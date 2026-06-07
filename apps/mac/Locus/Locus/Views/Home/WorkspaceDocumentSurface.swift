@@ -26,6 +26,11 @@ struct WorkspaceDocumentSurface: View {
   /// write, so the menu/Cmd+S command routes through this token rather than saving
   /// here.
   @State private var documentSaveRequest = 0
+  /// Effective read-only state of the selected document, resolved once per
+  /// selection (URL.locusIsReadOnly) rather than for every entry during listing.
+  /// Seeded from the core's mode-bit `readonly` so the common case is correct
+  /// immediately, then refined for read-only volumes, ACLs, and immutable flags.
+  @State private var selectedDocumentReadOnly = false
   @StateObject private var documentChangeMonitor = DocumentChangeMonitor()
   /// Retains opened buffers across file switches so unsaved edits survive
   /// navigating away and back (persists for the surface's lifetime).
@@ -97,6 +102,9 @@ struct WorkspaceDocumentSurface: View {
       documentDirty = false
       documentConflict = false
       saveErrorMessage = nil
+      // Seed from the core's mode-bit readonly so editability is right immediately;
+      // prepareSelectedDocument refines it for volume/ACL/immutable cases.
+      selectedDocumentReadOnly = entry?.isReadOnly ?? false
       onTextInputFocusChange(false)
     }
     .onChange(of: isEditorFocused) {
@@ -142,7 +150,7 @@ struct WorkspaceDocumentSurface: View {
         accessibilityLabel: "\(entry.name) text",
         syntax: WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText,
         wrapsLines: WorkspaceTextDocumentSupport.wrapsLines(for: entry),
-        isEditable: !entry.isReadOnly,
+        isEditable: !selectedDocumentReadOnly,
         reloadToken: documentReloadGeneration,
         saveRequest: documentSaveRequest,
         onSaveCompletion: { result in handleDocumentSaveResult(result, for: entry) },
@@ -160,7 +168,7 @@ struct WorkspaceDocumentSurface: View {
   private var isSaveDisabled: Bool {
     // The editor owns its dirty state; Save is enabled only for a writable text
     // document with unsaved edits.
-    guard let entry, !entry.isReadOnly, WorkspaceTextDocumentSupport.canEdit(entry) else {
+    guard let entry, !selectedDocumentReadOnly, WorkspaceTextDocumentSupport.canEdit(entry) else {
       return true
     }
     return !documentDirty
@@ -180,6 +188,10 @@ struct WorkspaceDocumentSurface: View {
       knownDocumentFingerprint = nil
       return
     }
+
+    // Resolve effective read-only state once for the opened document (read-only
+    // volume, ACL, ownership, immutable flags) rather than per entry at listing.
+    selectedDocumentReadOnly = entry.url.locusIsReadOnly(fallback: entry.isReadOnly)
 
     let key = entry.url.locusStandardizedPath
     let baseline =

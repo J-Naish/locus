@@ -214,7 +214,12 @@ struct CoreBridge: Sendable {
         modified: entry.has_modified_unix_seconds
           ? Date(timeIntervalSince1970: TimeInterval(entry.modified_unix_seconds))
           : nil,
-        isReadOnly: isReadOnlyFile(at: path, fallback: entry.readonly)
+        // The core already computes `readonly` during its single stat pass. The
+        // more precise, costlier effective-writability check (read-only volume,
+        // ACL, ownership, immutable flags) runs once when a document is opened
+        // (URL.locusIsReadOnly), not per entry here, so a large folder listing
+        // does not pay an extra stat per file.
+        isReadOnly: entry.readonly
       )
     }
   }
@@ -327,22 +332,6 @@ struct CoreBridge: Sendable {
     return text.isEmpty ? "Rust core error details are unavailable." : text
   }
 
-  private static func isReadOnlyFile(at path: String, fallback: Bool) -> Bool {
-    let url = URL(filePath: path)
-    guard
-      let resourceValues = try? url.resourceValues(
-        forKeys: [.isWritableKey, .isUserImmutableKey, .isSystemImmutableKey]
-      )
-    else {
-      return fallback
-    }
-
-    if resourceValues.isUserImmutable == true || resourceValues.isSystemImmutable == true {
-      return true
-    }
-
-    return resourceValues.isWritable.map { !$0 } ?? fallback
-  }
 }
 
 enum CoreBridgeError: LocalizedError, Equatable, Sendable {
