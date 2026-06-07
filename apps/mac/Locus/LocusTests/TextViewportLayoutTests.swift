@@ -210,29 +210,32 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
-  func testNonProseKeepsLineBelowThresholdSingleRowEvenWhenWide() throws {
-    // Non-prose (code/data) does not wrap a line under the long-line threshold,
-    // even when it is far wider than the viewport — it stays one row and scrolls
-    // horizontally (Cursor-like). One row proves it did not wrap.
+  func testNonProseWithoutLongLineScrollsHorizontally() throws {
+    // Non-prose (code/data) with no line past the threshold scrolls horizontally,
+    // even when a line is far wider than the viewport — it stays one row.
     let view = LineRenderingTextView()
     view.frame = NSRect(x: 0, y: 0, width: 140, height: 400)  // narrow viewport
     view.wrapsLines = false
     view.longLineWrapThreshold = 10_000
     let buffer = try TextBuffer.open(bytes: Data(String(repeating: "word ", count: 50).utf8))
     view.setBuffer(buffer)  // 250 chars: would wrap to many rows if it wrapped
+    XCTAssertFalse(view.isSoftWrapping)
     XCTAssertEqual(view.frame.height, view.layout.lineHeight)
   }
 
   @MainActor
-  func testNonProseWrapsLinePastThreshold() throws {
-    // A line past the threshold wraps, so the very long line is foldable rather
-    // than only horizontally scrollable.
+  func testNonProseLongLineWrapsEntireDocumentWithoutMixing() throws {
+    // A single line past the threshold flips the whole non-prose document to
+    // wrapping — folding and horizontal scrolling never mix. The short first line
+    // wraps too (it just fits one row), so the document is in wrap mode.
     let view = LineRenderingTextView()
     view.frame = NSRect(x: 0, y: 0, width: 140, height: 400)  // narrow viewport
     view.wrapsLines = false
     view.longLineWrapThreshold = 20
-    let buffer = try TextBuffer.open(bytes: Data(String(repeating: "word ", count: 50).utf8))
-    view.setBuffer(buffer)  // 250 chars > threshold
+    let longLine = String(repeating: "word ", count: 50)  // 250 chars > threshold
+    let buffer = try TextBuffer.open(bytes: Data("short\n\(longLine)".utf8))
+    view.setBuffer(buffer)
+    XCTAssertTrue(view.isSoftWrapping)
     XCTAssertGreaterThan(view.frame.height, view.layout.lineHeight * 3)
   }
 
@@ -276,6 +279,25 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(view.frame.height, reference.frame.height)
     // Sanity: the middle line actually wraps (document is taller than 3 rows).
     XCTAssertGreaterThan(view.frame.height, view.layout.lineHeight * 3)
+  }
+
+  @MainActor
+  func testNonProseLeavesWrapModeWhenLastLongLineShortened() throws {
+    // Shortening the only long line returns a non-prose document to horizontal
+    // scroll immediately (no reload needed) — the document-wide wrap decision is
+    // kept current as the single line is edited.
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
+    view.wrapsLines = false
+    view.longLineWrapThreshold = 20
+    view.isEditable = true
+    let buffer = try TextBuffer.open(bytes: Data(String(repeating: "x", count: 25).utf8))
+    view.setBuffer(buffer)
+    XCTAssertTrue(view.isSoftWrapping)  // 25 > 20 → whole document wraps
+
+    view.moveToDocumentEdge(end: true, extend: false)
+    for _ in 0..<6 { view.deleteBackward() }  // 25 - 6 = 19 ≤ 20
+    XCTAssertFalse(view.isSoftWrapping)  // back to horizontal scroll
   }
 
   @MainActor

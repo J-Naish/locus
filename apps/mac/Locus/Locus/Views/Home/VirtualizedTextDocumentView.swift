@@ -178,12 +178,15 @@ struct TextSelection: Equatable {
 /// [`TextBuffer`], fetching that band from the Rust core on demand. The document
 /// height is synthesized from the visual-row count, so a multi-gigabyte file
 /// never has its text assembled in memory — scrolling redraws exposed bands.
-/// When the host enables wrapping (prose) the lines soft-wrap to the viewport
-/// width (no horizontal scroll); when it does not (structured/code/data), the
-/// view widens to the widest line it has drawn and scrolls horizontally.
-/// Document size alone never disables wrapping — only a pathological line count
-/// or aggregate byte estimate (the work the wrap-index build would do on the
-/// main thread) falls back to no-wrap, to keep open and resize responsive.
+/// Wrapping is decided per document, never mixed with horizontal scrolling:
+/// prose (the host sets `wrapsLines`) always soft-wraps to the viewport width;
+/// a non-prose document (structured/code/data) scrolls horizontally until any
+/// single line exceeds the long-line threshold, at which point the whole
+/// document wraps (and the offending long lines drop syntax highlighting), like
+/// a code editor handling a pathological line. Document size alone never forces
+/// no-wrap — only a pathological line count or aggregate byte estimate (the work
+/// the synchronous wrap-index build would do on the main thread) does, to keep
+/// open and resize responsive.
 final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private(set) var buffer: TextBuffer?
   let layout: TextViewportLayout
@@ -362,53 +365,40 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// further. `var` so tests can lower the budgets to exercise the boundaries.
   var maximumWrappableLineCount = 200_000
   var maximumWrappableFetchedByteBudget = 64 * 1024 * 1024
-  /// In non-prose mode, the per-line length (UTF-16 units) past which a line is
-  /// soft-wrapped instead of left on one horizontally-scrolling row. Shorter
-  /// lines keep their structure (one row); only a pathologically long line folds.
-  /// `var` so tests can set it. Prose ignores this — it wraps every line.
+  /// In non-prose documents, the line length (UTF-16 units) at which the whole
+  /// document switches to soft wrapping. As long as every line is at or under it,
+  /// the document scrolls horizontally (a line is a record/structure unit); once
+  /// any single line exceeds it, the entire document wraps — folding and
+  /// horizontal scrolling never mix, matching a code editor's long-line handling.
+  /// The same threshold suppresses rule highlighting on the offending long lines.
+  /// `var` so tests can set it. Prose ignores this — it always wraps.
   var longLineWrapThreshold = 2_000
 
-  /// Whether a line of `length` UTF-16 units soft-wraps. Prose wraps everything;
-  /// non-prose wraps only lines past the long-line threshold.
-  private func lineWraps(lengthUTF16 length: Int) -> Bool {
-    wrapsLines || length > longLineWrapThreshold
-  }
+  /// Number of non-prose lines currently past `longLineWrapThreshold`. The whole
+  /// document wraps while this is non-zero. Width-independent, so it survives a
+  /// resize without re-scanning; maintained incrementally on single-line edits
+  /// (via `lineIsLong`) so shortening the last long line returns the document to
+  /// horizontal scroll without waiting for a reload.
+  private var longLineCount = 0
+  /// Per-logical-line "is past the threshold" flags backing `longLineCount`, kept
+  /// only while wrapping a non-prose document (nil for prose, no-wrap, or over
+  /// budget). Lets a single-line edit adjust the count without re-scanning.
+  private var lineIsLong: [Bool]?
 
-  /// Visual-row start offsets for a displayed line, honoring the per-line wrap
-  /// decision: a line that does not wrap is a single row `[0]`. The single source
-  /// of truth for row breaks, so the wrap-index counts, drawing, and hit-testing
-  /// cannot diverge.
-  private func rowStartOffsets(ofDisplayed attributed: NSAttributedString, width: CGFloat)
-    -> [Int]
-  {
-    guard lineWraps(lengthUTF16: attributed.length) else { return [0] }
-    return LineWrap.visualRowStartOffsets(
-      of: attributed, width: width, maximumRows: maximumDrawnCharactersPerLine)
-  }
+  /// Whether the whole document soft-wraps (vs. scrolls horizontally): prose
+  /// always does; a non-prose document does only while it holds a long line. The
+  /// decision is document-wide, so wrapping and horizontal scrolling never mix.
+  private var documentWraps: Bool { wrapsLines || longLineCount > 0 }
 
-  /// Whether a line is rendered as a single visual row (so its full width drives
-  /// horizontal scroll): true when nothing wraps at all (over budget) or this
-  /// specific line is under the wrap decision.
-  private func isSingleRow(lengthUTF16 length: Int) -> Bool {
-    wrapIndex == nil || !lineWraps(lengthUTF16: length)
-  }
+  /// Whether the document is currently soft-wrapping rather than scrolling
+  /// horizontally. Mirrors whether a wrap index is active.
+  var isSoftWrapping: Bool { wrapIndex != nil }
 
-  /// The x origin (this view's coordinates) where a line's text starts. An
-  /// unwrapped single-row line sits at a fixed document x and scrolls
-  /// horizontally with the rest of the content. A wrapped line is pinned just
-  /// right of the viewport-pinned gutter (it follows horizontal scroll), so it
-  /// stays fully visible — wrapped to the visible width — even when a sibling
-  /// long unwrapped line has widened the document and the user scrolls right.
-  /// Drawing, selection, caret, hit testing, and caret-scroll all use this so the
-  /// two row kinds share one coordinate system.
-  private func textOriginX(singleRow: Bool) -> CGFloat {
-    let base = gutterWidth + horizontalPadding
-    return singleRow ? base : visibleRect.minX + base
-  }
-
-  /// `textOriginX` for the line a displayed string belongs to.
-  private func textOriginX(forDisplayed attributed: NSAttributedString) -> CGFloat {
-    textOriginX(singleRow: isSingleRow(lengthUTF16: attributed.length))
+  /// Whether a line of `length` UTF-16 units gets rule-based syntax highlighting:
+  /// prose always does; non-prose skips it for lines past the long-line threshold
+  /// (the same lines that drive wrapping), matching a code editor's long lines.
+  private func highlightsLine(lengthUTF16 length: Int) -> Bool {
+    wrapsLines || length <= longLineWrapThreshold
   }
 
   /// Per-logical-line → visual-row mapping while wrapping is active; `nil` when not
@@ -431,12 +421,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return visible - gutterWidth - horizontalPadding * 2
   }
 
-  /// (Re)builds the wrap index for the current buffer and width, or clears it when
-  /// no line could wrap (over budget / zero width). Reads the whole (bounded)
-  /// document once; line widths depend only on the font, so highlighting is
-  /// skipped here. Built for both prose and non-prose: in non-prose most lines
-  /// resolve to a single row, and only lines past the long-line threshold wrap.
-  private func rebuildWrapIndex() {
+  /// (Re)builds the wrap index for the current buffer and width when the document
+  /// wraps (prose, or a non-prose document holding a long line), or clears it for
+  /// horizontal scrolling. Reads the whole (bounded) document once; line widths
+  /// depend only on the font, so highlighting is skipped here.
+  ///
+  /// `recomputeLongLine` re-decides whether a non-prose document has a long line
+  /// — needed only when the content changed (open, multi-line edit, undo). On a
+  /// resize (width changed, content same) the cached decision is reused, so a
+  /// horizontally-scrolling document is not re-scanned just to resize.
+  private func rebuildWrapIndex(recomputeLongLine: Bool = true) {
     lastWrapWidth = wrapContentWidth
     guard let buffer, wrapContentWidth > 0,
       buffer.lineCount <= maximumWrappableLineCount,
@@ -448,40 +442,84 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     else {
       wrapIndex = nil
       wrapRowCounts = nil
+      lineIsLong = nil
+      longLineCount = 0
+      return
+    }
+    // A horizontally-scrolling document needs no index. Decide that without
+    // re-reading the document on resize by reusing the cached long-line count.
+    if !recomputeLongLine, !documentWraps {
+      wrapIndex = nil
+      wrapRowCounts = nil
       return
     }
     let width = wrapContentWidth
-    let counts = displayLineStrings(forLineRange: 0, count: buffer.lineCount).map { lineText in
-      wrapRowCount(text: lineText, width: width)
+    let lineStrings = displayLineStrings(forLineRange: 0, count: buffer.lineCount)
+    if recomputeLongLine, !wrapsLines {
+      let flags = lineStrings.map { ($0 as NSString).length > longLineWrapThreshold }
+      lineIsLong = flags
+      longLineCount = flags.lazy.filter { $0 }.count
     }
+    guard documentWraps else {
+      wrapIndex = nil
+      wrapRowCounts = nil
+      return
+    }
+    let counts = lineStrings.map { wrapRowCount(text: $0, width: width) }
     wrapRowCounts = counts
     wrapIndex = WrapIndex(visualRowsPerLine: counts)
   }
 
   /// Recomputes the wrap index after an edit confined to one logical line (no line
   /// added or removed), replacing only that line's wrapped-row count rather than
-  /// re-wrapping the whole document. Falls back to a full rebuild whenever the fast
-  /// path is not provably safe: no cached counts, the line count changed, or the
-  /// width changed since the last build.
+  /// re-wrapping the whole document.
   private func updateWrapIndex(forChangedLine line: Int) {
-    guard let buffer, var counts = wrapRowCounts,
-      counts.count == buffer.lineCount, line >= 0, line < counts.count,
+    // Horizontal-scroll mode: stay there unless this edit introduced the first
+    // long line, which flips the whole document to wrapping. Reading just the one
+    // edited line keeps ordinary typing in a no-wrap document O(1).
+    guard var counts = wrapRowCounts else {
+      guard !wrapsLines, longLineCount == 0 else { return }
+      let text = displayLineStrings(forLineRange: line, count: 1).first ?? ""
+      if (text as NSString).length > longLineWrapThreshold {
+        rebuildWrapIndex()
+      }
+      return
+    }
+    // Already wrapping: update just the changed line's row count. Falls back to a
+    // full rebuild when the fast path is not provably safe.
+    guard let buffer, counts.count == buffer.lineCount, line >= 0, line < counts.count,
       lastWrapWidth == wrapContentWidth
     else {
       rebuildWrapIndex()
       return
     }
     let text = displayLineStrings(forLineRange: line, count: 1).first ?? ""
+    // Keep the long-line bookkeeping current so a non-prose document leaves wrap
+    // mode the moment its last long line is shortened (not only on a later
+    // reload). Prose has no `lineIsLong` and always wraps, so it is unaffected.
+    if !wrapsLines, var flags = lineIsLong, line < flags.count {
+      let isLong = (text as NSString).length > longLineWrapThreshold
+      if flags[line] != isLong {
+        flags[line] = isLong
+        lineIsLong = flags
+        longLineCount += isLong ? 1 : -1
+        if longLineCount == 0 {
+          rebuildWrapIndex(recomputeLongLine: false)  // last long line gone → scroll
+          return
+        }
+      }
+    }
     counts[line] = wrapRowCount(text: text, width: wrapContentWidth)
     wrapRowCounts = counts
     wrapIndex = WrapIndex(visualRowsPerLine: counts)
   }
 
-  /// Number of visual rows `text` occupies at `width` — one when the per-line wrap
-  /// decision leaves it unwrapped, otherwise its wrapped row count.
+  /// Number of visual rows `text` occupies at `width`.
   private func wrapRowCount(text: String, width: CGFloat) -> Int {
     let attributed = NSAttributedString(string: text, attributes: [.font: font])
-    return rowStartOffsets(ofDisplayed: attributed, width: width).count
+    return LineWrap.visualRowStartOffsets(
+      of: attributed, width: width, maximumRows: maximumDrawnCharactersPerLine
+    ).count
   }
 
   /// Total visual rows in the document (equals the logical line count when not
@@ -501,10 +539,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   /// UTF-16 start offsets of each visual row within `line` (just `[0]` when the
-  /// line does not wrap). `attributed` is the line's displayed string.
+  /// document is not wrapping). `attributed` is the line's displayed string.
   private func visualRowStartOffsets(ofLine line: Int, attributed: NSAttributedString) -> [Int] {
     guard wrapIndex != nil else { return [0] }
-    return rowStartOffsets(ofDisplayed: attributed, width: wrapContentWidth)
+    return LineWrap.visualRowStartOffsets(
+      of: attributed, width: wrapContentWidth, maximumRows: maximumDrawnCharactersPerLine)
   }
 
   /// The visual-row index within a line for `column`, given the line's row starts.
@@ -999,7 +1038,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let rowText = attributed.attributedSubstring(
       from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
     let columnInRow = columnUTF16(
-      forX: point.x - textOriginX(forDisplayed: attributed), in: rowText)
+      forX: point.x - (gutterWidth + horizontalPadding), in: rowText)
     return TextSelection.Endpoint(line: line, columnUTF16: bounds.start + columnInRow)
   }
 
@@ -1754,12 +1793,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private func scrollCaretToVisible(_ endpoint: TextSelection.Endpoint) {
-    // For a wrapped line the origin is viewport-relative, so the caret rect lands
-    // inside the visible band and only vertical scrolling happens; for a single-
-    // row line the document-x origin scrolls horizontally to reveal the caret.
-    let x =
-      textOriginX(forDisplayed: attributedLine(forLine: endpoint.line))
-      + caretX(for: endpoint)
+    let x = gutterWidth + horizontalPadding + caretX(for: endpoint)
     let rect = NSRect(
       x: x - caretScrollMargin,
       y: CGFloat(visualRow(of: endpoint)) * layout.lineHeight,
@@ -1775,18 +1809,21 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// region, so a tall/wide document does not allocate a full-size layer.
   func updateLayout() {
     // Resize changes the wrap width; rebuild the index when it actually changed.
+    // The content has not changed, so reuse the cached long-line decision rather
+    // than re-scanning the document just to resize.
     if lastWrapWidth != wrapContentWidth {
-      rebuildWrapIndex()
+      rebuildWrapIndex(recomputeLongLine: false)
     }
     let visibleWidth = enclosingScrollView?.documentVisibleRect.width ?? frame.width
     let height = CGFloat(max(totalVisualRows, 1)) * layout.lineHeight
-    // Width follows the widest line drawn as a single row (wrapped lines fit the
-    // viewport and never contribute), so a document where everything wraps stays
-    // at the viewport width while one with long unwrapped lines scrolls
-    // horizontally — both in the same pass, for the mixed wrap/no-wrap case.
-    let contentWidth =
-      gutterWidth + horizontalPadding + maxObservedLineWidth + trailingContentMargin
-    setFrameSize(NSSize(width: max(visibleWidth, contentWidth), height: height))
+    if wrapIndex != nil {
+      // Wrapped: fill the viewport width; no horizontal scrolling.
+      setFrameSize(NSSize(width: visibleWidth, height: height))
+    } else {
+      let contentWidth =
+        gutterWidth + horizontalPadding + maxObservedLineWidth + trailingContentMargin
+      setFrameSize(NSSize(width: max(visibleWidth, contentWidth), height: height))
+    }
     // The visible band and gutter width may have changed; re-establish the
     // I-beam cursor rect so its boundary stays aligned with the gutter edge.
     window?.invalidateCursorRects(for: self)
@@ -1839,13 +1876,6 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       applyRules: highlightsLine(lengthUTF16: fullRange.length))
     attributed.addAttribute(.font, value: font, range: fullRange)
     return attributed
-  }
-
-  /// Whether a line of `length` UTF-16 units gets rule-based syntax highlighting:
-  /// prose always does; non-prose skips it for lines past the long-line threshold
-  /// (the same lines that wrap), matching a code editor's long-line behavior.
-  private func highlightsLine(lengthUTF16 length: Int) -> Bool {
-    wrapsLines || length <= longLineWrapThreshold
   }
 
   // MARK: Line geometry (selection / caret hit-testing)
@@ -1910,29 +1940,26 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let range = firstLine..<(lastLine + 1)
 
     let gutter = gutterWidth
+    let textX = gutter + horizontalPadding
     let lines = attributedBandLines(for: buffer, range: range)
 
     if let selection, !selection.isEmpty {
-      drawSelectionHighlight(selection, lines: lines, range: range)
+      drawSelectionHighlight(selection, lines: lines, range: range, textX: textX)
     }
 
     var widest = maxObservedLineWidth
     for (offset, attributedLine) in lines.enumerated() {
       let lineIndex = range.lowerBound + offset
       let drawn = composedLineForDisplay(line: lineIndex, base: attributedLine)
-      // Only single-row (unwrapped) lines set the horizontal scroll extent;
-      // wrapped lines fit the viewport, so their full width is irrelevant.
-      if isSingleRow(lengthUTF16: drawn.length) {
-        widest = max(widest, drawn.size().width)
-      }
-      drawVisualRows(of: drawn, line: lineIndex)
+      widest = max(widest, drawn.size().width)
+      drawVisualRows(of: drawn, line: lineIndex, textX: textX)
     }
-    drawCaretIfNeeded(lines: lines, range: range)
+    drawCaretIfNeeded(lines: lines, range: range, textX: textX)
     if gutter > 0 {
       drawGutter(width: gutter, lineRange: range, dirtyRect: dirtyRect)
     }
-    // Grow the document to the widest single-row line so it can scroll horizontally.
-    if widest > maxObservedLineWidth {
+    // The widest-line tracking only drives horizontal scroll when not wrapping.
+    if wrapIndex == nil, widest > maxObservedLineWidth {
       maxObservedLineWidth = widest
       if !pendingLayoutUpdate {
         pendingLayoutUpdate = true
@@ -1947,11 +1974,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Draws each soft-wrapped visual row of `attributed` (one row when not
   /// wrapping) at its row's y position.
-  private func drawVisualRows(of attributed: NSAttributedString, line: Int) {
+  private func drawVisualRows(of attributed: NSAttributedString, line: Int, textX: CGFloat) {
     let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
     let firstRow = firstVisualRow(ofLine: line)
     let length = attributed.length
-    let textX = textOriginX(forDisplayed: attributed)
     for rowIndex in starts.indices {
       let bounds = rowRange(rowIndex, starts: starts, length: length)
       let rowText = attributed.attributedSubstring(
@@ -1968,7 +1994,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// fully spanned by a multi-line selection extend a little past their last
   /// character to signal the trailing newline is selected.
   private func drawSelectionHighlight(
-    _ selection: TextSelection, lines: [NSAttributedString], range: Range<Int>
+    _ selection: TextSelection, lines: [NSAttributedString], range: Range<Int>, textX: CGFloat
   ) {
     let focused = window?.firstResponder === self
     (focused ? NSColor.selectedTextBackgroundColor : .unemphasizedSelectedTextBackgroundColor)
@@ -1978,7 +2004,6 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       guard let span = selection.columnSpan(onLine: line, lineLengthUTF16: attributed.length) else {
         continue
       }
-      let textX = textOriginX(forDisplayed: attributed)
       let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
       let firstRow = firstVisualRow(ofLine: line)
       let length = attributed.length
@@ -2008,10 +2033,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Draws the caret at the (empty) selection head while focused and visible, or
   /// within the marked text while composing.
-  private func drawCaretIfNeeded(lines: [NSAttributedString], range: Range<Int>) {
+  private func drawCaretIfNeeded(lines: [NSAttributedString], range: Range<Int>, textX: CGFloat) {
     guard window?.firstResponder === self else { return }
     if let composition {
-      drawCompositionCaret(composition, lines: lines, range: range)
+      drawCompositionCaret(composition, lines: lines, range: range, textX: textX)
       return
     }
     // The plain caret is hidden during the blink's off phase; the composing caret
@@ -2022,13 +2047,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // Caret on the displayed line (which may include in-progress marked text only
     // on the composing line — handled above).
     let displayed = composedLineForDisplay(line: line, base: lines[line - range.lowerBound])
-    drawCaret(forColumn: selection.head.columnUTF16, line: line, attributed: displayed)
+    drawCaret(
+      forColumn: selection.head.columnUTF16, line: line, attributed: displayed, textX: textX)
   }
 
   /// Draws the caret within the marked (composing) text at the input method's
   /// cursor position.
   private func drawCompositionCaret(
-    _ composition: Composition, lines: [NSAttributedString], range: Range<Int>
+    _ composition: Composition, lines: [NSAttributedString], range: Range<Int>, textX: CGFloat
   ) {
     let line = composition.anchor.line
     guard range.contains(line) else { return }
@@ -2039,17 +2065,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // The caret sits inside the marked run; map it to the composed line's column.
     drawCaret(
       forColumn: column + within, line: line,
-      attributed: composedLineForDisplay(line: line, base: base))
+      attributed: composedLineForDisplay(line: line, base: base), textX: textX)
   }
 
   /// Draws a 1.5pt caret at `column` on `line`, on the correct visual row.
-  private func drawCaret(forColumn column: Int, line: Int, attributed: NSAttributedString) {
+  private func drawCaret(
+    forColumn column: Int, line: Int, attributed: NSAttributedString, textX: CGFloat
+  ) {
     let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
     let rowIndex = visualRowIndex(forColumn: column, starts: starts)
     let bounds = rowRange(rowIndex, starts: starts, length: attributed.length)
     let rowText = attributed.attributedSubstring(
       from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
-    let textX = textOriginX(forDisplayed: attributed)
     let x = textX + xOffset(forColumn: min(column, bounds.end) - bounds.start, in: rowText)
     let y = CGFloat(firstVisualRow(ofLine: line) + rowIndex) * layout.lineHeight
     NSColor.textColor.setFill()
