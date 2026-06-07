@@ -170,6 +170,82 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testHugeLineIsFullyAddressableNotClippedToTheDisplayLimit() throws {
+    // A single line far longer than the per-line display clip is virtualized, so
+    // its whole length stays addressable (Select All reaches the true end) rather
+    // than being truncated at the clip.
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
+    let length = 60_000
+    let buffer = try TextBuffer.open(bytes: Data(String(repeating: "x", count: length).utf8))
+    view.setBuffer(buffer)
+    XCTAssertTrue(view.isSoftWrapping)
+    view.selectAll(nil)
+    XCTAssertEqual(view.selection?.head.columnUTF16, length)
+  }
+
+  @MainActor
+  func testHugeLineWrapsBeyondTheDisplayClip() throws {
+    // The huge line wraps over its full length, so it is much taller than a line
+    // sitting at the clip would be — proof it is not laid out clipped.
+    let width: CGFloat = 140
+    let huge = LineRenderingTextView()
+    huge.frame = NSRect(x: 0, y: 0, width: width, height: 400)
+    huge.setBuffer(try TextBuffer.open(bytes: Data(String(repeating: "x", count: 60_000).utf8)))
+
+    let atClip = LineRenderingTextView()
+    atClip.frame = NSRect(x: 0, y: 0, width: width, height: 400)
+    // 20_000 == the clip, so this line is laid out in full (not virtualized).
+    atClip.setBuffer(try TextBuffer.open(bytes: Data(String(repeating: "x", count: 20_000).utf8)))
+
+    XCTAssertGreaterThan(huge.frame.height, atClip.frame.height * 2)
+  }
+
+  @MainActor
+  func testHugeLineCopyIsNotClippedToTheDisplayLimit() throws {
+    // Copy reads the real selected range, so a huge line copies in full — not
+    // truncated at the display clip (which would also corrupt cut).
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
+    let length = 60_000
+    view.setBuffer(try TextBuffer.open(bytes: Data(String(repeating: "x", count: length).utf8)))
+    view.selectAll(nil)
+    XCTAssertEqual(view.selectedText()?.count, length)
+  }
+
+  @MainActor
+  func testHugeLineCharacterStepBackwardPastClipIsSafe() throws {
+    // Stepping the caret backward from beyond the display clip must resolve the
+    // grapheme from a window (not index the clipped string, which would crash).
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
+    view.isEditable = true
+    let length = 60_000
+    view.setBuffer(try TextBuffer.open(bytes: Data(String(repeating: "x", count: length).utf8)))
+    view.selectAll(nil)
+    view.moveHorizontally(forward: true, extend: false)  // collapse the caret to the end
+    XCTAssertEqual(view.selection?.head.columnUTF16, length)
+    view.moveHorizontally(forward: false, extend: false)  // back one grapheme, well past the clip
+    XCTAssertEqual(view.selection?.head.columnUTF16, length - 1)
+  }
+
+  @MainActor
+  func testHugeLineDeleteBackwardPastClipShortensTheLine() throws {
+    // Delete backward from beyond the clip removes one real character rather than
+    // crashing or deleting from the clipped prefix.
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
+    view.isEditable = true
+    let length = 60_000
+    view.setBuffer(try TextBuffer.open(bytes: Data(String(repeating: "x", count: length).utf8)))
+    view.selectAll(nil)
+    view.moveHorizontally(forward: true, extend: false)  // caret at the true end
+    view.deleteBackward()
+    view.selectAll(nil)
+    XCTAssertEqual(view.selectedText()?.count, length - 1)
+  }
+
+  @MainActor
   func testExceedingFetchedByteBudgetFallsBackToNoWrap() throws {
     // Over the aggregate fetched-byte budget, the wrap-index build is skipped and
     // the long line scrolls horizontally instead of wrapping — the safety valve

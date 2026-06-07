@@ -401,6 +401,75 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     wrapsLines || length <= longLineWrapThreshold
   }
 
+  // MARK: Huge-line virtualization
+  //
+  // A logical line longer than `maximumDrawnCharactersPerLine` is not laid out in
+  // full. While wrapping, it folds on a fixed-column grid and only its visible
+  // rows are fetched from the buffer as UTF-16 windows — so an enormous single
+  // line shows in full (and scrolls) without ever materializing it. Normal lines
+  // are untouched; the geometry/draw/hit-test paths branch on `isHugeLine`.
+
+  /// A huge line's content start (global UTF-16) and content length (UTF-16,
+  /// terminator excluded), resolved once during the wrap-index build.
+  private struct HugeLineInfo {
+    let start: Int
+    let length: Int
+  }
+
+  /// Maps a huge line's index to its cached start/length, populated during the
+  /// wrap-index build (and only while wrapping). Empty otherwise. Bounded by the
+  /// number of huge lines, which is tiny in practice. Caching the start keeps
+  /// drawing a band of the line's rows from re-resolving it per row.
+  private var hugeLineInfo: [Int: HugeLineInfo] = [:]
+
+  private func isHugeLine(_ line: Int) -> Bool { hugeLineInfo[line] != nil }
+
+  /// The cached true UTF-16 length of `line` if it is huge, else nil.
+  private func hugeLength(_ line: Int) -> Int? { hugeLineInfo[line]?.length }
+
+  /// Columns (UTF-16 units) per visual row when grid-wrapping a huge line. Uses
+  /// the font's widest advance so a row never exceeds the content width and no
+  /// glyph is clipped: exact for the monospaced fonts huge machine-data lines
+  /// use, conservative (sparser rows) for proportional fonts.
+  private var hugeLineColumns: Int {
+    let advance = max(1, font.maximumAdvancement.width)
+    return max(1, Int((wrapContentWidth / advance).rounded(.down)))
+  }
+
+  /// Visual-row count of a huge line of `utf16Length` at the current width.
+  private func hugeRowCount(utf16Length: Int) -> Int {
+    let columns = hugeLineColumns
+    return max(1, (utf16Length + columns - 1) / columns)
+  }
+
+  /// A huge line's content start (UTF-16) and content length (terminator
+  /// excluded), via two `O(log n)` position lookups. Used only for lines already
+  /// suspected huge, so normal lines never pay for it.
+  private func hugeLineContent(_ line: Int) -> (start: Int, length: Int) {
+    guard let buffer else { return (0, 0) }
+    let start = (try? buffer.position(forLine: line, columnUTF16: 0).utf16) ?? 0
+    // A column past the content clamps to the line's content end (terminator
+    // excluded), so the difference is the content's UTF-16 length.
+    let end = (try? buffer.position(forLine: line, columnUTF16: buffer.utf16Length))?.utf16 ?? start
+    return (start, max(0, end - start))
+  }
+
+  /// The displayed text of a huge line's visual row, fetched as a UTF-16 window
+  /// from the buffer. Rule highlighting is skipped (like other long lines); only
+  /// the base font is applied.
+  private func hugeRowText(line: Int, rowIndex: Int, utf16Length: Int) -> NSAttributedString {
+    let columns = hugeLineColumns
+    let rowStart = rowIndex * columns
+    let rowEnd = min(utf16Length, rowStart + columns)
+    // Use the cached content start so drawing a band of rows does not re-resolve
+    // the line's start position once per visible row.
+    guard let buffer, rowEnd > rowStart, let info = hugeLineInfo[line] else {
+      return NSAttributedString(string: "", attributes: [.font: font])
+    }
+    let text = buffer.text(fromUTF16: info.start + rowStart, toUTF16: info.start + rowEnd)
+    return NSAttributedString(string: text, attributes: [.font: font])
+  }
+
   /// Per-logical-line → visual-row mapping while wrapping is active; `nil` when not
   /// wrapping. Rebuilt fully on open, width change, and undo/redo; updated for the
   /// single changed line on ordinary typing/deletion within a line.
@@ -444,6 +513,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       wrapRowCounts = nil
       lineIsLong = nil
       longLineCount = 0
+      hugeLineInfo = [:]
       return
     }
     // A horizontally-scrolling document needs no index. Decide that without
@@ -451,6 +521,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if !recomputeLongLine, !documentWraps {
       wrapIndex = nil
       wrapRowCounts = nil
+      hugeLineInfo = [:]
       return
     }
     let width = wrapContentWidth
@@ -463,9 +534,26 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     guard documentWraps else {
       wrapIndex = nil
       wrapRowCounts = nil
+      hugeLineInfo = [:]
       return
     }
-    let counts = lineStrings.map { wrapRowCount(text: $0, width: width) }
+    // A line clipped at the display cap may actually be enormous; resolve its true
+    // length and, if it is huge, count its rows from the fixed-column grid rather
+    // than laying it out. Only clipped (suspicious) lines pay for the lookup.
+    hugeLineInfo = [:]
+    var counts: [Int] = []
+    counts.reserveCapacity(lineStrings.count)
+    for (line, lineText) in lineStrings.enumerated() {
+      if (lineText as NSString).length >= maximumDrawnCharactersPerLine {
+        let content = hugeLineContent(line)
+        if content.length > maximumDrawnCharactersPerLine {
+          hugeLineInfo[line] = HugeLineInfo(start: content.start, length: content.length)
+          counts.append(hugeRowCount(utf16Length: content.length))
+          continue
+        }
+      }
+      counts.append(wrapRowCount(text: lineText, width: width))
+    }
     wrapRowCounts = counts
     wrapIndex = WrapIndex(visualRowsPerLine: counts)
   }
@@ -494,6 +582,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       return
     }
     let text = displayLineStrings(forLineRange: line, count: 1).first ?? ""
+    // Editing into or out of a huge line changes its grid row count (and whether
+    // it is windowed at all); a full rebuild re-resolves the true length. Rare, so
+    // the cost is acceptable; ordinary lines never reach here.
+    if isHugeLine(line) || (text as NSString).length >= maximumDrawnCharactersPerLine {
+      rebuildWrapIndex()
+      return
+    }
     // Keep the long-line bookkeeping current so a non-prose document leaves wrap
     // mode the moment its last long line is shortened (not only on a later
     // reload). Prose has no `lineIsLong` and always wraps, so it is unaffected.
@@ -557,6 +652,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// The global visual row a caret position sits on.
   private func visualRow(of endpoint: TextSelection.Endpoint) -> Int {
+    if let length = hugeLength(endpoint.line) {
+      let row = min(hugeRowCount(utf16Length: length) - 1, endpoint.columnUTF16 / hugeLineColumns)
+      return firstVisualRow(ofLine: endpoint.line) + row
+    }
     let attributed = attributedLine(forLine: endpoint.line)
     let starts = visualRowStartOffsets(ofLine: endpoint.line, attributed: attributed)
     return firstVisualRow(ofLine: endpoint.line)
@@ -1032,13 +1131,20 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let row = min(
       max(0, totalVisualRows - 1), max(0, Int((point.y / layout.lineHeight).rounded(.down))))
     let (line, rowInLine) = lineLocation(ofVisualRow: row)
+    let textRelativeX = point.x - (gutterWidth + horizontalPadding)
+    if let length = hugeLength(line) {
+      let rowStart = rowInLine * hugeLineColumns
+      let rowText = hugeRowText(line: line, rowIndex: rowInLine, utf16Length: length)
+      let columnInRow = columnUTF16(forX: textRelativeX, in: rowText)
+      return TextSelection.Endpoint(
+        line: line, columnUTF16: min(length, rowStart + columnInRow))
+    }
     let attributed = attributedLine(forLine: line)
     let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
     let bounds = rowRange(rowInLine, starts: starts, length: attributed.length)
     let rowText = attributed.attributedSubstring(
       from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
-    let columnInRow = columnUTF16(
-      forX: point.x - (gutterWidth + horizontalPadding), in: rowText)
+    let columnInRow = columnUTF16(forX: textRelativeX, in: rowText)
     return TextSelection.Endpoint(line: line, columnUTF16: bounds.start + columnInRow)
   }
 
@@ -1163,35 +1269,23 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// or when the selection is larger than `maximumCopiedByteCount` (in which case
   /// it beeps rather than materializing a giant string on the main thread).
   ///
-  /// The selection operates on the same clipped per-line text the view displays
-  /// (`maximumDrawnCharactersPerLine`), so what is copied matches what is shown
-  /// and selectable. Line terminators are normalized to LF — the view is
-  /// line-based and does not retain original terminators (a CRLF file copies with
-  /// LF); preserving them would require a terminator-aware range snapshot.
+  /// Reads the selection's actual UTF-16 range from the buffer, so a selection
+  /// inside a huge line copies in full rather than being clipped to the display
+  /// limit. Line terminators are normalized to LF — the view is line-based and
+  /// does not retain original terminators, so a CRLF file copies with LF.
   func selectedText() -> String? {
-    guard buffer != nil, let selection, !selection.isEmpty else {
+    guard let buffer, let selection, !selection.isEmpty else {
       return nil
     }
     if let span = selectionByteSpan(), span > maximumCopiedByteCount {
       NSSound.beep()
       return nil
     }
-
-    let lower = selection.start
-    let upper = selection.end
-    return displayText(
-      fromLine: lower.line, fromColumn: lower.columnUTF16,
-      toLine: upper.line, toColumn: upper.columnUTF16)
-  }
-
-  /// The clipped display text spanning `[(fromLine, fromColumn), (toLine, toColumn))`,
-  /// joined with LF. Uses the same per-line clipping as display and copy, so those
-  /// share one coordinate system. Endpoints must be ordered.
-  private func displayText(fromLine: Int, fromColumn: Int, toLine: Int, toColumn: Int) -> String {
-    let count = toLine - fromLine + 1
-    return Self.sliceLines(
-      displayLineStrings(forLineRange: fromLine, count: count),
-      fromColumn: fromColumn, toColumn: toColumn)
+    guard let range = currentSelectionUTF16Range(), range.end > range.start else {
+      return nil
+    }
+    return buffer.text(fromUTF16: range.start, toUTF16: range.end)
+      .replacingOccurrences(of: "\r\n", with: "\n")
   }
 
   /// The unclipped buffer text spanning `[(fromLine, fromColumn), (toLine, toColumn))`,
@@ -1399,13 +1493,20 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         line: head.line, columnUTF16: down ? lineLengthUTF16(head.line) : 0)
     } else {
       let (line, rowInLine) = lineLocation(ofVisualRow: targetRow)
-      let attributed = attributedLine(forLine: line)
-      let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
-      let bounds = rowRange(rowInLine, starts: starts, length: attributed.length)
-      let rowText = attributed.attributedSubstring(
-        from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
-      newHead = TextSelection.Endpoint(
-        line: line, columnUTF16: bounds.start + columnUTF16(forX: goalX, in: rowText))
+      if let length = hugeLength(line) {
+        let rowStart = rowInLine * hugeLineColumns
+        let rowText = hugeRowText(line: line, rowIndex: rowInLine, utf16Length: length)
+        newHead = TextSelection.Endpoint(
+          line: line, columnUTF16: min(length, rowStart + columnUTF16(forX: goalX, in: rowText)))
+      } else {
+        let attributed = attributedLine(forLine: line)
+        let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
+        let bounds = rowRange(rowInLine, starts: starts, length: attributed.length)
+        let rowText = attributed.attributedSubstring(
+          from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
+        newHead = TextSelection.Endpoint(
+          line: line, columnUTF16: bounds.start + columnUTF16(forX: goalX, in: rowText))
+      }
     }
     applyMovedHead(newHead, extend: extend, keepGoalX: true)
     verticalGoalX = goalX
@@ -1415,6 +1516,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private func steppedCharacterEndpoint(from endpoint: TextSelection.Endpoint, forward: Bool)
     -> TextSelection.Endpoint
   {
+    // A huge line is not laid out in full, so its clipped displayed string cannot
+    // index the caret's column; step the grapheme using a small window read.
+    if let length = hugeLength(endpoint.line) {
+      return steppedHugeCharacterEndpoint(
+        line: endpoint.line, column: endpoint.columnUTF16, length: length, forward: forward)
+    }
     let line = attributedLine(forLine: endpoint.line).string as NSString
     if forward {
       if endpoint.columnUTF16 < line.length {
@@ -1432,6 +1539,45 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       return .init(line: endpoint.line - 1, columnUTF16: lineLengthUTF16(endpoint.line - 1))
     }
     return endpoint
+  }
+
+  /// One composed-character step within a huge line, resolving the grapheme
+  /// boundary from a small UTF-16 window around the caret (the line is never laid
+  /// out in full). Crossing the line's start/end wraps to the adjacent line.
+  private func steppedHugeCharacterEndpoint(
+    line: Int, column: Int, length: Int, forward: Bool
+  ) -> TextSelection.Endpoint {
+    // Wide enough for any ordinary grapheme cluster (surrogate pair, emoji,
+    // combining marks); a pathologically long cluster at a huge-line boundary is
+    // not worth a larger read.
+    let window = 16
+    guard let buffer, let info = hugeLineInfo[line] else {
+      return .init(line: line, columnUTF16: column)
+    }
+    if forward {
+      if column < length {
+        let end = min(length, column + window)
+        let text =
+          buffer.text(fromUTF16: info.start + column, toUTF16: info.start + end) as NSString
+        let step = text.length > 0 ? NSMaxRange(text.rangeOfComposedCharacterSequence(at: 0)) : 1
+        return .init(line: line, columnUTF16: min(length, column + step))
+      }
+      return line < lineCount - 1
+        ? .init(line: line + 1, columnUTF16: 0)
+        : .init(
+          line: line, columnUTF16: column)
+    }
+    if column > 0 {
+      let start = max(0, column - window)
+      let text =
+        buffer.text(fromUTF16: info.start + start, toUTF16: info.start + column) as NSString
+      let location =
+        text.length > 0 ? text.rangeOfComposedCharacterSequence(at: text.length - 1).location : 0
+      return .init(line: line, columnUTF16: start + location)
+    }
+    return line > 0
+      ? .init(line: line - 1, columnUTF16: lineLengthUTF16(line - 1))
+      : .init(line: line, columnUTF16: 0)
   }
 
   /// One word step using the OS text tokenizer's word boundaries, so it is
@@ -1783,6 +1929,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Text-relative x of the caret at `endpoint`, measured within its visual row.
   private func caretX(for endpoint: TextSelection.Endpoint) -> CGFloat {
+    if let length = hugeLength(endpoint.line) {
+      let columns = hugeLineColumns
+      let rowIndex = min(hugeRowCount(utf16Length: length) - 1, endpoint.columnUTF16 / columns)
+      let rowStart = rowIndex * columns
+      let rowText = hugeRowText(line: endpoint.line, rowIndex: rowIndex, utf16Length: length)
+      return xOffset(forColumn: min(endpoint.columnUTF16 - rowStart, rowText.length), in: rowText)
+    }
     let attributed = attributedLine(forLine: endpoint.line)
     let starts = visualRowStartOffsets(ofLine: endpoint.line, attributed: attributed)
     let rowIndex = visualRowIndex(forColumn: endpoint.columnUTF16, starts: starts)
@@ -1894,7 +2047,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private func lineLengthUTF16(_ line: Int) -> Int {
-    attributedLine(forLine: line).length
+    // A huge line is never laid out in full, so its true length comes from the
+    // grid bookkeeping, not the clipped displayed string.
+    if let length = hugeLength(line) { return length }
+    return attributedLine(forLine: line).length
   }
 
   /// UTF-16 column at horizontal offset `x` (relative to the text's left edge)
@@ -1944,12 +2100,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let lines = attributedBandLines(for: buffer, range: range)
 
     if let selection, !selection.isEmpty {
-      drawSelectionHighlight(selection, lines: lines, range: range, textX: textX)
+      drawSelectionHighlight(selection, lines: lines, range: range, textX: textX, visibleRows: rows)
     }
 
     var widest = maxObservedLineWidth
     for (offset, attributedLine) in lines.enumerated() {
       let lineIndex = range.lowerBound + offset
+      // A huge line is never laid out in full; draw only its visible rows from
+      // windows fetched on demand. It always wraps, so it adds no scroll width.
+      if let length = hugeLength(lineIndex) {
+        drawHugeLineRows(line: lineIndex, utf16Length: length, textX: textX, visibleRows: rows)
+        continue
+      }
       let drawn = composedLineForDisplay(line: lineIndex, base: attributedLine)
       widest = max(widest, drawn.size().width)
       drawVisualRows(of: drawn, line: lineIndex, textX: textX)
@@ -1969,6 +2131,27 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
           self.updateLayout()
         }
       }
+    }
+  }
+
+  /// Draws only the visible visual rows of a huge line, each fetched as a UTF-16
+  /// window — so an enormous line renders without ever being laid out in full.
+  private func drawHugeLineRows(
+    line: Int, utf16Length: Int, textX: CGFloat, visibleRows: Range<Int>
+  ) {
+    let firstRow = firstVisualRow(ofLine: line)
+    let count = hugeRowCount(utf16Length: utf16Length)
+    let lo = max(firstRow, visibleRows.lowerBound)
+    let hi = min(firstRow + count, visibleRows.upperBound)
+    guard lo < hi else { return }
+    for globalRow in lo..<hi {
+      let rowText = hugeRowText(
+        line: line, rowIndex: globalRow - firstRow, utf16Length: utf16Length)
+      let y = CGFloat(globalRow) * layout.lineHeight
+      rowText.draw(
+        with: NSRect(x: textX, y: y, width: rowText.size().width, height: layout.lineHeight),
+        options: [.usesLineFragmentOrigin]
+      )
     }
   }
 
@@ -1994,22 +2177,30 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// fully spanned by a multi-line selection extend a little past their last
   /// character to signal the trailing newline is selected.
   private func drawSelectionHighlight(
-    _ selection: TextSelection, lines: [NSAttributedString], range: Range<Int>, textX: CGFloat
+    _ selection: TextSelection, lines: [NSAttributedString], range: Range<Int>, textX: CGFloat,
+    visibleRows: Range<Int>
   ) {
     let focused = window?.firstResponder === self
     (focused ? NSColor.selectedTextBackgroundColor : .unemphasizedSelectedTextBackgroundColor)
       .setFill()
     for line in range {
       let attributed = lines[line - range.lowerBound]
-      guard let span = selection.columnSpan(onLine: line, lineLengthUTF16: attributed.length) else {
+      // A fully-selected line includes its trailing newline; mark it on the line's
+      // last visual row.
+      let includesNewline = line < selection.end.line
+      guard let span = selection.columnSpan(onLine: line, lineLengthUTF16: lineLengthUTF16(line))
+      else {
+        continue
+      }
+      if let length = hugeLength(line) {
+        drawHugeSelectionHighlight(
+          line: line, utf16Length: length, span: span, includesNewline: includesNewline,
+          textX: textX, visibleRows: visibleRows)
         continue
       }
       let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
       let firstRow = firstVisualRow(ofLine: line)
       let length = attributed.length
-      // A fully-selected line includes its trailing newline; mark it on the line's
-      // last visual row.
-      let includesNewline = line < selection.end.line
       for rowIndex in starts.indices {
         let bounds = rowRange(rowIndex, starts: starts, length: length)
         let segmentStart = max(span.start, bounds.start)
@@ -2028,6 +2219,40 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
           width: max(0, xEnd - xStart), height: layout.lineHeight
         ).fill()
       }
+    }
+  }
+
+  /// Selection highlight for a huge line: only its visible grid rows are filled,
+  /// each measured from a fetched window, so a selection spanning thousands of
+  /// wrapped rows costs only the visible band.
+  private func drawHugeSelectionHighlight(
+    line: Int, utf16Length: Int, span: (start: Int, end: Int), includesNewline: Bool,
+    textX: CGFloat, visibleRows: Range<Int>
+  ) {
+    let columns = hugeLineColumns
+    let firstRow = firstVisualRow(ofLine: line)
+    let count = hugeRowCount(utf16Length: utf16Length)
+    let lo = max(firstRow, visibleRows.lowerBound)
+    let hi = min(firstRow + count, visibleRows.upperBound)
+    guard lo < hi else { return }
+    for globalRow in lo..<hi {
+      let rowIndex = globalRow - firstRow
+      let rowStart = rowIndex * columns
+      let rowEnd = min(utf16Length, rowStart + columns)
+      let segmentStart = max(span.start, rowStart)
+      let segmentEnd = min(span.end, rowEnd)
+      let isLastRow = rowIndex == count - 1
+      guard segmentEnd > segmentStart || (includesNewline && isLastRow) else { continue }
+      let rowText = hugeRowText(line: line, rowIndex: rowIndex, utf16Length: utf16Length)
+      let xStart = textX + xOffset(forColumn: segmentStart - rowStart, in: rowText)
+      var xEnd = textX + xOffset(forColumn: segmentEnd - rowStart, in: rowText)
+      if includesNewline, isLastRow {
+        xEnd += newlineSelectionWidth
+      }
+      NSRect(
+        x: xStart, y: CGFloat(globalRow) * layout.lineHeight,
+        width: max(0, xEnd - xStart), height: layout.lineHeight
+      ).fill()
     }
   }
 
@@ -2072,6 +2297,17 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private func drawCaret(
     forColumn column: Int, line: Int, attributed: NSAttributedString, textX: CGFloat
   ) {
+    if let length = hugeLength(line) {
+      let columns = hugeLineColumns
+      let rowIndex = min(hugeRowCount(utf16Length: length) - 1, column / columns)
+      let rowText = hugeRowText(line: line, rowIndex: rowIndex, utf16Length: length)
+      let x =
+        textX + xOffset(forColumn: min(column - rowIndex * columns, rowText.length), in: rowText)
+      let y = CGFloat(firstVisualRow(ofLine: line) + rowIndex) * layout.lineHeight
+      NSColor.textColor.setFill()
+      NSRect(x: x, y: y, width: 1.5, height: layout.lineHeight).fill()
+      return
+    }
     let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
     let rowIndex = visualRowIndex(forColumn: column, starts: starts)
     let bounds = rowRange(rowIndex, starts: starts, length: attributed.length)
