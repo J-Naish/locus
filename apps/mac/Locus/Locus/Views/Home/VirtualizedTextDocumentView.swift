@@ -464,10 +464,17 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // Use the cached content start so drawing a band of rows does not re-resolve
     // the line's start position once per visible row.
     guard let buffer, rowEnd > rowStart, let info = hugeLineInfo[line] else {
-      return NSAttributedString(string: "", attributes: [.font: font])
+      return NSAttributedString(string: "", attributes: hugeRowAttributes)
     }
     let text = buffer.text(fromUTF16: info.start + rowStart, toUTF16: info.start + rowEnd)
-    return NSAttributedString(string: text, attributes: [.font: font])
+    return NSAttributedString(string: text, attributes: hugeRowAttributes)
+  }
+
+  /// Base styling for a huge line's rows: the editor font and the standard label
+  /// color (so the text is visible in light and dark). Rule highlighting is
+  /// skipped for huge lines, like other long lines.
+  private var hugeRowAttributes: [NSAttributedString.Key: Any] {
+    [.font: font, .foregroundColor: NSColor.labelColor]
   }
 
   /// Per-logical-line → visual-row mapping while wrapping is active; `nil` when not
