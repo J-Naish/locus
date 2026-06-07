@@ -3,12 +3,14 @@
 //! into an editable buffer is opened read-only, and only the lines in (or near)
 //! the viewport are read on demand.
 //!
-//! The index is sparse — it records cumulative byte/char/UTF-16 counts at the
-//! start of every Nth line plus the totals — so its memory is bounded regardless
-//! of how many lines the file has. A line range, or a byte/char/UTF-16/line/
-//! column position, is resolved by seeking to the nearest checkpoint and scanning
-//! forward within a bounded span (one scan over at most `checkpoint_lines` lines,
-//! plus a within-line scan).
+//! The index is sparse — it records cumulative byte/char/UTF-16 counts at a
+//! checkpoint taken at least every Nth line *and* every Nth byte, plus the totals
+//! — so its memory is bounded regardless of how many lines the file has or how
+//! long any single line is. A line range, or a byte/char/UTF-16/line/column
+//! position, is resolved by seeking to the nearest checkpoint and scanning forward
+//! within a bounded span: at most one checkpoint gap (`checkpoint_lines` lines or
+//! `checkpoint_bytes` bytes), so even a seek deep inside one enormous line is
+//! bounded.
 //!
 //! Line semantics match [`crate::text_buffer`]: line count is `newlines + 1`
 //! (an empty source is one empty line; a trailing newline yields a final empty
@@ -43,14 +45,22 @@ pub trait ByteSource {
     }
 }
 
-/// The index records a checkpoint at every `CHECKPOINT_LINES`-th line, so its
-/// memory is `~24 * (line_count / CHECKPOINT_LINES)` bytes regardless of how many
-/// (possibly tiny) lines the file has.
+/// A checkpoint is recorded at least every `CHECKPOINT_LINES` lines *and* every
+/// [`CHECKPOINT_BYTES`] bytes, whichever comes first. The line cadence keeps a
+/// file of many short lines cheap to seek; the byte cadence bounds a seek *within*
+/// one very long line, so resolving a position inside a multi-megabyte line scans
+/// at most one chunk rather than the whole line. Index memory stays bounded:
+/// ~40 bytes per checkpoint — `line_count / CHECKPOINT_LINES` checkpoints for
+/// normal files, plus `long_line_bytes / CHECKPOINT_BYTES` for long lines.
 const CHECKPOINT_LINES: usize = 1024;
 
 /// Read granularity while scanning the source to build the index or to walk from
 /// a checkpoint to a requested line/position.
 const SCAN_CHUNK_BYTES: usize = 256 * 1024;
+
+/// Byte cadence for checkpoints (see [`CHECKPOINT_LINES`]). One scan chunk, so a
+/// within-line seek walks at most one chunk's worth of bytes.
+const CHECKPOINT_BYTES: u64 = SCAN_CHUNK_BYTES as u64;
 
 const NEWLINE: u8 = b'\n';
 
@@ -66,23 +76,42 @@ fn floor_to_byte_cap(content: &str, cap: usize) -> &str {
     &content[..end]
 }
 
-/// Cumulative byte/char/UTF-16 counts at the start of a line, recorded every
-/// `checkpoint_lines` lines. Sorted ascending in every dimension.
+/// Cumulative byte/char/UTF-16 counts at a recorded position — a line start, or a
+/// point inside a long line. `line` is the line the position sits in and
+/// `line_start_utf16` is the UTF-16 count at the start of that line, so a seek that
+/// anchors here can report the column (`utf16 - line_start_utf16`) without having
+/// scanned from the line start. Checkpoints are sorted ascending by byte (hence by
+/// char/UTF-16; `line` is non-decreasing).
 #[derive(Clone, Copy)]
 struct Checkpoint {
     byte: u64,
     char: u64,
     utf16: u64,
+    line: u64,
+    line_start_utf16: u64,
+}
+
+impl Checkpoint {
+    /// A scan cursor starting at this checkpoint, carrying its line and the line's
+    /// start so a within-line scan reports the column correctly even mid-line.
+    fn cursor(&self) -> Cursor {
+        Cursor {
+            byte: self.byte,
+            char: self.char,
+            utf16: self.utf16,
+            line: self.line,
+            line_start_utf16: self.line_start_utf16,
+        }
+    }
 }
 
 /// A sparse line index over a [`ByteSource`], serving line-range text and
 /// byte/char/UTF-16/line/column positions by reading only the needed window.
 pub struct LineIndex<S> {
     source: S,
-    /// Cumulative counts at the start of line `i * checkpoint_lines`. Always
-    /// begins with all-zero (the start of line 0).
+    /// Sorted checkpoints, at least one every `CHECKPOINT_LINES` lines and every
+    /// `CHECKPOINT_BYTES` bytes. Always begins with the all-zero start of line 0.
     checkpoints: Vec<Checkpoint>,
-    checkpoint_lines: usize,
     line_count: usize,
     byte_len: u64,
     char_len: u64,
@@ -116,7 +145,7 @@ enum Stop {
 impl<S: ByteSource> LineIndex<S> {
     /// Builds an index over `source`, scanning it once.
     pub fn build(source: S) -> io::Result<Self> {
-        Self::build_with_checkpoint(source, CHECKPOINT_LINES)
+        Self::build_with_checkpoints(source, CHECKPOINT_LINES, CHECKPOINT_BYTES)
     }
 
     /// Total number of lines (`newlines + 1`; an empty source is one line).
@@ -225,11 +254,10 @@ impl<S: ByteSource> LineIndex<S> {
     }
 
     /// The raw text of the UTF-16 range `[start, end)`, decoded lossily — used to
-    /// copy a selection within or across lines. The endpoints are mapped by
-    /// scanning forward from the nearest line checkpoint (the index is
-    /// checkpointed by line, not by byte), so a within-line seek is linear in the
-    /// enclosing line's length; the platform refuses a file with a pathologically
-    /// long single line, which keeps that bound small.
+    /// copy a selection within or across lines, or to read a window inside one long
+    /// line. Each endpoint maps to a byte offset by seeking to the nearest
+    /// checkpoint and scanning forward; because checkpoints are recorded by byte as
+    /// well as by line, that scan is bounded even deep inside a multi-megabyte line.
     pub fn text_for_utf16_range(&self, start: u64, end: u64) -> io::Result<String> {
         let start_byte = self.position_for_utf16(start)?.byte as u64;
         let end_byte = self.position_for_utf16(end)?.byte as u64;
@@ -240,15 +268,8 @@ impl<S: ByteSource> LineIndex<S> {
     /// `[0, utf16_len]`. Seeks to the nearest checkpoint and scans forward.
     pub fn position_for_utf16(&self, utf16: u64) -> io::Result<Position> {
         let target = utf16.min(self.utf16_len);
-        let index = self.checkpoint_index_for_utf16(target);
-        let anchor = self.checkpoints[index];
-        let mut cursor = Cursor {
-            byte: anchor.byte,
-            char: anchor.char,
-            utf16: anchor.utf16,
-            line: (index * self.checkpoint_lines) as u64,
-            line_start_utf16: anchor.utf16,
-        };
+        let anchor = self.checkpoints[self.checkpoint_index_for_utf16(target)];
+        let mut cursor = anchor.cursor();
         self.advance(&mut cursor, Stop::AtUtf16(target))?;
         Ok(cursor.position())
     }
@@ -265,37 +286,61 @@ impl<S: ByteSource> LineIndex<S> {
         // contract is clamp-safe.)
         let line = line.min(self.line_count.saturating_sub(1));
         let start = self.cumulative_at_line_start(line)?;
+        let column = column_utf16 as u64;
+        // A column at or past the line's content clamps to the content end.
+        // Resolve that end directly (next line start minus the terminator) instead
+        // of scanning the whole line, so clamping a huge line stays cheap.
+        let end = self.line_content_end(line, &start)?;
+        if column >= end.column_utf16 as u64 {
+            return Ok(end);
+        }
+        // A column within the content: anchor at the densest checkpoint inside this
+        // line at or before the target, then scan the bounded remainder.
+        let target_utf16 = start.utf16 + column;
+        let anchor = self.checkpoint_inside_line(line as u64, &start, target_utf16);
         let mut cursor = Cursor {
-            byte: start.byte,
-            char: start.char,
-            utf16: start.utf16,
+            byte: anchor.byte,
+            char: anchor.char,
+            utf16: anchor.utf16,
             line: line as u64,
+            // The true start of this line, so the column is measured from there
+            // even when the anchor sits mid-line.
             line_start_utf16: start.utf16,
         };
-        self.advance(&mut cursor, Stop::AtColumnInLine(column_utf16 as u64))?;
+        self.advance(&mut cursor, Stop::AtColumnInLine(column))?;
         Ok(cursor.position())
     }
 
-    fn build_with_checkpoint(source: S, checkpoint_lines: usize) -> io::Result<Self> {
+    fn build_with_checkpoints(
+        source: S,
+        checkpoint_lines: usize,
+        checkpoint_bytes: u64,
+    ) -> io::Result<Self> {
         let checkpoint_lines = checkpoint_lines.max(1);
+        let checkpoint_bytes = checkpoint_bytes.max(1);
         let byte_len = source.len();
 
         let mut checkpoints = vec![Checkpoint {
             byte: 0,
             char: 0,
             utf16: 0,
+            line: 0,
+            line_start_utf16: 0,
         }];
-        let mut newlines: usize = 0;
-        // Newlines since the last recorded checkpoint. Counting up to the cadence
-        // (rather than `newlines % checkpoint_lines`) keeps the intent obvious and
-        // avoids a modulo lint that varies by toolchain.
-        let mut since_checkpoint: usize = 0;
+        // The current line number (`newlines` so far) and counters for the two
+        // cadences: lines since the last checkpoint, and the byte of the last
+        // checkpoint (for the byte cadence).
+        let mut newlines: u64 = 0;
+        let mut lines_since_checkpoint: usize = 0;
+        let mut last_checkpoint_byte: u64 = 0;
         let mut offset: u64 = 0;
         let mut char_count: u64 = 0;
         let mut utf16_count: u64 = 0;
-        // Start of the line currently being scanned, and the longest line seen so
-        // far (start-of-line to start-of-next-line, terminator included).
-        let mut line_start: u64 = 0;
+        // Start of the line currently being scanned (byte and UTF-16), and the
+        // longest line seen so far (start-of-line to start-of-next-line,
+        // terminator included).
+        let mut line_start_byte: u64 = 0;
+        let mut line_start_utf16: u64 = 0;
         let mut max_line_byte_count: u64 = 0;
 
         while offset < byte_len {
@@ -305,9 +350,25 @@ impl<S: ByteSource> LineIndex<S> {
                 break; // source shrank or reported EOF early; stop scanning
             }
             for (i, &byte) in chunk.iter().enumerate() {
+                let pos = offset + i as u64;
                 // A non-continuation byte starts a code point; a 4-byte lead is a
                 // non-BMP scalar (two UTF-16 units). Exact for valid UTF-8.
-                if (byte & 0xC0) != 0x80 {
+                let is_char_start = (byte & 0xC0) != 0x80;
+                // Byte-cadence checkpoint, at a code-point boundary inside a long
+                // run, so a within-line seek never scans more than the gap. The
+                // counts here are for the content strictly before `pos`.
+                if is_char_start && pos - last_checkpoint_byte >= checkpoint_bytes {
+                    checkpoints.push(Checkpoint {
+                        byte: pos,
+                        char: char_count,
+                        utf16: utf16_count,
+                        line: newlines,
+                        line_start_utf16,
+                    });
+                    last_checkpoint_byte = pos;
+                    lines_since_checkpoint = 0;
+                }
+                if is_char_start {
                     char_count += 1;
                     // A valid 4-byte lead (0xF0..=0xF4) is a non-BMP scalar (two
                     // UTF-16 units). Exact for valid UTF-8; an invalid byte is
@@ -316,30 +377,38 @@ impl<S: ByteSource> LineIndex<S> {
                 }
                 if byte == NEWLINE {
                     newlines += 1;
-                    let next_line_start = offset + i as u64 + 1;
-                    max_line_byte_count = max_line_byte_count.max(next_line_start - line_start);
-                    line_start = next_line_start;
-                    since_checkpoint += 1;
-                    if since_checkpoint == checkpoint_lines {
-                        since_checkpoint = 0;
+                    let next_line_start = pos + 1;
+                    max_line_byte_count =
+                        max_line_byte_count.max(next_line_start - line_start_byte);
+                    line_start_byte = next_line_start;
+                    line_start_utf16 = utf16_count;
+                    lines_since_checkpoint += 1;
+                    // Line-cadence checkpoint, at the new line's start (skipped if a
+                    // byte-cadence checkpoint already landed here).
+                    if lines_since_checkpoint >= checkpoint_lines
+                        && next_line_start > last_checkpoint_byte
+                    {
                         checkpoints.push(Checkpoint {
                             byte: next_line_start,
                             char: char_count,
                             utf16: utf16_count,
+                            line: newlines,
+                            line_start_utf16,
                         });
+                        last_checkpoint_byte = next_line_start;
+                        lines_since_checkpoint = 0;
                     }
                 }
             }
             offset += chunk.len() as u64;
         }
         // The final line carries no trailing newline; include its length too.
-        max_line_byte_count = max_line_byte_count.max(byte_len - line_start);
+        max_line_byte_count = max_line_byte_count.max(byte_len - line_start_byte);
 
         Ok(Self {
             source,
             checkpoints,
-            checkpoint_lines,
-            line_count: newlines + 1,
+            line_count: (newlines as usize) + 1,
             byte_len,
             char_len: char_count,
             utf16_len: utf16_count,
@@ -400,8 +469,9 @@ impl<S: ByteSource> LineIndex<S> {
         Ok(out)
     }
 
-    /// Cumulative counts at the start of `line`; for a line at or past the end,
-    /// the "start" is end of input (the totals).
+    /// Cumulative counts at the start of `line`; for a line at or past the end, the
+    /// "start" is end of input (the totals). The returned checkpoint's `line` is
+    /// `line` itself (a line start, so its `line_start_utf16` equals its `utf16`).
     fn cumulative_at_line_start(&self, line: usize) -> io::Result<Checkpoint> {
         if line == 0 {
             return Ok(self.checkpoints[0]);
@@ -411,23 +481,83 @@ impl<S: ByteSource> LineIndex<S> {
                 byte: self.byte_len,
                 char: self.char_len,
                 utf16: self.utf16_len,
+                line: self.line_count.saturating_sub(1) as u64,
+                line_start_utf16: self.utf16_len,
             });
         }
-        let index = line / self.checkpoint_lines;
-        let anchor = self.checkpoints[index];
-        let mut cursor = Cursor {
-            byte: anchor.byte,
-            char: anchor.char,
-            utf16: anchor.utf16,
-            line: (index * self.checkpoint_lines) as u64,
-            line_start_utf16: anchor.utf16,
-        };
-        self.advance(&mut cursor, Stop::AtLine(line as u64))?;
+        // Anchor at the last checkpoint lying before `line` begins — the one just
+        // before the first checkpoint whose line is `line` or greater — then scan
+        // forward to the line start. The byte cadence bounds that scan even when an
+        // intervening line is enormous.
+        let target = line as u64;
+        let index = self
+            .checkpoints
+            .partition_point(|checkpoint| checkpoint.line < target)
+            .saturating_sub(1);
+        let mut cursor = self.checkpoints[index].cursor();
+        self.advance(&mut cursor, Stop::AtLine(target))?;
         Ok(Checkpoint {
             byte: cursor.byte,
             char: cursor.char,
             utf16: cursor.utf16,
+            line: target,
+            line_start_utf16: cursor.utf16,
         })
+    }
+
+    /// The position at the end of `line`'s content (terminator excluded). Derived
+    /// from the next line's start minus the terminator — with a tiny read to size
+    /// the terminator — so it is cheap even when `line` is enormous. `start` must be
+    /// `line`'s start (passed in to avoid recomputing it).
+    fn line_content_end(&self, line: usize, start: &Checkpoint) -> io::Result<Position> {
+        let next = self.cumulative_at_line_start(line + 1)?;
+        let terminator = self.terminator_len(start.byte, next.byte)?;
+        // Each terminator unit (`\r`, `\n`) is one byte, one char, and one UTF-16
+        // unit, so the same count is subtracted from all three.
+        let utf16 = next.utf16 - terminator;
+        Ok(Position {
+            byte: (next.byte - terminator) as usize,
+            char: (next.char - terminator) as usize,
+            utf16: utf16 as usize,
+            line,
+            column_utf16: (utf16 - start.utf16) as usize,
+        })
+    }
+
+    /// Length (0, 1, or 2) of the terminator ending the line spanning
+    /// `[line_start, next)`: `\r\n` is 2, a lone `\n` is 1, and none (the file's
+    /// last line) is 0.
+    fn terminator_len(&self, line_start: u64, next: u64) -> io::Result<u64> {
+        if next <= line_start {
+            return Ok(0); // empty line, or end of input
+        }
+        let want: usize = if next - line_start >= 2 { 2 } else { 1 };
+        let bytes = self.source.read_at(next - want as u64, want)?;
+        match bytes.last() {
+            // A `\r` immediately before the `\n` makes it a two-unit CRLF.
+            Some(&NEWLINE) if bytes.len() == 2 && bytes[0] == b'\r' => Ok(2),
+            Some(&NEWLINE) => Ok(1),
+            _ => Ok(0),
+        }
+    }
+
+    /// The densest checkpoint inside `line` at or before `target_utf16` (which must
+    /// lie within the line's content), or `*start` when none is nearer than the
+    /// line's start. Lets a within-line column seek skip ahead instead of scanning
+    /// from the line start; either way the remaining scan is bounded by the byte
+    /// cadence.
+    fn checkpoint_inside_line(
+        &self,
+        line: u64,
+        start: &Checkpoint,
+        target_utf16: u64,
+    ) -> Checkpoint {
+        let anchor = self.checkpoints[self.checkpoint_index_for_utf16(target_utf16)];
+        if anchor.line == line {
+            anchor
+        } else {
+            *start
+        }
     }
 
     /// Index of the last checkpoint whose UTF-16 count is `<= utf16`.
@@ -539,8 +669,29 @@ mod tests {
     }
 
     fn index(text: &str, checkpoint_lines: usize) -> LineIndex<VecSource> {
-        LineIndex::build_with_checkpoint(VecSource(text.as_bytes().to_vec()), checkpoint_lines)
-            .expect("build index")
+        // A huge byte cadence keeps these cases on the line cadence alone, matching
+        // the original behavior; `index_with_byte_cadence` exercises the byte one.
+        LineIndex::build_with_checkpoints(
+            VecSource(text.as_bytes().to_vec()),
+            checkpoint_lines,
+            u64::MAX,
+        )
+        .expect("build index")
+    }
+
+    /// Builds with an explicit byte cadence too, to force intra-line checkpoints so
+    /// the within-line seek paths are exercised.
+    fn index_with_byte_cadence(
+        text: &str,
+        checkpoint_lines: usize,
+        checkpoint_bytes: u64,
+    ) -> LineIndex<VecSource> {
+        LineIndex::build_with_checkpoints(
+            VecSource(text.as_bytes().to_vec()),
+            checkpoint_lines,
+            checkpoint_bytes,
+        )
+        .expect("build index")
     }
 
     #[test]
@@ -613,7 +764,7 @@ mod tests {
     #[test]
     fn decodes_invalid_utf8_lossily_without_failing() {
         let source = VecSource(vec![b'a', 0xFF, NEWLINE, b'b']);
-        let idx = LineIndex::build_with_checkpoint(source, 1024).expect("build index");
+        let idx = LineIndex::build_with_checkpoints(source, 1024, u64::MAX).expect("build index");
         assert_eq!(idx.line_count(), 2);
         let first = idx.text_for_line_range(0, 1).unwrap();
         assert!(first.starts_with('a'));
@@ -760,13 +911,14 @@ mod tests {
         // Documented contract: counts use per-byte UTF-8 classification (exact for
         // valid UTF-8). A lone 0xFF counts as one char/one UTF-16 unit — which here
         // matches lossy display (one replacement char).
-        let idx = LineIndex::build_with_checkpoint(VecSource(vec![b'a', 0xFF, b'b']), 1024)
-            .expect("build index");
+        let idx =
+            LineIndex::build_with_checkpoints(VecSource(vec![b'a', 0xFF, b'b']), 1024, u64::MAX)
+                .expect("build index");
         assert_eq!((idx.char_len(), idx.utf16_len()), (3, 3));
         // A stray 0xF0 looks like a 4-byte lead, so classification counts it as two
         // UTF-16 units (0xF0 + 'a' = 3), while lossy display would show one
         // replacement char (2). This is the documented divergence for invalid bytes.
-        let stray = LineIndex::build_with_checkpoint(VecSource(vec![0xF0, b'a']), 1024)
+        let stray = LineIndex::build_with_checkpoints(VecSource(vec![0xF0, b'a']), 1024, u64::MAX)
             .expect("build index");
         assert_eq!(stray.utf16_len(), 3);
     }
@@ -800,5 +952,120 @@ mod tests {
             idx.text_for_line_range_capped(0, 3, 4).unwrap(),
             "shor\nthis\nx"
         );
+    }
+
+    // --- Intra-line (byte-cadence) checkpoints ---
+    //
+    // A tiny `checkpoint_bytes` forces many checkpoints *inside* a single line, so
+    // these exercise the within-line seek that bounds work on a long line. The
+    // results must match what the line-only cadence would produce.
+
+    #[test]
+    fn byte_checkpoints_resolve_positions_inside_a_long_line() {
+        // Line 0 is 100 'a's; line 1 is "bcd". A checkpoint every 8 bytes lands many
+        // checkpoints inside line 0.
+        let text = format!("{}\nbcd", "a".repeat(100));
+        let idx = index_with_byte_cadence(&text, 1024, 8);
+        assert_eq!(idx.line_count(), 2);
+
+        // A UTF-16 offset deep inside the long line resolves correctly.
+        let at = idx.position_for_utf16(50).unwrap();
+        assert_eq!((at.byte, at.line, at.column_utf16), (50, 0, 50));
+        // The offset just past the long line's newline starts line 1.
+        let next = idx.position_for_utf16(101).unwrap();
+        assert_eq!((next.byte, next.line, next.column_utf16), (101, 1, 0));
+
+        // A (line, column) deep inside the long line, and one clamped past its end.
+        let mid = idx.position_for_line_column(0, 50).unwrap();
+        assert_eq!((mid.byte, mid.column_utf16), (50, 50));
+        let clamped = idx.position_for_line_column(0, 999).unwrap();
+        assert_eq!((clamped.byte, clamped.column_utf16), (100, 100));
+
+        // A window read inside the long line.
+        assert_eq!(idx.text_for_utf16_range(48, 52).unwrap(), "aaaa");
+    }
+
+    #[test]
+    fn byte_checkpoints_match_the_line_only_cadence() {
+        // The same content under both cadences must resolve identically — the
+        // intra-line checkpoints are a transparent optimization. `checkpoint_bytes`
+        // of 1 records a checkpoint at every character (the densest case).
+        let text = "ab\n😀x\ncd";
+        let line_only = index(text, 1024);
+        let byte_dense = index_with_byte_cadence(text, 1024, 1);
+        let tuple = |p: Position| (p.byte, p.char, p.utf16, p.line, p.column_utf16);
+
+        for utf16 in 0..=line_only.utf16_len() {
+            assert_eq!(
+                tuple(line_only.position_for_utf16(utf16).unwrap()),
+                tuple(byte_dense.position_for_utf16(utf16).unwrap()),
+                "utf16 {utf16}"
+            );
+        }
+        for line in 0..line_only.line_count() {
+            for col in 0..6 {
+                assert_eq!(
+                    tuple(line_only.position_for_line_column(line, col).unwrap()),
+                    tuple(byte_dense.position_for_line_column(line, col).unwrap()),
+                    "line {line} col {col}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn byte_checkpoints_handle_non_bmp_and_crlf_in_a_long_line() {
+        // A long line of a non-BMP scalar (😀 = 2 UTF-16 units, 4 bytes) terminated
+        // by CRLF, checkpointed every few bytes.
+        let text = format!("{}\r\nz", "😀".repeat(50)); // 100 UTF-16 units, 200 bytes
+        let idx = index_with_byte_cadence(&text, 1024, 4);
+
+        // A column past the content clamps before the CRLF (100 UTF-16 units).
+        let end = idx.position_for_line_column(0, 999).unwrap();
+        assert_eq!((end.column_utf16, end.utf16, end.byte), (100, 100, 200));
+        // Offset 10 is after five emoji (10 UTF-16 units, 20 bytes).
+        let p = idx.position_for_utf16(10).unwrap();
+        assert_eq!((p.byte, p.line, p.column_utf16), (20, 0, 10));
+        // A mid-surrogate offset floors to the scalar start (still a bounded seek).
+        let mid = idx.position_for_utf16(11).unwrap();
+        assert_eq!((mid.byte, mid.utf16), (20, 10));
+    }
+
+    #[test]
+    fn build_resolves_positions_inside_a_line_longer_than_the_byte_cadence() {
+        // Built through the production `build` (default cadences) with a single line
+        // several `CHECKPOINT_BYTES` long, so the within-line seek is exercised on
+        // the real byte-cadence path — the case the removed long-line guard blocked.
+        let len = CHECKPOINT_BYTES as usize * 3 + 1234;
+        let idx = LineIndex::build(VecSource("x".repeat(len).into_bytes())).expect("build index");
+        assert_eq!(idx.line_count(), 1);
+
+        // A position near the end resolves without scanning from the line start.
+        let near_end = idx.position_for_line_column(0, len - 5).unwrap();
+        assert_eq!((near_end.byte, near_end.column_utf16), (len - 5, len - 5));
+        // A column past the end clamps to the content end (the whole line).
+        let clamped = idx.position_for_line_column(0, len + 100).unwrap();
+        assert_eq!((clamped.byte, clamped.column_utf16), (len, len));
+        // A UTF-16 offset and a window read, both deep inside the line.
+        let at = idx.position_for_utf16(len as u64 - 10).unwrap();
+        assert_eq!((at.byte, at.line, at.column_utf16), (len - 10, 0, len - 10));
+        assert_eq!(
+            idx.text_for_utf16_range(len as u64 - 4, len as u64)
+                .unwrap(),
+            "xxxx"
+        );
+    }
+
+    #[test]
+    fn build_resolves_a_line_after_a_huge_line() {
+        // The line after a huge line: resolving its start anchors at a byte
+        // checkpoint near the huge line's end rather than scanning the whole line.
+        let huge = "y".repeat(CHECKPOINT_BYTES as usize * 2);
+        let idx =
+            LineIndex::build(VecSource(format!("{huge}\ntail").into_bytes())).expect("build index");
+        assert_eq!(idx.line_count(), 2);
+        assert_eq!(idx.text_for_line_range(1, 1).unwrap(), "tail");
+        let p = idx.position_for_line_column(1, 2).unwrap();
+        assert_eq!((p.line, p.column_utf16), (1, 2));
     }
 }

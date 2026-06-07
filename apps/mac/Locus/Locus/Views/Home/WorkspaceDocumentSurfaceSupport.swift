@@ -90,20 +90,6 @@ enum WorkspaceDocumentSurfaceSupport {
     byteCount > editableTextByteLimit
   }
 
-  /// A single line longer than this (bytes) makes a file unsupported in the
-  /// read-only viewer for now. The viewer renders through the editor view, which
-  /// can window a long line, but the windowed core index is checkpointed by line,
-  /// so resolving an in-line UTF-16 position scans forward from the line start — a
-  /// pathological single line would scan on the main thread during the wrap-index
-  /// build. Until the core gains byte/UTF-16 checkpoints (or a line-length read),
-  /// such a file is shown as unsupported. Checked against the longest line (not
-  /// the average), so one giant line in an otherwise normal file is still caught.
-  static let maxRenderableLineByteCount = 1024 * 1024  // 1 MiB
-
-  static func hasUnreadablyLongLines(maxLineByteCount: Int) -> Bool {
-    maxLineByteCount > maxRenderableLineByteCount
-  }
-
   /// Logical size of `url` in bytes, read inside a balanced security scope so it
   /// resolves the same way the document open does (which holds the scope before
   /// reading). Returns nil when the size is unavailable.

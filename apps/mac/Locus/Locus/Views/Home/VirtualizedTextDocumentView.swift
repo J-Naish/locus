@@ -465,14 +465,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   /// A huge line's content start (UTF-16) and content length (terminator
-  /// excluded), via two position lookups. The cost depends on the backend: the
-  /// editable piece-tree buffer resolves each in `O(log n)`, but the windowed
-  /// large-file index is checkpointed by line, so an in-line lookup scans forward
-  /// from the line start. That scan is bounded by the surface's long-line guard,
-  /// which keeps a file with any line over the renderable byte limit out of this
-  /// path entirely; lifting that guard would require a line-length metadata read
-  /// from the core rather than estimating the end from a huge column here. Used
-  /// only for lines already suspected huge, so normal lines never pay for it.
+  /// excluded), via two position lookups. Both backends resolve these in bounded
+  /// time: the editable piece-tree buffer in `O(log n)`, and the windowed
+  /// large-file index from byte-cadence checkpoints (so an in-line seek scans at
+  /// most one checkpoint gap, not the whole line). Passing a huge column for the
+  /// end clamps to the line's content end, which the core resolves directly rather
+  /// than by scanning. Used only for lines already suspected huge, so normal lines
+  /// never pay for it.
   private func hugeLineContent(_ line: Int) -> (start: Int, length: Int) {
     guard let buffer = reader else { return (0, 0) }
     let start = (try? buffer.position(forLine: line, columnUTF16: 0).utf16) ?? 0

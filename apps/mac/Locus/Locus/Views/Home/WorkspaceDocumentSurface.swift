@@ -818,37 +818,19 @@ private struct LargeTextDocumentSurface: View {
         ProgressView()
           .frame(maxWidth: .infinity, maxHeight: .infinity)
       case .loaded(let file):
-        // Policy: the read-only editor view can window a long line, but the
-        // windowed index is checkpointed by line, so resolving an in-line UTF-16
-        // position scans from the line start — fast for a long-ish line, but a
-        // pathological single line (e.g. one-line gigabyte) would scan on the main
-        // thread during the wrap-index build. Until the core gains byte/UTF-16
-        // checkpoints (or a line-length read), a file whose longest line exceeds
-        // the renderable byte limit is shown as unsupported rather than risking a
-        // hang. The editor view's huge-line path therefore covers long lines up to
-        // that limit, not arbitrarily huge ones.
-        if WorkspaceDocumentSurfaceSupport.hasUnreadablyLongLines(
-          maxLineByteCount: file.maxLineByteLength)
-        {
-          ContentUnavailableView {
-            Label("Lines Too Long to Preview", systemImage: "doc.text.magnifyingglass")
-          } description: {
-            Text("This file has extremely long lines and can't be previewed yet.")
-          }
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .accessibilityIdentifier("document-large-text-long-lines")
-        } else {
-          // Render the windowed read-only file through the same editor view as
-          // editable text, so selection, navigation, wrapping, and look match;
-          // the backend has no editable buffer, so editing and saving stay inert.
-          LargeTextViewport(
-            backend: .readOnly(file),
-            accessibilityLabel: accessibilityLabel,
-            syntax: syntax,
-            wrapsLines: wrapsLines,
-            onFocusChange: onFocusChange
-          )
-        }
+        // Render the windowed read-only file through the same editor view as
+        // editable text, so selection, navigation, wrapping, and look match; the
+        // backend has no editable buffer, so editing and saving stay inert. An
+        // extremely long line is handled by the editor's huge-line windowing: the
+        // core index is checkpointed by byte as well as by line, so resolving an
+        // in-line position is bounded regardless of line length.
+        LargeTextViewport(
+          backend: .readOnly(file),
+          accessibilityLabel: accessibilityLabel,
+          syntax: syntax,
+          wrapsLines: wrapsLines,
+          onFocusChange: onFocusChange
+        )
       case .failed(let message):
         ContentUnavailableView {
           Label("File Could Not Be Opened", systemImage: "exclamationmark.triangle")

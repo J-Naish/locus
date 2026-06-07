@@ -418,8 +418,6 @@ final class LargeFile: @unchecked Sendable {
   /// band cache keyed on `(revision, range)` therefore stays valid for the
   /// document's whole life — exactly right, since the bytes are immutable.
   var revision: UInt64 { 0 }
-  /// Length in bytes of the longest line (including its terminator).
-  var maxLineByteLength: Int { Int(locus_large_file_max_line_byte_length(handle)) }
 
   /// Text of lines `[start, start + count)` (clamped), read as one window from the
   /// file. The borrowed snapshot is copied into a Swift `String` before free.

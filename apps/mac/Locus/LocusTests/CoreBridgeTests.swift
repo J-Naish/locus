@@ -274,6 +274,27 @@ final class CoreBridgeTests: XCTestCase {
     XCTAssertEqual(try reader.position(forLine: 1, columnUTF16: 0).utf16, 6)
   }
 
+  func testLargeFileOpensAndReadsALineLongerThanOneMiB() throws {
+    let directory = try temporaryDirectory()
+    let fileURL = directory.appending(path: "one-long-line.txt")
+    // A single line well over 1 MiB — the case the old guard refused. It must open
+    // through the windowed backend and resolve positions deep inside the line
+    // (the byte-cadence checkpoints keep that seek bounded).
+    let length = 2 * 1024 * 1024 + 500
+    try String(repeating: "x", count: length)
+      .write(to: fileURL, atomically: true, encoding: .utf8)
+
+    let file = try LargeFile.open(at: fileURL)
+
+    XCTAssertEqual(file.lineCount, 1)
+    XCTAssertEqual(file.utf16Length, length)
+    // A column deep inside the long line resolves, and one past the end clamps.
+    XCTAssertEqual(try file.position(forLine: 0, columnUTF16: length - 3).columnUTF16, length - 3)
+    XCTAssertEqual(try file.position(forLine: 0, columnUTF16: length + 99).columnUTF16, length)
+    // A window read near the end.
+    XCTAssertEqual(file.text(fromUTF16: length - 4, toUTF16: length), "xxxx")
+  }
+
   func testLargeFileOpenThrowsForMissingFile() {
     let missingURL = FileManager.default.temporaryDirectory.appending(
       path: "locus-large-missing-\(UUID().uuidString).txt")
