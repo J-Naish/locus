@@ -177,8 +177,7 @@ impl<S: ByteSource> LineIndex<S> {
             return Ok(String::new());
         }
         let end_line = start_line.saturating_add(count).min(total);
-        let start_byte = self.cumulative_at_line_start(start_line)?.byte;
-        let end_byte = self.band_end_byte(end_line)?;
+        let (start_byte, end_byte) = self.band_byte_range(start_line, end_line)?;
         self.format_band(
             start_byte,
             end_byte,
@@ -203,8 +202,7 @@ impl<S: ByteSource> LineIndex<S> {
         }
         let end_line = start_line.saturating_add(count).min(total);
         let line_count = end_line - start_line;
-        let start_byte = self.cumulative_at_line_start(start_line)?.byte;
-        let end_byte = self.band_end_byte(end_line)?;
+        let (start_byte, end_byte) = self.band_byte_range(start_line, end_line)?;
 
         // Fast path: the band fits roughly the cap budget — read it once and cap
         // each line in the assembled string (the per-line cap is still enforced;
@@ -408,14 +406,20 @@ impl<S: ByteSource> LineIndex<S> {
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    /// Byte offset where a band ending just before `end_line` stops: the start of
-    /// `end_line`, or end of input when the band reaches the last line.
-    fn band_end_byte(&self, end_line: usize) -> io::Result<u64> {
-        if end_line < self.line_count {
-            Ok(self.cumulative_at_line_start(end_line)?.byte)
-        } else {
-            Ok(self.byte_len)
+    /// Byte offsets `[start_byte, end_byte)` of the band `[start_line, end_line)`,
+    /// found in one forward pass: it scans to `start_line`, then continues the same
+    /// cursor on to `end_line`, so the shared prefix from the nearest checkpoint is
+    /// walked once rather than twice. `end_byte` is the start of `end_line`, or end
+    /// of input when the band reaches the last line. Caller guarantees
+    /// `start_line < end_line <= line_count`.
+    fn band_byte_range(&self, start_line: usize, end_line: usize) -> io::Result<(u64, u64)> {
+        let start = self.cumulative_at_line_start(start_line)?;
+        if end_line >= self.line_count {
+            return Ok((start.byte, self.byte_len));
         }
+        let mut cursor = start.cursor();
+        self.advance(&mut cursor, Stop::AtLine(end_line as u64))?;
+        Ok((start.byte, cursor.byte))
     }
 
     /// Formats an already-located byte band into `line_count` lines joined by `\n`,
