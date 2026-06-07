@@ -91,26 +91,17 @@ enum WorkspaceItemMove {
     _ urls: [URL],
     workspaceURL: URL
   ) -> (internalURLs: [URL], externalURLs: [URL]) {
-    let workspacePath = workspaceURL.resolvingSymlinksInPath().locusStandardizedPath
+    let workspacePath = workspaceURL.locusResolvedPath
     var internalURLs: [URL] = []
     var externalURLs: [URL] = []
     for url in urls {
-      if resolvedParentPath(of: url).locusHasPathPrefix(workspacePath) {
+      if url.locusResolvedParentPath.locusHasPathPrefix(workspacePath) {
         internalURLs.append(url)
       } else {
         externalURLs.append(url)
       }
     }
     return (internalURLs, externalURLs)
-  }
-
-  /// Canonical path of `url` with intermediate symlinks resolved but the final
-  /// component preserved (see `partitionByWorkspace`).
-  private static func resolvedParentPath(of url: URL) -> String {
-    url.deletingLastPathComponent()
-      .resolvingSymlinksInPath()
-      .appending(component: url.lastPathComponent)
-      .locusStandardizedPath
   }
 
   /// Validates source URLs against the workspace and target folder and returns
@@ -126,8 +117,12 @@ enum WorkspaceItemMove {
     into target: URL,
     workspaceURL: URL
   ) throws -> [WorkspacePlannedMove] {
-    let workspacePath = workspaceURL.locusStandardizedPath
-    let targetPath = target.locusStandardizedPath
+    // Symlinks are resolved consistently so a symlinked directory cannot move
+    // items outside the workspace while looking lexically internal: the
+    // destination folder is resolved fully (a write into it lands on its real
+    // target) and each source by its parent (the move acts on the entry itself).
+    let workspacePath = workspaceURL.locusResolvedPath
+    let targetPath = target.locusResolvedPath
 
     guard targetPath.locusHasPathPrefix(workspacePath) else {
       throw WorkspaceItemMoveError.outsideWorkspace
@@ -137,7 +132,7 @@ enum WorkspaceItemMove {
     var planned: [WorkspacePlannedMove] = []
 
     for source in sources {
-      let sourcePath = source.locusStandardizedPath
+      let sourcePath = source.locusResolvedParentPath
 
       guard sourcePath != workspacePath else {
         throw WorkspaceItemMoveError.cannotMoveWorkspaceRoot
@@ -151,7 +146,7 @@ enum WorkspaceItemMove {
         throw WorkspaceItemMoveError.moveIntoSelf
       }
       // No-op: the item already lives directly inside the target folder.
-      if source.deletingLastPathComponent().locusStandardizedPath == targetPath {
+      if source.deletingLastPathComponent().locusResolvedPath == targetPath {
         continue
       }
       guard seenPaths.insert(sourcePath).inserted else {
@@ -178,8 +173,11 @@ enum WorkspaceItemMove {
     into target: URL,
     workspaceURL: URL
   ) throws -> [WorkspacePlannedMove] {
-    let workspacePath = workspaceURL.locusStandardizedPath
-    let targetPath = target.locusStandardizedPath
+    // Resolve symlinks so the destination cannot land outside the workspace
+    // through a symlinked directory (see `plannedMoves`). Sources are expected
+    // to be external, so only the target is validated.
+    let workspacePath = workspaceURL.locusResolvedPath
+    let targetPath = target.locusResolvedPath
 
     guard targetPath.locusHasPathPrefix(workspacePath) else {
       throw WorkspaceItemMoveError.outsideWorkspace

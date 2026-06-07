@@ -381,6 +381,74 @@ final class WorkspaceItemMoveTests: XCTestCase {
     XCTAssertTrue(externalURLs.isEmpty)
   }
 
+  func testPlannedMovesRejectsTargetReachedThroughSymlinkedDirectoryEscape() throws {
+    let root = try temporaryDirectory()
+    let workspaceURL = root.appending(path: "workspace", directoryHint: .isDirectory)
+    let outsideURL = root.appending(path: "outside", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: false)
+    try FileManager.default.createDirectory(at: outsideURL, withIntermediateDirectories: false)
+    let sourceURL = workspaceURL.appending(path: "notes.md")
+    try "notes".write(to: sourceURL, atomically: true, encoding: .utf8)
+
+    // A symlinked directory inside the workspace that points outside it. Using
+    // it as the move destination would write the file outside the workspace, so
+    // it must be rejected rather than treated as a lexically internal target.
+    let linkURL = workspaceURL.appending(path: "escape", directoryHint: .isDirectory)
+    try FileManager.default.createSymbolicLink(at: linkURL, withDestinationURL: outsideURL)
+
+    XCTAssertThrowsError(
+      try WorkspaceItemMove.plannedMoves(
+        for: [sourceURL], into: linkURL, workspaceURL: workspaceURL)
+    ) {
+      XCTAssertEqual($0 as? WorkspaceItemMoveError, .outsideWorkspace)
+    }
+  }
+
+  func testPlannedMovesRejectsSourceReachedThroughSymlinkedDirectoryEscape() throws {
+    let root = try temporaryDirectory()
+    let workspaceURL = root.appending(path: "workspace", directoryHint: .isDirectory)
+    let outsideURL = root.appending(path: "outside", directoryHint: .isDirectory)
+    let targetURL = workspaceURL.appending(path: "Drafts", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: false)
+    try FileManager.default.createDirectory(at: outsideURL, withIntermediateDirectories: false)
+    try FileManager.default.createDirectory(at: targetURL, withIntermediateDirectories: false)
+    let secretURL = outsideURL.appending(path: "secret.txt")
+    try "secret".write(to: secretURL, atomically: true, encoding: .utf8)
+
+    // The source is reached through a symlinked directory that escapes the
+    // workspace, so moving it would act on a file that lives outside.
+    let linkURL = workspaceURL.appending(path: "escape", directoryHint: .isDirectory)
+    try FileManager.default.createSymbolicLink(at: linkURL, withDestinationURL: outsideURL)
+    let throughLink = linkURL.appending(path: "secret.txt")
+
+    XCTAssertThrowsError(
+      try WorkspaceItemMove.plannedMoves(
+        for: [throughLink], into: targetURL, workspaceURL: workspaceURL)
+    ) {
+      XCTAssertEqual($0 as? WorkspaceItemMoveError, .outsideWorkspace)
+    }
+  }
+
+  func testPlannedImportsRejectsTargetReachedThroughSymlinkedDirectoryEscape() throws {
+    let root = try temporaryDirectory()
+    let workspaceURL = root.appending(path: "workspace", directoryHint: .isDirectory)
+    let outsideURL = root.appending(path: "outside", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: false)
+    try FileManager.default.createDirectory(at: outsideURL, withIntermediateDirectories: false)
+    let externalURL = root.appending(path: "photo.png")
+    try Data().write(to: externalURL)
+
+    let linkURL = workspaceURL.appending(path: "escape", directoryHint: .isDirectory)
+    try FileManager.default.createSymbolicLink(at: linkURL, withDestinationURL: outsideURL)
+
+    XCTAssertThrowsError(
+      try WorkspaceItemMove.plannedImports(
+        for: [externalURL], into: linkURL, workspaceURL: workspaceURL)
+    ) {
+      XCTAssertEqual($0 as? WorkspaceItemMoveError, .outsideWorkspace)
+    }
+  }
+
   private func temporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appending(
       path: "locus-item-move-tests-\(UUID().uuidString)",

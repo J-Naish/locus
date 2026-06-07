@@ -96,12 +96,16 @@ enum WorkspaceItemDeletion {
     for urls: [URL],
     workspaceURL: URL
   ) throws -> [URL] {
-    let workspacePath = workspaceURL.locusStandardizedPath
+    // Resolve symlinks consistently so a file reached through a symlinked
+    // directory that escapes the workspace is rejected rather than trashed: the
+    // entry is located by its parent (deleting it removes the link, not its
+    // target) while a symlinked directory in the path still resolves.
+    let workspacePath = workspaceURL.locusResolvedPath
     var seenPaths = Set<String>()
     var targets: [URL] = []
 
     for url in urls {
-      let path = url.locusStandardizedPath
+      let path = url.locusResolvedParentPath
       guard path != workspacePath else {
         throw WorkspaceItemDeletionError.cannotDeleteWorkspaceRoot
       }

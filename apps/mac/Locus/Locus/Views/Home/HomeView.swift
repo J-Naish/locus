@@ -597,7 +597,10 @@ struct HomeView: View {
       throw WorkspaceItemCreationError.noActiveWorkspace
     }
 
-    guard targetFolderURL.locusStandardizedPath.locusHasPathPrefix(folderURL.locusStandardizedPath)
+    // Resolve symlinks so a symlinked target folder cannot create the item
+    // outside the workspace while looking lexically internal (see
+    // WorkspaceItemMove.plannedMoves).
+    guard targetFolderURL.locusResolvedPath.locusHasPathPrefix(folderURL.locusResolvedPath)
     else {
       assertionFailure("createWorkspaceItem invoked outside the active workspace")
       throw WorkspaceItemCreationError.noActiveWorkspace

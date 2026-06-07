@@ -264,6 +264,30 @@ final class WorkspaceItemDeletionTests: XCTestCase {
       FileManager.default.fileExists(atPath: thirdOriginalURL.path(percentEncoded: false)))
   }
 
+  func testRejectsItemReachedThroughSymlinkedDirectoryEscape() throws {
+    let root = try temporaryDirectory()
+    let workspaceURL = root.appending(path: "workspace", directoryHint: .isDirectory)
+    let outsideURL = root.appending(path: "outside", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: false)
+    try FileManager.default.createDirectory(at: outsideURL, withIntermediateDirectories: false)
+    let secretURL = outsideURL.appending(path: "secret.txt")
+    try "secret".write(to: secretURL, atomically: true, encoding: .utf8)
+
+    // A symlinked directory inside the workspace that escapes it. A delete
+    // reached through the link resolves outside the workspace and must be
+    // rejected so the real file is never trashed.
+    let linkURL = workspaceURL.appending(path: "escape", directoryHint: .isDirectory)
+    try FileManager.default.createSymbolicLink(at: linkURL, withDestinationURL: outsideURL)
+    let throughLink = linkURL.appending(path: "secret.txt")
+
+    XCTAssertThrowsError(
+      try WorkspaceItemDeletion.delete([makeEntry(url: throughLink, kind: .file)], in: workspaceURL)
+    ) {
+      XCTAssertEqual($0 as? WorkspaceItemDeletionError, .outsideWorkspace)
+    }
+    XCTAssertTrue(FileManager.default.fileExists(atPath: secretURL.path(percentEncoded: false)))
+  }
+
   private func makeEntry(url: URL, kind: WorkspaceEntryKind) -> WorkspaceEntry {
     WorkspaceEntry(
       id: url.locusStandardizedPath,
