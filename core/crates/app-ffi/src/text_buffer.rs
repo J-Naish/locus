@@ -73,7 +73,7 @@ fn status_from_error(error: &TextBufferError) -> u32 {
     }
 }
 
-fn ffi_position(position: Position) -> LocusTextPosition {
+pub(crate) fn ffi_position(position: Position) -> LocusTextPosition {
     LocusTextPosition {
         byte: position.byte,
         char_index: position.char,

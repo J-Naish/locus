@@ -200,6 +200,21 @@ final class CoreBridgeTests: XCTestCase {
     XCTAssertEqual(file.text(forLineRange: 2, count: 9), "gamma")  // clamped past the end
   }
 
+  func testLargeFileTextPreservesFinalLoneCarriageReturn() throws {
+    let directory = try temporaryDirectory()
+    let fileURL = directory.appending(path: "trailing-cr.txt")
+    try "a\nb\r".write(to: fileURL, atomically: true, encoding: .utf8)
+
+    let file = try LargeFile.open(at: fileURL)
+
+    // The core strips each line's terminator, but a final lone CR (no following
+    // LF) is content, not a terminator. The read-only viewer renders this text
+    // verbatim and must not re-strip it, so the bridge has to surface it intact.
+    XCTAssertEqual(file.lineCount, 2)
+    XCTAssertEqual(file.text(forLineRange: 1, count: 1), "b\r")
+    XCTAssertEqual(file.text(forLineRange: 0, count: 2), "a\nb\r")
+  }
+
   func testLargeFileOpenThrowsForMissingFile() {
     let missingURL = FileManager.default.temporaryDirectory.appending(
       path: "locus-large-missing-\(UUID().uuidString).txt")

@@ -859,7 +859,10 @@ private struct LargeTextLineList: View {
 
   var body: some View {
     List(0..<file.lineCount, id: \.self) { index in
-      Text(displayLine(at: index))
+      // The core's line-range read already strips each line's terminator (and
+      // keeps a genuine final lone CR as content), so show the text verbatim;
+      // re-stripping here would delete a real trailing CR on the last line.
+      Text(file.text(forLineRange: index, count: 1))
         .font(.system(.body, design: .monospaced))
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -868,17 +871,5 @@ private struct LargeTextLineList: View {
     }
     .listStyle(.plain)
     .accessibilityIdentifier("document-readonly-large-text-viewer")
-  }
-
-  /// One line's text with its trailing newline removed for display.
-  private func displayLine(at index: Int) -> String {
-    var line = file.text(forLineRange: index, count: 1)
-    if line.hasSuffix("\n") {
-      line.removeLast()
-    }
-    if line.hasSuffix("\r") {
-      line.removeLast()
-    }
-    return line
   }
 }

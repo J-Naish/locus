@@ -224,8 +224,12 @@ impl<S: ByteSource> LineIndex<S> {
         Ok(out)
     }
 
-    /// The raw text of the UTF-16 range `[start, end)`, decoded lossily. Used to
-    /// copy a selection or read a window of one huge line.
+    /// The raw text of the UTF-16 range `[start, end)`, decoded lossily — used to
+    /// copy a selection within or across lines. The endpoints are mapped by
+    /// scanning forward from the nearest line checkpoint (the index is
+    /// checkpointed by line, not by byte), so a within-line seek is linear in the
+    /// enclosing line's length; the platform refuses a file with a pathologically
+    /// long single line, which keeps that bound small.
     pub fn text_for_utf16_range(&self, start: u64, end: u64) -> io::Result<String> {
         let start_byte = self.position_for_utf16(start)?.byte as u64;
         let end_byte = self.position_for_utf16(end)?.byte as u64;

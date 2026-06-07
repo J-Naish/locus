@@ -469,6 +469,8 @@ void locus_large_file_free(LocusLargeFile *file);
 size_t locus_large_file_line_count(const LocusLargeFile *file);
 uint64_t locus_large_file_byte_length(const LocusLargeFile *file);
 uint64_t locus_large_file_max_line_byte_length(const LocusLargeFile *file);
+/* Total UTF-16 code units (size_t, mirroring locus_text_buffer_utf16_length). */
+size_t locus_large_file_utf16_length(const LocusLargeFile *file);
 
 /*
  * Snapshots the text of lines [start_line, start_line + count) (clamped) by
@@ -481,6 +483,56 @@ uint64_t locus_large_file_max_line_byte_length(const LocusLargeFile *file);
 LocusStatus locus_large_file_snapshot_line_range(
     const LocusLargeFile *file, size_t start_line, size_t count,
     LocusTextSnapshot **out_snapshot);
+
+/*
+ * Like locus_large_file_snapshot_line_range, but returns at most
+ * max_bytes_per_line bytes of any single line's content (truncated on a UTF-8
+ * character boundary), so a file that is one enormous line is not materialized
+ * to paint a band. Ownership matches locus_large_file_snapshot_line_range.
+ */
+LocusStatus locus_large_file_snapshot_line_range_capped(
+    const LocusLargeFile *file, size_t start_line, size_t count,
+    size_t max_bytes_per_line, LocusTextSnapshot **out_snapshot);
+
+/*
+ * Snapshots the raw text of the UTF-16 range [start_utf16, end_utf16) with no
+ * line-terminator stripping, for copying a selection within or across lines. The
+ * endpoints are mapped by scanning forward from the nearest line checkpoint (the
+ * index is checkpointed by line, not by byte), so a within-line seek is linear in
+ * the enclosing line's length; the platform refuses a file with a pathologically
+ * long single line, keeping that bound small. As a viewport read it clamps rather
+ * than erroring: offsets past the end are clamped, an endpoint inside a surrogate
+ * pair is floored to that character's start, and an inverted range yields empty
+ * text. The snapshot's line metadata is not meaningful here and is reported as
+ * zero. Only a NULL out_snapshot/file is rejected. Ownership matches
+ * locus_large_file_snapshot_line_range.
+ */
+LocusStatus locus_large_file_snapshot_utf16_range(
+    const LocusLargeFile *file, size_t start_utf16, size_t end_utf16,
+    LocusTextSnapshot **out_snapshot);
+
+/*
+ * Maps a UTF-16 offset to a full position (writes *out_position on success,
+ * reusing the LocusTextPosition layout above). Unlike
+ * locus_text_buffer_position_for_utf16, this is a viewport read that never
+ * rejects the offset: an offset past the end is clamped to the end and an offset
+ * inside a surrogate pair is floored to that character's start. Only a NULL
+ * handle/out_position or an underlying read error (LOCUS_TEXT_STATUS_IO) is
+ * reported.
+ */
+LocusStatus locus_large_file_position_for_utf16(
+    const LocusLargeFile *file, size_t utf16, LocusTextPosition *out_position);
+
+/*
+ * Maps a 0-based line and UTF-16 column (from the line start) to a full
+ * position. Also clamp-safe: a column past the line content is clamped to the
+ * line end and a line past the last line is clamped to the last line (never
+ * rejected, unlike locus_text_buffer_position_for_line_column). Only a NULL
+ * handle/out_position or an underlying read error is reported.
+ */
+LocusStatus locus_large_file_position_for_line_column(
+    const LocusLargeFile *file, size_t line, size_t column_utf16,
+    LocusTextPosition *out_position);
 
 #ifdef __cplusplus
 }
