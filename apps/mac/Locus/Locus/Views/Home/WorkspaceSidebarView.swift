@@ -116,6 +116,9 @@ struct WorkspaceSidebarView: View {
                 // the focused (accent) color rather than the unfocused gray.
                 isListFocused = true
               },
+              onActivate: {
+                performPrimaryAction(for: [entry.id])
+              },
               onDropURLs: { urls in
                 handleDrop(urls, onto: entry)
               }
@@ -1192,6 +1195,11 @@ private struct WorkspaceSidebarEntryRow: View {
   let isSelected: Bool
   let toggleExpansion: () -> Void
   let onSelect: () -> Void
+  /// Primary action for a row double-click: browse into a folder or open a file.
+  /// The List's native `primaryAction` does not fire for these rows — the
+  /// `.draggable` (and the selection tap that works around it) consume the second
+  /// click before the Outline sees it — so the row drives it explicitly.
+  let onActivate: () -> Void
   let onDropURLs: ([URL]) -> Void
   @State private var isDropTargeted = false
   @State private var isHovered = false
@@ -1294,6 +1302,10 @@ private struct WorkspaceSidebarEntryRow: View {
     // swallow clicks that include any pointer movement, so drive selection
     // explicitly with a simultaneous tap that survives the drag gesture.
     .simultaneousGesture(TapGesture().onEnded(onSelect))
+    // The List's built-in double-click `primaryAction` never reaches these rows
+    // (the `.draggable` above swallows the second click), so drive the primary
+    // action — browse into a folder / open a file — from an explicit double tap.
+    .simultaneousGesture(TapGesture(count: 2).onEnded(onActivate))
     // Merge the icon + name + badge into one labeled element for VoiceOver, and
     // publish it as static text so it resolves as `app.staticTexts[name]` (not a
     // generic group) for accessibility tooling and UI tests alike.
