@@ -1505,9 +1505,23 @@ final class WorkspaceSearchUITests: XCTestCase {
 
   @MainActor
   private func disclosureButton(for directoryURL: URL, in app: XCUIApplication) -> XCUIElement {
-    let path = directoryURL.path(percentEncoded: false)
-    let identifier = "workspace-sidebar-disclosure-\(stableHash(for: path))"
+    // The sidebar hashes each row's `entry.id`. For the workspace root that id is
+    // the standardized path with no trailing slash (matching the app's
+    // `locusStandardizedPath`), so normalize here the same way — a directory URL
+    // built with `directoryHint: .isDirectory` otherwise carries a trailing slash
+    // and hashes differently. Child rows already have a slash-free path, so this
+    // leaves them unchanged.
+    let identifier =
+      "workspace-sidebar-disclosure-\(stableHash(for: standardizedPath(for: directoryURL)))"
     return app.buttons.matching(identifier: identifier).firstMatch
+  }
+
+  private func standardizedPath(for url: URL) -> String {
+    var path = url.standardizedFileURL.path(percentEncoded: false)
+    while path.count > 1, path.hasSuffix("/") {
+      path.removeLast()
+    }
+    return path
   }
 
   @MainActor
