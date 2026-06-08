@@ -1559,12 +1559,76 @@ final class TextViewportLayoutTests: XCTestCase {
     // duration so the read never races an edit.
     let view = try makeEditableViewer("abc")
     view.moveToDocumentEdge(end: true, extend: false)
-    view.isSaving = true
+    view.beginSaveForTesting()
 
     view.insertText("X")
     view.deleteBackward()
     view.undoEdit()
     view.redoEdit()
     XCTAssertEqual(content(of: view), "abc")  // every mutation no-ops while saving
+  }
+
+  @MainActor
+  func testEditsStayPausedAfterSwappingAwayFromAndBackToASavingBuffer() throws {
+    // Reproduces the open-document-cache reuse path: a save starts, the view shows
+    // another document and then returns to the original (same cached buffer). The
+    // first save is still in flight, so edits to that buffer must remain paused —
+    // a per-view flag reset on swap would wrongly re-enable them and race the write.
+    let view = try makeEditableViewer("abc")
+    let savingBuffer = try XCTUnwrap(view.editableBuffer)
+    view.beginSaveForTesting()  // a save is now in flight for `savingBuffer`
+
+    let otherBuffer = try TextBuffer.open(bytes: Data("xyz".utf8))
+    view.setBuffer(otherBuffer)  // swap away — the other buffer is freely editable
+    view.moveToDocumentEdge(end: true, extend: false)
+    view.insertText("Z")
+    XCTAssertEqual(content(of: view), "xyzZ")  // unrelated buffer is not paused
+
+    view.setBuffer(savingBuffer)  // swap back to the still-saving buffer
+    view.moveToDocumentEdge(end: true, extend: false)
+    view.insertText("Q")
+    XCTAssertEqual(content(of: view), "abc")  // still paused: no edit reaches it
+  }
+
+  // MARK: DocumentSaveTracker
+
+  @MainActor
+  func testSaveTrackerMarksAndClearsInFlightSaves() throws {
+    let tracker = DocumentSaveTracker()
+    let buffer = try TextBuffer.open(bytes: Data("abc".utf8))
+
+    XCTAssertFalse(tracker.isSaving(buffer))
+    XCTAssertTrue(tracker.begin(buffer))
+    XCTAssertTrue(tracker.isSaving(buffer))
+    XCTAssertFalse(tracker.begin(buffer))  // a second save is refused while one runs
+    XCTAssertTrue(tracker.finish(buffer))  // unchanged → safe to mark saved
+    XCTAssertFalse(tracker.isSaving(buffer))
+    XCTAssertFalse(tracker.finish(buffer))  // nothing in flight to finish
+  }
+
+  @MainActor
+  func testSaveTrackerWithholdsMarkSavedWhenBufferChangedMidWrite() throws {
+    // If the buffer is edited between begin and finish, its content no longer
+    // matches what was written, so the caller must not mark it saved.
+    let tracker = DocumentSaveTracker()
+    let buffer = try TextBuffer.open(bytes: Data("abc".utf8))
+
+    XCTAssertTrue(tracker.begin(buffer))
+    try buffer.insert("X", atUTF16: 3)  // advances the buffer's revision
+    XCTAssertFalse(tracker.finish(buffer))  // diverged → withhold "saved"
+  }
+
+  @MainActor
+  func testSaveTrackerKeepsBuffersIndependent() throws {
+    let tracker = DocumentSaveTracker()
+    let first = try TextBuffer.open(bytes: Data("one".utf8))
+    let second = try TextBuffer.open(bytes: Data("two".utf8))
+
+    XCTAssertTrue(tracker.begin(first))
+    XCTAssertFalse(tracker.isSaving(second))  // saving one does not pause another
+    XCTAssertTrue(tracker.begin(second))
+    XCTAssertTrue(tracker.isSaving(first))
+    XCTAssertTrue(tracker.finish(first))
+    XCTAssertTrue(tracker.isSaving(second))  // finishing one leaves the other in flight
   }
 }

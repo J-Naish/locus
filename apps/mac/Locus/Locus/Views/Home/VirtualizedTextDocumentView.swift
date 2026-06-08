@@ -250,11 +250,20 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// failure the error to surface.
   var onSaveCompletion: ((Result<DocumentFileFingerprint?, Error>) -> Void)?
 
-  /// True while a save is writing on a background thread. Buffer *mutations* are
-  /// paused while it is true so the background read never races an edit; reads
-  /// (rendering, selection) stay safe because the core buffer is `Sync`. Set
-  /// synchronously on the main thread by the save flow (settable for tests).
-  var isSaving = false
+  /// Tracks which buffers have a background save in flight. It is keyed by the
+  /// buffer (not a per-view flag) so the edit pause survives a document
+  /// swap-and-return: the open-document cache hands back the *same* `TextBuffer`
+  /// when switching back to a file, and a per-view flag — reset on every swap —
+  /// could let an edit race the still-running off-main write.
+  private let saveTracker = DocumentSaveTracker()
+
+  /// Whether the buffer currently shown has a save writing on a background thread.
+  /// Buffer *mutations* are paused while true so the background read never races an
+  /// edit; reads (rendering, selection) stay safe because the core buffer is `Sync`.
+  var isSaving: Bool {
+    guard let buffer = editableBuffer else { return false }
+    return saveTracker.isSaving(buffer)
+  }
 
   /// Reports the buffer's dirty state to the host after each edit/undo, so it can
   /// decide whether an external change may safely reload (clean) or conflicts
@@ -807,9 +816,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     isSelecting = false
     verticalGoalX = nil
     composition = nil
-    // A save in flight (if any) was for the previous buffer; let its completion
-    // mark that buffer saved, but the new document starts clean.
-    isSaving = false
+    // A save in flight (if any) is tracked per buffer in `saveTracker`, not on the
+    // view, so it is intentionally not reset here: switching back to a buffer that
+    // is still saving keeps its edits paused, and the save's completion still marks
+    // the correct buffer.
     rebuildWrapIndex()  // the previous buffer's wrap index does not apply
     updateLayout()
     // A new document always opens at the top-left; otherwise a reused scroll view
@@ -1949,10 +1959,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// pause buffer mutations for the write's duration; rendering keeps reading the
   /// buffer concurrently, which is sound because the core buffer is `Sync`.
   func requestSave() {
-    guard isEditable, !isSaving, let buffer = editableBuffer, buffer.isDirty, let saveURL else {
+    guard isEditable, let buffer = editableBuffer, buffer.isDirty, let saveURL,
+      saveTracker.begin(buffer)
+    else {
       return
     }
-    isSaving = true
     invalidateVisibleArea()
 
     // Capture everything the completion needs at save start. The view may be
@@ -1991,18 +2002,32 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     savedBuffer: TextBuffer,
     completion: ((Result<DocumentFileFingerprint?, Error>) -> Void)?
   ) {
+    // Clear the in-flight mark and learn whether the buffer is unchanged since the
+    // write began. Edits are paused while a buffer saves, so it normally is; the
+    // check keeps a buffer that somehow diverged *dirty* rather than marking its
+    // newer, not-yet-written content as saved (which would silently lose edits).
+    let savedContentStillCurrent = saveTracker.finish(savedBuffer)
     switch result {
     case .success:
-      savedBuffer.markSaved()
+      if savedContentStillCurrent {
+        savedBuffer.markSaved()
+      }
     case .failure:
       NSSound.beep()
     }
     if savedBuffer === editableBuffer {
-      isSaving = false
       notifyDirtyChanged()
       invalidateVisibleArea()
     }
     completion?(result)
+  }
+
+  /// Test seam: marks the current buffer as having a save in flight — the same
+  /// state `requestSave` sets at the start of a write — so tests can verify edits
+  /// pause without driving the asynchronous, disk-touching writer.
+  func beginSaveForTesting() {
+    guard let buffer = editableBuffer else { return }
+    saveTracker.begin(buffer)
   }
 
   /// Text-relative x of the caret at `endpoint`, measured within its visual row.
@@ -2993,11 +3018,55 @@ private enum LoadedDocument: @unchecked Sendable {
 
 /// Carries the `TextBuffer` to the background save thread. Sound because the
 /// save only *reads* the buffer (`write_to`) and the main thread pauses buffer
-/// mutations (`isSaving`) for the write's duration; concurrent reads are safe
-/// because the core buffer is `Sync`.
+/// mutations (tracked per buffer by `DocumentSaveTracker`) for the write's
+/// duration; concurrent reads are safe because the core buffer is `Sync`.
 private struct SendableTextBuffer: @unchecked Sendable {
   let buffer: TextBuffer
   init(_ buffer: TextBuffer) {
     self.buffer = buffer
+  }
+}
+
+/// Tracks which editable text buffers have a background save in flight so the
+/// editor can pause edits to a buffer for the full duration of its write.
+///
+/// The pause must outlive a document swap: the open-document cache reuses the same
+/// `TextBuffer` instance when the user switches away from a file and back, so a
+/// per-view flag (reset on every swap) could let an edit run while the off-main
+/// writer is still reading that buffer — a data race, since a mutation needs
+/// exclusive access. Keying by object identity keeps unrelated buffers editable,
+/// and recording each buffer's revision at save start lets the caller decline to
+/// mark a buffer "saved" if it was somehow edited mid-write (which would otherwise
+/// silently treat newer, unwritten content as on disk).
+@MainActor
+final class DocumentSaveTracker {
+  private var revisionAtSaveStart: [ObjectIdentifier: UInt64] = [:]
+
+  /// Whether `buffer` currently has a save in flight.
+  func isSaving(_ buffer: TextBuffer) -> Bool {
+    revisionAtSaveStart[ObjectIdentifier(buffer)] != nil
+  }
+
+  /// Marks `buffer` as saving and records its revision. Returns `false` if a save
+  /// is already in flight for it, so the caller skips starting a second write.
+  @discardableResult
+  func begin(_ buffer: TextBuffer) -> Bool {
+    let identifier = ObjectIdentifier(buffer)
+    guard revisionAtSaveStart[identifier] == nil else { return false }
+    revisionAtSaveStart[identifier] = buffer.revision
+    return true
+  }
+
+  /// Clears the in-flight mark for `buffer` and reports whether its content is
+  /// unchanged since `begin` — i.e. whether it is safe to mark it saved. Returns
+  /// `false` if no save was in flight or the buffer's revision advanced meanwhile.
+  @discardableResult
+  func finish(_ buffer: TextBuffer) -> Bool {
+    guard
+      let startRevision = revisionAtSaveStart.removeValue(forKey: ObjectIdentifier(buffer))
+    else {
+      return false
+    }
+    return buffer.revision == startRevision
   }
 }
