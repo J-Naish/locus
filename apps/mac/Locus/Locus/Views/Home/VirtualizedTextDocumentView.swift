@@ -2887,10 +2887,10 @@ struct VirtualizedTextDocumentView: View {
     Group {
       switch phase {
       case .loading:
-        // A very large file's one-time index scan can take a moment; a small file
-        // loads fast enough that the spinner barely shows.
-        ProgressView()
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Show feedback only if the open actually takes a moment (a large file's
+        // index scan or a big read). A fast open — nearly always — finishes
+        // within the grace period, so no spinner ever flashes.
+        DelayedProgressView()
       case .editable(let buffer, let encoding):
         LargeTextViewport(
           backend: .editable(buffer),
@@ -3024,6 +3024,32 @@ private struct SendableTextBuffer: @unchecked Sendable {
   let buffer: TextBuffer
   init(_ buffer: TextBuffer) {
     self.buffer = buffer
+  }
+}
+
+/// Renders nothing for a short grace period, then a spinner. A fast load — the
+/// overwhelming majority — finishes within that period and removes this view
+/// before the timer fires, so no spinner flashes; only a genuinely slow open (a
+/// large file's index scan or a big read) shows feedback. Mirrors the sidebar's
+/// delayed loading indicator so loading feel is consistent across the app.
+private struct DelayedProgressView: View {
+  /// Matches `WorkspaceSidebarMetrics.loadingIndicatorDelay`.
+  var delay: Duration = .milliseconds(180)
+  @State private var isVisible = false
+
+  var body: some View {
+    ZStack {
+      if isVisible {
+        ProgressView()
+      }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .task {
+      // If the load finishes first, this view leaves the tree and the task is
+      // cancelled before the sleep returns, so the spinner never appears.
+      guard (try? await Task.sleep(for: delay)) != nil else { return }
+      isVisible = true
+    }
   }
 }
 
