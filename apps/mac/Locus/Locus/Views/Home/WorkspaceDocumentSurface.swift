@@ -140,7 +140,7 @@ struct WorkspaceDocumentSurface: View {
           // Dismiss the warning and keep editing the in-memory version; the
           // divergence from disk is resolved on the next save.
           Button("Keep Editing") { documentConflict = false }
-          Button("Reload") { reloadDocumentDiscardingEdits() }
+          Button("Reload from Disk") { reloadDocumentDiscardingEdits() }
         }
         .padding(12)
         .background(.thinMaterial)
@@ -742,7 +742,7 @@ private struct UnsupportedDocumentSurface: View {
       Label("No Built-In Preview", systemImage: "doc")
     } description: {
       Text(
-        "This \(WorkspaceFileTypeLabel.displayLabel(for: entry).lowercased()) is not supported yet."
+        "No preview is available for this \(WorkspaceFileTypeLabel.displayLabel(for: entry).lowercased())."
       )
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)

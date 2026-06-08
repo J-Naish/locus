@@ -1277,7 +1277,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     }
 
     // A conflict banner appears (rather than silently reloading).
-    let reload = app.buttons["Reload"]
+    let reload = app.buttons["Reload from Disk"]
     XCTAssertTrue(reload.waitForExistence(timeout: 3), app.debugDescription)
 
     // The unsaved edits are preserved (the buffer was not reloaded).
@@ -1386,7 +1386,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     try Data("EXTERNAL".utf8).write(to: aURL)  // A changes while inactive
     open("Notes.txt")  // return to A
 
-    let reload = app.buttons["Reload"]
+    let reload = app.buttons["Reload from Disk"]
     XCTAssertTrue(reload.waitForExistence(timeout: 5), app.debugDescription)  // conflict banner
     XCTAssertEqual(copyAll(), "DIRTYEDIT", app.debugDescription)  // edits preserved
   }
@@ -1416,7 +1416,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     app.typeText("DIRTYEDIT")  // single replace edit
     try Data("EXTERNAL".utf8).write(to: fileURL)
 
-    let reload = app.buttons["Reload"]
+    let reload = app.buttons["Reload from Disk"]
     XCTAssertTrue(reload.waitForExistence(timeout: 3), app.debugDescription)
 
     // Undo back to the opened content: the buffer is clean again, but the disk
