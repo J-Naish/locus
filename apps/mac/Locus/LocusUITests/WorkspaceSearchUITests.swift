@@ -53,8 +53,10 @@ final class WorkspaceSearchUITests: XCTestCase {
     let workspaceURL = try makeSymlinkWorkspace()
     let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
 
+    // A symlink row is announced as an alias, so its accessibility label is
+    // "<name>, alias" — match that rather than the bare name.
     XCTAssertTrue(
-      workspaceSidebarLabel(named: "linked-folder", in: app).waitForExistence(timeout: 5),
+      workspaceSidebarLabel(named: "linked-folder, alias", in: app).waitForExistence(timeout: 5),
       app.debugDescription)
 
     let linkedFolderDisclosure = disclosureButton(
@@ -75,7 +77,8 @@ final class WorkspaceSearchUITests: XCTestCase {
     let targetURL = workspaceURL.appending(path: "Target.md")
     let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
 
-    let linkedFileRow = workspaceSidebarCellContainingLabel(named: "Linked.md", in: app)
+    // A symlink row is announced as an alias ("<name>, alias"); match the full label.
+    let linkedFileRow = workspaceSidebarCellContainingLabel(named: "Linked.md, alias", in: app)
     XCTAssertTrue(linkedFileRow.waitForExistence(timeout: 5), app.debugDescription)
     linkedFileRow.click()
 
