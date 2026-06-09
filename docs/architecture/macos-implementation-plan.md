@@ -84,7 +84,7 @@ Current ownership:
 
 - `file_type`: extension and MIME-ish classification used by both app and CLI.
 - `workspace`: open a folder, list child entries, apply shallow filters, sort folders/files.
-- `text_buffer`: UTF-8 piece tree backing text editing at any size — line index and snapshots, byte/char/UTF-16/line/column position lookups, insert/delete/replace and undo/redo, dirty tracking, and streaming save. Opened by reading a UTF-8 file into an owned buffer, or from already-decoded bytes. Text encoding detection/conversion and all UI, IME, drawing, and selection stay in the macOS app.
+- `text_buffer`: UTF-8 piece tree backing text editing up to a bounded in-memory size (larger files open read-only in the same viewer) — line index and snapshots, byte/char/UTF-16/line/column position lookups, insert/delete/replace and undo/redo, dirty tracking, and streaming save. Opened by reading a UTF-8 file into an owned buffer, or from already-decoded bytes. Text encoding detection/conversion and all UI, IME, drawing, and selection stay in the macOS app.
 
 Deferred modules and boundaries:
 

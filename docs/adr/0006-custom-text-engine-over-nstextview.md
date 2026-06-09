@@ -21,15 +21,19 @@ line selection (locale-aware), a blinking caret, and range-based VoiceOver.
 
 ## Decision
 
-Use the custom virtualized text engine for every editable text file, at any
-size, in every build. Retire the `NSTextView`/TextKit editor (`TextDocumentEditorView`
-and its gutter/line-number helpers) and the editable-string load/save service
-(`TextDocumentStore`). Reverting to `NSTextView` is comparatively easy if needed,
-which keeps the risk of unifying low.
+Use the custom virtualized text engine for every text document in every build.
+Files within an in-memory size bound are fully editable; larger files open
+read-only in the same engine, which still virtualizes rendering so a file of any
+size opens and scrolls. Retire the `NSTextView`/TextKit editor
+(`TextDocumentEditorView` and its gutter/line-number helpers) and the
+editable-string load/save service (`TextDocumentStore`). Reverting to
+`NSTextView` is comparatively easy if needed, which keeps the risk of unifying
+low.
 
 ## Consequences
 
-- One text engine to maintain; large files open and edit without a size cap.
+- One text engine to maintain; a file of any size opens and renders, while
+  editing is bounded by an in-memory size cap (larger files open read-only).
 - The engine owns its own loading, failure UI, editing, save, dirty state, and
   external-change reconciliation; the document surface just hosts it.
 - Lines longer than the display clip are read in full for accessibility but not
