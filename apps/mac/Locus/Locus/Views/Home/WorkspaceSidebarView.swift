@@ -82,6 +82,9 @@ struct WorkspaceSidebarView: View {
   @State private var expansionGeneration: UInt64 = 0
   @State private var isRootExpanded = true
   @State private var visibleRows: [WorkspaceSidebarRow] = []
+  // True while a drag targets the workspace root (the empty area / no folder row),
+  // driving the root drop affordance. Folder rows show their own row highlight.
+  @State private var isRootDropTargeted = false
   @State private var creationKind: WorkspaceItemCreationKind?
   @State private var creationParent: WorkspaceEntry?
   @State private var creationName = ""
@@ -233,7 +236,33 @@ struct WorkspaceSidebarView: View {
       .dropDestination(for: URL.self) { urls, _ in
         handleDrop(urls, onto: rootEntry)
         return true
+      } isTargeted: { targeted in
+        isRootDropTargeted = targeted
       }
+      // Root drop affordance: a drag over the empty area (no folder row claims it,
+      // so this List-level destination is the target) washes the whole sidebar in
+      // the accent color, mirroring how a folder row highlights. Driven by this
+      // destination's own `isTargeted`, so it stays off while a folder row is the
+      // target and never competes with the per-row highlight.
+      .overlay {
+        if isRootDropTargeted {
+          RoundedRectangle(
+            cornerRadius: WorkspaceSidebarMetrics.dropHighlightCornerRadius, style: .continuous
+          )
+          .strokeBorder(
+            Color.accentColor, lineWidth: WorkspaceSidebarMetrics.rootDropHighlightBorderWidth
+          )
+          .background(
+            RoundedRectangle(
+              cornerRadius: WorkspaceSidebarMetrics.dropHighlightCornerRadius, style: .continuous
+            )
+            .fill(Color.accentColor.opacity(WorkspaceSidebarMetrics.rootDropHighlightFillOpacity))
+          )
+          .padding(WorkspaceSidebarMetrics.rootDropHighlightInset)
+          .allowsHitTesting(false)
+        }
+      }
+      .animation(.easeOut(duration: 0.12), value: isRootDropTargeted)
       .frame(maxWidth: .infinity, maxHeight: .infinity)
 
       if !recentFolders.isEmpty {
@@ -1048,6 +1077,12 @@ private enum WorkspaceSidebarMetrics {
   // tuned by eye; adjust if the highlight leaves a gap or overflows the row.
   static let dropHighlightVerticalExpansion: CGFloat = 8
   static let dropHighlightHorizontalExpansion: CGFloat = 5
+
+  // Accent wash + border shown over the whole sidebar while a drag targets the
+  // workspace root (the empty area), so dropping there reads as adding to the root.
+  static let rootDropHighlightInset: CGFloat = 4
+  static let rootDropHighlightFillOpacity: Double = 0.1
+  static let rootDropHighlightBorderWidth: CGFloat = 2
 
   // Drag preview pill shown while an entry is being dragged.
   static let dragPreviewSpacing: CGFloat = 6
