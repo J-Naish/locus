@@ -224,6 +224,14 @@ struct WorkspaceSidebarView: View {
           }
         )
       }
+      // Dropping files into the empty area below the rows imports into the
+      // workspace root. Folder rows keep their own drop destinations; this only
+      // claims the area no row occupies (see WorkspaceSidebarRootDropTarget).
+      .overlay {
+        WorkspaceSidebarRootDropTarget { urls in
+          handleDrop(urls, onto: rootEntry)
+        }
+      }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
 
       if !recentFolders.isEmpty {
@@ -946,6 +954,211 @@ private final class WorkspaceSidebarEmptyAreaClickHandlerView: NSView {
   }
 
   private func findSidebarTableView() -> NSTableView? {
+    locusNearbySidebarTableView()
+  }
+}
+
+/// Accepts file-URL drops on the empty area below the sidebar rows and routes
+/// them to the workspace root. The List's empty area is not a reliable SwiftUI
+/// drop target (the same reason `WorkspaceSidebarEmptyAreaClickHandler` uses an
+/// AppKit seam), so this transparent overlay claims it directly. Crucially its
+/// `hitTest` returns `nil` over any row, so folder rows keep their own drop
+/// destinations and a drag there falls straight through to the row underneath.
+private struct WorkspaceSidebarRootDropTarget: NSViewRepresentable {
+  let onDrop: ([URL]) -> Void
+
+  func makeNSView(context: Context) -> WorkspaceSidebarRootDropTargetView {
+    let view = WorkspaceSidebarRootDropTargetView()
+    view.onDrop = onDrop
+    return view
+  }
+
+  func updateNSView(_ nsView: WorkspaceSidebarRootDropTargetView, context: Context) {
+    nsView.onDrop = onDrop
+    nsView.resolveTableViewSoon()
+  }
+
+  static func dismantleNSView(_ nsView: WorkspaceSidebarRootDropTargetView, coordinator: ()) {
+    nsView.invalidate()
+  }
+}
+
+private final class WorkspaceSidebarRootDropTargetView: NSView {
+  var onDrop: ([URL]) -> Void = { _ in }
+  private weak var tableView: NSTableView?
+  private var didRegisterForDrags = false
+  private var isDropTargeted = false {
+    didSet {
+      if oldValue != isDropTargeted {
+        needsDisplay = true
+      }
+    }
+  }
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    guard window != nil else {
+      tableView = nil
+      return
+    }
+
+    if !didRegisterForDrags {
+      registerForDraggedTypes([.fileURL])
+      didRegisterForDrags = true
+    }
+    resolveTableViewSoon()
+  }
+
+  func invalidate() {
+    tableView = nil
+  }
+
+  func resolveTableViewSoon() {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else {
+        return
+      }
+
+      tableView = locusNearbySidebarTableView()
+    }
+  }
+
+  // Claim only the empty area (no row under the point) so rows keep their own
+  // drop destinations and every non-drag event there still passes through.
+  override func hitTest(_ point: NSPoint) -> NSView? {
+    isInEmptyListArea(convert(point, from: superview)) ? self : nil
+  }
+
+  private func isInEmptyListArea(_ pointInSelf: NSPoint) -> Bool {
+    guard bounds.contains(pointInSelf) else {
+      return false
+    }
+
+    // Only claim a drop when we can positively confirm the point is in the empty
+    // area below the rows. If the table can't be resolved, or the point is outside
+    // it, decline (return false) so the drop falls through rather than risk
+    // routing a row drop to the root — misfiling an item is worse than a drop that
+    // doesn't take. This mirrors WorkspaceSidebarEmptyAreaClickHandler's check.
+    guard let tableView = tableView ?? locusNearbySidebarTableView() else {
+      return false
+    }
+
+    self.tableView = tableView
+    let pointInTable = tableView.convert(pointInSelf, from: self)
+    guard tableView.bounds.contains(pointInTable) else {
+      return false
+    }
+
+    return tableView.row(at: pointInTable) == -1
+  }
+
+  override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+    dragOperation(for: sender)
+  }
+
+  override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+    dragOperation(for: sender)
+  }
+
+  override func draggingExited(_ sender: NSDraggingInfo?) {
+    isDropTargeted = false
+  }
+
+  override func draggingEnded(_ sender: NSDraggingInfo) {
+    isDropTargeted = false
+  }
+
+  override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+    canReadFileURLs(from: sender)
+  }
+
+  override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+    isDropTargeted = false
+    let urls = fileURLs(from: sender)
+    guard !urls.isEmpty else {
+      return false
+    }
+
+    onDrop(urls)
+    return true
+  }
+
+  private func dragOperation(for sender: NSDraggingInfo) -> NSDragOperation {
+    // Hot path (fires on every draggingUpdated): check readability without
+    // materializing the URL array; the real URLs are read only on drop.
+    guard canReadFileURLs(from: sender) else {
+      isDropTargeted = false
+      return []
+    }
+
+    isDropTargeted = true
+    // The drop's real move-vs-copy is decided downstream from whether each URL is
+    // already inside the workspace; honor whatever the source allows for the badge.
+    let sourceMask = sender.draggingSourceOperationMask
+    if sourceMask.contains(.copy) {
+      return .copy
+    }
+    if sourceMask.contains(.move) {
+      return .move
+    }
+    if sourceMask.contains(.generic) {
+      return .generic
+    }
+    return .copy
+  }
+
+  private func canReadFileURLs(from sender: NSDraggingInfo) -> Bool {
+    let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+    return sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: options)
+  }
+
+  private func fileURLs(from sender: NSDraggingInfo) -> [URL] {
+    let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+    let objects = sender.draggingPasteboard.readObjects(
+      forClasses: [NSURL.self], options: options)
+    return (objects as? [URL]) ?? []
+  }
+
+  override func draw(_ dirtyRect: NSRect) {
+    super.draw(dirtyRect)
+    guard isDropTargeted else {
+      return
+    }
+
+    let inset = bounds.insetBy(
+      dx: WorkspaceSidebarMetrics.rootDropBorderInset,
+      dy: WorkspaceSidebarMetrics.rootDropBorderInset)
+    let path = NSBezierPath(
+      roundedRect: inset,
+      xRadius: WorkspaceSidebarMetrics.dropHighlightCornerRadius,
+      yRadius: WorkspaceSidebarMetrics.dropHighlightCornerRadius)
+    path.lineWidth = WorkspaceSidebarMetrics.rootDropBorderWidth
+    NSColor.controlAccentColor.setStroke()
+    path.stroke()
+  }
+}
+
+extension NSView {
+  fileprivate func descendantTableViews() -> [NSTableView] {
+    var result: [NSTableView] = []
+    var stack = subviews
+
+    while let view = stack.popLast() {
+      if let tableView = view as? NSTableView {
+        result.append(tableView)
+      }
+
+      stack.append(contentsOf: view.subviews)
+    }
+
+    return result
+  }
+
+  /// The sidebar's backing `NSTableView` nearest this marker view: the smallest
+  /// table whose frame overlaps the marker, in the same window. Used by the
+  /// empty-area click and root-drop overlays, which both sit over the List but
+  /// need the table to tell the empty area from the rows.
+  fileprivate func locusNearbySidebarTableView() -> NSTableView? {
     guard let window, let contentView = window.contentView else {
       return nil
     }
@@ -968,23 +1181,6 @@ private final class WorkspaceSidebarEmptyAreaClickHandlerView: NSView {
       .min { lhs, rhs in
         lhs.convert(lhs.bounds, to: nil).area < rhs.convert(rhs.bounds, to: nil).area
       }
-  }
-}
-
-extension NSView {
-  fileprivate func descendantTableViews() -> [NSTableView] {
-    var result: [NSTableView] = []
-    var stack = subviews
-
-    while let view = stack.popLast() {
-      if let tableView = view as? NSTableView {
-        result.append(tableView)
-      }
-
-      stack.append(contentsOf: view.subviews)
-    }
-
-    return result
   }
 }
 
@@ -1030,6 +1226,11 @@ private enum WorkspaceSidebarMetrics {
   // tuned by eye; adjust if the highlight leaves a gap or overflows the row.
   static let dropHighlightVerticalExpansion: CGFloat = 8
   static let dropHighlightHorizontalExpansion: CGFloat = 5
+
+  // Accent border drawn around the sidebar while a file drag hovers the empty
+  // area, signaling that dropping there lands in the workspace root.
+  static let rootDropBorderInset: CGFloat = 2
+  static let rootDropBorderWidth: CGFloat = 2
 
   // Drag preview pill shown while an entry is being dragged.
   static let dragPreviewSpacing: CGFloat = 6
