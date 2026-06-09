@@ -12,9 +12,11 @@ the whole file into a Swift `String`, while files above a 64 MB limit fell back
 to a separate virtualized viewer. Maintaining two engines was costly, and the
 string-backed editor could not open very large files or stream them efficiently.
 
-A virtualized engine was built to handle any size: a flipped `NSView` that draws
-only the visible band with Core Text, backed by the Rust `TextBuffer` (a
-piece-tree the file is memory-mapped into). Over successive slices it reached
+A single virtualized engine was built that renders a file of any size by drawing
+only the visible band with Core Text (a flipped `NSView`), backed by the Rust
+`TextBuffer` the file is read into. Editing is bounded by an in-memory size cap;
+larger files open read-only in that same engine (see the Decision below). Over
+successive slices it reached
 parity for the prototype's needs — editing, international input (IME), undo/redo,
 cut/copy/paste, save in the original encoding, soft wrap, line numbers, word and
 line selection (locale-aware), a blinking caret, and range-based VoiceOver.
