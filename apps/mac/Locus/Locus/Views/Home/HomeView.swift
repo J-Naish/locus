@@ -1119,6 +1119,9 @@ private struct WorkspaceBrowserView: View {
   @State private var gitStatusRefreshGeneration: UInt64 = 0
   @State private var gitMetadataMonitor = GitRepositoryMetadataMonitor()
   @State private var gitMetadataMonitorGeneration: UInt64 = 0
+  // Recursively watches the workspace tree so an external change inside a
+  // subfolder (any depth, even while Locus is frontmost) refreshes the sidebar.
+  @State private var workspaceTreeMonitor = WorkspaceTreeMonitor()
   @State private var gitRepositoryRootURL: URL?
   @State private var workspaceUndoErrorMessage: String?
   @State private var isWorkspaceUndoErrorPresented = false
@@ -1196,12 +1199,10 @@ private struct WorkspaceBrowserView: View {
         highlightedEntryID: sidebarHighlight,
         shortcutActions: shortcutActions,
         actions: sidebarActions,
-        onItemCreated: {
-          requestGitStatusRefresh()
-          // A new item created in an expanded subfolder is invisible to the
-          // root-only directory monitor; reload expanded children to show it.
-          requestSidebarChildReload()
-        },
+        // Creation reloads its target subfolder locally (the sidebar's
+        // refreshCreationParentIfNeeded); only Git status needs a nudge here.
+        // A global child reload would redundantly re-list every expanded folder.
+        onItemCreated: requestGitStatusRefresh,
         dropItems: handleSidebarDrop,
         childReloadToken: sidebarChildReloadToken,
         onVisibleEntriesChange: updateSidebarVisibleEntries
@@ -1249,6 +1250,9 @@ private struct WorkspaceBrowserView: View {
     .task(id: gitMetadataMonitorKey) {
       await refreshGitMetadataMonitoring()
     }
+    .task(id: folderURL.locusStandardizedPath) {
+      startWorkspaceTreeMonitoring()
+    }
     .onChange(of: scenePhase) { _, newPhase in
       guard newPhase == .active else {
         return
@@ -1263,6 +1267,7 @@ private struct WorkspaceBrowserView: View {
     }
     .onDisappear {
       gitMetadataMonitor.stopMonitoring()
+      workspaceTreeMonitor.stopMonitoring()
       clearWorkspaceUndoActions()
     }
     .focusedSceneValue(\.workspaceNavigationCommands, workspaceNavigationCommands)
@@ -1982,6 +1987,17 @@ private struct WorkspaceBrowserView: View {
 
   private func requestGitMetadataMonitorRefresh() {
     gitMetadataMonitorGeneration &+= 1
+  }
+
+  private func startWorkspaceTreeMonitoring() {
+    workspaceTreeMonitor.startMonitoring(folderURL) {
+      // An external change anywhere in the tree (any depth, even while Locus is
+      // frontmost) reloads the expanded subfolders the root monitor doesn't watch
+      // and refreshes Git status. The stream ignores the app's own edits, which
+      // already refresh directly.
+      requestSidebarChildReload()
+      requestGitStatusRefresh()
+    }
   }
 
   private var sidebarHighlight: Binding<WorkspaceEntry.ID?> {
