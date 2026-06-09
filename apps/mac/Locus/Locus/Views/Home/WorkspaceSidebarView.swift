@@ -26,6 +26,38 @@ extension GitWorkspaceChangeKind {
       return "ignored"
     }
   }
+
+  /// A compact, color-independent status letter (Xcode-style "M"/"A") so the
+  /// change state reads without relying on text color alone — important for
+  /// contrast and color-vision differences. `ignored` has no letter; it is
+  /// conveyed by dimming the row instead.
+  fileprivate var sidebarStatusLetter: String? {
+    switch self {
+    case .modified:
+      return "M"
+    case .added:
+      return "A"
+    case .ignored:
+      return nil
+    }
+  }
+}
+
+/// Trailing status glyph for a sidebar row. Pairs the Git text color with a
+/// distinct letter shape so modified vs. added is distinguishable without color.
+private struct WorkspaceSidebarGitStatusBadge: View {
+  let gitStatus: GitWorkspaceChangeKind?
+
+  var body: some View {
+    if let gitStatus, let letter = gitStatus.sidebarStatusLetter {
+      Text(letter)
+        .font(.caption2.weight(.semibold))
+        .monospaced()
+        .foregroundStyle(gitStatus.sidebarTextColor)
+        // The row's merged accessibility label already states the change kind.
+        .accessibilityHidden(true)
+    }
+  }
 }
 
 struct WorkspaceSidebarView: View {
@@ -421,19 +453,64 @@ struct WorkspaceSidebarView: View {
     publishVisibleEntries()
   }
 
-  /// Invalidates cached children after a move/import (the root reload doesn't
-  /// touch subfolder caches) and reloads the folders that are currently
-  /// expanded. Collapsed folders simply lose their stale cache and reload fresh
-  /// the next time they are expanded.
+  /// Refreshes the children of every currently-expanded folder after an external
+  /// change, a move/import, or app reactivation (the root reload doesn't touch
+  /// subfolder caches). Visible folders refresh *in place* — their current
+  /// children stay on screen until the new listing arrives — so the subtree never
+  /// flashes empty, which matters because reactivation can fire on every app
+  /// switch. Collapsed (non-visible) folders drop their stale cache and reload
+  /// fresh the next time they are expanded.
   private func reloadExpandedChildren() {
+    // Capture the visible expanded folders before mutating state; the recursion
+    // reads the existing child snapshots.
     let entriesToReload = expandedDirectoryEntries()
+    let visibleExpandedIDs = Set(entriesToReload.map(\.id))
+
     expansionGeneration &+= 1
     cancelAllChildLoads()
-    childStates.removeAll()
+    // Keep the visible expanded folders' children on screen; drop everything else
+    // so a re-expanded folder reloads fresh rather than showing a stale cache.
+    childStates = childStates.filter { visibleExpandedIDs.contains($0.key) }
     publishVisibleEntries()
 
     for entry in entriesToReload {
-      loadChildrenIfNeeded(for: entry)
+      refreshLoadedChild(for: entry)
+    }
+  }
+
+  /// Re-lists an expanded folder while leaving its current children on screen,
+  /// swapping in the new listing only once it arrives and only if it differs.
+  /// Unlike `loadChildrenIfNeeded`, it refreshes a folder that is already
+  /// `.loaded` without first clearing it, so a reload never flashes empty.
+  private func refreshLoadedChild(for entry: WorkspaceEntry) {
+    let generation = expansionGeneration
+    let loadToken = UUID()
+    childLoadTokens[entry.id] = loadToken
+    childLoadTasks[entry.id] = Task { @MainActor in
+      defer {
+        if childLoadTokens[entry.id] == loadToken {
+          childLoadTasks[entry.id] = nil
+          childLoadTokens[entry.id] = nil
+        }
+      }
+
+      do {
+        let snapshot = try await actions.loadFolderChildren(entry.url)
+        guard !Task.isCancelled,
+          generation == expansionGeneration,
+          expandedFolderIDs.contains(entry.id),
+          childLoadTokens[entry.id] == loadToken,
+          childStates[entry.id] != .loaded(snapshot)
+        else {
+          return
+        }
+
+        childStates[entry.id] = .loaded(snapshot)
+        publishVisibleEntries()
+      } catch {
+        // Keep the existing children on a refresh failure; the next trigger retries.
+        return
+      }
     }
   }
 
@@ -1292,6 +1369,8 @@ private struct WorkspaceSidebarEntryRow: View {
         .foregroundStyle(gitStatus?.sidebarTextColor ?? .primary)
 
       Spacer(minLength: 0)
+
+      WorkspaceSidebarGitStatusBadge(gitStatus: gitStatus)
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .contentShape(Rectangle())
@@ -1393,6 +1472,8 @@ private struct WorkspaceSidebarDragPreview: View {
       Text(entry.name)
         .lineLimit(1)
         .foregroundStyle(gitStatus?.sidebarTextColor ?? .primary)
+
+      WorkspaceSidebarGitStatusBadge(gitStatus: gitStatus)
     }
     .padding(.horizontal, WorkspaceSidebarMetrics.dragPreviewHorizontalPadding)
     .padding(.vertical, WorkspaceSidebarMetrics.dragPreviewVerticalPadding)

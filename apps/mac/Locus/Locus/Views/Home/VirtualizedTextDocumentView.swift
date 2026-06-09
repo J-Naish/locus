@@ -1971,6 +1971,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // switch), so completion must act on the buffer that was actually saved and
     // route to the entry that requested it — never the current one.
     let savedBuffer = buffer
+    // Revision at save start. Edits to this buffer are paused for the write's
+    // duration, so it normally still matches at completion; the check lets the
+    // completion decline to mark *newer*, not-yet-written content as saved if the
+    // buffer somehow diverged (e.g. a reopened cached buffer edited after this
+    // view was torn down mid-save).
+    let startRevision = buffer.revision
     let pending = SendableTextBuffer(buffer)
     let store = bufferStore
     let completion = onSaveCompletion
@@ -1988,38 +1994,52 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       } catch {
         result = .failure(error)
       }
-      self?.finishSave(result, savedBuffer: savedBuffer, completion: completion)
+      // View-independent: the disk write finished, so always record the saved
+      // state and notify the host — even if SwiftUI tore down this representable
+      // mid-write. Otherwise markSaved, the fingerprint update, the dirty mirror,
+      // and save-error reporting would be silently dropped (leaving the cached
+      // buffer stuck dirty or provoking a false external-change conflict later).
+      Self.completeSave(
+        result, savedBuffer: savedBuffer, startRevision: startRevision, completion: completion)
+      // Live-view cleanup: clear the per-buffer in-flight mark so edits re-enable,
+      // and repaint. Skipped harmlessly when the view is already gone.
+      self?.finishSaveOnView(savedBuffer: savedBuffer)
     }
   }
 
-  /// Main-actor continuation after the background write. Marks the buffer that was
-  /// saved (not whatever the view shows now) and reports to the save's own
-  /// completion. Live view state (`isSaving`, dirty, repaint) is touched only if
-  /// that buffer is still the current one — a buffer swap during the save already
-  /// reset `isSaving` and must not be clobbered.
-  private func finishSave(
+  /// View-independent save completion. Runs after the background write whether or
+  /// not the text view still exists, so a finished write always updates the saved
+  /// buffer and reports to the save's own completion. Marking "saved" is withheld
+  /// when the buffer diverged from the written revision, so newer, unwritten
+  /// content is never recorded as on disk.
+  @MainActor
+  static func completeSave(
     _ result: Result<DocumentFileFingerprint?, Error>,
     savedBuffer: TextBuffer,
+    startRevision: UInt64,
     completion: ((Result<DocumentFileFingerprint?, Error>) -> Void)?
   ) {
-    // Clear the in-flight mark and learn whether the buffer is unchanged since the
-    // write began. Edits are paused while a buffer saves, so it normally is; the
-    // check keeps a buffer that somehow diverged *dirty* rather than marking its
-    // newer, not-yet-written content as saved (which would silently lose edits).
-    let savedContentStillCurrent = saveTracker.finish(savedBuffer)
     switch result {
     case .success:
-      if savedContentStillCurrent {
+      if savedBuffer.revision == startRevision {
         savedBuffer.markSaved()
       }
     case .failure:
       NSSound.beep()
     }
+    completion?(result)
+  }
+
+  /// Live-view continuation after the write: clears the per-buffer in-flight mark
+  /// so edits re-enable, and repaints if the saved buffer is still the one shown.
+  /// The saved-state and host-notification side effects already ran in
+  /// `completeSave`, so this is safe to skip entirely when the view is gone.
+  private func finishSaveOnView(savedBuffer: TextBuffer) {
+    saveTracker.finish(savedBuffer)
     if savedBuffer === editableBuffer {
       notifyDirtyChanged()
       invalidateVisibleArea()
     }
-    completion?(result)
   }
 
   /// Test seam: marks the current buffer as having a save in flight — the same
@@ -3027,12 +3047,13 @@ private struct SendableTextBuffer: @unchecked Sendable {
   }
 }
 
-/// Renders nothing for a short grace period, then a spinner. A fast load — the
-/// overwhelming majority — finishes within that period and removes this view
-/// before the timer fires, so no spinner flashes; only a genuinely slow open (a
-/// large file's index scan or a big read) shows feedback. Mirrors the sidebar's
-/// delayed loading indicator so loading feel is consistent across the app.
-private struct DelayedProgressView: View {
+/// A progress spinner that only appears after a short grace period, so a load
+/// that finishes quickly never flashes a spinner. If the load completes first,
+/// this view leaves the tree and its `.task` is cancelled before the sleep
+/// returns, so the spinner stays hidden. Shared by the text editor and every
+/// document preview surface (image, PDF, media, Quick Look) so loading feel is
+/// consistent and mirrors the sidebar's delayed indicator.
+struct DelayedProgressView: View {
   /// Matches `WorkspaceSidebarMetrics.loadingIndicatorDelay`.
   var delay: Duration = .milliseconds(180)
   @State private var isVisible = false
@@ -3045,8 +3066,6 @@ private struct DelayedProgressView: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .task {
-      // If the load finishes first, this view leaves the tree and the task is
-      // cancelled before the sleep returns, so the spinner never appears.
       guard (try? await Task.sleep(for: delay)) != nil else { return }
       isVisible = true
     }

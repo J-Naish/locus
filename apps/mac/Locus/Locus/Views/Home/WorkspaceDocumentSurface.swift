@@ -11,6 +11,10 @@ struct WorkspaceDocumentSurface: View {
   let mediaDocumentStore: any MediaDocumentStoring
   let quickLookDocumentStore: any QuickLookDocumentStoring
   let onTextInputFocusChange: (Bool) -> Void
+  /// Called after the open document is saved to disk so the host can refresh
+  /// dependent UI — notably Git status, which should turn a tracked file
+  /// "modified" once an edit lands rather than waiting for another trigger.
+  let onDocumentSaved: () -> Void
 
   @State private var saveErrorMessage: String?
   @State private var knownDocumentFingerprint: DocumentFileFingerprint?
@@ -134,11 +138,21 @@ struct WorkspaceDocumentSurface: View {
 
       if documentConflict {
         HStack(spacing: 12) {
-          Label("This file changed on disk.", systemImage: "exclamationmark.triangle")
-            .font(.caption)
+          Label {
+            VStack(alignment: .leading, spacing: 2) {
+              Text("This file changed on disk.")
+              // Spell out the consequence of keeping edits so the choice isn't
+              // ambiguous: the in-memory version wins on the next save.
+              Text("Keeping your edits will overwrite that change on the next save.")
+                .foregroundStyle(.secondary)
+            }
+          } icon: {
+            Image(systemName: "exclamationmark.triangle")
+          }
+          .font(.caption)
           Spacer(minLength: 0)
           // Dismiss the warning and keep editing the in-memory version; the
-          // divergence from disk is resolved on the next save.
+          // divergence from disk is resolved (by overwriting it) on the next save.
           Button("Keep Editing") { documentConflict = false }
           Button("Reload from Disk") { reloadDocumentDiscardingEdits() }
         }
@@ -269,6 +283,9 @@ struct WorkspaceDocumentSurface: View {
       // Keep the retained buffer's baseline current so switching back later does
       // not mistake our own save for an external change.
       openDocuments.setFingerprint(fingerprint, forKey: entry.url.locusStandardizedPath)
+      // An edit just landed on disk; let the host refresh Git status so the
+      // sidebar reflects the new "modified" state without another trigger.
+      onDocumentSaved()
     case .failure(let error):
       saveErrorMessage = error.localizedDescription
     }
@@ -370,8 +387,7 @@ private struct ImageDocumentSurface: View {
     VStack(alignment: .leading, spacing: 0) {
       switch loadState {
       case .loading:
-        Color.clear
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+        DelayedProgressView()
       case .loaded(let image):
         Image(nsImage: image)
           .resizable()
@@ -438,8 +454,7 @@ private struct PDFDocumentSurface: View {
     VStack(alignment: .leading, spacing: 0) {
       switch loadState {
       case .loading:
-        Color.clear
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+        DelayedProgressView()
       case .loaded(let document):
         PDFDocumentView(document: document)
           .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -528,8 +543,7 @@ private struct MediaDocumentSurface: View {
     VStack(alignment: .leading, spacing: 0) {
       switch loadState {
       case .loading:
-        Color.clear
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+        DelayedProgressView()
       case .loaded(let document):
         MediaPlayerView(player: document.player)
           .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -640,8 +654,7 @@ private struct QuickLookDocumentSurface: View {
     VStack(alignment: .leading, spacing: 0) {
       switch loadState {
       case .loading:
-        Color.clear
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+        DelayedProgressView()
       case .loaded(let document):
         QuickLookDocumentView(url: document.url)
           .frame(maxWidth: .infinity, maxHeight: .infinity)

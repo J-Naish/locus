@@ -779,7 +779,7 @@ struct HomeView: View {
   @MainActor
   private func importWorkspaceItems(
     _ planned: [WorkspacePlannedMove]
-  ) -> WorkspaceMoveExecution {
+  ) async -> WorkspaceMoveExecution {
     guard let folderURL = workspaceState.folderURL else {
       return WorkspaceMoveExecution(failure: .noActiveWorkspace)
     }
@@ -791,7 +791,14 @@ struct HomeView: View {
       }
     }
 
-    let execution = WorkspaceItemMove.copy(planned)
+    // Import copies bytes, so a large external file or folder would freeze the UI
+    // if copied on the main actor (unlike move/trash/restore, which are
+    // same-volume metadata renames). Run the copy off-main; security-scoped access
+    // is process-wide and stays open across the await. State updates resume on the
+    // main actor once the copy returns.
+    let execution = await Task.detached {
+      WorkspaceItemMove.copy(planned)
+    }.value
     finishWorkspaceItemMove(execution.moved, folderURL: folderURL)
     return execution
   }
@@ -985,7 +992,9 @@ struct WorkspaceActions {
   let trashItemsAtURLs: ([URL]) throws -> [WorkspaceDeletedItem]
   let restoreDeletedItems: ([WorkspaceDeletedItem]) throws -> [URL]
   let moveItems: ([WorkspacePlannedMove]) -> WorkspaceMoveExecution
-  let importItems: ([WorkspacePlannedMove]) -> WorkspaceMoveExecution
+  // Async because importing copies bytes (a large external file/folder), unlike
+  // the same-volume rename that backs move/trash/restore.
+  let importItems: ([WorkspacePlannedMove]) async -> WorkspaceMoveExecution
   let loadFolderChildren: (URL) async throws -> WorkspaceSnapshot
   let performOpenAction: (WorkspaceEntryOpenAction) -> Void
 }
@@ -1242,6 +1251,10 @@ private struct WorkspaceBrowserView: View {
 
       requestGitStatusRefresh()
       requestGitMetadataMonitorRefresh()
+      // The directory monitor only watches the current folder, so a change an
+      // agent made inside an expanded subfolder while Locus was in the background
+      // would stay stale. Reload the expanded subtree on reactivation to catch up.
+      requestSidebarChildReload()
     }
     .onDisappear {
       gitMetadataMonitor.stopMonitoring()
@@ -1576,7 +1589,7 @@ private struct WorkspaceBrowserView: View {
       }
 
       if resolution.unresolved.isEmpty {
-        executeResolvedDrop(resolution)
+        Task { await executeResolvedDrop(resolution) }
       } else {
         pendingDrop = resolution
       }
@@ -1619,7 +1632,7 @@ private struct WorkspaceBrowserView: View {
 
     if resolution.unresolved.isEmpty {
       pendingDrop = nil
-      executeResolvedDrop(resolution)
+      Task { await executeResolvedDrop(resolution) }
     } else {
       pendingDrop = resolution
     }
@@ -1645,11 +1658,11 @@ private struct WorkspaceBrowserView: View {
     FileManager.default.fileExists(atPath: url.path(percentEncoded: false))
   }
 
-  private func executeResolvedDrop(_ resolution: PendingDropResolution) {
+  private func executeResolvedDrop(_ resolution: PendingDropResolution) async {
     let moveExecution =
       resolution.moveResolved.isEmpty ? nil : actions.moveItems(resolution.moveResolved)
     let importExecution =
-      resolution.copyResolved.isEmpty ? nil : actions.importItems(resolution.copyResolved)
+      resolution.copyResolved.isEmpty ? nil : await actions.importItems(resolution.copyResolved)
 
     // Register undo for whatever actually landed, even if a later item failed,
     // so a partially-successful drop is still reversible.
@@ -2034,7 +2047,8 @@ private struct WorkspaceBrowserView: View {
           quickLookDocumentStore: quickLookDocumentStore,
           onTextInputFocusChange: { isFocused in
             isDocumentTextInputFocused = isFocused
-          }
+          },
+          onDocumentSaved: requestGitStatusRefresh
         )
         .navigationSplitViewColumnWidth(
           min: LocusWindowMetrics.documentSurfaceMinimumWidth,

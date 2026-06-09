@@ -1631,4 +1631,79 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertTrue(tracker.finish(first))
     XCTAssertTrue(tracker.isSaving(second))  // finishing one leaves the other in flight
   }
+
+  // MARK: completeSave (survives view teardown)
+
+  @MainActor
+  func testCompleteSaveMarksSavedAndNotifiesWithoutALiveView() throws {
+    // The disk write finished. Even if SwiftUI tore down the text view mid-save,
+    // the buffer must be marked saved and the host completion must still fire —
+    // these run independently of the (possibly gone) view.
+    let buffer = try TextBuffer.open(bytes: Data("abc".utf8))
+    try buffer.insert("X", atUTF16: 3)  // make it dirty
+    XCTAssertTrue(buffer.isDirty)
+
+    var reportedSuccess: [Bool] = []
+    LineRenderingTextView.completeSave(
+      .success(nil),
+      savedBuffer: buffer,
+      startRevision: buffer.revision,
+      completion: { result in
+        if case .success = result {
+          reportedSuccess.append(true)
+        } else {
+          reportedSuccess.append(false)
+        }
+      }
+    )
+
+    XCTAssertFalse(buffer.isDirty)  // marked saved despite having no view
+    XCTAssertEqual(reportedSuccess, [true])  // host was notified of the success
+  }
+
+  @MainActor
+  func testCompleteSaveWithholdsMarkSavedWhenBufferDivergedFromWrite() throws {
+    // The buffer changed after the write captured its revision (e.g. a reopened
+    // cached buffer edited after the saving view was torn down). Its newer content
+    // must not be recorded as saved, so it stays dirty — but the host is still
+    // notified so the written fingerprint is recorded.
+    let buffer = try TextBuffer.open(bytes: Data("abc".utf8))
+    try buffer.insert("X", atUTF16: 3)
+    let startRevision = buffer.revision
+    try buffer.insert("Y", atUTF16: 4)  // diverges from the written revision
+    XCTAssertTrue(buffer.isDirty)
+
+    var notified = false
+    LineRenderingTextView.completeSave(
+      .success(nil),
+      savedBuffer: buffer,
+      startRevision: startRevision,
+      completion: { _ in notified = true }
+    )
+
+    XCTAssertTrue(buffer.isDirty)  // withheld → still dirty
+    XCTAssertTrue(notified)
+  }
+
+  @MainActor
+  func testCompleteSaveReportsFailureToCompletion() throws {
+    // A failed write surfaces to the host and leaves the buffer dirty.
+    let buffer = try TextBuffer.open(bytes: Data("abc".utf8))
+    try buffer.insert("X", atUTF16: 3)
+
+    var reportedFailure = false
+    LineRenderingTextView.completeSave(
+      .failure(CocoaError(.fileWriteNoPermission)),
+      savedBuffer: buffer,
+      startRevision: buffer.revision,
+      completion: { result in
+        if case .failure = result {
+          reportedFailure = true
+        }
+      }
+    )
+
+    XCTAssertTrue(reportedFailure)
+    XCTAssertTrue(buffer.isDirty)  // a failed write does not mark the buffer saved
+  }
 }
