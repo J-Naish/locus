@@ -127,6 +127,10 @@ final class WorkspaceTreeMonitor {
   }
 
   deinit {
+    // Backstop for the app-teardown path where `stopMonitoring()` did not run.
+    // No `queue` drain here: `deinit` must not block, and in the normal path
+    // `stopMonitoring()` already released the stream, so `stream` is nil and this
+    // is a no-op.
     Self.teardown(stream)
     pendingRefreshTask?.cancel()
   }
@@ -138,9 +142,12 @@ final class WorkspaceTreeMonitor {
 
     // `passUnretained`: the stream does not own `self`. Safe because the host view
     // calls `stopMonitoring()` (onDisappear / re-target) before the monitor can
-    // deallocate, and that invalidates the stream so no further callback fires.
-    // (An earlier `passRetained` + C release-callback variant crashed on the
-    // navigate→teardown path; this is the proven approach.)
+    // deallocate; that invalidates the stream and drains any in-flight callback off
+    // `queue` (see `stopMonitoring`) before releasing it, so no callback reads
+    // `self` after it is gone. (An earlier `passRetained` + C release-callback
+    // variant crashed: the stream's final Release re-entered `deinit`, which
+    // released the same stream again. The drain closes that race without the
+    // re-entrancy.)
     var context = FSEventStreamContext(
       version: 0,
       info: Unmanaged.passUnretained(self).toOpaque(),
@@ -185,7 +192,22 @@ final class WorkspaceTreeMonitor {
     monitorGeneration &+= 1
     pendingRefreshTask?.cancel()
     pendingRefreshTask = nil
-    Self.teardown(stream)
+    if let stream {
+      // Tear down with a queue drain so a callback already dispatched onto `queue`
+      // cannot read `self` after this monitor deallocates. Order matters:
+      //   Stop + Invalidate → the stream schedules no new callback onto `queue`.
+      //   queue.sync { }     → wait out any callback already running on the serial
+      //                        `queue`. It only bridges the path array and enqueues
+      //                        a main-actor Task (never blocks on main), so this
+      //                        drain returns promptly and cannot deadlock. `self`
+      //                        is still alive here, so that callback's unretained
+      //                        read stays valid.
+      //   Release            → now safe; no callback can be mid-read.
+      FSEventStreamStop(stream)
+      FSEventStreamInvalidate(stream)
+      queue.sync {}
+      FSEventStreamRelease(stream)
+    }
     stream = nil
     onChange = nil
   }
