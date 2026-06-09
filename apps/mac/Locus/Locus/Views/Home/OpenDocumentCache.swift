@@ -3,8 +3,11 @@ import Foundation
 /// Keeps recently opened text documents' live buffers alive across file switches,
 /// so unsaved edits survive navigating away and back — until the document is
 /// saved, reloaded, or evicted. Unsaved (dirty) buffers are always retained; clean
-/// buffers are evicted least-recently-used once the cache exceeds `maxRetained`,
-/// bounding how many memory-mapped files are held at once.
+/// buffers are evicted least-recently-used once the cache exceeds either the
+/// document count limit (`maxRetained`) or the total retained-bytes budget
+/// (`maxRetainedByteCount`), bounding both how many files and how much memory are
+/// held at once. The single most-recently-used document is always kept, so the
+/// active document is never dropped to satisfy the byte budget.
 ///
 /// Each entry also remembers the file fingerprint the buffer was last in sync with
 /// (at open or save), so switching back to an inactive document can detect an
@@ -29,8 +32,23 @@ final class OpenDocumentCache: ObservableObject {
   /// ones are evicted, so unsaved edits are never dropped to honor the limit.
   let maxRetained: Int
 
-  init(maxRetained: Int = 8) {
+  /// Total retained buffer bytes to stay under. A count limit alone lets a few
+  /// large files pin a lot of memory (the editable buffer cap is 256 MiB each, so
+  /// eight of them could hold ~2 GiB), so clean least-recently-used buffers are
+  /// also evicted once their combined byte length exceeds this budget. Dirty
+  /// buffers and the single most-recently-used document are kept regardless.
+  let maxRetainedByteCount: Int
+
+  /// Default total retained-bytes budget (see `maxRetainedByteCount`). Generously
+  /// holds many ordinary documents while capping the few-large-files worst case.
+  /// `nonisolated` so it can be used as an `init` default argument.
+  nonisolated static let defaultMaxRetainedByteCount = 128 * 1024 * 1024  // 128 MiB
+
+  init(
+    maxRetained: Int = 8, maxRetainedByteCount: Int = OpenDocumentCache.defaultMaxRetainedByteCount
+  ) {
     self.maxRetained = maxRetained
+    self.maxRetainedByteCount = maxRetainedByteCount
   }
 
   var count: Int { entries.count }
@@ -83,17 +101,25 @@ final class OpenDocumentCache: ObservableObject {
     entries.removeValue(forKey: key)
   }
 
+  private var totalRetainedByteCount: Int {
+    entries.values.reduce(0) { $0 + $1.buffer.byteLength }
+  }
+
   private func evictIfNeeded() {
-    while entries.count > maxRetained {
-      // Evict the least-recently-used clean entry; never drop unsaved edits.
+    while entries.count > maxRetained || totalRetainedByteCount > maxRetainedByteCount {
+      // Never evict the most-recently-used entry: it is the active document, and
+      // dropping it to honor the byte budget would defeat the cache. Among the
+      // rest, evict the least-recently-used clean entry; never drop unsaved edits.
+      let mostRecentlyUsedKey =
+        entries.max(by: { $0.value.lastUsedTick < $1.value.lastUsedTick })?.key
       guard
         let victim =
           entries
-          .filter({ !$0.value.buffer.isDirty })
+          .filter({ $0.key != mostRecentlyUsedKey && !$0.value.buffer.isDirty })
           .min(by: { $0.value.lastUsedTick < $1.value.lastUsedTick })?
           .key
       else {
-        break  // everything retained is dirty — keep it (bounded by edits in flight)
+        break  // only the active document and dirty buffers remain — keep them
       }
       entries.removeValue(forKey: victim)
     }

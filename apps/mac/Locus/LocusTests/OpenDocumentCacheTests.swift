@@ -90,4 +90,65 @@ final class OpenDocumentCacheTests: XCTestCase {
     XCTAssertNotNil(cache.cached(forKey: "c"))
     XCTAssertEqual(cache.count, 2)  // both kept despite maxRetained == 1
   }
+
+  /// A clean buffer whose UTF-8 byte length is exactly `byteCount` (ASCII fill).
+  private func makeBuffer(byteCount: Int) throws -> TextBuffer {
+    try makeBuffer(String(repeating: "a", count: max(byteCount, 1)))
+  }
+
+  func testEvictsCleanBuffersOverByteBudget() throws {
+    // Count limit is generous; only the byte budget should force eviction.
+    let cache = OpenDocumentCache(maxRetained: 100, maxRetainedByteCount: 300)
+    cache.store(
+      buffer: try makeBuffer(byteCount: 200), encoding: .utf8, fingerprint: nil, forKey: "a")
+    cache.store(
+      buffer: try makeBuffer(byteCount: 200), encoding: .utf8, fingerprint: nil, forKey: "b")
+
+    // a + b = 400 bytes > 300 → least-recently-used clean "a" is evicted.
+    XCTAssertNil(cache.cached(forKey: "a"))
+    XCTAssertNotNil(cache.cached(forKey: "b"))
+    XCTAssertEqual(cache.count, 1)
+  }
+
+  func testKeepsMostRecentlyStoredBufferEvenWhenAloneOverByteBudget() throws {
+    // The active document is never evicted to satisfy the byte budget.
+    let cache = OpenDocumentCache(maxRetained: 100, maxRetainedByteCount: 100)
+    cache.store(
+      buffer: try makeBuffer(byteCount: 500), encoding: .utf8, fingerprint: nil, forKey: "big")
+
+    XCTAssertNotNil(cache.cached(forKey: "big"))
+    XCTAssertEqual(cache.count, 1)
+  }
+
+  func testNeverEvictsDirtyBuffersToHonorByteBudget() throws {
+    let cache = OpenDocumentCache(maxRetained: 100, maxRetainedByteCount: 100)
+    cache.store(
+      buffer: try makeBuffer(String(repeating: "a", count: 200), dirty: true),
+      encoding: .utf8, fingerprint: nil, forKey: "a")
+    cache.store(
+      buffer: try makeBuffer(String(repeating: "b", count: 200), dirty: true),
+      encoding: .utf8, fingerprint: nil, forKey: "b")
+
+    // Both far exceed the budget but hold unsaved edits → both retained.
+    XCTAssertNotNil(cache.cached(forKey: "a"))
+    XCTAssertNotNil(cache.cached(forKey: "b"))
+    XCTAssertEqual(cache.count, 2)
+  }
+
+  func testByteBudgetEvictsLeastRecentlyUsedCleanBufferFirst() throws {
+    let cache = OpenDocumentCache(maxRetained: 100, maxRetainedByteCount: 250)
+    cache.store(
+      buffer: try makeBuffer(byteCount: 100), encoding: .utf8, fingerprint: nil, forKey: "a")
+    cache.store(
+      buffer: try makeBuffer(byteCount: 100), encoding: .utf8, fingerprint: nil, forKey: "b")
+    _ = cache.cached(forKey: "a")  // touch "a" → "b" becomes least-recently-used
+    cache.store(
+      buffer: try makeBuffer(byteCount: 100), encoding: .utf8, fingerprint: nil, forKey: "c")
+
+    // a + b + c = 300 > 250 → LRU clean "b" is evicted (a was touched, c is newest).
+    XCTAssertNotNil(cache.cached(forKey: "a"))
+    XCTAssertNil(cache.cached(forKey: "b"))
+    XCTAssertNotNil(cache.cached(forKey: "c"))
+    XCTAssertEqual(cache.count, 2)
+  }
 }
