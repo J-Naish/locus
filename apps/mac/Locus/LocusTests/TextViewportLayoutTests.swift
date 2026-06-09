@@ -1643,11 +1643,18 @@ final class TextViewportLayoutTests: XCTestCase {
     try buffer.insert("X", atUTF16: 3)  // make it dirty
     XCTAssertTrue(buffer.isDirty)
 
+    // A save is in flight, started by a view that is now gone. The shared tracker
+    // must be cleared by completion regardless, or this buffer stays paused forever.
+    let tracker = DocumentSaveTracker()
+    tracker.begin(buffer)
+    XCTAssertTrue(tracker.isSaving(buffer))
+
     var reportedSuccess: [Bool] = []
     LineRenderingTextView.completeSave(
       .success(nil),
       savedBuffer: buffer,
       startRevision: buffer.revision,
+      saveTracker: tracker,
       completion: { result in
         if case .success = result {
           reportedSuccess.append(true)
@@ -1659,6 +1666,7 @@ final class TextViewportLayoutTests: XCTestCase {
 
     XCTAssertFalse(buffer.isDirty)  // marked saved despite having no view
     XCTAssertEqual(reportedSuccess, [true])  // host was notified of the success
+    XCTAssertFalse(tracker.isSaving(buffer))  // in-flight mark cleared so edits re-enable
   }
 
   @MainActor
@@ -1678,6 +1686,7 @@ final class TextViewportLayoutTests: XCTestCase {
       .success(nil),
       savedBuffer: buffer,
       startRevision: startRevision,
+      saveTracker: DocumentSaveTracker(),
       completion: { _ in notified = true }
     )
 
@@ -1696,6 +1705,7 @@ final class TextViewportLayoutTests: XCTestCase {
       .failure(CocoaError(.fileWriteNoPermission)),
       savedBuffer: buffer,
       startRevision: buffer.revision,
+      saveTracker: DocumentSaveTracker(),
       completion: { result in
         if case .failure = result {
           reportedFailure = true

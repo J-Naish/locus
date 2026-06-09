@@ -250,12 +250,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// failure the error to surface.
   var onSaveCompletion: ((Result<DocumentFileFingerprint?, Error>) -> Void)?
 
-  /// Tracks which buffers have a background save in flight. It is keyed by the
-  /// buffer (not a per-view flag) so the edit pause survives a document
-  /// swap-and-return: the open-document cache hands back the *same* `TextBuffer`
-  /// when switching back to a file, and a per-view flag — reset on every swap —
-  /// could let an edit race the still-running off-main write.
-  private let saveTracker = DocumentSaveTracker()
+  /// Tracks which buffers have a background save in flight, keyed by the buffer so
+  /// the edit pause survives a document swap-and-return (the open-document cache
+  /// hands back the *same* `TextBuffer`). Production wires this to the shared
+  /// `DocumentSaveTracker.shared` in `makeNSView` so the pause also survives this
+  /// view being torn down and recreated mid-write; the default fresh instance keeps
+  /// tests isolated.
+  var saveTracker = DocumentSaveTracker()
 
   /// Whether the buffer currently shown has a save writing on a background thread.
   /// Buffer *mutations* are paused while true so the background read never races an
@@ -1981,6 +1982,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let store = bufferStore
     let completion = onSaveCompletion
     let encoding = saveEncoding
+    // Capture the (shared) tracker so completion can clear the in-flight mark even
+    // if this view is gone — never reach back through `self` for it.
+    let tracker = saveTracker
     Task { [weak self] in
       let result: Result<DocumentFileFingerprint?, Error>
       do {
@@ -2000,23 +2004,28 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       // and save-error reporting would be silently dropped (leaving the cached
       // buffer stuck dirty or provoking a false external-change conflict later).
       Self.completeSave(
-        result, savedBuffer: savedBuffer, startRevision: startRevision, completion: completion)
-      // Live-view cleanup: clear the per-buffer in-flight mark so edits re-enable,
-      // and repaint. Skipped harmlessly when the view is already gone.
+        result, savedBuffer: savedBuffer, startRevision: startRevision, saveTracker: tracker,
+        completion: completion)
+      // Live-view cleanup: repaint and re-report dirty state. The in-flight mark was
+      // already cleared in `completeSave`; this is skipped harmlessly if the view is
+      // already gone.
       self?.finishSaveOnView(savedBuffer: savedBuffer)
     }
   }
 
   /// View-independent save completion. Runs after the background write whether or
   /// not the text view still exists, so a finished write always updates the saved
-  /// buffer and reports to the save's own completion. Marking "saved" is withheld
-  /// when the buffer diverged from the written revision, so newer, unwritten
-  /// content is never recorded as on disk.
+  /// buffer, clears the buffer's in-flight-save mark, and reports to the save's own
+  /// completion. Clearing the mark here (rather than in the view-local continuation)
+  /// is what guarantees a torn-down view never leaves the shared tracker stuck
+  /// "saving". Marking "saved" is withheld when the buffer diverged from the written
+  /// revision, so newer, unwritten content is never recorded as on disk.
   @MainActor
   static func completeSave(
     _ result: Result<DocumentFileFingerprint?, Error>,
     savedBuffer: TextBuffer,
     startRevision: UInt64,
+    saveTracker: DocumentSaveTracker,
     completion: ((Result<DocumentFileFingerprint?, Error>) -> Void)?
   ) {
     switch result {
@@ -2027,15 +2036,17 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     case .failure:
       NSSound.beep()
     }
+    // Always clear the in-flight mark so edits re-enable, even if the originating
+    // view is gone; the shared tracker would otherwise pause this buffer forever.
+    saveTracker.finish(savedBuffer)
     completion?(result)
   }
 
-  /// Live-view continuation after the write: clears the per-buffer in-flight mark
-  /// so edits re-enable, and repaints if the saved buffer is still the one shown.
-  /// The saved-state and host-notification side effects already ran in
-  /// `completeSave`, so this is safe to skip entirely when the view is gone.
+  /// Live-view continuation after the write: repaints and re-reports dirty state if
+  /// the saved buffer is still the one shown. The saved-state, in-flight-mark clear,
+  /// and host-notification side effects already ran in `completeSave`, so this is
+  /// safe to skip entirely when the view is gone.
   private func finishSaveOnView(savedBuffer: TextBuffer) {
-    saveTracker.finish(savedBuffer)
     if savedBuffer === editableBuffer {
       notifyDirtyChanged()
       invalidateVisibleArea()
@@ -2742,6 +2753,11 @@ struct LargeTextViewport: NSViewRepresentable {
     scrollView.backgroundColor = .textBackgroundColor
 
     let documentView = LineRenderingTextView()
+    // Share the in-flight-save guard across editor views so a save started by a
+    // torn-down view still pauses edits in a freshly created one for the same
+    // cached buffer (keyed by buffer identity), preventing an edit from racing the
+    // background write.
+    documentView.saveTracker = .shared
     documentView.setAccessibilityIdentifier(backendAccessibilityIdentifier)
     documentView.setAccessibilityLabel(accessibilityLabel)
     documentView.syntax = syntax
@@ -3085,6 +3101,16 @@ struct DelayedProgressView: View {
 /// silently treat newer, unwritten content as on disk).
 @MainActor
 final class DocumentSaveTracker {
+  /// Process-wide shared tracker the editor uses in production. The in-flight-save
+  /// guard must survive the text view being torn down and *recreated* — not just
+  /// reused — while a slow write is still reading the cached buffer (e.g. switching
+  /// to a non-text document and back, or closing and reopening the file mid-save).
+  /// A per-view tracker would forget the save, letting the new view's edit race the
+  /// background read. Keying by globally-unique buffer identity makes one shared
+  /// instance correct, and `finish` always runs on completion, so no stale "saving"
+  /// entry outlives a write. Tests use their own instances for isolation.
+  static let shared = DocumentSaveTracker()
+
   private var revisionAtSaveStart: [ObjectIdentifier: UInt64] = [:]
 
   /// Whether `buffer` currently has a save in flight.
