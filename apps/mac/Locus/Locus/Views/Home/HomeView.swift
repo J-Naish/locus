@@ -1196,7 +1196,12 @@ private struct WorkspaceBrowserView: View {
         highlightedEntryID: sidebarHighlight,
         shortcutActions: shortcutActions,
         actions: sidebarActions,
-        onItemCreated: requestGitStatusRefresh,
+        onItemCreated: {
+          requestGitStatusRefresh()
+          // A new item created in an expanded subfolder is invisible to the
+          // root-only directory monitor; reload expanded children to show it.
+          requestSidebarChildReload()
+        },
         dropItems: handleSidebarDrop,
         childReloadToken: sidebarChildReloadToken,
         onVisibleEntriesChange: updateSidebarVisibleEntries
@@ -1433,6 +1438,9 @@ private struct WorkspaceBrowserView: View {
     }
     registerDeletedItemsUndo(deletedItems)
     requestGitStatusRefresh()
+    // The deleted item may live inside an expanded subfolder, which the root-only
+    // directory monitor never sees; reload expanded children so it disappears.
+    requestSidebarChildReload()
     return deletedItems
   }
 
@@ -1480,6 +1488,9 @@ private struct WorkspaceBrowserView: View {
         redoCreatedItem(kind: kind, deletedItem: deletedItem)
       }
       requestGitStatusRefresh()
+      // Reload expanded subfolder children too: an undone/redone create or delete
+      // can land inside a subfolder the root monitor does not watch.
+      requestSidebarChildReload()
     } catch {
       workspaceUndoErrorMessage = error.localizedDescription
       isWorkspaceUndoErrorPresented = true
@@ -1495,6 +1506,9 @@ private struct WorkspaceBrowserView: View {
 
       registerCreatedItemUndo(kind: kind, url: restoredURL)
       requestGitStatusRefresh()
+      // Reload expanded subfolder children too: an undone/redone create or delete
+      // can land inside a subfolder the root monitor does not watch.
+      requestSidebarChildReload()
     } catch {
       workspaceUndoErrorMessage = error.localizedDescription
       isWorkspaceUndoErrorPresented = true
@@ -1508,6 +1522,9 @@ private struct WorkspaceBrowserView: View {
         redoDeletedItems(restoredURLs)
       }
       requestGitStatusRefresh()
+      // Reload expanded subfolder children too: an undone/redone create or delete
+      // can land inside a subfolder the root monitor does not watch.
+      requestSidebarChildReload()
     } catch {
       workspaceUndoErrorMessage = error.localizedDescription
       isWorkspaceUndoErrorPresented = true
@@ -1529,6 +1546,9 @@ private struct WorkspaceBrowserView: View {
         sidebarSelectionState.setActiveEntryID(nil)
       }
       requestGitStatusRefresh()
+      // Reload expanded subfolder children too: an undone/redone create or delete
+      // can land inside a subfolder the root monitor does not watch.
+      requestSidebarChildReload()
     } catch {
       workspaceUndoErrorMessage = error.localizedDescription
       isWorkspaceUndoErrorPresented = true
