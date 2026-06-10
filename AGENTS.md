@@ -107,6 +107,8 @@ direction explicitly changes.
 
 User experience is the top priority: Locus must feel comfortable, responsive, calm, and native to use. Judge performance, weight, and polish work by its effect on that experience — pursue an optimization when it makes the product feel better to use, not for its own sake.
 
+Because the product exists to push UX and UI quality as far as it can go, large-scale refactoring in service of that goal is entirely acceptable — there is no penalty for reshaping existing structure when it clears the way for a better experience. Existing code carries no inherent weight: if rebuilding a subsystem, or even starting it over from scratch, is what genuinely raises product value, do it. Treat current implementations as the best attempt so far, not as something to preserve for its own sake. (This is about ambition, not churn: a rewrite should be driven by a concrete UX or quality gain, not restructuring for its own sake, and it does not override the change-hygiene and testing rules below.)
+
 ## Coding Style
 
 - Prefer immutable data and explicit replacement over hidden shared mutation.
