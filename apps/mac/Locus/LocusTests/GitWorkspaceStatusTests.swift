@@ -391,6 +391,27 @@ final class GitWorkspaceStatusTests: XCTestCase {
     XCTAssertLessThan(Date().timeIntervalSince(start), 0.5)
   }
 
+  func testProviderStopsPromptlyWhenCallerIsCancelled() async throws {
+    // A cancelled status request must terminate the git process and return
+    // right away — not run out the (here deliberately long) timeout.
+    let scriptURL = try makeExecutableScript("sleep 5")
+    let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 10)
+
+    let start = Date()
+    let request = Task {
+      await provider.sidebarStatuses(
+        for: URL(filePath: "/tmp/locus"),
+        repositoryRootURL: nil
+      )
+    }
+    try await Task.sleep(for: .milliseconds(100))
+    request.cancel()
+    let statuses = await request.value
+
+    XCTAssertTrue(statuses.isEmpty)
+    XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+  }
+
   func testRepositoryMetadataParserResolvesRelativeCommonDirectoryFromWorkspace() {
     let workspaceURL = URL(filePath: "/tmp/locus/apps/mac")
     let data = Data("/tmp/locus/.git\n../../.git\n../..\n".utf8)

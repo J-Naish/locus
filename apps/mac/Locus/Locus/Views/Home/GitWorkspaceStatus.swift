@@ -100,31 +100,35 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
     }
   }
 
+  /// How often the suspended wait re-checks a running git process. Each check
+  /// is a suspension point (`Task.sleep`), never a blocked thread.
+  private static let exitPollInterval: Duration = .milliseconds(25)
+  /// Grace between SIGTERM and SIGKILL while tearing a process down.
+  private static let terminationGrace: Duration = .milliseconds(250)
+  /// Bound on the best-effort reap after SIGKILL (which is not survivable).
+  private static let reapTimeout: Duration = .seconds(1)
+  /// Polling cadence while waiting out a terminating process's last moments.
+  private static let terminationPollInterval: Duration = .milliseconds(10)
+
   private func gitOutput(for workspaceURL: URL, arguments: [String]) async throws -> Data {
-    try await withThrowingTaskGroup(of: Data.self) { group in
-      group.addTask(priority: .utility) {
-        try Self.gitOutputSync(
-          gitExecutableURL: gitExecutableURL,
-          arguments: arguments,
-          timeout: statusTimeout,
-          isCancelled: { Task.isCancelled }
-        )
-      }
-
-      guard let output = try await group.next() else {
-        throw CancellationError()
-      }
-
-      return output
-    }
+    try await Self.runGit(
+      gitExecutableURL: gitExecutableURL,
+      arguments: arguments,
+      timeout: statusTimeout
+    )
   }
 
-  private static func gitOutputSync(
+  /// Runs git and returns its standard output. Output goes to temporary files
+  /// rather than pipes, so arbitrarily large status output cannot deadlock a
+  /// full pipe buffer. The wait suspends (`Task.sleep`) instead of blocking, so
+  /// a burst of slow repositories cannot starve the cooperative thread pool the
+  /// way the previous `Thread.sleep` polling could. Cancellation and timeout
+  /// both terminate the process before rethrowing.
+  private static func runGit(
     gitExecutableURL: URL,
     arguments: [String],
-    timeout: TimeInterval,
-    isCancelled: () -> Bool
-  ) throws -> Data {
+    timeout: TimeInterval
+  ) async throws -> Data {
     let temporaryDirectory = FileManager.default.temporaryDirectory
       .appending(path: "LocusGitStatus-\(UUID().uuidString)", directoryHint: .isDirectory)
     try FileManager.default.createDirectory(
@@ -154,19 +158,19 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
 
     try process.run()
 
-    let deadline = Date().addingTimeInterval(timeout)
+    let deadline = ContinuousClock.now + .seconds(timeout)
     while process.isRunning {
-      if isCancelled() {
-        terminateProcess(process)
+      if Task.isCancelled {
+        await terminate(process)
         throw CancellationError()
       }
-
-      if Date() >= deadline {
-        terminateProcess(process)
+      if ContinuousClock.now >= deadline {
+        await terminate(process)
         throw GitWorkspaceStatusError.timedOut
       }
-
-      Thread.sleep(forTimeInterval: 0.025)
+      // On a freshly cancelled task the sleep returns immediately and the next
+      // iteration takes the cancellation branch — no busy wait.
+      try? await Task.sleep(for: exitPollInterval)
     }
 
     guard process.terminationStatus == 0 else {
@@ -179,19 +183,34 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
     return try Data(contentsOf: outputURL)
   }
 
-  private static func terminateProcess(_ process: Process) {
+  private static func terminate(_ process: Process) async {
     process.terminate()
 
-    let deadline = Date().addingTimeInterval(0.25)
-    while process.isRunning && Date() < deadline {
-      Thread.sleep(forTimeInterval: 0.01)
+    // Give git a moment to exit cleanly after SIGTERM, then escalate.
+    if await waitUntilExited(process, within: terminationGrace) {
+      return
     }
-
     if process.isRunning {
       kill(process.processIdentifier, SIGKILL)
     }
+    // Best-effort reap so temp-file cleanup runs behind a dead process. On an
+    // already-cancelled task this gives up immediately; Foundation still reaps
+    // the child on its own.
+    _ = await waitUntilExited(process, within: reapTimeout)
+  }
 
-    process.waitUntilExit()
+  /// Suspends until the process exits or `limit` passes, returning whether it
+  /// exited. Gives up immediately on a cancelled task instead of busy-waiting
+  /// (a cancelled `Task.sleep` returns without suspending).
+  private static func waitUntilExited(_ process: Process, within limit: Duration) async -> Bool {
+    let deadline = ContinuousClock.now + limit
+    while process.isRunning {
+      guard !Task.isCancelled, ContinuousClock.now < deadline else {
+        return !process.isRunning
+      }
+      try? await Task.sleep(for: terminationPollInterval)
+    }
+    return true
   }
 }
 
@@ -241,6 +260,16 @@ final class GitRepositoryMetadataMonitor {
 
   init(debounceDuration: Duration = .milliseconds(250)) {
     self.debounceDuration = debounceDuration
+  }
+
+  deinit {
+    // Backstop for teardown without `stopMonitoring()`, matching the sibling
+    // monitors: cancelling each source releases its descriptor via the cancel
+    // handler instead of leaking it for the process lifetime.
+    pendingRefreshTask?.cancel()
+    for eventSource in eventSources {
+      eventSource.cancel()
+    }
   }
 
   func startMonitoring(
