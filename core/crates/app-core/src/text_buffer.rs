@@ -141,6 +141,11 @@ pub struct TextBuffer {
     /// if saved while empty). The buffer is dirty when the current top differs.
     saved_seq: Option<u64>,
     revision: u64,
+    /// Set by [`snapshot_for_save`](Self::snapshot_for_save) so the next insert
+    /// starts a fresh undo record instead of coalescing into the snapshotted run.
+    /// This keeps the snapshot's captured `seq` a faithful identifier of its
+    /// content even if the user keeps typing during the background write.
+    seal_coalescing: bool,
 }
 
 // A background save reads the buffer (`write_to`, `&self`) on another thread
@@ -188,6 +193,7 @@ impl TextBuffer {
             seq_counter: 0,
             saved_seq: None,
             revision: 0,
+            seal_coalescing: false,
         })
     }
 
@@ -293,11 +299,36 @@ impl TextBuffer {
     /// (immutable, structurally shared), this is an `O(1)` clone of the root that
     /// shares every node with the live buffer; later edits never change it. This
     /// is the capability the rope exists to provide — cheap baselines for diff,
-    /// review, and history. (Not yet exposed across the FFI.)
+    /// review, and history.
     pub fn snapshot(&self) -> TextSnapshot {
         TextSnapshot {
             root: self.root.clone(),
+            marker: self.current_top_seq(),
         }
+    }
+
+    /// Takes a snapshot for a background save and seals the current insert run.
+    /// Like [`snapshot`](Self::snapshot) the content clone is `O(1)`, but this
+    /// also records the edit-history position being written and makes the next
+    /// keystroke start a new undo record, so that position stays accurate even if
+    /// the user keeps editing during the write. Pass the returned snapshot to
+    /// [`mark_saved_snapshot`](Self::mark_saved_snapshot) once the write finishes.
+    pub fn snapshot_for_save(&mut self) -> TextSnapshot {
+        self.seal_coalescing = true;
+        TextSnapshot {
+            root: self.root.clone(),
+            marker: self.current_top_seq(),
+        }
+    }
+
+    /// Marks the content captured by `snapshot` as the saved baseline. Unlike
+    /// [`mark_saved`](Self::mark_saved), which marks the *current* content, this
+    /// marks exactly what was written: a buffer edited during the write stays
+    /// dirty (its newer content is not yet on disk), and undoing back to the saved
+    /// content reads clean again. Pair with [`snapshot_for_save`](Self::snapshot_for_save),
+    /// whose seal keeps the recorded position faithful.
+    pub fn mark_saved_snapshot(&mut self, snapshot: &TextSnapshot) {
+        self.saved_seq = snapshot.marker;
     }
 
     // MARK: - Edits
@@ -313,16 +344,24 @@ impl TextBuffer {
         self.splice(at_byte, 0, inserted.clone());
         self.redo_stack.clear();
 
+        // A save snapshot seals the current run: the next insert starts a fresh
+        // undo record instead of extending it, so the snapshot's captured `seq`
+        // stays a faithful identifier of its content even as typing continues
+        // during the background write. This one insert consumes the seal.
+        let sealed = std::mem::replace(&mut self.seal_coalescing, false);
+
         // Extend the previous typed run, but never coalesce into the saved
         // baseline record: doing so would hide the new edit from dirty tracking.
         let saved_seq = self.saved_seq;
-        if let Some(top) = self.undo_stack.last_mut() {
-            if top.removed.byte_len() == 0
-                && top.at_byte + top.inserted.byte_len() == at_byte
-                && Some(top.seq) != saved_seq
-            {
-                top.inserted = Node::concat(top.inserted.clone(), inserted);
-                return Ok(());
+        if !sealed {
+            if let Some(top) = self.undo_stack.last_mut() {
+                if top.removed.byte_len() == 0
+                    && top.at_byte + top.inserted.byte_len() == at_byte
+                    && Some(top.seq) != saved_seq
+                {
+                    top.inserted = Node::concat(top.inserted.clone(), inserted);
+                    return Ok(());
+                }
             }
         }
 
@@ -470,9 +509,23 @@ impl TextBuffer {
 /// keeps editing.
 pub struct TextSnapshot {
     root: Node,
+    /// `seq` of the buffer's top undo record when this snapshot was taken, so
+    /// [`TextBuffer::mark_saved_snapshot`] can mark exactly this content saved.
+    /// `None` means the buffer had no (or fully undone) edits at snapshot time.
+    /// Read-only snapshots carry it too; it only matters when paired with
+    /// `mark_saved_snapshot`.
+    marker: Option<u64>,
 }
 
 impl TextSnapshot {
+    /// Writes the snapshot's full content to `writer` in document order without
+    /// materializing a full-document buffer (`O(tree height)` memory). This is the
+    /// background-save read: the snapshot is immutable, so the write is isolated
+    /// from concurrent edits to the originating buffer.
+    pub fn write_to(&self, writer: &mut dyn std::io::Write) -> std::io::Result<()> {
+        self.root.write_to(writer)
+    }
+
     /// Total bytes of UTF-8 content.
     pub fn byte_len(&self) -> usize {
         self.root.summary().bytes
@@ -519,6 +572,85 @@ mod tests {
 
     fn contents(buffer: &TextBuffer) -> String {
         buffer.text_for_line_range(0, buffer.line_count())
+    }
+
+    // MARK: - Save snapshot (immutable background-save baseline + dirty tracking)
+
+    #[test]
+    fn save_snapshot_is_isolated_from_later_edits() {
+        let mut buffer = buffer("hello");
+        let snapshot = buffer.snapshot_for_save();
+        buffer.insert(5, " world").expect("insert");
+        // The snapshot keeps the content captured at save start.
+        assert_eq!(snapshot.text(), "hello");
+        assert_eq!(snapshot.byte_len(), 5);
+        assert_eq!(contents(&buffer), "hello world");
+    }
+
+    #[test]
+    fn save_snapshot_write_to_streams_full_content() {
+        let mut buffer = buffer("line1\nline2\n");
+        let snapshot = buffer.snapshot_for_save();
+        let mut out = Vec::new();
+        snapshot.write_to(&mut out).expect("write");
+        assert_eq!(out, b"line1\nline2\n");
+    }
+
+    #[test]
+    fn save_snapshot_seals_the_coalescing_run() {
+        let mut buffer = buffer("");
+        buffer.insert(0, "a").expect("insert");
+        buffer.insert(1, "b").expect("insert"); // coalesces with "a" -> run "ab"
+        let _snapshot = buffer.snapshot_for_save(); // seal the run
+        buffer.insert(2, "c").expect("insert"); // new record, not coalesced into "ab"
+        assert!(buffer.undo());
+        assert_eq!(contents(&buffer), "ab"); // only "c" undone
+        assert!(buffer.undo());
+        assert_eq!(contents(&buffer), ""); // "ab" undone in one step
+    }
+
+    #[test]
+    fn contiguous_inserts_coalesce_without_a_save_snapshot() {
+        let mut buffer = buffer("");
+        buffer.insert(0, "a").expect("insert");
+        buffer.insert(1, "b").expect("insert");
+        buffer.insert(2, "c").expect("insert"); // all coalesced into one run
+        assert!(buffer.undo());
+        assert_eq!(contents(&buffer), ""); // one undo removes "abc"
+    }
+
+    #[test]
+    fn mark_saved_snapshot_clears_dirty_when_unchanged() {
+        let mut buffer = buffer("");
+        buffer.insert(0, "hello").expect("insert");
+        assert!(buffer.is_dirty());
+        let snapshot = buffer.snapshot_for_save();
+        buffer.mark_saved_snapshot(&snapshot);
+        assert!(!buffer.is_dirty());
+    }
+
+    #[test]
+    fn mark_saved_snapshot_keeps_buffer_dirty_when_edited_during_save() {
+        let mut buffer = buffer("");
+        buffer.insert(0, "hello").expect("insert");
+        let snapshot = buffer.snapshot_for_save(); // captures "hello"
+        buffer.insert(5, "world").expect("insert"); // edited during the write
+        buffer.mark_saved_snapshot(&snapshot); // only "hello" reached disk
+        assert!(buffer.is_dirty());
+        assert_eq!(snapshot.text(), "hello");
+    }
+
+    #[test]
+    fn mark_saved_snapshot_then_undo_to_saved_content_is_clean() {
+        let mut buffer = buffer("");
+        buffer.insert(0, "hello").expect("insert");
+        let snapshot = buffer.snapshot_for_save();
+        buffer.insert(5, "world").expect("insert");
+        buffer.mark_saved_snapshot(&snapshot); // disk == "hello"
+        assert!(buffer.is_dirty());
+        assert!(buffer.undo()); // back to "hello"
+        assert_eq!(contents(&buffer), "hello");
+        assert!(!buffer.is_dirty()); // matches disk again
     }
 
     // MARK: - Read (read-only slice behavior, retained)
