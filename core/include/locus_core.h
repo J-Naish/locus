@@ -297,6 +297,20 @@ typedef struct LocusTextPosition {
 } LocusTextPosition;
 
 /*
+ * The document span one undo or redo step rewrote, in the coordinates of the
+ * document that step produced: the content before start_utf16 is identical on
+ * both sides of the step; at that offset the step replaced old_len_utf16 UTF-16
+ * units with new_len_utf16 units. Lets the platform update per-line caches
+ * (such as the soft-wrap index) for just the rewritten lines instead of
+ * rescanning the document.
+ */
+typedef struct LocusTextChange {
+  size_t start_utf16;
+  size_t old_len_utf16;
+  size_t new_len_utf16;
+} LocusTextChange;
+
+/*
  * Opaque Rust-owned handles. Callers must never allocate, free, copy, or
  * inspect these directly; use the functions below.
  */
@@ -437,9 +451,15 @@ LocusStatus locus_text_buffer_replace(
     LocusTextBuffer *buffer, size_t start_utf16, size_t end_utf16,
     const uint8_t *bytes, size_t len);
 
-/* Undo/redo. out_did_* (which may be NULL) receives whether anything changed. */
-LocusStatus locus_text_buffer_undo(LocusTextBuffer *buffer, bool *out_did_undo);
-LocusStatus locus_text_buffer_redo(LocusTextBuffer *buffer, bool *out_did_redo);
+/*
+ * Undo/redo (ABI version 5 signature). out_did_* (which may be NULL) receives
+ * whether anything changed; out_change (which may be NULL) receives the span
+ * the step rewrote, zeroed when nothing was undone/redone.
+ */
+LocusStatus locus_text_buffer_undo(
+    LocusTextBuffer *buffer, bool *out_did_undo, LocusTextChange *out_change);
+LocusStatus locus_text_buffer_redo(
+    LocusTextBuffer *buffer, bool *out_did_redo, LocusTextChange *out_change);
 
 /*
  * Writes the buffer's full content to the file at `path` (created/truncated),
@@ -555,7 +575,8 @@ LocusStatus locus_large_file_position_for_utf16(
 /*
  * Maps a 0-based line and UTF-16 column (from the line start) to a full
  * position. Also clamp-safe: a column past the line content is clamped to the
- * line end and a line past the last line is clamped to the last line (never
+ * line end, a column inside a surrogate pair is floored to that character's
+ * start, and a line past the last line is clamped to the last line (never
  * rejected, unlike locus_text_buffer_position_for_line_column). Only a NULL
  * handle/out_position or an underlying read error is reported.
  */

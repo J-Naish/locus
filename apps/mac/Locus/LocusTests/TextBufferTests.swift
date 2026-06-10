@@ -37,13 +37,28 @@ final class TextBufferTests: XCTestCase {
     XCTAssertEqual(buffer.text(forLineRange: 0, count: 1), "abc")
     XCTAssertTrue(buffer.isDirty)
 
-    XCTAssertTrue(try buffer.undo())
+    XCTAssertNotNil(try buffer.undo())
     XCTAssertEqual(buffer.text(forLineRange: 0, count: 1), "ac")
-    XCTAssertTrue(try buffer.redo())
+    XCTAssertNotNil(try buffer.redo())
     XCTAssertEqual(buffer.text(forLineRange: 0, count: 1), "abc")
 
     try buffer.delete(fromUTF16: 0, toUTF16: 1)
     XCTAssertEqual(buffer.text(forLineRange: 0, count: 1), "bc")
+  }
+
+  func testUndoAndRedoReportTheRewrittenSpan() throws {
+    // "😀" is 2 UTF-16 units, so the offsets prove the span is UTF-16-based.
+    // Replace "bc" (2 units at offset 3) with "XX\nYY" (5 units).
+    let buffer = try TextBuffer.open(bytes: Data("😀abc".utf8))
+    try buffer.replace("XX\nYY", fromUTF16: 3, toUTF16: 5)
+
+    let undone = try XCTUnwrap(buffer.undo())
+    XCTAssertEqual(undone, TextChange(startUTF16: 3, oldLengthUTF16: 5, newLengthUTF16: 2))
+
+    let redone = try XCTUnwrap(buffer.redo())
+    XCTAssertEqual(redone, TextChange(startUTF16: 3, oldLengthUTF16: 2, newLengthUTF16: 5))
+
+    XCTAssertNil(try buffer.redo())  // nothing left to redo reports nil, not zeros
   }
 
   func testMarkSavedClearsDirty() throws {

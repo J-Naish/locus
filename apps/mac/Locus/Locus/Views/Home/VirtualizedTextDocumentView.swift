@@ -509,8 +509,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   /// Per-logical-line → visual-row mapping while wrapping is active; `nil` when not
-  /// wrapping. Rebuilt fully on open, width change, and undo/redo; updated for the
-  /// single changed line on ordinary typing/deletion within a line.
+  /// wrapping. Rebuilt fully on open and width change; every edit — typing,
+  /// multi-line paste/delete, undo/redo — splices just its rewritten lines via
+  /// `updateWrapIndex(afterChange:)`.
   private var wrapIndex: WrapIndex?
   /// The per-logical-line wrapped-row counts the current `wrapIndex` was built from,
   /// kept so a single-line edit can recompute just that line instead of re-wrapping
@@ -606,53 +607,154 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     wrapIndex = WrapIndex(visualRowsPerLine: counts)
   }
 
-  /// Recomputes the wrap index after an edit confined to one logical line (no line
-  /// added or removed), replacing only that line's wrapped-row count rather than
-  /// re-wrapping the whole document.
-  private func updateWrapIndex(forChangedLine line: Int) {
-    // Horizontal-scroll mode: stay there unless this edit introduced the first
-    // long line, which flips the whole document to wrapping. Reading just the one
-    // edited line keeps ordinary typing in a no-wrap document O(1).
-    guard var counts = wrapRowCounts else {
-      guard !wrapsLines, longLineCount == 0 else { return }
-      let text = displayLineStrings(forLineRange: line, count: 1).first ?? ""
-      if (text as NSString).length > longLineWrapThreshold {
-        rebuildWrapIndex()
-      }
-      return
-    }
-    // Already wrapping: update just the changed line's row count. Falls back to a
-    // full rebuild when the fast path is not provably safe.
-    guard let buffer = reader, counts.count == buffer.lineCount, line >= 0, line < counts.count,
-      lastWrapWidth == wrapContentWidth
+  /// Recomputes the wrap index for just the lines a change rewrote, splicing
+  /// their new row counts into place rather than re-wrapping the whole document
+  /// — the difference between an instant Return/paste/undo and a hitch that
+  /// grows with the file. `change` is in post-edit coordinates. Falls back to a
+  /// full rebuild whenever the splice is not provably safe.
+  private func updateWrapIndex(afterChange change: TextChange) {
+    // Resolve the rewritten line band [startLine, startLine + insertedBreaks]
+    // in the new document. The prefix before the change is identical on both
+    // sides, so `startLine` is also where the old band began.
+    guard let buffer = reader,
+      let startPosition = try? buffer.position(forUTF16: change.startUTF16),
+      let newEndPosition = try? buffer.position(
+        forUTF16: change.startUTF16 + change.newLengthUTF16)
     else {
       rebuildWrapIndex()
       return
     }
-    let text = displayLineStrings(forLineRange: line, count: 1).first ?? ""
-    // Editing into or out of a huge line changes its grid row count (and whether
-    // it is windowed at all); a full rebuild re-resolves the true length. Rare, so
-    // the cost is acceptable; ordinary lines never reach here.
-    if isHugeLine(line) || (text as NSString).length >= maximumDrawnCharactersPerLine {
+    let startLine = startPosition.line
+    let insertedBreaks = newEndPosition.line - startLine
+    if let counts = wrapRowCounts {
+      spliceWrapIndex(
+        counts, startLine: startLine, insertedBreaks: insertedBreaks,
+        utf16Delta: change.newLengthUTF16 - change.oldLengthUTF16)
+    } else {
+      updateNoWrapDecision(startLine: startLine, insertedBreaks: insertedBreaks)
+    }
+  }
+
+  /// Maintains the horizontal-scroll (no-index) state across a change by
+  /// scanning only the rewritten lines: the document stays scrolling unless the
+  /// change introduced its first long line, which flips it to wrapping. Keeps
+  /// edits in a large no-wrap document O(rewritten lines), not O(document).
+  private func updateNoWrapDecision(startLine: Int, insertedBreaks: Int) {
+    // Prose without an index, or a long-line decision that was never made at a
+    // valid width, means the last build bailed (zero width or over budget).
+    // Re-evaluate through the full build, which re-checks those bounds first
+    // and re-bails cheaply without reading the document.
+    guard !wrapsLines, longLineCount == 0, longLineDecisionValid, var flags = lineIsLong,
+      let buffer = reader
+    else {
+      rebuildWrapIndex()
+      return
+    }
+    let removedBreaks = insertedBreaks - (buffer.lineCount - flags.count)
+    let oldEndLine = startLine + removedBreaks
+    guard removedBreaks >= 0, startLine >= 0, oldEndLine < flags.count else {
+      rebuildWrapIndex()
+      return
+    }
+    let newTexts = displayLineStrings(forLineRange: startLine, count: insertedBreaks + 1)
+    guard newTexts.count == insertedBreaks + 1 else {
+      rebuildWrapIndex()
+      return
+    }
+    let newFlags = newTexts.map { ($0 as NSString).length > longLineWrapThreshold }
+    if newFlags.contains(true) {
+      rebuildWrapIndex()  // first long line → the whole document starts wrapping
+      return
+    }
+    flags.replaceSubrange(startLine...oldEndLine, with: newFlags)
+    guard flags.count == buffer.lineCount else {
+      rebuildWrapIndex()
+      return
+    }
+    lineIsLong = flags
+  }
+
+  /// Splices the rewritten band's row counts (and long-line flags) into the
+  /// active wrap index. Lines after the band keep their wrap untouched — only
+  /// their indices (and a huge line's cached UTF-16 start) shift by the change's
+  /// line and length deltas.
+  private func spliceWrapIndex(
+    _ counts: [Int], startLine: Int, insertedBreaks: Int, utf16Delta: Int
+  ) {
+    guard let buffer = reader, lastWrapWidth == wrapContentWidth, startLine >= 0 else {
+      rebuildWrapIndex()
+      return
+    }
+    let newLineCount = buffer.lineCount
+    let removedBreaks = insertedBreaks - (newLineCount - counts.count)
+    let oldEndLine = startLine + removedBreaks
+    guard removedBreaks >= 0, oldEndLine < counts.count else {
+      rebuildWrapIndex()
+      return
+    }
+    // A huge line inside the rewritten band changes its grid shape (or stops
+    // being huge); re-resolving true lengths is the rebuild's job. Rare, so the
+    // cost is acceptable; documents without huge lines never reach this.
+    if hugeLineInfo.keys.contains(where: { $0 >= startLine && $0 <= oldEndLine }) {
+      rebuildWrapIndex()
+      return
+    }
+    let newTexts = displayLineStrings(forLineRange: startLine, count: insertedBreaks + 1)
+    guard newTexts.count == insertedBreaks + 1 else {
+      rebuildWrapIndex()
+      return
+    }
+    // A rewritten line clipped at the display cap may actually be enormous; the
+    // rebuild resolves its true length and grid row count. Also rare.
+    if newTexts.contains(where: { ($0 as NSString).length >= maximumDrawnCharactersPerLine }) {
       rebuildWrapIndex()
       return
     }
     // Keep the long-line bookkeeping current so a non-prose document leaves wrap
-    // mode the moment its last long line is shortened (not only on a later
+    // mode the moment its last long line is rewritten away (not only on a later
     // reload). Prose has no `lineIsLong` and always wraps, so it is unaffected.
-    if !wrapsLines, var flags = lineIsLong, line < flags.count {
-      let isLong = (text as NSString).length > longLineWrapThreshold
-      if flags[line] != isLong {
-        flags[line] = isLong
-        lineIsLong = flags
-        longLineCount += isLong ? 1 : -1
-        if longLineCount == 0 {
-          rebuildWrapIndex(recomputeLongLine: false)  // last long line gone → scroll
-          return
-        }
+    if !wrapsLines {
+      guard var flags = lineIsLong, flags.count == counts.count else {
+        rebuildWrapIndex()
+        return
+      }
+      let newFlags = newTexts.map { ($0 as NSString).length > longLineWrapThreshold }
+      let removedLong = flags[startLine...oldEndLine].lazy.filter { $0 }.count
+      let insertedLong = newFlags.lazy.filter { $0 }.count
+      flags.replaceSubrange(startLine...oldEndLine, with: newFlags)
+      lineIsLong = flags
+      longLineCount += insertedLong - removedLong
+      if longLineCount == 0 {
+        rebuildWrapIndex(recomputeLongLine: false)  // last long line gone → scroll
+        return
       }
     }
-    counts[line] = wrapRowCount(text: text, width: wrapContentWidth)
+    // Shift the huge lines past the band: their content is untouched, but their
+    // line index moves by the line delta and their cached global UTF-16 start by
+    // the length delta (positions at or past the old band's end shift exactly by
+    // newLength - oldLength). Huge lines before the band are untouched.
+    let lineDelta = insertedBreaks - removedBreaks
+    if !hugeLineInfo.isEmpty, lineDelta != 0 || utf16Delta != 0 {
+      var shifted: [Int: HugeLineInfo] = [:]
+      shifted.reserveCapacity(hugeLineInfo.count)
+      for (line, info) in hugeLineInfo {
+        if line < startLine {
+          shifted[line] = info
+        } else {
+          shifted[line + lineDelta] =
+            HugeLineInfo(start: info.start + utf16Delta, length: info.length)
+        }
+      }
+      hugeLineInfo = shifted
+    }
+    var counts = counts
+    counts.replaceSubrange(
+      startLine...oldEndLine,
+      with: newTexts.map { wrapRowCount(text: $0, width: wrapContentWidth) })
+    guard counts.count == newLineCount else {
+      rebuildWrapIndex()
+      return
+    }
     wrapRowCounts = counts
     wrapIndex = WrapIndex(visualRowsPerLine: counts)
   }
@@ -1756,12 +1858,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       NSSound.beep()
       return false
     }
-    // A pure insert with no line break changes only the line it lands on, so the
-    // wrap index can be updated for that line alone. A range replace may span or
-    // introduce line breaks, so it triggers a full rebuild.
-    let isSingleLineInsert = end == start && string.rangeOfCharacter(from: .newlines) == nil
+    let newLengthUTF16 = (string as NSString).length
     finishEdit(
-      caretUTF16: start + (string as NSString).length, singleLineChange: isSingleLineInsert)
+      caretUTF16: start + newLengthUTF16,
+      change: TextChange(
+        startUTF16: start,
+        oldLengthUTF16: max(0, end - start),
+        newLengthUTF16: newLengthUTF16
+      )
+    )
     return true
   }
 
@@ -1825,8 +1930,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   func undoEdit() -> Bool {
     guard isEditable, let buffer = editableBuffer else { return false }
     composition = nil
-    if (try? buffer.undo()) == true {
-      afterUndoRedo()
+    if let change = (try? buffer.undo()) ?? nil {
+      afterUndoRedo(change: change)
     }
     return true
   }
@@ -1836,20 +1941,21 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   func redoEdit() -> Bool {
     guard isEditable, let buffer = editableBuffer else { return false }
     composition = nil
-    if (try? buffer.redo()) == true {
-      afterUndoRedo()
+    if let change = (try? buffer.redo()) ?? nil {
+      afterUndoRedo(change: change)
     }
     return true
   }
 
   /// Refresh after undo/redo replaced buffer content beneath the current
   /// selection: drop caches, clamp the (possibly now out-of-range) selection,
-  /// re-measure, and repaint.
-  private func afterUndoRedo() {
+  /// re-measure, and repaint. `change` is the span the step rewrote, so the
+  /// wrap index can be updated for just those lines.
+  private func afterUndoRedo(change: TextChange) {
     cachedBand = nil
     maxObservedLineWidth = 0
     verticalGoalX = nil
-    rebuildWrapIndex()
+    updateWrapIndex(afterChange: change)
     clampSelectionToBounds()
     showCaretSolid()
     updateLayout()
@@ -1884,9 +1990,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     do {
       try buffer.delete(fromUTF16: startOffset, toUTF16: endOffset)
-      // A deletion confined to one line removes no line break, so only that line's
-      // wrap changes; a deletion spanning lines merges them and needs a full rebuild.
-      finishEdit(caretUTF16: startOffset, singleLineChange: start.line == end.line)
+      finishEdit(
+        caretUTF16: startOffset,
+        change: TextChange(
+          startUTF16: startOffset,
+          oldLengthUTF16: endOffset - startOffset,
+          newLengthUTF16: 0
+        )
+      )
     } catch {
       NSSound.beep()
     }
@@ -1912,27 +2023,20 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Shared post-edit refresh: places the caret at `offset`, drops cached band
   /// and geometry (the buffer revision changed), re-measures the document, and
-  /// repaints the visible band. When `singleLineChange` is true the edit stayed
-  /// within one logical line, so only that line's wrap is recomputed instead of
-  /// the whole document.
-  private func finishEdit(caretUTF16 offset: Int, singleLineChange: Bool = false) {
+  /// repaints the visible band. `change` is the span the edit rewrote; the wrap
+  /// index is spliced for just those lines.
+  private func finishEdit(caretUTF16 offset: Int, change: TextChange) {
     cachedBand = nil
     verticalGoalX = nil
     // The widest-line high-water mark can only shrink via an edit (deleting or
     // splitting a long line), so reset it and let `draw` re-measure the visible
     // band rather than keeping a stale, too-wide horizontal extent.
     maxObservedLineWidth = 0
-    var changedLine: Int?
     if let buffer = reader, let position = try? buffer.position(forUTF16: offset) {
       selection = TextSelection(
         caretAt: .init(line: position.line, columnUTF16: position.columnUTF16))
-      changedLine = position.line
     }
-    if singleLineChange, let changedLine {
-      updateWrapIndex(forChangedLine: changedLine)
-    } else {
-      rebuildWrapIndex()
-    }
+    updateWrapIndex(afterChange: change)
     showCaretSolid()
     updateLayout()
     if let head = selection?.head {

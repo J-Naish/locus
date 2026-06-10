@@ -10,6 +10,17 @@ struct TextPosition: Equatable, Sendable {
   let columnUTF16: Int
 }
 
+/// The document span one applied change rewrote, in the coordinates of the
+/// document it produced: the content before `startUTF16` is identical on both
+/// sides of the change; at that offset it replaced `oldLengthUTF16` UTF-16
+/// units with `newLengthUTF16` units. Lets the editor update per-line caches
+/// (such as the soft-wrap index) for just the rewritten lines.
+struct TextChange: Equatable, Sendable {
+  let startUTF16: Int
+  let oldLengthUTF16: Int
+  let newLengthUTF16: Int
+}
+
 enum TextBufferError: LocalizedError, Equatable, Sendable {
   case invalidArgument(String)
   case io(String)
@@ -309,26 +320,30 @@ final class TextBuffer {
     }
   }
 
-  /// Reverts the most recent edit. Returns whether anything was undone.
+  /// Reverts the most recent edit. Returns the document span the undo rewrote,
+  /// or `nil` when there was nothing to undo.
   @discardableResult
-  func undo() throws -> Bool {
+  func undo() throws -> TextChange? {
     var didUndo = false
-    let status = locus_text_buffer_undo(handle, &didUndo)
+    var change = LocusTextChange()
+    let status = locus_text_buffer_undo(handle, &didUndo, &change)
     guard status == LOCUS_STATUS_OK else {
       throw Self.error(for: status)
     }
-    return didUndo
+    return didUndo ? TextChange(from: change) : nil
   }
 
-  /// Re-applies the most recently undone edit. Returns whether anything was redone.
+  /// Re-applies the most recently undone edit. Returns the document span the
+  /// redo rewrote, or `nil` when there was nothing to redo.
   @discardableResult
-  func redo() throws -> Bool {
+  func redo() throws -> TextChange? {
     var didRedo = false
-    let status = locus_text_buffer_redo(handle, &didRedo)
+    var change = LocusTextChange()
+    let status = locus_text_buffer_redo(handle, &didRedo, &change)
     guard status == LOCUS_STATUS_OK else {
       throw Self.error(for: status)
     }
-    return didRedo
+    return didRedo ? TextChange(from: change) : nil
   }
 
   // MARK: - Internals
@@ -383,6 +398,16 @@ extension TextPosition {
       utf16: raw.utf16,
       line: raw.line,
       columnUTF16: raw.column_utf16
+    )
+  }
+}
+
+extension TextChange {
+  fileprivate init(from raw: LocusTextChange) {
+    self.init(
+      startUTF16: raw.start_utf16,
+      oldLengthUTF16: raw.old_len_utf16,
+      newLengthUTF16: raw.new_len_utf16
     )
   }
 }

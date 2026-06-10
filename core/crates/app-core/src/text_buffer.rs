@@ -130,6 +130,19 @@ struct EditRecord {
     inserted: Node,
 }
 
+/// The document span one undo or redo step rewrote, in the coordinates of the
+/// document that step produced. The content before `start_utf16` is identical
+/// on both sides of the step; at that offset the step replaced `old_len_utf16`
+/// UTF-16 units with `new_len_utf16` units. Lets the platform update per-line
+/// caches (such as a soft-wrap index) for just the rewritten lines instead of
+/// rescanning the document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditSpan {
+    pub start_utf16: usize,
+    pub old_len_utf16: usize,
+    pub new_len_utf16: usize,
+}
+
 /// A line-indexed, editable UTF-8 text buffer backed by a persistent rope.
 pub struct TextBuffer {
     /// Never absent: an empty buffer is a single empty leaf.
@@ -442,35 +455,49 @@ impl TextBuffer {
         Ok(())
     }
 
-    /// Reverts the most recent edit. Returns `false` if there is nothing to undo.
-    pub fn undo(&mut self) -> bool {
-        let Some(record) = self.undo_stack.pop() else {
-            return false;
-        };
+    /// Reverts the most recent edit, returning the span it rewrote (in the
+    /// reverted document's coordinates), or `None` if there is nothing to undo.
+    pub fn undo(&mut self) -> Option<EditSpan> {
+        let record = self.undo_stack.pop()?;
         // The inserted sub-rope currently occupies `[at_byte, at_byte + inserted)`;
         // put the removed sub-rope back in its place.
+        let old_len_utf16 = record.inserted.summary().utf16;
+        let new_len_utf16 = record.removed.summary().utf16;
         self.splice(
             record.at_byte,
             record.inserted.byte_len(),
             record.removed.clone(),
         );
+        // Resolved on the post-splice tree: the prefix before the splice point is
+        // identical on both sides, so this is the span start either way.
+        let start_utf16 = coords::utf16_before_byte(&self.root, record.at_byte);
         self.redo_stack.push(record);
-        true
+        Some(EditSpan {
+            start_utf16,
+            old_len_utf16,
+            new_len_utf16,
+        })
     }
 
-    /// Re-applies the most recently undone edit. Returns `false` if there is
-    /// nothing to redo.
-    pub fn redo(&mut self) -> bool {
-        let Some(record) = self.redo_stack.pop() else {
-            return false;
-        };
+    /// Re-applies the most recently undone edit, returning the span it rewrote
+    /// (in the re-applied document's coordinates), or `None` if there is nothing
+    /// to redo.
+    pub fn redo(&mut self) -> Option<EditSpan> {
+        let record = self.redo_stack.pop()?;
+        let old_len_utf16 = record.removed.summary().utf16;
+        let new_len_utf16 = record.inserted.summary().utf16;
         self.splice(
             record.at_byte,
             record.removed.byte_len(),
             record.inserted.clone(),
         );
+        let start_utf16 = coords::utf16_before_byte(&self.root, record.at_byte);
         self.undo_stack.push(record);
-        true
+        Some(EditSpan {
+            start_utf16,
+            old_len_utf16,
+            new_len_utf16,
+        })
     }
 
     // MARK: - Edit internals
@@ -603,9 +630,9 @@ mod tests {
         buffer.insert(1, "b").expect("insert"); // coalesces with "a" -> run "ab"
         let _snapshot = buffer.snapshot_for_save(); // seal the run
         buffer.insert(2, "c").expect("insert"); // new record, not coalesced into "ab"
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert_eq!(contents(&buffer), "ab"); // only "c" undone
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert_eq!(contents(&buffer), ""); // "ab" undone in one step
     }
 
@@ -615,7 +642,7 @@ mod tests {
         buffer.insert(0, "a").expect("insert");
         buffer.insert(1, "b").expect("insert");
         buffer.insert(2, "c").expect("insert"); // all coalesced into one run
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert_eq!(contents(&buffer), ""); // one undo removes "abc"
     }
 
@@ -648,7 +675,7 @@ mod tests {
         buffer.insert(5, "world").expect("insert");
         buffer.mark_saved_snapshot(&snapshot); // disk == "hello"
         assert!(buffer.is_dirty());
-        assert!(buffer.undo()); // back to "hello"
+        assert!(buffer.undo().is_some()); // back to "hello"
         assert_eq!(contents(&buffer), "hello");
         assert!(!buffer.is_dirty()); // matches disk again
     }
@@ -812,9 +839,9 @@ mod tests {
         buffer.replace(0, 5, "bye").expect("replace");
         assert_eq!(contents(&buffer), "bye");
         // A single undo restores the whole replaced range (not just the insert).
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert_eq!(contents(&buffer), "hello");
-        assert!(buffer.redo());
+        assert!(buffer.redo().is_some());
         assert_eq!(contents(&buffer), "bye");
     }
 
@@ -830,7 +857,7 @@ mod tests {
         let mut buffer = buffer("hello");
         buffer.replace(1, 3, "").expect("replace");
         assert_eq!(contents(&buffer), "hlo");
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert_eq!(contents(&buffer), "hello");
     }
 
@@ -923,10 +950,64 @@ mod tests {
         let mut buffer = buffer("ac");
         buffer.insert(1, "b").expect("insert");
         assert_eq!(contents(&buffer), "abc");
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert_eq!(contents(&buffer), "ac");
-        assert!(buffer.redo());
+        assert!(buffer.redo().is_some());
         assert_eq!(contents(&buffer), "abc");
+    }
+
+    #[test]
+    fn undo_and_redo_report_the_rewritten_span_in_utf16() {
+        // "😀" is 4 bytes but 2 UTF-16 units, so the reported offsets prove the
+        // span is UTF-16, not bytes. Replace "bc" (2 units at offset 3) with
+        // "XX\nYY" (5 units).
+        let mut buffer = buffer("😀abc");
+        buffer.replace(3, 5, "XX\nYY").expect("replace");
+
+        // Undo removes the 5-unit replacement and restores the 2-unit original.
+        let undone = buffer.undo().expect("one edit to undo");
+        assert_eq!(
+            undone,
+            EditSpan {
+                start_utf16: 3,
+                old_len_utf16: 5,
+                new_len_utf16: 2,
+            }
+        );
+        assert_eq!(contents(&buffer), "😀abc");
+
+        // Redo is the mirror image: the original span goes back out, the
+        // replacement back in.
+        let redone = buffer.redo().expect("one edit to redo");
+        assert_eq!(
+            redone,
+            EditSpan {
+                start_utf16: 3,
+                old_len_utf16: 2,
+                new_len_utf16: 5,
+            }
+        );
+        assert_eq!(contents(&buffer), "😀aXX\nYY");
+    }
+
+    #[test]
+    fn undo_span_covers_a_whole_coalesced_typing_run() {
+        // Three coalesced single-character inserts form one record; undoing it
+        // reports the run's full span, since that is what left the document.
+        let mut buffer = buffer("..");
+        buffer.insert(1, "a").expect("insert");
+        buffer.insert(2, "b").expect("insert");
+        buffer.insert(3, "c").expect("insert");
+        let undone = buffer.undo().expect("the typed run undoes as one step");
+        assert_eq!(
+            undone,
+            EditSpan {
+                start_utf16: 1,
+                old_len_utf16: 3,
+                new_len_utf16: 0,
+            }
+        );
+        assert_eq!(contents(&buffer), "..");
     }
 
     #[test]
@@ -934,17 +1015,17 @@ mod tests {
         let mut buffer = buffer("abcdef");
         buffer.delete(1, 4).expect("delete");
         assert_eq!(contents(&buffer), "aef");
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert_eq!(contents(&buffer), "abcdef");
-        assert!(buffer.redo());
+        assert!(buffer.redo().is_some());
         assert_eq!(contents(&buffer), "aef");
     }
 
     #[test]
     fn undo_on_empty_history_returns_false() {
         let mut buffer = buffer("ab");
-        assert!(!buffer.undo());
-        assert!(!buffer.redo());
+        assert!(buffer.undo().is_none());
+        assert!(buffer.redo().is_none());
     }
 
     #[test]
@@ -955,9 +1036,9 @@ mod tests {
         buffer.insert(2, "!").expect("insert");
         assert_eq!(contents(&buffer), "hi!");
         // A single undo reverts the whole typed run.
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert_eq!(contents(&buffer), "");
-        assert!(!buffer.undo());
+        assert!(buffer.undo().is_none());
     }
 
     #[test]
@@ -967,9 +1048,9 @@ mod tests {
         // Jump the caret: insert not contiguous with the previous run.
         buffer.insert(3, "b").expect("insert");
         assert_eq!(contents(&buffer), "a..b");
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert_eq!(contents(&buffer), "a..");
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert_eq!(contents(&buffer), "..");
     }
 
@@ -980,7 +1061,7 @@ mod tests {
         buffer.undo();
         buffer.insert(0, "b").expect("insert");
         // Redo of the original insert is no longer available.
-        assert!(!buffer.redo());
+        assert!(buffer.redo().is_none());
         assert_eq!(contents(&buffer), "b");
     }
 
@@ -1063,9 +1144,9 @@ mod tests {
         buffer.delete(2, 3).expect("delete"); // "ab"
         buffer.insert(2, "X").expect("insert"); // "abX"
         assert_eq!(contents(&buffer), "abX");
-        assert!(buffer.undo()); // undo the insert only
+        assert!(buffer.undo().is_some()); // undo the insert only
         assert_eq!(contents(&buffer), "ab");
-        assert!(buffer.undo()); // undo the delete
+        assert!(buffer.undo().is_some()); // undo the delete
         assert_eq!(contents(&buffer), "abc");
     }
 
@@ -1075,7 +1156,7 @@ mod tests {
         buffer.insert(5, "-").expect("insert"); // "HELLO-WORLD"
         buffer.delete(3, 8).expect("delete"); // remove "LO-WO" across leaves
         assert_eq!(contents(&buffer), "HELRLD");
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert_eq!(contents(&buffer), "HELLO-WORLD");
     }
 
@@ -1084,9 +1165,9 @@ mod tests {
         let mut buffer = buffer("");
         buffer.insert(0, "a").expect("insert");
         buffer.insert(1, "b").expect("insert"); // coalesced
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert_eq!(contents(&buffer), "");
-        assert!(buffer.redo()); // re-applies the whole run at once
+        assert!(buffer.redo().is_some()); // re-applies the whole run at once
         assert_eq!(contents(&buffer), "ab");
     }
 
@@ -1332,9 +1413,9 @@ mod tests {
         // Remove utf16 [2, 9) = "234ABC5", spanning original and inserted leaves.
         buffer.delete(2, 9).expect("delete");
         assert_eq!(contents(&buffer), "016789");
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert_eq!(contents(&buffer), "01234ABC56789");
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert_eq!(contents(&buffer), "0123456789");
     }
 
@@ -1361,7 +1442,7 @@ mod tests {
         assert_eq!(contents(&buffer), expected);
         assert_eq!(buffer.utf16_len(), expected.chars().count());
         // Unwind everything back to empty.
-        while buffer.undo() {}
+        while buffer.undo().is_some() {}
         assert_eq!(contents(&buffer), "");
     }
 
@@ -1385,14 +1466,14 @@ mod tests {
             buffer.root.owned_byte_count()
         );
         assert_eq!(buffer.byte_len(), 20);
-        assert!(buffer.undo());
+        assert!(buffer.undo().is_some());
         assert!(
             buffer.root.owned_byte_count() < 1_024,
             "undo copied {} bytes of content",
             buffer.root.owned_byte_count()
         );
         assert_eq!(buffer.byte_len(), 50_000);
-        assert!(buffer.redo());
+        assert!(buffer.redo().is_some());
         assert_eq!(buffer.byte_len(), 20);
     }
 

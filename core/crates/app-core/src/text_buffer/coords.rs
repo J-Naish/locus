@@ -323,7 +323,7 @@ pub(super) fn position_for_line_column(
 
 /// UTF-16 code units before byte offset `at` (which must lie on a char
 /// boundary). One descent plus a scan bounded by a single leaf.
-fn utf16_before_byte(root: &Node, at: usize) -> usize {
+pub(super) fn utf16_before_byte(root: &Node, at: usize) -> usize {
     if at >= root.byte_len() {
         return root.summary().utf16;
     }

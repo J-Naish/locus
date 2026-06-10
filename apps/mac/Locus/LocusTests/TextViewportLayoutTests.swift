@@ -428,17 +428,178 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
-  func testNewlineInsertFallsBackToFullWrapRebuild() throws {
-    // Inserting a line break changes the line count, so the incremental path must
-    // defer to a full rebuild; the height must still match a fresh viewer.
+  func testNewlineInsertWrapsIdenticallyToAFullRebuild() throws {
+    // Inserting a line break splices the rewritten lines into the wrap index;
+    // the height must still match a fresh viewer of the same final text.
     let width: CGFloat = 160
     let view = try makeWrappingViewer("one two three four five\nsix", width: width)
     view.moveToDocumentEdge(end: false, extend: false)
     view.moveToLineEdge(end: true, extend: false)  // end of the first (wrapping) line
-    view.insertText("\nsplit")  // adds a line → not single-line
+    view.insertText("\nsplit")  // adds a line
 
     let reference = try makeWrappingViewer(content(of: view), width: width)
     XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
+  }
+
+  @MainActor
+  func testBackspaceAtLineStartMergesAndWrapsIdenticallyToAFullRebuild() throws {
+    // Deleting a line break merges two lines: one rewritten line replaces two.
+    // The first line fits one visual row, so one "down" lands on logical line 1.
+    let width: CGFloat = 160
+    let view = try makeWrappingViewer(
+      "short\nsix seven eight nine ten eleven twelve thirteen", width: width)
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveVertically(down: true, extend: false)  // start of the second line
+    view.deleteBackward()  // removes the line break
+
+    let reference = try makeWrappingViewer(content(of: view), width: width)
+    XCTAssertEqual(content(of: view), "shortsix seven eight nine ten eleven twelve thirteen")
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
+  }
+
+  @MainActor
+  func testMultiLinePasteOverAMultiLineSelectionWrapsIdenticallyToAFullRebuild() throws {
+    // Replacing a selection that spans lines with a block that spans different
+    // lines exercises the general splice: removed and inserted line counts both
+    // differ from one. The result must match a fresh viewer.
+    let width: CGFloat = 160
+    let view = try makeWrappingViewer(
+      "alpha beta gamma delta epsilon zeta\nshort\ntheta iota kappa lambda mu nu xi\ntail",
+      width: width)
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveToLineEdge(end: true, extend: false)  // end of line 0
+    view.moveVertically(down: true, extend: true)
+    view.moveVertically(down: true, extend: true)
+    view.moveToLineEdge(end: false, extend: true)  // selection spans lines 0–2
+    view.insertText("one two three four five six seven eight\nnine\nten eleven twelve\nthirteen")
+
+    let reference = try makeWrappingViewer(content(of: view), width: width)
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
+    XCTAssertGreaterThan(view.visualRowCount, 5)  // sanity: wrapping is active
+  }
+
+  @MainActor
+  func testMultiLineDeleteWrapsIdenticallyToAFullRebuild() throws {
+    let width: CGFloat = 160
+    let view = try makeWrappingViewer(
+      "alpha beta gamma delta epsilon zeta\nmiddle one\nmiddle two\ntheta iota kappa lambda",
+      width: width)
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveVertically(down: true, extend: false)  // line 1
+    view.moveVertically(down: true, extend: true)
+    view.moveVertically(down: true, extend: true)
+    view.moveToLineEdge(end: true, extend: true)  // selection spans lines 1–3
+    view.deleteBackward()
+
+    let reference = try makeWrappingViewer(content(of: view), width: width)
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
+  }
+
+  @MainActor
+  func testUndoAndRedoOfAMultiLineEditWrapIdenticallyToAFullRebuild() throws {
+    // Undo/redo splice the rewritten span reported by the buffer instead of
+    // re-wrapping the document; both directions must match fresh viewers.
+    let width: CGFloat = 160
+    let original = "first line long enough to wrap at this width\nsecond\nthird line also wraps"
+    let view = try makeWrappingViewer(original, width: width)
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveToLineEdge(end: true, extend: false)
+    view.moveVertically(down: true, extend: true)
+    view.moveToLineEdge(end: true, extend: true)  // selection spans lines 0–1
+    view.insertText("replacement spanning the viewport width\nwith\nextra\nlines")
+    let edited = content(of: view)
+    let editedReference = try makeWrappingViewer(edited, width: width)
+    XCTAssertEqual(view.visualRowCount, editedReference.visualRowCount)
+
+    XCTAssertTrue(view.undoEdit())
+    XCTAssertEqual(content(of: view), original)
+    let originalReference = try makeWrappingViewer(original, width: width)
+    XCTAssertEqual(view.visualRowCount, originalReference.visualRowCount)
+
+    XCTAssertTrue(view.redoEdit())
+    XCTAssertEqual(content(of: view), edited)
+    XCTAssertEqual(view.visualRowCount, editedReference.visualRowCount)
+  }
+
+  @MainActor
+  func testMultiLineEditsAtTheDocumentEdgesWrapIdenticallyToAFullRebuild() throws {
+    // Splice bands touching both document edges, including appending past a
+    // trailing newline (the final empty line).
+    let width: CGFloat = 160
+    let view = try makeWrappingViewer(
+      "middle line that wraps at this narrow width\nend\n", width: width)
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.insertText("prologue first\nprologue second longer than the viewport width\n")
+    view.moveToDocumentEdge(end: true, extend: false)
+    view.insertText("epilogue one\nepilogue two stretches well past the narrow viewport")
+
+    let reference = try makeWrappingViewer(content(of: view), width: width)
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
+  }
+
+  @MainActor
+  func testMultiLineEditBeforeAHugeLineKeepsItsGridRows() throws {
+    // A huge line (past the display cap) grid-wraps from a cached global UTF-16
+    // start; an edit on earlier lines shifts that start rather than re-resolving
+    // (or corrupting) it. The height must match a fresh viewer, whose build
+    // re-resolves the huge line from scratch.
+    let width: CGFloat = 400
+    let huge = String(repeating: "h", count: 25_000)  // past maximumDrawnCharactersPerLine
+    let view = try makeWrappingViewer("short top\nmiddle\n\(huge)\nbottom", width: width)
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.insertText("inserted alpha\ninserted beta\n")  // before the huge line
+
+    let reference = try makeWrappingViewer(content(of: view), width: width)
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
+    XCTAssertGreaterThan(view.visualRowCount, 50)  // sanity: the huge line grid-wraps
+  }
+
+  @MainActor
+  func testNonProseMultiLinePasteIntroducingALongLineEntersWrapMode() throws {
+    // In a horizontally-scrolling non-prose document, a long line arriving
+    // inside a multi-line paste must still flip the document to wrapping.
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
+    view.wrapsLines = false
+    view.longLineWrapThreshold = 20
+    view.isEditable = true
+    view.setBuffer(try TextBuffer.open(bytes: Data("short\nlines".utf8)))
+    XCTAssertFalse(view.isSoftWrapping)
+
+    view.moveToDocumentEdge(end: true, extend: false)
+    view.insertText("\nmid\n" + String(repeating: "x", count: 25))
+    XCTAssertTrue(view.isSoftWrapping)
+
+    // Oracle: a fresh non-prose viewer of the final content agrees on the rows.
+    let reference = LineRenderingTextView()
+    reference.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
+    reference.wrapsLines = false
+    reference.longLineWrapThreshold = 20
+    reference.setBuffer(try TextBuffer.open(bytes: Data(content(of: view).utf8)))
+    XCTAssertTrue(reference.isSoftWrapping)
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
+  }
+
+  @MainActor
+  func testNonProseMultiLineDeleteRemovingTheLastLongLineLeavesWrapMode() throws {
+    // Deleting a selection that swallows the document's only long line returns
+    // a non-prose document to horizontal scroll immediately.
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
+    view.wrapsLines = false
+    view.longLineWrapThreshold = 20
+    view.isEditable = true
+    let long = String(repeating: "x", count: 25)
+    view.setBuffer(try TextBuffer.open(bytes: Data("aaa\n\(long)\nbbb".utf8)))
+    XCTAssertTrue(view.isSoftWrapping)  // the long line wraps the whole document
+
+    view.moveToDocumentEdge(end: false, extend: false)
+    view.moveToLineEdge(end: true, extend: false)  // end of line 0
+    view.moveVertically(down: true, extend: true)
+    view.moveToLineEdge(end: true, extend: true)  // selection covers the long line
+    view.deleteBackward()
+    XCTAssertFalse(view.isSoftWrapping)
+    XCTAssertEqual(content(of: view), "aaa\nbbb")
   }
 
   // MARK: Multi-click selection
@@ -1706,3 +1867,4 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertTrue(buffer.isDirty)  // a failed write does not mark the buffer saved
   }
 }
+

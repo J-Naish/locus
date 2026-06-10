@@ -13,7 +13,7 @@
 use std::ffi::c_char;
 use std::io::Write;
 
-use app_core::text_buffer::{Position, TextBuffer, TextBufferError};
+use app_core::text_buffer::{EditSpan, Position, TextBuffer, TextBufferError};
 
 use crate::{clear_last_error_message, set_last_error_message, string_from_c_str, LOCUS_STATUS_OK};
 
@@ -34,6 +34,36 @@ pub struct LocusTextPosition {
     pub utf16: usize,
     pub line: usize,
     pub column_utf16: usize,
+}
+
+/// The document span one undo or redo step rewrote, in the coordinates of the
+/// document that step produced: the content before `start_utf16` is identical
+/// on both sides of the step; at that offset the step replaced `old_len_utf16`
+/// UTF-16 units with `new_len_utf16` units. The platform uses it to update
+/// per-line caches (such as the soft-wrap index) for just the rewritten lines
+/// instead of rescanning the document.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocusTextChange {
+    pub start_utf16: usize,
+    pub old_len_utf16: usize,
+    pub new_len_utf16: usize,
+}
+
+impl LocusTextChange {
+    const ZERO: Self = Self {
+        start_utf16: 0,
+        old_len_utf16: 0,
+        new_len_utf16: 0,
+    };
+
+    fn from_span(span: EditSpan) -> Self {
+        Self {
+            start_utf16: span.start_utf16,
+            old_len_utf16: span.old_len_utf16,
+            new_len_utf16: span.new_len_utf16,
+        }
+    }
 }
 
 /// Opaque Rust-owned text buffer handle.
@@ -924,51 +954,87 @@ pub unsafe extern "C" fn locus_text_buffer_replace(
 }
 
 /// Undoes the most recent edit, writing whether anything was undone to
-/// `out_did_undo` (which may be NULL).
+/// `out_did_undo` and the rewritten document span to `out_change` (zeroed when
+/// nothing was undone). Either out-pointer may be NULL.
 ///
 /// # Safety
 /// `buffer` must be NULL or a live handle. `out_did_undo` must be NULL or point
-/// to caller-owned writable storage for a `bool`.
+/// to caller-owned writable storage for a `bool`; `out_change` must be NULL or
+/// point to caller-owned writable storage for a `LocusTextChange`.
 #[no_mangle]
 pub unsafe extern "C" fn locus_text_buffer_undo(
     buffer: *mut LocusTextBuffer,
     out_did_undo: *mut bool,
+    out_change: *mut LocusTextChange,
 ) -> u32 {
     clear_last_error_message();
+    // Clear the outs before any fallible work so a caller never reads stale
+    // values (mirrors the constructors' stale-out hygiene).
+    // SAFETY: out_did_undo is NULL or caller-owned writable storage.
+    if let Some(slot) = unsafe { out_did_undo.as_mut() } {
+        *slot = false;
+    }
+    // SAFETY: out_change is NULL or caller-owned writable storage.
+    if let Some(slot) = unsafe { out_change.as_mut() } {
+        *slot = LocusTextChange::ZERO;
+    }
     // SAFETY: buffer is NULL or a live handle the caller still owns.
     let Some(handle) = (unsafe { buffer.as_mut() }) else {
         set_last_error_message("buffer must not be NULL");
         return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
     };
-    let did_undo = handle.buffer.undo();
-    // SAFETY: out_did_undo is NULL or caller-owned writable storage.
+    let Some(span) = handle.buffer.undo() else {
+        return LOCUS_STATUS_OK;
+    };
+    // SAFETY: as above; the outs are caller-owned writable storage or NULL.
     if let Some(slot) = unsafe { out_did_undo.as_mut() } {
-        *slot = did_undo;
+        *slot = true;
+    }
+    if let Some(slot) = unsafe { out_change.as_mut() } {
+        *slot = LocusTextChange::from_span(span);
     }
     LOCUS_STATUS_OK
 }
 
 /// Redoes the most recently undone edit, writing whether anything was redone to
-/// `out_did_redo` (which may be NULL).
+/// `out_did_redo` and the rewritten document span to `out_change` (zeroed when
+/// nothing was redone). Either out-pointer may be NULL.
 ///
 /// # Safety
 /// `buffer` must be NULL or a live handle. `out_did_redo` must be NULL or point
-/// to caller-owned writable storage for a `bool`.
+/// to caller-owned writable storage for a `bool`; `out_change` must be NULL or
+/// point to caller-owned writable storage for a `LocusTextChange`.
 #[no_mangle]
 pub unsafe extern "C" fn locus_text_buffer_redo(
     buffer: *mut LocusTextBuffer,
     out_did_redo: *mut bool,
+    out_change: *mut LocusTextChange,
 ) -> u32 {
     clear_last_error_message();
+    // Clear the outs before any fallible work so a caller never reads stale
+    // values (mirrors the constructors' stale-out hygiene).
+    // SAFETY: out_did_redo is NULL or caller-owned writable storage.
+    if let Some(slot) = unsafe { out_did_redo.as_mut() } {
+        *slot = false;
+    }
+    // SAFETY: out_change is NULL or caller-owned writable storage.
+    if let Some(slot) = unsafe { out_change.as_mut() } {
+        *slot = LocusTextChange::ZERO;
+    }
     // SAFETY: buffer is NULL or a live handle the caller still owns.
     let Some(handle) = (unsafe { buffer.as_mut() }) else {
         set_last_error_message("buffer must not be NULL");
         return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
     };
-    let did_redo = handle.buffer.redo();
-    // SAFETY: out_did_redo is NULL or caller-owned writable storage.
+    let Some(span) = handle.buffer.redo() else {
+        return LOCUS_STATUS_OK;
+    };
+    // SAFETY: as above; the outs are caller-owned writable storage or NULL.
     if let Some(slot) = unsafe { out_did_redo.as_mut() } {
-        *slot = did_redo;
+        *slot = true;
+    }
+    if let Some(slot) = unsafe { out_change.as_mut() } {
+        *slot = LocusTextChange::from_span(span);
     }
     LOCUS_STATUS_OK
 }
@@ -1223,7 +1289,7 @@ mod tests {
         assert_eq!(snapshot_all(handle), "bye");
 
         let mut did = false;
-        unsafe { locus_text_buffer_undo(handle, &mut did) };
+        unsafe { locus_text_buffer_undo(handle, &mut did, ptr::null_mut()) };
         assert!(did);
         assert_eq!(snapshot_all(handle), "hello"); // one undo restores the whole range
         unsafe { locus_text_buffer_free(handle) };
@@ -1399,18 +1465,95 @@ mod tests {
 
         let mut did = false;
         assert_eq!(
-            unsafe { locus_text_buffer_undo(handle, &mut did) },
+            unsafe { locus_text_buffer_undo(handle, &mut did, ptr::null_mut()) },
             LOCUS_STATUS_OK
         );
         assert!(did);
         assert_eq!(snapshot_all(handle), "ac");
 
         assert_eq!(
-            unsafe { locus_text_buffer_redo(handle, &mut did) },
+            unsafe { locus_text_buffer_redo(handle, &mut did, ptr::null_mut()) },
             LOCUS_STATUS_OK
         );
         assert!(did);
         assert_eq!(snapshot_all(handle), "abc");
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn text_change_layout_matches_the_hand_written_header() {
+        use std::mem::{align_of, offset_of, size_of};
+        // Pinned like `LocusTextPosition`: the header is hand-written and Swift
+        // reads the fields through it, so a reorder must fail a test on the
+        // defining side. The Swift twin pins the same numbers via MemoryLayout.
+        assert_eq!(size_of::<LocusTextChange>(), 24);
+        assert_eq!(align_of::<LocusTextChange>(), 8);
+        assert_eq!(offset_of!(LocusTextChange, start_utf16), 0);
+        assert_eq!(offset_of!(LocusTextChange, old_len_utf16), 8);
+        assert_eq!(offset_of!(LocusTextChange, new_len_utf16), 16);
+    }
+
+    #[test]
+    fn undo_and_redo_report_the_rewritten_span() {
+        // "😀" is 2 UTF-16 units, so the offsets prove the span is UTF-16, not
+        // bytes: replace "bc" (2 units at offset 3) with "XX\nYY" (5 units).
+        let handle = open("😀abc");
+        let bytes = "XX\nYY".as_bytes();
+        assert_eq!(
+            unsafe { locus_text_buffer_replace(handle, 3, 5, bytes.as_ptr(), bytes.len()) },
+            LOCUS_STATUS_OK
+        );
+
+        let mut did = false;
+        let stale = LocusTextChange {
+            start_utf16: 9,
+            old_len_utf16: 9,
+            new_len_utf16: 9,
+        };
+        let mut change = stale;
+        assert_eq!(
+            unsafe { locus_text_buffer_undo(handle, &mut did, &mut change) },
+            LOCUS_STATUS_OK
+        );
+        assert!(did);
+        assert_eq!(change.start_utf16, 3);
+        assert_eq!(change.old_len_utf16, 5);
+        assert_eq!(change.new_len_utf16, 2);
+
+        assert_eq!(
+            unsafe { locus_text_buffer_redo(handle, &mut did, &mut change) },
+            LOCUS_STATUS_OK
+        );
+        assert!(did);
+        assert_eq!(change.old_len_utf16, 2);
+        assert_eq!(change.new_len_utf16, 5);
+
+        // Nothing left to redo: the outs come back cleared, never stale.
+        change = stale;
+        assert_eq!(
+            unsafe { locus_text_buffer_redo(handle, &mut did, &mut change) },
+            LOCUS_STATUS_OK
+        );
+        assert!(!did);
+        assert_eq!(change, LocusTextChange::ZERO);
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn undo_and_redo_tolerate_null_out_pointers() {
+        let handle = open("ab");
+        let text = CString::new("x").unwrap();
+        unsafe { locus_text_buffer_insert(handle, 1, text.as_ptr()) };
+        assert_eq!(
+            unsafe { locus_text_buffer_undo(handle, ptr::null_mut(), ptr::null_mut()) },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(snapshot_all(handle), "ab");
+        assert_eq!(
+            unsafe { locus_text_buffer_redo(handle, ptr::null_mut(), ptr::null_mut()) },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(snapshot_all(handle), "axb");
         unsafe { locus_text_buffer_free(handle) };
     }
 
@@ -1560,5 +1703,183 @@ mod tests {
         let status = unsafe { locus_text_buffer_open_bytes(bad.as_ptr(), bad.len(), &mut handle) };
         assert_eq!(status, LOCUS_TEXT_STATUS_NOT_UTF8);
         assert!(handle.is_null());
+    }
+
+    // MARK: - Layout
+
+    #[test]
+    fn text_position_layout_matches_the_hand_written_header() {
+        use std::mem::{align_of, offset_of, size_of};
+        // `locus_core.h` declares this struct by hand and the Swift side reads
+        // the fields through that header, so pin the Rust layout: a reordered or
+        // retyped field would otherwise shear the two sides apart silently. The
+        // Swift twin (`CoreBridgeTests`) pins the same numbers via MemoryLayout.
+        assert_eq!(size_of::<LocusTextPosition>(), 40);
+        assert_eq!(align_of::<LocusTextPosition>(), 8);
+        assert_eq!(offset_of!(LocusTextPosition, byte), 0);
+        assert_eq!(offset_of!(LocusTextPosition, char_index), 8);
+        assert_eq!(offset_of!(LocusTextPosition, utf16), 16);
+        assert_eq!(offset_of!(LocusTextPosition, line), 24);
+        assert_eq!(offset_of!(LocusTextPosition, column_utf16), 32);
+    }
+
+    // MARK: - Adversarial integer inputs
+    //
+    // These entry points forward raw `usize` arguments into the core. The tests
+    // pin that extreme values come back as status codes or clamped viewport
+    // reads — never an arithmetic overflow or a panic (a panic would abort the
+    // host app process).
+
+    #[test]
+    fn extreme_line_ranges_clamp_to_empty_or_full_snapshots() {
+        let handle = open("ab\ncde");
+
+        let mut past_end: *mut LocusTextSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                locus_text_buffer_snapshot_line_range(handle, usize::MAX, usize::MAX, &mut past_end)
+            },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(unsafe { locus_text_snapshot_first_line(past_end) }, 2);
+        assert_eq!(unsafe { locus_text_snapshot_line_count(past_end) }, 0);
+        assert_eq!(unsafe { locus_text_snapshot_byte_length(past_end) }, 0);
+        unsafe { locus_text_snapshot_free(past_end) };
+
+        // A maximal count from line 0 is the whole document, not an overflow.
+        let mut all: *mut LocusTextSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe { locus_text_buffer_snapshot_line_range(handle, 0, usize::MAX, &mut all) },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(snapshot_bytes(all), b"ab\ncde");
+        unsafe { locus_text_snapshot_free(all) };
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn extreme_caps_on_capped_line_ranges_do_not_overflow() {
+        let handle = open("ab\ncde");
+
+        // cap == usize::MAX must not overflow the per-line budget arithmetic.
+        let mut uncapped: *mut LocusTextSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                locus_text_buffer_snapshot_line_range_capped(
+                    handle,
+                    0,
+                    usize::MAX,
+                    usize::MAX,
+                    &mut uncapped,
+                )
+            },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(snapshot_bytes(uncapped), b"ab\ncde");
+        unsafe { locus_text_snapshot_free(uncapped) };
+
+        // cap == 0 keeps the line structure with every line's content elided.
+        let mut elided: *mut LocusTextSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                locus_text_buffer_snapshot_line_range_capped(handle, 0, usize::MAX, 0, &mut elided)
+            },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(snapshot_bytes(elided), b"\n");
+        unsafe { locus_text_snapshot_free(elided) };
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn extreme_utf16_ranges_clamp_like_viewport_reads() {
+        let handle = open("abc");
+
+        let mut empty: *mut LocusTextSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                locus_text_buffer_snapshot_utf16_range(handle, usize::MAX, usize::MAX, &mut empty)
+            },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(snapshot_bytes(empty), b"");
+        unsafe { locus_text_snapshot_free(empty) };
+
+        let mut full: *mut LocusTextSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe { locus_text_buffer_snapshot_utf16_range(handle, 0, usize::MAX, &mut full) },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(snapshot_bytes(full), b"abc");
+        unsafe { locus_text_snapshot_free(full) };
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn extreme_position_lookups_report_status_codes() {
+        let handle = open("ab\ncde");
+        let mut position = LocusTextPosition {
+            byte: 0,
+            char_index: 0,
+            utf16: 0,
+            line: 0,
+            column_utf16: 0,
+        };
+        assert_eq!(
+            unsafe { locus_text_buffer_position_for_utf16(handle, usize::MAX, &mut position) },
+            LOCUS_TEXT_STATUS_INVALID_OFFSET
+        );
+        assert_eq!(
+            unsafe {
+                locus_text_buffer_position_for_line_column(
+                    handle,
+                    usize::MAX,
+                    usize::MAX,
+                    &mut position,
+                )
+            },
+            LOCUS_TEXT_STATUS_INVALID_LINE
+        );
+        // A maximal column on a valid line saturates to the line's content end.
+        assert_eq!(
+            unsafe {
+                locus_text_buffer_position_for_line_column(handle, 1, usize::MAX, &mut position)
+            },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(position.column_utf16, 3);
+        assert_eq!(position.byte, 6);
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn extreme_edit_offsets_report_status_codes_and_leave_content_intact() {
+        let handle = open("abc");
+        let text = CString::new("x").unwrap();
+        assert_eq!(
+            unsafe { locus_text_buffer_insert(handle, usize::MAX, text.as_ptr()) },
+            LOCUS_TEXT_STATUS_INVALID_OFFSET
+        );
+        assert_eq!(
+            unsafe { locus_text_buffer_insert_bytes(handle, usize::MAX, b"x".as_ptr(), 1) },
+            LOCUS_TEXT_STATUS_INVALID_OFFSET
+        );
+        // A reversed maximal range is rejected as a range before its offsets are
+        // resolved; a forward range out to usize::MAX fails the offset lookup.
+        assert_eq!(
+            unsafe { locus_text_buffer_delete(handle, usize::MAX, 0) },
+            LOCUS_TEXT_STATUS_INVALID_RANGE
+        );
+        assert_eq!(
+            unsafe { locus_text_buffer_delete(handle, 0, usize::MAX) },
+            LOCUS_TEXT_STATUS_INVALID_OFFSET
+        );
+        assert_eq!(
+            unsafe { locus_text_buffer_replace(handle, usize::MAX, usize::MAX, b"x".as_ptr(), 1) },
+            LOCUS_TEXT_STATUS_INVALID_OFFSET
+        );
+        assert_eq!(snapshot_all(handle), "abc");
+        assert!(!unsafe { locus_text_buffer_is_dirty(handle) });
+        unsafe { locus_text_buffer_free(handle) };
     }
 }

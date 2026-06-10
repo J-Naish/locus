@@ -18,8 +18,10 @@ pub mod text_buffer;
 // removing a symbol is a breaking change, so the version is bumped per the
 // contract in `locus_core.h`. Version 4 added the save-snapshot API
 // (`locus_text_buffer_take_save_snapshot` / `_snapshot_write_path` /
-// `_mark_saved_snapshot` / `_snapshot_free`) additively.
-pub const ABI_VERSION: u32 = 4;
+// `_mark_saved_snapshot` / `_snapshot_free`) additively. Version 5 added the
+// `out_change` rewritten-span parameter to `locus_text_buffer_undo`/`_redo` —
+// a signature change to existing symbols, hence a bump.
+pub const ABI_VERSION: u32 = 5;
 
 static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
@@ -443,6 +445,37 @@ mod tests {
     #[test]
     fn exposes_expected_abi_version() {
         assert_eq!(super::locus_core_abi_version(), super::ABI_VERSION);
+    }
+
+    #[test]
+    fn workspace_ffi_layout_matches_the_hand_written_header() {
+        use std::mem::{align_of, offset_of, size_of};
+        // `locus_core.h` declares these structs by hand and the Swift side reads
+        // the fields through that header, so pin the Rust layout: a reordered or
+        // retyped field would otherwise shear the two sides apart silently. The
+        // Swift twin (`CoreBridgeTests`) pins the same numbers via MemoryLayout.
+        assert_eq!(size_of::<super::LocusWorkspaceEntry>(), 64);
+        assert_eq!(align_of::<super::LocusWorkspaceEntry>(), 8);
+        assert_eq!(offset_of!(super::LocusWorkspaceEntry, path), 0);
+        assert_eq!(offset_of!(super::LocusWorkspaceEntry, name), 8);
+        assert_eq!(offset_of!(super::LocusWorkspaceEntry, kind), 16);
+        assert_eq!(offset_of!(super::LocusWorkspaceEntry, file_type), 20);
+        assert_eq!(offset_of!(super::LocusWorkspaceEntry, has_size_bytes), 24);
+        assert_eq!(offset_of!(super::LocusWorkspaceEntry, size_bytes), 32);
+        assert_eq!(
+            offset_of!(super::LocusWorkspaceEntry, has_modified_unix_seconds),
+            40
+        );
+        assert_eq!(
+            offset_of!(super::LocusWorkspaceEntry, modified_unix_seconds),
+            48
+        );
+        assert_eq!(offset_of!(super::LocusWorkspaceEntry, readonly), 56);
+
+        assert_eq!(size_of::<super::LocusWorkspacePartialError>(), 16);
+        assert_eq!(align_of::<super::LocusWorkspacePartialError>(), 8);
+        assert_eq!(offset_of!(super::LocusWorkspacePartialError, status), 0);
+        assert_eq!(offset_of!(super::LocusWorkspacePartialError, message), 8);
     }
 
     #[test]

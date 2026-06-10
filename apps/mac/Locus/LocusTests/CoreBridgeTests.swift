@@ -36,6 +36,29 @@ final class CoreBridgeTests: XCTestCase {
     XCTAssertEqual(MemoryLayout<LocusWorkspacePartialError>.offset(of: \.message), 8)
   }
 
+  func testTextPositionFFILayoutMatchesCurrentABI() {
+    // Rust writes this struct and Swift reads its fields through the
+    // hand-written header; the Rust twin of this test pins the same numbers
+    // via offset_of!, so a drifting field shows up on whichever side moved.
+    XCTAssertEqual(MemoryLayout<LocusTextPosition>.size, 40)
+    XCTAssertEqual(MemoryLayout<LocusTextPosition>.stride, 40)
+    XCTAssertEqual(MemoryLayout<LocusTextPosition>.offset(of: \.byte), 0)
+    XCTAssertEqual(MemoryLayout<LocusTextPosition>.offset(of: \.char_index), 8)
+    XCTAssertEqual(MemoryLayout<LocusTextPosition>.offset(of: \.utf16), 16)
+    XCTAssertEqual(MemoryLayout<LocusTextPosition>.offset(of: \.line), 24)
+    XCTAssertEqual(MemoryLayout<LocusTextPosition>.offset(of: \.column_utf16), 32)
+  }
+
+  func testTextChangeFFILayoutMatchesCurrentABI() {
+    // Same contract as LocusTextPosition: Rust writes, Swift reads, the header
+    // is hand-written, and the Rust twin pins the same numbers via offset_of!.
+    XCTAssertEqual(MemoryLayout<LocusTextChange>.size, 24)
+    XCTAssertEqual(MemoryLayout<LocusTextChange>.stride, 24)
+    XCTAssertEqual(MemoryLayout<LocusTextChange>.offset(of: \.start_utf16), 0)
+    XCTAssertEqual(MemoryLayout<LocusTextChange>.offset(of: \.old_len_utf16), 8)
+    XCTAssertEqual(MemoryLayout<LocusTextChange>.offset(of: \.new_len_utf16), 16)
+  }
+
   func testHeaderStatusConstantsMatchRustResponses() {
     var rawSnapshot: OpaquePointer?
 
