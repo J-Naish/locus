@@ -154,6 +154,96 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
     XCTAssertEqual(backend(nil, true), .editable)
   }
 
+  // MARK: Inactive-document reconciliation
+
+  func testReconciliationKeepsBufferWhenDiskIsUnchanged() {
+    let fingerprint = makeFingerprint(size: 5)
+    XCTAssertEqual(
+      WorkspaceDocumentSurfaceSupport.reconciliation(
+        isCached: true,
+        baselineFingerprint: fingerprint,
+        currentFingerprint: fingerprint,
+        hasUnsavedEdits: true
+      ),
+      .keepBuffer
+    )
+    // Both sides unreadable (never resolved) compares equal too.
+    XCTAssertEqual(
+      WorkspaceDocumentSurfaceSupport.reconciliation(
+        isCached: true,
+        baselineFingerprint: nil,
+        currentFingerprint: nil,
+        hasUnsavedEdits: true
+      ),
+      .keepBuffer
+    )
+  }
+
+  func testReconciliationIgnoresDivergenceForAnUncachedDocument() {
+    // Not cached → there is no retained buffer to reconcile, whatever disk says.
+    XCTAssertEqual(
+      WorkspaceDocumentSurfaceSupport.reconciliation(
+        isCached: false,
+        baselineFingerprint: makeFingerprint(size: 5),
+        currentFingerprint: makeFingerprint(size: 9),
+        hasUnsavedEdits: false
+      ),
+      .keepBuffer
+    )
+  }
+
+  func testReconciliationWarnsWhenDiskChangedUnderUnsavedEdits() {
+    XCTAssertEqual(
+      WorkspaceDocumentSurfaceSupport.reconciliation(
+        isCached: true,
+        baselineFingerprint: makeFingerprint(size: 5),
+        currentFingerprint: makeFingerprint(size: 9),
+        hasUnsavedEdits: true
+      ),
+      .conflict
+    )
+  }
+
+  func testReconciliationReloadsWhenDiskChangedUnderACleanBuffer() {
+    XCTAssertEqual(
+      WorkspaceDocumentSurfaceSupport.reconciliation(
+        isCached: true,
+        baselineFingerprint: makeFingerprint(size: 5),
+        currentFingerprint: makeFingerprint(size: 9),
+        hasUnsavedEdits: false
+      ),
+      .reloadFromDisk
+    )
+  }
+
+  func testReconciliationTreatsAFingerprintAppearingOrVanishingAsADivergence() {
+    // The file became unreadable (deleted/moved) while inactive: unsaved edits
+    // are worth a warning; a clean buffer reloads (and surfaces the open error).
+    XCTAssertEqual(
+      WorkspaceDocumentSurfaceSupport.reconciliation(
+        isCached: true,
+        baselineFingerprint: makeFingerprint(size: 5),
+        currentFingerprint: nil,
+        hasUnsavedEdits: true
+      ),
+      .conflict
+    )
+    // No baseline was ever recorded but the file reads now.
+    XCTAssertEqual(
+      WorkspaceDocumentSurfaceSupport.reconciliation(
+        isCached: true,
+        baselineFingerprint: nil,
+        currentFingerprint: makeFingerprint(size: 5),
+        hasUnsavedEdits: false
+      ),
+      .reloadFromDisk
+    )
+  }
+
+  private func makeFingerprint(size: UInt64) -> DocumentFileFingerprint {
+    DocumentFileFingerprint(size: size, modificationDate: Date(timeIntervalSince1970: 100))
+  }
+
   private func makeEntry(
     name: String,
     kind: WorkspaceEntryKind = .file,

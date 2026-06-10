@@ -135,4 +135,33 @@ enum WorkspaceDocumentSurfaceSupport {
     }
     return (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
   }
+
+  /// How a cached-but-inactive text document catches up with the disk state
+  /// found when the user switches back to it (it is not monitored while
+  /// inactive, so this is the reconciliation decision).
+  enum InactiveDocumentReconciliation: Equatable {
+    /// Nothing changed on disk (or the document is not cached): keep the buffer.
+    case keepBuffer
+    /// Disk changed under unsaved edits: keep them and warn; the user resolves.
+    case conflict
+    /// Disk changed and the buffer is clean: drop it and reload from disk.
+    case reloadFromDisk
+  }
+
+  /// Decides how a document that was open-but-inactive reconciles with disk.
+  /// `baselineFingerprint` is the disk state the cached buffer was last in sync
+  /// with; `currentFingerprint` is the state found now — either side is nil
+  /// when unreadable (e.g. the file was deleted), which still counts as a
+  /// divergence when the two differ.
+  static func reconciliation(
+    isCached: Bool,
+    baselineFingerprint: DocumentFileFingerprint?,
+    currentFingerprint: DocumentFileFingerprint?,
+    hasUnsavedEdits: Bool
+  ) -> InactiveDocumentReconciliation {
+    guard isCached, baselineFingerprint != currentFingerprint else {
+      return .keepBuffer
+    }
+    return hasUnsavedEdits ? .conflict : .reloadFromDisk
+  }
 }

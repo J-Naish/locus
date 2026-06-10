@@ -226,13 +226,20 @@ struct WorkspaceDocumentSurface: View {
     // so reconcile any external change now, using the cached buffer's own dirty
     // state (not the lagging surface mirror, which the editor has not re-reported
     // yet).
-    guard openDocuments.contains(forKey: key), baseline != current else {
+    let reconciliation = WorkspaceDocumentSurfaceSupport.reconciliation(
+      isCached: openDocuments.contains(forKey: key),
+      baselineFingerprint: baseline,
+      currentFingerprint: current,
+      hasUnsavedEdits: openDocuments.isDirty(forKey: key)
+    )
+    switch reconciliation {
+    case .keepBuffer:
       return
-    }
-    openDocuments.setFingerprint(current, forKey: key)
-    if openDocuments.isDirty(forKey: key) {
+    case .conflict:
+      openDocuments.setFingerprint(current, forKey: key)
       documentConflict = true  // keep the unsaved edits; warn about the divergence
-    } else {
+    case .reloadFromDisk:
+      openDocuments.setFingerprint(current, forKey: key)
       documentConflict = false
       openDocuments.drop(forKey: key)  // clean → reopen to show the new disk content
       documentReloadGeneration &+= 1
