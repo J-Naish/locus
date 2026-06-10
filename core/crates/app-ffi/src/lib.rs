@@ -20,7 +20,9 @@ pub mod text_buffer;
 // (`locus_text_buffer_take_save_snapshot` / `_snapshot_write_path` /
 // `_mark_saved_snapshot` / `_snapshot_free`) additively. Version 5 added the
 // `out_change` rewritten-span parameter to `locus_text_buffer_undo`/`_redo` —
-// a signature change to existing symbols, hence a bump.
+// a signature change to existing symbols, hence a bump — and, additively, the
+// snapshot read surface (`locus_text_buffer_take_snapshot` plus the
+// `locus_text_buffer_snapshot_*` line/position reads).
 pub const ABI_VERSION: u32 = 5;
 
 static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();

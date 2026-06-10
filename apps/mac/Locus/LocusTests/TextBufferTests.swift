@@ -61,6 +61,44 @@ final class TextBufferTests: XCTestCase {
     XCTAssertNil(try buffer.redo())  // nothing left to redo reports nil, not zeros
   }
 
+  func testReadSnapshotIsIsolatedAndDoesNotSealTypingRun() throws {
+    let buffer = try TextBuffer.open(bytes: Data("hi\nthere".utf8))
+    try buffer.insert("a", atUTF16: 2)
+
+    let snapshot = try XCTUnwrap(buffer.takeReadSnapshot())
+    try buffer.insert("b", atUTF16: 3)  // keeps coalescing into the same run
+
+    // The snapshot reads the content from the moment it was taken.
+    XCTAssertEqual(snapshot.lineCount, 2)
+    XCTAssertEqual(snapshot.utf16Length, 9)
+    XCTAssertEqual(snapshot.text(forLineRange: 0, count: 2, maxBytesPerLine: 1024), "hia\nthere")
+    let position = try snapshot.position(forLine: 1, columnUTF16: 99)
+    XCTAssertEqual(position.line, 1)
+    XCTAssertEqual(position.columnUTF16, 5)  // clamped to "there"
+    XCTAssertThrowsError(try snapshot.position(forLine: 9, columnUTF16: 0))
+
+    // One undo reverts the whole typed run: taking a read snapshot mid-run did
+    // not split it (unlike a save snapshot, which seals deliberately).
+    XCTAssertNotNil(try buffer.undo())
+    XCTAssertEqual(buffer.text(forLineRange: 0, count: 2), "hi\nthere")
+  }
+
+  func testReadSnapshotServesReadsOffTheMainActor() async throws {
+    // The wrap measurement reads snapshots on a detached task; pin that the
+    // reads answer correctly off-main while the live buffer is edited on-main.
+    let buffer = try TextBuffer.open(bytes: Data("alpha\nbeta\ngamma".utf8))
+    let snapshot = try XCTUnwrap(buffer.takeReadSnapshot())
+    try buffer.replace("rewritten", fromUTF16: 0, toUTF16: buffer.utf16Length)
+
+    let lines = await Task.detached(priority: .userInitiated) {
+      (0..<snapshot.lineCount).map { line in
+        snapshot.text(forLineRange: line, count: 1, maxBytesPerLine: 64)
+      }
+    }.value
+
+    XCTAssertEqual(lines, ["alpha", "beta", "gamma"])
+  }
+
   func testMarkSavedClearsDirty() throws {
     let buffer = try TextBuffer.open(bytes: Data("a".utf8))
     try buffer.insert("b", atUTF16: 1)

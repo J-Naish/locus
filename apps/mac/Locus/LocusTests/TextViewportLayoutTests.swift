@@ -602,6 +602,161 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(content(of: view), "aaa\nbbb")
   }
 
+  // MARK: Background (chunked, off-main) wrap build
+
+  /// A wrapping viewer whose knobs force the chunked background build even for
+  /// tiny fixtures: any document over two lines builds off-main, three lines
+  /// per chunk.
+  @MainActor
+  private func makeBackgroundWrappingViewer(_ contents: String, width: CGFloat) throws
+    -> LineRenderingTextView
+  {
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: width, height: 400)
+    view.wrapBuildSynchronousLineLimit = 2
+    view.wrapBuildChunkLineCount = 3
+    view.setBuffer(try TextBuffer.open(bytes: Data(contents.utf8)))
+    view.isEditable = true
+    return view
+  }
+
+  @MainActor
+  func testBackgroundBuildMatchesTheSynchronousBuild() async throws {
+    let contents = (0..<10)
+      .map { "line \($0) with words enough to wrap at a narrow width" }
+      .joined(separator: "\n")
+    let view = try makeBackgroundWrappingViewer(contents, width: 160)
+
+    // While the build is in flight the document keeps unwrapped geometry — the
+    // open never blocks on a full-document measurement.
+    XCTAssertFalse(view.isSoftWrapping)
+    XCTAssertEqual(view.visualRowCount, 10)
+
+    await view.settleWrapBuildsForTesting()
+    let reference = try makeWrappingViewer(contents, width: 160)  // synchronous path
+    XCTAssertTrue(view.isSoftWrapping)
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
+    XCTAssertGreaterThan(view.visualRowCount, 10)  // sanity: wrapping happened
+  }
+
+  @MainActor
+  func testEditDuringBackgroundBuildSettlesToTheFinalContent() async throws {
+    let contents = (0..<9).map { "alpha beta gamma delta epsilon \($0)" }.joined(separator: "\n")
+    let view = try makeBackgroundWrappingViewer(contents, width: 160)
+
+    // Edit before the first build merges: the build restarts against the new
+    // content and the splice keeps the interim geometry consistent.
+    view.moveToDocumentEdge(end: true, extend: false)
+    view.insertText("\nzz tail line that wraps around the narrow viewport too")
+
+    await view.settleWrapBuildsForTesting()
+    let reference = try makeWrappingViewer(content(of: view), width: 160)
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
+  }
+
+  @MainActor
+  func testResizeDuringBackgroundBuildSettlesAtTheNewWidth() async throws {
+    let contents = (0..<9).map { "alpha beta gamma delta epsilon \($0)" }.joined(separator: "\n")
+    let view = try makeBackgroundWrappingViewer(contents, width: 400)
+
+    // Resize while the 400pt build is still in flight: it is superseded and the
+    // settled index must describe the new width.
+    view.setFrameSize(NSSize(width: 160, height: 400))
+    view.updateLayout()
+
+    await view.settleWrapBuildsForTesting()
+    let reference = try makeWrappingViewer(contents, width: 160)
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
+  }
+
+  @MainActor
+  func testBackgroundBuildResolvesHugeLinesFromTheSnapshot() async throws {
+    // A line past the display cap is grid-wrapped from its true length, which
+    // the worker resolves through the immutable snapshot, not the live buffer.
+    let huge = String(repeating: "h", count: 25_000)
+    let contents = "short top\nmiddle\n\(huge)\nbottom"
+    let view = try makeBackgroundWrappingViewer(contents, width: 400)
+
+    await view.settleWrapBuildsForTesting()
+    let reference = try makeWrappingViewer(contents, width: 400)
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
+    XCTAssertGreaterThan(view.visualRowCount, 50)  // sanity: the huge line grid-wraps
+  }
+
+  @MainActor
+  func testNonProseBackgroundScanStaysHorizontalWithoutALongLine() async throws {
+    // Phase 1 of the background build scans for long lines without measuring;
+    // a non-prose document with none must settle back to horizontal scroll.
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
+    view.wrapsLines = false
+    view.longLineWrapThreshold = 20
+    view.wrapBuildSynchronousLineLimit = 2
+    view.wrapBuildChunkLineCount = 3
+    view.setBuffer(try TextBuffer.open(bytes: Data("aa\nbb\ncc\ndd\nee".utf8)))
+
+    await view.settleWrapBuildsForTesting()
+    XCTAssertFalse(view.isSoftWrapping)
+    XCTAssertEqual(view.visualRowCount, 5)
+  }
+
+  @MainActor
+  func testNonProseBackgroundScanEntersWrapModeForALongLine() async throws {
+    let long = String(repeating: "x", count: 25)
+    let contents = "aa\nbb\n\(long)\ndd\nee"
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 140, height: 400)
+    view.wrapsLines = false
+    view.longLineWrapThreshold = 20
+    view.wrapBuildSynchronousLineLimit = 2
+    view.wrapBuildChunkLineCount = 2
+    view.setBuffer(try TextBuffer.open(bytes: Data(contents.utf8)))
+
+    await view.settleWrapBuildsForTesting()
+    XCTAssertTrue(view.isSoftWrapping)
+
+    let reference = LineRenderingTextView()
+    reference.frame = NSRect(x: 0, y: 0, width: 140, height: 400)
+    reference.wrapsLines = false
+    reference.longLineWrapThreshold = 20
+    reference.setBuffer(try TextBuffer.open(bytes: Data(contents.utf8)))
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
+  }
+
+  @MainActor
+  func testReadOnlyDocumentBuildsItsWrapIndexInBackground() async throws {
+    // The read-only path snapshots the buffer the same way; rows must match a
+    // synchronous read-only reference.
+    let contents = (0..<10)
+      .map { "read only line \($0) with words enough to wrap at this width" }
+      .joined(separator: "\n")
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 160, height: 400)
+    view.wrapBuildSynchronousLineLimit = 2
+    view.wrapBuildChunkLineCount = 3
+    view.setReadOnlyDocument(try TextBuffer.open(bytes: Data(contents.utf8)))
+
+    await view.settleWrapBuildsForTesting()
+    let reference = LineRenderingTextView()
+    reference.frame = NSRect(x: 0, y: 0, width: 160, height: 400)
+    reference.setReadOnlyDocument(try TextBuffer.open(bytes: Data(contents.utf8)))
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
+    XCTAssertGreaterThan(view.visualRowCount, 10)
+  }
+
+  @MainActor
+  func testTeardownDuringBackgroundBuildDoesNotCrash() async throws {
+    let contents = (0..<50)
+      .map { "teardown line \($0) with words enough to wrap at this width" }
+      .joined(separator: "\n")
+    var view: LineRenderingTextView? = try makeBackgroundWrappingViewer(contents, width: 160)
+    XCTAssertNotNil(view)
+    view = nil  // drop the view while its first build is (likely) in flight
+
+    // Give the orphaned worker time to run; absence of a crash is the assertion.
+    try await Task.sleep(for: .milliseconds(100))
+  }
+
   // MARK: Multi-click selection
 
   @MainActor

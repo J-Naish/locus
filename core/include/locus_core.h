@@ -495,6 +495,38 @@ LocusStatus locus_text_buffer_mark_saved_snapshot(
 void locus_text_buffer_snapshot_free(LocusTextBufferSnapshot *snapshot);
 
 /*
+ * Snapshot read surface (added under ABI version 5): the same immutable
+ * snapshot type also serves read-only background passes, e.g. measuring
+ * soft-wrap row counts off the main thread while the user keeps editing.
+ * take_snapshot is the non-mutating twin of take_save_snapshot: it does NOT
+ * seal the insert-coalescing run (a measurement pass must not change undo
+ * granularity) and never touches the dirty flag. The reads are safe from any
+ * thread; read_line_range_capped mirrors
+ * locus_text_buffer_snapshot_line_range_capped, and position_for_line_column
+ * mirrors locus_text_buffer_position_for_line_column (column clamps to the
+ * line's content end; an out-of-range line reports
+ * LOCUS_TEXT_STATUS_INVALID_LINE). NULL snapshots report 0 from the scalar
+ * reads.
+ *
+ * Ownership: on LOCUS_STATUS_OK, take_snapshot writes a Rust-owned snapshot to
+ * *out_snapshot (released exactly once with locus_text_buffer_snapshot_free);
+ * read_line_range_capped writes a Rust-owned text block to *out_snapshot
+ * (released exactly once with locus_text_snapshot_free).
+ */
+LocusStatus locus_text_buffer_take_snapshot(
+    const LocusTextBuffer *buffer, LocusTextBufferSnapshot **out_snapshot);
+size_t locus_text_buffer_snapshot_line_count(
+    const LocusTextBufferSnapshot *snapshot);
+size_t locus_text_buffer_snapshot_utf16_length(
+    const LocusTextBufferSnapshot *snapshot);
+LocusStatus locus_text_buffer_snapshot_read_line_range_capped(
+    const LocusTextBufferSnapshot *snapshot, size_t start_line, size_t count,
+    size_t max_bytes_per_line, LocusTextSnapshot **out_snapshot);
+LocusStatus locus_text_buffer_snapshot_position_for_line_column(
+    const LocusTextBufferSnapshot *snapshot, size_t line, size_t column_utf16,
+    LocusTextPosition *out_position);
+
+/*
  * Read-only, line-indexed large-file viewer (see app_core::line_index).
  *
  * For a file too large to load into an editable buffer: it is scanned once to

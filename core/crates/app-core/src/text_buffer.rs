@@ -582,6 +582,31 @@ impl TextSnapshot {
     pub fn text_for_line_range(&self, start_line: usize, count: usize) -> String {
         coords::text_for_line_range(&self.root, start_line, count)
     }
+
+    /// Like [`text_for_line_range`](Self::text_for_line_range), but each line is
+    /// truncated to at most `max_bytes_per_line` (on a character boundary),
+    /// matching [`TextBuffer::text_for_line_range_capped`]. This is the read a
+    /// background wrap-measure pass uses, so one enormous line cannot blow up
+    /// the chunk fetch.
+    pub fn text_for_line_range_capped(
+        &self,
+        start_line: usize,
+        count: usize,
+        max_bytes_per_line: usize,
+    ) -> String {
+        coords::text_for_line_range_capped(&self.root, start_line, count, max_bytes_per_line)
+    }
+
+    /// Maps a 0-based `line` and UTF-16 `column_utf16` to a full [`Position`],
+    /// matching [`TextBuffer::position_for_line_column`] (column clamps to the
+    /// line's content end; an out-of-range line is rejected).
+    pub fn position_for_line_column(
+        &self,
+        line: usize,
+        column_utf16: usize,
+    ) -> Result<Position, TextBufferError> {
+        coords::position_for_line_column(&self.root, line, column_utf16)
+    }
 }
 
 #[cfg(test)]
@@ -1585,6 +1610,38 @@ mod tests {
         assert_eq!(snapshot.utf16_len(), 11);
         assert_eq!(snapshot.line_count(), 2);
         assert_eq!(snapshot.text_for_line_range(1, 1), "world");
+    }
+
+    #[test]
+    fn snapshot_reads_match_the_buffer_it_was_taken_from() {
+        // The wrap-measure read surface: capped line reads and line/column
+        // positions answer from the snapshot exactly like the live buffer at the
+        // moment it was taken, and stay isolated from later edits. "😀" makes the
+        // byte cap land on a character boundary, not mid-code-point.
+        let mut buffer = buffer("😀😀😀😀\nshort\nlast");
+        let snapshot = buffer.snapshot();
+        let capped_from_buffer = buffer.text_for_line_range_capped(0, 3, 8);
+        let position_from_buffer = buffer
+            .position_for_line_column(1, 3)
+            .expect("line 1 exists");
+
+        buffer
+            .replace(0, buffer.utf16_len(), "rewritten")
+            .expect("replace");
+
+        assert_eq!(
+            snapshot.text_for_line_range_capped(0, 3, 8),
+            capped_from_buffer
+        );
+        assert_eq!(snapshot.text_for_line_range_capped(0, 1, 8), "😀😀"); // 8 bytes = 2 emoji
+        let position = snapshot
+            .position_for_line_column(1, 3)
+            .expect("snapshot keeps line 1");
+        assert_eq!(position, position_from_buffer);
+        assert_eq!(position.line, 1);
+        assert_eq!(position.column_utf16, 3);
+        // Out-of-range lines are rejected, mirroring the buffer's contract.
+        assert!(snapshot.position_for_line_column(99, 0).is_err());
     }
 
     // MARK: - Differential model (oracle) test

@@ -507,6 +507,182 @@ pub unsafe extern "C" fn locus_text_buffer_snapshot_free(snapshot: *mut LocusTex
     }
 }
 
+// MARK: - Snapshot reads (background measurement)
+//
+// The same immutable snapshot type also serves read-only background passes
+// (e.g. measuring soft-wrap row counts off the main thread): take a snapshot,
+// read line ranges and positions from it on any thread, and release it. Unlike
+// `locus_text_buffer_take_save_snapshot` this take does NOT seal the insert
+// run, because a measurement pass must not change undo granularity.
+
+/// Takes an immutable snapshot of the buffer's current content for background
+/// reads. `O(1)`: a structurally-shared rope clone, no content copy; later
+/// edits to the buffer never change it. Does not affect undo coalescing or the
+/// dirty flag (contrast `locus_text_buffer_take_save_snapshot`).
+///
+/// # Safety
+/// `buffer` must be NULL or a live handle. `out_snapshot` must point to
+/// caller-owned writable storage for a `*mut LocusTextBufferSnapshot`. On
+/// success the caller owns the snapshot and must release it exactly once with
+/// `locus_text_buffer_snapshot_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_take_snapshot(
+    buffer: *const LocusTextBuffer,
+    out_snapshot: *mut *mut LocusTextBufferSnapshot,
+) -> u32 {
+    clear_last_error_message();
+    if out_snapshot.is_null() {
+        set_last_error_message("out_snapshot must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    }
+    // SAFETY: out_snapshot is non-null (checked above). Clear it so the caller's
+    // pointer is never left stale on a failure path.
+    unsafe {
+        *out_snapshot = std::ptr::null_mut();
+    }
+    // SAFETY: buffer is NULL or a live handle the caller still owns.
+    let Some(handle) = (unsafe { buffer.as_ref() }) else {
+        set_last_error_message("buffer must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    };
+    let snapshot = handle.buffer.snapshot();
+    // SAFETY: out_snapshot is non-null (checked above).
+    unsafe {
+        *out_snapshot = Box::into_raw(Box::new(LocusTextBufferSnapshot { snapshot }));
+    }
+    LOCUS_STATUS_OK
+}
+
+/// Number of logical lines in the snapshot (a trailing newline counts a final
+/// empty line). NULL reports 0.
+///
+/// # Safety
+/// `snapshot` must be NULL or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_snapshot_line_count(
+    snapshot: *const LocusTextBufferSnapshot,
+) -> usize {
+    // SAFETY: snapshot is NULL or a live handle the caller still owns.
+    match unsafe { snapshot.as_ref() } {
+        Some(handle) => handle.snapshot.line_count(),
+        None => 0,
+    }
+}
+
+/// Total UTF-16 code units in the snapshot. NULL reports 0.
+///
+/// # Safety
+/// `snapshot` must be NULL or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_snapshot_utf16_length(
+    snapshot: *const LocusTextBufferSnapshot,
+) -> usize {
+    // SAFETY: snapshot is NULL or a live handle the caller still owns.
+    match unsafe { snapshot.as_ref() } {
+        Some(handle) => handle.snapshot.utf16_len(),
+        None => 0,
+    }
+}
+
+/// Reads lines `[start_line, start_line + count)` (clamped) from an immutable
+/// buffer snapshot as one UTF-8 block, each line's content truncated to at most
+/// `max_bytes_per_line` (on a character boundary) — the snapshot-sourced twin of
+/// `locus_text_buffer_snapshot_line_range_capped`, safe to call from any thread.
+///
+/// # Safety
+/// `snapshot` must be NULL or a live handle. `out_snapshot` must point to
+/// caller-owned writable storage for a `*mut LocusTextSnapshot`; on success the
+/// caller releases it with `locus_text_snapshot_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_snapshot_read_line_range_capped(
+    snapshot: *const LocusTextBufferSnapshot,
+    start_line: usize,
+    count: usize,
+    max_bytes_per_line: usize,
+    out_snapshot: *mut *mut LocusTextSnapshot,
+) -> u32 {
+    clear_last_error_message();
+    if out_snapshot.is_null() {
+        set_last_error_message("out_snapshot must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    }
+    // SAFETY: out_snapshot is non-null (checked above). Clear it so the caller's
+    // pointer is never left stale on a failure path.
+    unsafe {
+        *out_snapshot = std::ptr::null_mut();
+    }
+    // SAFETY: snapshot is NULL or a live handle the caller still owns.
+    let Some(handle) = (unsafe { snapshot.as_ref() }) else {
+        set_last_error_message("snapshot must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    };
+
+    let total = handle.snapshot.line_count();
+    let text = handle
+        .snapshot
+        .text_for_line_range_capped(start_line, count, max_bytes_per_line);
+    let returned = if start_line >= total {
+        0
+    } else {
+        count.min(total - start_line)
+    };
+    let band = LocusTextSnapshot {
+        // Length-counted raw UTF-8; an embedded NUL stays intact, matching the
+        // buffer-sourced reads.
+        text: text.into_bytes().into_boxed_slice(),
+        first_line: start_line.min(total),
+        line_count: returned,
+    };
+    // SAFETY: out_snapshot was checked non-null; ownership transfers to caller.
+    unsafe {
+        *out_snapshot = Box::into_raw(Box::new(band));
+    }
+    LOCUS_STATUS_OK
+}
+
+/// Maps a 0-based line and UTF-16 column to a full position within an immutable
+/// buffer snapshot — the snapshot-sourced twin of
+/// `locus_text_buffer_position_for_line_column` (column clamps to the line's
+/// content end; an out-of-range line reports LOCUS_TEXT_STATUS_INVALID_LINE).
+/// Writes `*out_position` on success. Safe to call from any thread.
+///
+/// # Safety
+/// `snapshot` must be NULL or a live handle. `out_position` must be NULL or
+/// point to caller-owned writable storage for a `LocusTextPosition`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_snapshot_position_for_line_column(
+    snapshot: *const LocusTextBufferSnapshot,
+    line: usize,
+    column_utf16: usize,
+    out_position: *mut LocusTextPosition,
+) -> u32 {
+    clear_last_error_message();
+    // SAFETY: snapshot is NULL or a live handle the caller still owns.
+    let Some(handle) = (unsafe { snapshot.as_ref() }) else {
+        set_last_error_message("snapshot must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    };
+    match handle.snapshot.position_for_line_column(line, column_utf16) {
+        Ok(position) => {
+            // SAFETY: out_position is NULL or caller-owned writable storage.
+            if let Some(slot) = unsafe { out_position.as_mut() } {
+                *slot = LocusTextPosition {
+                    byte: position.byte,
+                    char_index: position.char,
+                    utf16: position.utf16,
+                    line: position.line,
+                    column_utf16: position.column_utf16,
+                };
+            }
+            LOCUS_STATUS_OK
+        }
+        Err(error) => {
+            set_last_error_message(error.to_string());
+            status_from_error(&error)
+        }
+    }
+}
+
 // MARK: - Viewport read
 
 /// Snapshots the text of lines `[start_line, start_line + count)` (clamped) as
@@ -1536,6 +1712,174 @@ mod tests {
         );
         assert!(!did);
         assert_eq!(change, LocusTextChange::ZERO);
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn read_snapshot_serves_isolated_reads_without_sealing_coalescing() {
+        let handle = open("hi\nthere");
+        // Type one coalescing run, taking a read snapshot mid-run: the snapshot
+        // must NOT seal the run (unlike a save snapshot), so one undo still
+        // reverts the whole run.
+        let a = CString::new("a").unwrap();
+        let b = CString::new("b").unwrap();
+        assert_eq!(
+            unsafe { locus_text_buffer_insert(handle, 2, a.as_ptr()) },
+            LOCUS_STATUS_OK
+        );
+
+        let mut snapshot: *mut LocusTextBufferSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe { locus_text_buffer_take_snapshot(handle, &mut snapshot) },
+            LOCUS_STATUS_OK
+        );
+        assert!(!snapshot.is_null());
+
+        assert_eq!(
+            unsafe { locus_text_buffer_insert(handle, 3, b.as_ptr()) },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(snapshot_all(handle), "hiab\nthere");
+
+        // The snapshot still reads the content from the moment it was taken.
+        assert_eq!(
+            unsafe { locus_text_buffer_snapshot_line_count(snapshot) },
+            2
+        );
+        assert_eq!(
+            unsafe { locus_text_buffer_snapshot_utf16_length(snapshot) },
+            9
+        );
+        let mut band: *mut LocusTextSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                locus_text_buffer_snapshot_read_line_range_capped(
+                    snapshot,
+                    0,
+                    usize::MAX,
+                    usize::MAX,
+                    &mut band,
+                )
+            },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(snapshot_bytes(band), b"hia\nthere");
+        unsafe { locus_text_snapshot_free(band) };
+
+        let mut position = LocusTextPosition {
+            byte: 0,
+            char_index: 0,
+            utf16: 0,
+            line: 0,
+            column_utf16: 0,
+        };
+        assert_eq!(
+            unsafe {
+                locus_text_buffer_snapshot_position_for_line_column(snapshot, 1, 99, &mut position)
+            },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(position.line, 1);
+        assert_eq!(position.column_utf16, 5); // clamped to "there"
+        assert_eq!(
+            unsafe {
+                locus_text_buffer_snapshot_position_for_line_column(snapshot, 9, 0, &mut position)
+            },
+            LOCUS_TEXT_STATUS_INVALID_LINE
+        );
+        unsafe { locus_text_buffer_snapshot_free(snapshot) };
+
+        // One undo reverts the whole coalesced run — the read snapshot did not
+        // split it into two records.
+        let mut did = false;
+        assert_eq!(
+            unsafe { locus_text_buffer_undo(handle, &mut did, ptr::null_mut()) },
+            LOCUS_STATUS_OK
+        );
+        assert!(did);
+        assert_eq!(snapshot_all(handle), "hi\nthere");
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn snapshot_read_entry_points_tolerate_null_and_clamp_extremes() {
+        // NULL snapshot handles answer like the other null-safe accessors.
+        assert_eq!(
+            unsafe { locus_text_buffer_snapshot_line_count(ptr::null()) },
+            0
+        );
+        assert_eq!(
+            unsafe { locus_text_buffer_snapshot_utf16_length(ptr::null()) },
+            0
+        );
+        let mut band: *mut LocusTextSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                locus_text_buffer_snapshot_read_line_range_capped(ptr::null(), 0, 1, 1, &mut band)
+            },
+            LOCUS_TEXT_STATUS_INVALID_ARGUMENT
+        );
+        assert!(band.is_null());
+        assert_eq!(
+            unsafe {
+                locus_text_buffer_snapshot_position_for_line_column(
+                    ptr::null(),
+                    0,
+                    0,
+                    ptr::null_mut(),
+                )
+            },
+            LOCUS_TEXT_STATUS_INVALID_ARGUMENT
+        );
+
+        let mut snapshot: *mut LocusTextBufferSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe { locus_text_buffer_take_snapshot(ptr::null(), &mut snapshot) },
+            LOCUS_TEXT_STATUS_INVALID_ARGUMENT
+        );
+        assert!(snapshot.is_null());
+
+        // Extreme integer inputs clamp like the buffer-sourced reads — never a
+        // panic across the boundary.
+        let handle = open("ab\ncde");
+        assert_eq!(
+            unsafe { locus_text_buffer_take_snapshot(handle, &mut snapshot) },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(
+            unsafe {
+                locus_text_buffer_snapshot_read_line_range_capped(
+                    snapshot,
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                    &mut band,
+                )
+            },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(unsafe { locus_text_snapshot_line_count(band) }, 0);
+        assert_eq!(unsafe { locus_text_snapshot_byte_length(band) }, 0);
+        unsafe { locus_text_snapshot_free(band) };
+        let mut position = LocusTextPosition {
+            byte: 0,
+            char_index: 0,
+            utf16: 0,
+            line: 0,
+            column_utf16: 0,
+        };
+        assert_eq!(
+            unsafe {
+                locus_text_buffer_snapshot_position_for_line_column(
+                    snapshot,
+                    usize::MAX,
+                    usize::MAX,
+                    &mut position,
+                )
+            },
+            LOCUS_TEXT_STATUS_INVALID_LINE
+        );
+        unsafe { locus_text_buffer_snapshot_free(snapshot) };
         unsafe { locus_text_buffer_free(handle) };
     }
 

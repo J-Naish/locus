@@ -121,6 +121,29 @@ enum LineWrap {
   }
 }
 
+/// The read surface a background wrap measurement consumes. Only immutable,
+/// thread-safe backends conform — a snapshot of the editable buffer or the
+/// read-only large file — never the live, main-actor-bound `TextBuffer`, so the
+/// chunked build can run on a detached task while the user keeps editing.
+protocol WrapMeasurementReading: AnyObject {
+  /// Number of logical lines captured by the source.
+  var lineCount: Int { get }
+  /// Total UTF-16 code units captured by the source.
+  var utf16Length: Int { get }
+  /// Text of lines `[start, start + count)` (clamped), joined by `\n`, each
+  /// line's content truncated to at most `maxBytesPerLine` bytes.
+  func text(forLineRange start: Int, count: Int, maxBytesPerLine: Int) -> String
+  /// Maps a 0-based line and UTF-16 column (clamped to the line's content end)
+  /// to a full position; an out-of-range line throws.
+  func position(forLine line: Int, columnUTF16: Int) throws -> TextPosition
+}
+
+/// Both conformances are declaration-only: the snapshot exposes exactly this
+/// surface for background reads, and the large file's `TextDocumentReading`
+/// methods are already safe from any thread (read-only `&self` FFI calls).
+extension TextBufferSnapshot: WrapMeasurementReading {}
+extension LargeFile: WrapMeasurementReading {}
+
 /// A text selection (or caret, when empty) as two endpoints in line/UTF-16-column
 /// coordinates. `anchor` is the fixed end set when the gesture began; `head` is
 /// the moving end the caret follows. Kept free of AppKit state so the ordering
@@ -531,8 +554,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// (Re)builds the wrap index for the current buffer and width when the document
   /// wraps (prose, or a non-prose document holding a long line), or clears it for
-  /// horizontal scrolling. Reads the whole (bounded) document once; line widths
-  /// depend only on the font, so highlighting is skipped here.
+  /// horizontal scrolling.
+  ///
+  /// A document up to `wrapBuildSynchronousLineLimit` lines is measured
+  /// synchronously (one chunk's worth of work, no observable intermediate
+  /// state). A larger document is measured by a chunked background build (see
+  /// `scheduleWrapBuild`): the view keeps its current geometry — no index on
+  /// open, the old-width index across a resize — and swaps the finished index
+  /// in on the main actor, so the main thread never stalls on a full-document
+  /// Core Text pass.
   ///
   /// `recomputeLongLine` forces re-deciding whether a non-prose document has a
   /// long line — passed when the content changed (open, multi-line edit, undo).
@@ -540,7 +570,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// decision was never computed at a valid width yet (see `longLineDecisionValid`),
   /// so the first real layout after a width-less open still resolves it.
   private func rebuildWrapIndex(recomputeLongLine: Bool = true) {
-    lastWrapWidth = wrapContentWidth
+    // Whatever triggered this rebuild supersedes any in-flight background build
+    // (its inputs — content, width, or wrap mode — just changed underneath it).
+    cancelWrapBuild()
     guard let buffer = reader, wrapContentWidth > 0,
       buffer.lineCount <= maximumWrappableLineCount,
       // Estimate the bytes the build pulls across the FFI: at most the per-line
@@ -549,6 +581,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       min(buffer.byteLength, buffer.lineCount * maximumFetchedBytesPerLine)
         <= maximumWrappableFetchedByteBudget
     else {
+      lastWrapWidth = wrapContentWidth
       wrapIndex = nil
       wrapRowCounts = nil
       lineIsLong = nil
@@ -564,11 +597,25 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // a pure resize, but only when the no-wrap decision is actually trustworthy:
     // not on a content change, and not before a valid-width scan has happened.
     if !recomputeLongLine, longLineDecisionValid, !documentWraps {
+      lastWrapWidth = wrapContentWidth
       wrapIndex = nil
       wrapRowCounts = nil
       hugeLineInfo = [:]
       return
     }
+    if buffer.lineCount <= wrapBuildSynchronousLineLimit {
+      buildWrapIndexNow(recomputeLongLine: recomputeLongLine)
+    } else {
+      scheduleWrapBuild(recomputeLongLine: recomputeLongLine)
+    }
+  }
+
+  /// The synchronous build for documents small enough to measure in one pass.
+  /// Reads the whole (bounded) document once; line widths depend only on the
+  /// font, so highlighting is skipped here.
+  private func buildWrapIndexNow(recomputeLongLine: Bool) {
+    guard let buffer = reader else { return }
+    lastWrapWidth = wrapContentWidth
     let width = wrapContentWidth
     let lineStrings = displayLineStrings(forLineRange: 0, count: buffer.lineCount)
     // (Re)scan for long lines when the content changed or the decision has not yet
@@ -605,6 +652,287 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     wrapRowCounts = counts
     wrapIndex = WrapIndex(visualRowsPerLine: counts)
+  }
+
+  // MARK: Background wrap build
+  //
+  // Above `wrapBuildSynchronousLineLimit` lines, the full-document measurement
+  // moves off the main actor: an immutable source (a buffer snapshot or the
+  // read-only large file) is read and measured in chunks on a detached task,
+  // checking for cancellation between chunks — so a superseded build (resize,
+  // edit, document switch) stops within one chunk and only one chunk's strings
+  // are ever resident. The finished outcome is validated against the current
+  // generation/content/width on the main actor and swapped in atomically;
+  // anything stale restarts from the new state. While a build is in flight the
+  // view keeps its current geometry: no index on open (horizontal scroll), the
+  // old-width index across a resize.
+
+  /// Largest document measured synchronously (one chunk's worth — keeps small
+  /// documents free of any intermediate unwrapped state). `var` so tests can
+  /// lower it to force the background path on tiny fixtures.
+  var wrapBuildSynchronousLineLimit = 4_096
+  /// Lines fetched and measured per background chunk: large enough to amortize
+  /// the per-chunk FFI call, small enough that cancellation lands within a few
+  /// tens of milliseconds. `var` so tests can lower it to exercise chunk
+  /// boundaries on tiny fixtures.
+  var wrapBuildChunkLineCount = 4_096
+
+  /// Identifies the current build; bumped whenever a build is scheduled or
+  /// cancelled so a stale completion is dropped on arrival.
+  private var wrapBuildGeneration = 0
+  private var wrapBuildTask: Task<Void, Never>?
+  /// Width the in-flight build is measuring at, so a layout pass does not
+  /// re-trigger a rebuild for a width that is already being measured. -1 when
+  /// no build is in flight.
+  private var wrapBuildTargetWidth: CGFloat = -1
+
+  deinit {
+    // The worker retains only the immutable source and checks cancellation per
+    // chunk; cancelling here stops a torn-down view's build from measuring on
+    // toward a completion the generation check would drop anyway.
+    wrapBuildTask?.cancel()
+  }
+
+  /// Inputs captured on the main actor at schedule time, crossed once into the
+  /// worker. `@unchecked Sendable`: `source` is one of the immutable,
+  /// thread-safe backends (never the live buffer), and `font` is an immutable
+  /// `NSFont`, which AppKit documents as thread-safe.
+  private struct WrapBuildInput: @unchecked Sendable {
+    let source: any WrapMeasurementReading
+    let width: CGFloat
+    let font: NSFont
+    let wrapsLines: Bool
+    /// Whether the worker must (re)scan for long lines (non-prose content
+    /// change, or no trustworthy decision yet).
+    let scanLongLines: Bool
+    /// The wrap decision to use when not scanning (the cached one).
+    let wrapsWithoutScan: Bool
+    let longLineWrapThreshold: Int
+    let drawnCharacterCap: Int
+    let fetchedBytesPerLineCap: Int
+    let chunkLineCount: Int
+    /// Grid columns for huge-line rows at `width`/`font` (precomputed so the
+    /// worker never touches view state).
+    let hugeColumns: Int
+  }
+
+  /// What a finished build hands back for the atomic swap.
+  private struct WrapBuildOutcome {
+    var rowCounts: [Int]
+    var lineIsLong: [Bool]?
+    var longLineCount: Int
+    var hugeLines: [Int: HugeLineInfo]
+    /// False when the (re)scanned non-prose document holds no long line — the
+    /// document stays horizontally scrolling and `rowCounts` is empty.
+    var wraps: Bool
+  }
+
+  /// Captures the build inputs, or `nil` when no immutable source exists for
+  /// the current backend (then the caller measures synchronously).
+  private func makeWrapBuildInput(recomputeLongLine: Bool) -> WrapBuildInput? {
+    let source: (any WrapMeasurementReading)?
+    if let editableBuffer {
+      source = editableBuffer.takeReadSnapshot()
+    } else if let largeFile = readOnlyDocument as? LargeFile {
+      source = largeFile
+    } else if let readOnlyBuffer = readOnlyDocument as? TextBuffer {
+      source = readOnlyBuffer.takeReadSnapshot()
+    } else {
+      source = nil
+    }
+    guard let source else { return nil }
+    return WrapBuildInput(
+      source: source,
+      width: wrapContentWidth,
+      font: font,
+      wrapsLines: wrapsLines,
+      scanLongLines: !wrapsLines && (recomputeLongLine || !longLineDecisionValid),
+      wrapsWithoutScan: documentWraps,
+      longLineWrapThreshold: longLineWrapThreshold,
+      drawnCharacterCap: maximumDrawnCharactersPerLine,
+      fetchedBytesPerLineCap: maximumFetchedBytesPerLine,
+      chunkLineCount: max(1, wrapBuildChunkLineCount),
+      hugeColumns: hugeLineColumns
+    )
+  }
+
+  /// Starts (or restarts) the chunked background build for the current state.
+  private func scheduleWrapBuild(recomputeLongLine: Bool) {
+    guard let input = makeWrapBuildInput(recomputeLongLine: recomputeLongLine) else {
+      buildWrapIndexNow(recomputeLongLine: recomputeLongLine)
+      return
+    }
+    wrapBuildGeneration &+= 1
+    let generation = wrapBuildGeneration
+    let revision = reader?.revision ?? 0
+    wrapBuildTargetWidth = input.width
+    wrapBuildTask = Task.detached(priority: .userInitiated) { [weak self] in
+      let outcome = Self.measureWrapOutcome(input: input)
+      await MainActor.run { [weak self] in
+        self?.completeWrapBuild(
+          generation: generation, revision: revision, input: input, outcome: outcome)
+      }
+    }
+  }
+
+  /// Drops any in-flight build: the worker stops at its next chunk boundary,
+  /// and a completion that still arrives is dropped by the generation check.
+  private func cancelWrapBuild() {
+    wrapBuildGeneration &+= 1
+    wrapBuildTask?.cancel()
+    wrapBuildTask = nil
+    wrapBuildTargetWidth = -1
+  }
+
+  /// Validates a finished build against the current state and swaps it in, or
+  /// restarts from the new state when the world moved while measuring.
+  private func completeWrapBuild(
+    generation: Int, revision: UInt64, input: WrapBuildInput, outcome: WrapBuildOutcome?
+  ) {
+    guard generation == wrapBuildGeneration else { return }  // superseded
+    wrapBuildTask = nil
+    wrapBuildTargetWidth = -1
+    guard let outcome else { return }  // cancelled mid-build, successor owns the state
+    // Content, width, or wrap mode moved while measuring: this outcome
+    // describes a document that no longer exists, so measure the new one. The
+    // splice keeps editing responsive in the meantime, so restarting is cheap
+    // for the main thread.
+    guard reader?.revision == revision, wrapContentWidth == input.width,
+      wrapsLines == input.wrapsLines
+    else {
+      rebuildWrapIndex(recomputeLongLine: true)
+      return
+    }
+    lastWrapWidth = input.width
+    if input.scanLongLines {
+      lineIsLong = outcome.lineIsLong
+      longLineCount = outcome.longLineCount
+    }
+    longLineDecisionValid = true
+    if outcome.wraps {
+      hugeLineInfo = outcome.hugeLines
+      wrapRowCounts = outcome.rowCounts
+      wrapIndex = WrapIndex(visualRowsPerLine: outcome.rowCounts)
+    } else {
+      wrapIndex = nil
+      wrapRowCounts = nil
+      hugeLineInfo = [:]
+    }
+    updateLayout()
+    invalidateVisibleArea()
+  }
+
+  /// Test hook: suspends until no background wrap build (including restarts) is
+  /// in flight, so geometry assertions read the settled index.
+  func settleWrapBuildsForTesting() async {
+    var remainingIterations = 100  // bounded: a restart loop must converge
+    while let task = wrapBuildTask, remainingIterations > 0 {
+      remainingIterations -= 1
+      await task.value
+      await Task.yield()  // let the main-actor merge (and any restart) run
+    }
+  }
+
+  /// The chunked measurement pass. Runs off the main actor against an immutable
+  /// source; returns `nil` when cancelled between chunks. Mirrors
+  /// `buildWrapIndexNow` exactly: same clipping, same long-line flags, same
+  /// huge-line grid rows.
+  private nonisolated static func measureWrapOutcome(input: WrapBuildInput) -> WrapBuildOutcome? {
+    let totalLines = input.source.lineCount
+    var lineIsLong: [Bool]?
+    var longLineCount = 0
+    if input.scanLongLines {
+      // Phase 1 — flags only (no Core Text): cheap, and when the document turns
+      // out not to wrap the row measurement below is skipped entirely, matching
+      // the synchronous build's early exit.
+      var flags: [Bool] = []
+      flags.reserveCapacity(totalLines)
+      var start = 0
+      while start < totalLines {
+        if Task.isCancelled { return nil }
+        let count = min(input.chunkLineCount, totalLines - start)
+        autoreleasepool {
+          let band = input.source.text(
+            forLineRange: start, count: count, maxBytesPerLine: input.fetchedBytesPerLineCap)
+          for line in band.components(separatedBy: "\n") {
+            flags.append((line as NSString).length > input.longLineWrapThreshold)
+          }
+        }
+        start += count
+      }
+      longLineCount = flags.lazy.filter { $0 }.count
+      lineIsLong = flags
+    }
+    let wraps =
+      input.scanLongLines
+      ? (input.wrapsLines || longLineCount > 0)
+      : input.wrapsWithoutScan
+    guard wraps else {
+      return WrapBuildOutcome(
+        rowCounts: [], lineIsLong: lineIsLong, longLineCount: longLineCount,
+        hugeLines: [:], wraps: false)
+    }
+    // Phase 2 — per-line wrapped-row counts, one chunk of lines resident at a
+    // time. The autoreleasepool bounds the NSAttributedString churn per chunk.
+    var counts: [Int] = []
+    counts.reserveCapacity(totalLines)
+    var hugeLines: [Int: HugeLineInfo] = [:]
+    var start = 0
+    while start < totalLines {
+      if Task.isCancelled { return nil }
+      let count = min(input.chunkLineCount, totalLines - start)
+      autoreleasepool {
+        let band = input.source.text(
+          forLineRange: start, count: count, maxBytesPerLine: input.fetchedBytesPerLineCap)
+        for (offset, raw) in band.components(separatedBy: "\n").enumerated() {
+          let line = start + offset
+          let text =
+            raw.count > input.drawnCharacterCap
+            ? String(raw.prefix(input.drawnCharacterCap)) : raw
+          var gridRows: Int?
+          if (text as NSString).length >= input.drawnCharacterCap {
+            // Clipped at the display cap: resolve the true length; a genuinely
+            // huge line folds on the fixed-column grid instead of a layout.
+            let content = Self.hugeContent(of: line, source: input.source)
+            if content.length > input.drawnCharacterCap {
+              hugeLines[line] = HugeLineInfo(start: content.start, length: content.length)
+              gridRows = max(1, (content.length + input.hugeColumns - 1) / input.hugeColumns)
+            }
+          }
+          counts.append(
+            gridRows
+              ?? Self.wrapRowCount(
+                text: text, width: input.width, font: input.font,
+                maximumRows: input.drawnCharacterCap))
+        }
+      }
+      start += count
+    }
+    return WrapBuildOutcome(
+      rowCounts: counts, lineIsLong: lineIsLong, longLineCount: longLineCount,
+      hugeLines: hugeLines, wraps: true)
+  }
+
+  /// A huge line's content start (global UTF-16) and length, resolved from the
+  /// immutable source — the worker-side twin of `hugeLineContent(_:)`.
+  private nonisolated static func hugeContent(
+    of line: Int, source: any WrapMeasurementReading
+  ) -> (start: Int, length: Int) {
+    let start = (try? source.position(forLine: line, columnUTF16: 0).utf16) ?? 0
+    // A column past the content clamps to the line's content end (terminator
+    // excluded), so the difference is the content's UTF-16 length.
+    let end = (try? source.position(forLine: line, columnUTF16: source.utf16Length))?.utf16 ?? start
+    return (start, max(0, end - start))
+  }
+
+  /// Number of visual rows `text` occupies at `width` in `font`. Pure, so the
+  /// background worker and the main-actor paths measure identically.
+  private nonisolated static func wrapRowCount(
+    text: String, width: CGFloat, font: NSFont, maximumRows: Int
+  ) -> Int {
+    let attributed = NSAttributedString(string: text, attributes: [.font: font])
+    return LineWrap.visualRowStartOffsets(of: attributed, width: width, maximumRows: maximumRows)
+      .count
   }
 
   /// Recomputes the wrap index for just the lines a change rewrote, splicing
@@ -761,10 +1089,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Number of visual rows `text` occupies at `width`.
   private func wrapRowCount(text: String, width: CGFloat) -> Int {
-    let attributed = NSAttributedString(string: text, attributes: [.font: font])
-    return LineWrap.visualRowStartOffsets(
-      of: attributed, width: width, maximumRows: maximumDrawnCharactersPerLine
-    ).count
+    Self.wrapRowCount(
+      text: text, width: width, font: font, maximumRows: maximumDrawnCharactersPerLine)
   }
 
   /// Total visual rows in the document (equals the logical line count when not
@@ -2200,8 +2526,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   func updateLayout() {
     // Resize changes the wrap width; rebuild the index when it actually changed.
     // The content has not changed, so reuse the cached long-line decision rather
-    // than re-scanning the document just to resize.
-    if lastWrapWidth != wrapContentWidth {
+    // than re-scanning the document just to resize. A background build already
+    // measuring at the current width is left to finish — re-triggering it here
+    // would restart the build once per layout pass and never converge.
+    if lastWrapWidth != wrapContentWidth, wrapBuildTargetWidth != wrapContentWidth {
       rebuildWrapIndex(recomputeLongLine: false)
     }
     let visibleSize = enclosingScrollView?.documentVisibleRect.size

@@ -180,6 +180,22 @@ final class TextBuffer {
     locus_text_buffer_mark_saved_snapshot(handle, snapshot.handle)
   }
 
+  /// Captures an immutable snapshot of the current content for background
+  /// *reads* (e.g. measuring soft-wrap rows off the main actor). `O(1)`: a
+  /// structurally-shared clone, no content copy. Unlike ``takeSaveSnapshot()``
+  /// this never mutates the buffer — the typing run keeps coalescing and the
+  /// dirty flag is untouched. Returns `nil` only if the core rejects the call,
+  /// which cannot happen for a live buffer.
+  func takeReadSnapshot() -> TextBufferSnapshot? {
+    var snapshot: OpaquePointer?
+    let status = locus_text_buffer_take_snapshot(handle, &snapshot)
+    guard status == LOCUS_STATUS_OK, let snapshot else {
+      Self.logger.error("take_snapshot failed with status \(status)")
+      return nil
+    }
+    return TextBufferSnapshot(handle: snapshot)
+  }
+
   /// Writes the full content to the file at `path` (created/truncated), streaming
   /// it through the core so a multi-gigabyte document is not assembled in memory.
   /// The caller owns any atomic-rename / symlink handling.
@@ -577,5 +593,55 @@ final class TextBufferSnapshot: @unchecked Sendable {
     guard status == LOCUS_STATUS_OK else {
       throw TextBuffer.error(for: status)
     }
+  }
+
+  // MARK: Background reads
+  //
+  // The snapshot is immutable and the core reads are thread-safe, so a
+  // background pass (the chunked wrap measurement) can read line bands and
+  // positions from any thread while the user keeps editing the live buffer.
+
+  /// Number of logical lines captured by the snapshot.
+  var lineCount: Int {
+    locus_text_buffer_snapshot_line_count(handle)
+  }
+
+  /// Total UTF-16 code units captured by the snapshot.
+  var utf16Length: Int {
+    locus_text_buffer_snapshot_utf16_length(handle)
+  }
+
+  /// Text of lines `[start, start + count)` (clamped), joined by `\n`, each
+  /// line's content truncated to at most `maxBytesPerLine` bytes — the
+  /// snapshot-sourced twin of ``TextBuffer/text(forLineRange:count:maxBytesPerLine:)``.
+  func text(forLineRange start: Int, count: Int, maxBytesPerLine: Int) -> String {
+    guard start >= 0, count >= 0, maxBytesPerLine >= 0 else {
+      return ""
+    }
+    var snapshot: OpaquePointer?
+    let status = locus_text_buffer_snapshot_read_line_range_capped(
+      handle, start, count, maxBytesPerLine, &snapshot)
+    return TextBuffer.decodeSnapshot(
+      status, snapshot, context: "snapshot text(forLineRange:maxBytesPerLine:)")
+  }
+
+  /// Maps a 0-based line and UTF-16 column to a full position within the
+  /// snapshot — the snapshot-sourced twin of
+  /// ``TextBuffer/position(forLine:columnUTF16:)`` (column clamps to the line's
+  /// content end; an out-of-range line throws).
+  func position(forLine line: Int, columnUTF16: Int) throws -> TextPosition {
+    guard line >= 0 else {
+      throw TextBufferError.invalidLine
+    }
+    guard columnUTF16 >= 0 else {
+      throw TextBufferError.invalidOffset
+    }
+    var raw = LocusTextPosition()
+    let status = locus_text_buffer_snapshot_position_for_line_column(
+      handle, line, columnUTF16, &raw)
+    guard status == LOCUS_STATUS_OK else {
+      throw TextBuffer.error(for: status)
+    }
+    return TextPosition(from: raw)
   }
 }
