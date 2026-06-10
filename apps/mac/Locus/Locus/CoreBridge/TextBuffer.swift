@@ -87,10 +87,12 @@ protocol TextDocumentReading: AnyObject {
 /// Swift `String`s before releasing it and freeing the handle on `deinit`.
 ///
 /// Not `Sendable`. The underlying Rust buffer is `Send + Sync`, so concurrent
-/// *immutable* reads are safe (the background save reads it while the main thread
-/// keeps rendering). Mutations (`insert`/`replace`/`delete`/`undo`/`redo`/
-/// `markSaved`) must not overlap any other access; the caller serializes them by
-/// pausing edits for the save's duration and keeping all mutation on one actor.
+/// *immutable* reads are safe (rendering reads it on the main thread). Mutations
+/// (`insert`/`replace`/`delete`/`undo`/`redo`/`markSaved`/`takeSaveSnapshot`) must
+/// not overlap any other access, so the caller keeps all mutation on one actor.
+/// A background save no longer reads this live buffer: `takeSaveSnapshot()` hands
+/// the writer an immutable ``TextBufferSnapshot``, so editing continues during the
+/// write.
 final class TextBuffer {
   private let handle: OpaquePointer
   private static let logger = Logger(subsystem: "com.nash.locus", category: "TextBuffer")
@@ -141,6 +143,30 @@ final class TextBuffer {
   /// Marks the current content as saved (clears the dirty flag).
   func markSaved() {
     locus_text_buffer_mark_saved(handle)
+  }
+
+  /// Captures an immutable snapshot of the current content for a background save
+  /// and seals the current typing run, so the buffer stays editable during the
+  /// write without the dirty flag drifting (see ``TextBufferSnapshot``). `O(1)`: a
+  /// structurally-shared clone, no content copy. Mutates the buffer (the seal), so
+  /// it runs under the same exclusive access as other edits. Returns `nil` only if
+  /// the core rejects the call, which cannot happen for a live buffer.
+  func takeSaveSnapshot() -> TextBufferSnapshot? {
+    var snapshot: OpaquePointer?
+    let status = locus_text_buffer_take_save_snapshot(handle, &snapshot)
+    guard status == LOCUS_STATUS_OK, let snapshot else {
+      Self.logger.error("take_save_snapshot failed with status \(status)")
+      return nil
+    }
+    return TextBufferSnapshot(handle: snapshot)
+  }
+
+  /// Marks the content captured by `snapshot` as the saved baseline. Unlike
+  /// ``markSaved()``, which marks the *current* content, this marks exactly what
+  /// was written, so a buffer edited during the write stays dirty and undoing back
+  /// to the saved content reads clean again.
+  func markSaved(_ snapshot: TextBufferSnapshot) {
+    locus_text_buffer_mark_saved_snapshot(handle, snapshot.handle)
   }
 
   /// Writes the full content to the file at `path` (created/truncated), streaming
@@ -497,3 +523,34 @@ final class LargeFile: @unchecked Sendable {
 /// A large file is a read-only document peer of ``TextBuffer``: it satisfies the
 /// full read surface, with no editable backing.
 extension LargeFile: TextDocumentReading {}
+
+/// A Swift owner of an immutable, Rust-backed save snapshot of a ``TextBuffer``.
+///
+/// `Sendable` (unchecked): the handle is immutable after creation, the underlying
+/// Rust snapshot is `Send + Sync`, the only cross-thread call (``write(toPath:)``)
+/// merely *reads* it, and it is freed exactly once on `deinit`. That lets the
+/// editor hand a snapshot to a background writer while the user keeps editing the
+/// live buffer — the snapshot shares the buffer's rope nodes immutably and never
+/// observes later edits. (The previous design instead smuggled the live, *mutable*
+/// buffer across the boundary and relied on pausing edits for the write.)
+final class TextBufferSnapshot: @unchecked Sendable {
+  fileprivate let handle: OpaquePointer
+
+  fileprivate init(handle: OpaquePointer) {
+    self.handle = handle
+  }
+
+  deinit {
+    locus_text_buffer_snapshot_free(handle)
+  }
+
+  /// Streams the snapshot's full content to the file at `path` (created or
+  /// truncated). Safe to call off the main thread; the caller owns any
+  /// atomic-rename / symlink policy.
+  func write(toPath path: String) throws {
+    let status = path.withCString { locus_text_buffer_snapshot_write_path(handle, $0) }
+    guard status == LOCUS_STATUS_OK else {
+      throw TextBuffer.error(for: status)
+    }
+  }
+}

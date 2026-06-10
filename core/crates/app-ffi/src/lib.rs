@@ -16,8 +16,10 @@ pub mod text_buffer;
 
 // Version 3 dropped the unused `locus_large_file_max_line_byte_length` export;
 // removing a symbol is a breaking change, so the version is bumped per the
-// contract in `locus_core.h`.
-pub const ABI_VERSION: u32 = 3;
+// contract in `locus_core.h`. Version 4 added the save-snapshot API
+// (`locus_text_buffer_take_save_snapshot` / `_snapshot_write_path` /
+// `_mark_saved_snapshot` / `_snapshot_free`) additively.
+pub const ABI_VERSION: u32 = 4;
 
 static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 

@@ -84,7 +84,7 @@ struct TextBufferStore {
     }
   }
 
-  func save(_ buffer: TextBuffer, to url: URL, encoding: String.Encoding = .utf8) throws {
+  func save(_ snapshot: TextBufferSnapshot, to url: URL, encoding: String.Encoding = .utf8) throws {
     let didStartAccess = url.startAccessingSecurityScopedResource()
     defer {
       if didStartAccess {
@@ -93,15 +93,15 @@ struct TextBufferStore {
     }
 
     if encoding == .utf8 {
-      // Stream the buffer straight to disk — no full-document materialization.
+      // Stream the snapshot straight to disk — no full-document materialization.
       try writeAtomically(to: url) { destination in
-        try buffer.write(toPath: destination.path(percentEncoded: false))
+        try snapshot.write(toPath: destination.path(percentEncoded: false))
       }
       return
     }
 
     // Legacy encoding: materialize the (small) content and re-encode it.
-    let text = try utf8Text(of: buffer, siblingOf: url)
+    let text = try utf8Text(of: snapshot, siblingOf: url)
     let data = try TextEncoding.encode(text, as: encoding)
     try writeAtomically(to: url) { destination in
       try data.write(to: destination)
@@ -123,13 +123,13 @@ struct TextBufferStore {
     return (try TextBuffer.open(bytes: Data(document.text.utf8)), document.encoding)
   }
 
-  /// The buffer's exact content as a UTF-8 string, via a sibling temp file so the
-  /// streaming write path is reused (no content-snapshot FFI needed).
-  private func utf8Text(of buffer: TextBuffer, siblingOf url: URL) throws -> String {
+  /// The snapshot's exact content as a UTF-8 string, via a sibling temp file so the
+  /// streaming write path is reused (no in-memory content materialization in Rust).
+  private func utf8Text(of snapshot: TextBufferSnapshot, siblingOf url: URL) throws -> String {
     let temporaryURL = url.deletingLastPathComponent()
       .appendingPathComponent(".locus-reencode-\(UUID().uuidString).tmp")
     defer { try? FileManager.default.removeItem(at: temporaryURL) }
-    try buffer.write(toPath: temporaryURL.path(percentEncoded: false))
+    try snapshot.write(toPath: temporaryURL.path(percentEncoded: false))
     return String(decoding: try Data(contentsOf: temporaryURL), as: UTF8.self)
   }
 

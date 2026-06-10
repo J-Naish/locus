@@ -1554,40 +1554,39 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
-  func testBufferMutationsArePausedWhileSaving() throws {
-    // The background save reads the buffer; mutations must be paused for its
-    // duration so the read never races an edit.
+  func testBufferStaysEditableWhileSaving() throws {
+    // The background save reads an immutable snapshot, not the live buffer, so a
+    // save in flight no longer pauses editing.
     let view = try makeEditableViewer("abc")
     view.moveToDocumentEdge(end: true, extend: false)
     view.beginSaveForTesting()
 
     view.insertText("X")
+    XCTAssertEqual(content(of: view), "abcX")  // edits apply during a save
     view.deleteBackward()
-    view.undoEdit()
-    view.redoEdit()
-    XCTAssertEqual(content(of: view), "abc")  // every mutation no-ops while saving
+    XCTAssertEqual(content(of: view), "abc")
   }
 
   @MainActor
-  func testEditsStayPausedAfterSwappingAwayFromAndBackToASavingBuffer() throws {
-    // Reproduces the open-document-cache reuse path: a save starts, the view shows
-    // another document and then returns to the original (same cached buffer). The
-    // first save is still in flight, so edits to that buffer must remain paused —
-    // a per-view flag reset on swap would wrongly re-enable them and race the write.
+  func testBufferStaysEditableAfterSwappingAwayFromAndBackToASavingBuffer() throws {
+    // The open-document-cache reuse path: a save starts, the view shows another
+    // document, then returns to the original (same cached buffer). Editing is never
+    // paused — the writer holds an immutable snapshot — so the buffer is editable
+    // throughout, including after the swap-back.
     let view = try makeEditableViewer("abc")
     let savingBuffer = try XCTUnwrap(view.editableBuffer)
     view.beginSaveForTesting()  // a save is now in flight for `savingBuffer`
 
     let otherBuffer = try TextBuffer.open(bytes: Data("xyz".utf8))
-    view.setBuffer(otherBuffer)  // swap away — the other buffer is freely editable
+    view.setBuffer(otherBuffer)  // swap away
     view.moveToDocumentEdge(end: true, extend: false)
     view.insertText("Z")
-    XCTAssertEqual(content(of: view), "xyzZ")  // unrelated buffer is not paused
+    XCTAssertEqual(content(of: view), "xyzZ")
 
     view.setBuffer(savingBuffer)  // swap back to the still-saving buffer
     view.moveToDocumentEdge(end: true, extend: false)
     view.insertText("Q")
-    XCTAssertEqual(content(of: view), "abc")  // still paused: no edit reaches it
+    XCTAssertEqual(content(of: view), "abcQ")  // editable even while its save runs
   }
 
   // MARK: DocumentSaveTracker
@@ -1601,21 +1600,8 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertTrue(tracker.begin(buffer))
     XCTAssertTrue(tracker.isSaving(buffer))
     XCTAssertFalse(tracker.begin(buffer))  // a second save is refused while one runs
-    XCTAssertTrue(tracker.finish(buffer))  // unchanged → safe to mark saved
+    tracker.finish(buffer)
     XCTAssertFalse(tracker.isSaving(buffer))
-    XCTAssertFalse(tracker.finish(buffer))  // nothing in flight to finish
-  }
-
-  @MainActor
-  func testSaveTrackerWithholdsMarkSavedWhenBufferChangedMidWrite() throws {
-    // If the buffer is edited between begin and finish, its content no longer
-    // matches what was written, so the caller must not mark it saved.
-    let tracker = DocumentSaveTracker()
-    let buffer = try TextBuffer.open(bytes: Data("abc".utf8))
-
-    XCTAssertTrue(tracker.begin(buffer))
-    try buffer.insert("X", atUTF16: 3)  // advances the buffer's revision
-    XCTAssertFalse(tracker.finish(buffer))  // diverged → withhold "saved"
   }
 
   @MainActor
@@ -1625,10 +1611,11 @@ final class TextViewportLayoutTests: XCTestCase {
     let second = try TextBuffer.open(bytes: Data("two".utf8))
 
     XCTAssertTrue(tracker.begin(first))
-    XCTAssertFalse(tracker.isSaving(second))  // saving one does not pause another
+    XCTAssertFalse(tracker.isSaving(second))  // tracked independently per buffer
     XCTAssertTrue(tracker.begin(second))
     XCTAssertTrue(tracker.isSaving(first))
-    XCTAssertTrue(tracker.finish(first))
+    tracker.finish(first)
+    XCTAssertFalse(tracker.isSaving(first))
     XCTAssertTrue(tracker.isSaving(second))  // finishing one leaves the other in flight
   }
 
@@ -1642,9 +1629,10 @@ final class TextViewportLayoutTests: XCTestCase {
     let buffer = try TextBuffer.open(bytes: Data("abc".utf8))
     try buffer.insert("X", atUTF16: 3)  // make it dirty
     XCTAssertTrue(buffer.isDirty)
+    let snapshot = try XCTUnwrap(buffer.takeSaveSnapshot())  // captures "abcX"
 
     // A save is in flight, started by a view that is now gone. The shared tracker
-    // must be cleared by completion regardless, or this buffer stays paused forever.
+    // must be cleared by completion regardless, or this buffer stays blocked forever.
     let tracker = DocumentSaveTracker()
     tracker.begin(buffer)
     XCTAssertTrue(tracker.isSaving(buffer))
@@ -1653,7 +1641,7 @@ final class TextViewportLayoutTests: XCTestCase {
     LineRenderingTextView.completeSave(
       .success(nil),
       savedBuffer: buffer,
-      startRevision: buffer.revision,
+      snapshot: snapshot,
       saveTracker: tracker,
       completion: { result in
         if case .success = result {
@@ -1666,31 +1654,31 @@ final class TextViewportLayoutTests: XCTestCase {
 
     XCTAssertFalse(buffer.isDirty)  // marked saved despite having no view
     XCTAssertEqual(reportedSuccess, [true])  // host was notified of the success
-    XCTAssertFalse(tracker.isSaving(buffer))  // in-flight mark cleared so edits re-enable
+    XCTAssertFalse(tracker.isSaving(buffer))  // in-flight mark cleared
   }
 
   @MainActor
-  func testCompleteSaveWithholdsMarkSavedWhenBufferDivergedFromWrite() throws {
-    // The buffer changed after the write captured its revision (e.g. a reopened
-    // cached buffer edited after the saving view was torn down). Its newer content
-    // must not be recorded as saved, so it stays dirty — but the host is still
-    // notified so the written fingerprint is recorded.
+  func testCompleteSaveKeepsBufferDirtyWhenEditedDuringWrite() throws {
+    // The buffer is edited after the snapshot is captured (the user keeps typing
+    // during the write). Only the snapshot's content reached disk, so the newer
+    // content must stay dirty — but the host is still notified so the written
+    // fingerprint is recorded.
     let buffer = try TextBuffer.open(bytes: Data("abc".utf8))
     try buffer.insert("X", atUTF16: 3)
-    let startRevision = buffer.revision
-    try buffer.insert("Y", atUTF16: 4)  // diverges from the written revision
+    let snapshot = try XCTUnwrap(buffer.takeSaveSnapshot())  // captures "abcX"
+    try buffer.insert("Y", atUTF16: 4)  // edited during the write -> "abcXY"
     XCTAssertTrue(buffer.isDirty)
 
     var notified = false
     LineRenderingTextView.completeSave(
       .success(nil),
       savedBuffer: buffer,
-      startRevision: startRevision,
+      snapshot: snapshot,
       saveTracker: DocumentSaveTracker(),
       completion: { _ in notified = true }
     )
 
-    XCTAssertTrue(buffer.isDirty)  // withheld → still dirty
+    XCTAssertTrue(buffer.isDirty)  // newer content not written -> still dirty
     XCTAssertTrue(notified)
   }
 
@@ -1699,12 +1687,13 @@ final class TextViewportLayoutTests: XCTestCase {
     // A failed write surfaces to the host and leaves the buffer dirty.
     let buffer = try TextBuffer.open(bytes: Data("abc".utf8))
     try buffer.insert("X", atUTF16: 3)
+    let snapshot = try XCTUnwrap(buffer.takeSaveSnapshot())
 
     var reportedFailure = false
     LineRenderingTextView.completeSave(
       .failure(CocoaError(.fileWriteNoPermission)),
       savedBuffer: buffer,
-      startRevision: buffer.revision,
+      snapshot: snapshot,
       saveTracker: DocumentSaveTracker(),
       completion: { result in
         if case .failure = result {

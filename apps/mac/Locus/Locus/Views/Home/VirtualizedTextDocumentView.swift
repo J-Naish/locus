@@ -251,20 +251,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   var onSaveCompletion: ((Result<DocumentFileFingerprint?, Error>) -> Void)?
 
   /// Tracks which buffers have a background save in flight, keyed by the buffer so
-  /// the edit pause survives a document swap-and-return (the open-document cache
-  /// hands back the *same* `TextBuffer`). Production wires this to the shared
-  /// `DocumentSaveTracker.shared` in `makeNSView` so the pause also survives this
-  /// view being torn down and recreated mid-write; the default fresh instance keeps
-  /// tests isolated.
+  /// the one-save-at-a-time guard survives a document swap-and-return (the
+  /// open-document cache hands back the *same* `TextBuffer`). Production wires this
+  /// to the shared `DocumentSaveTracker.shared` in `makeNSView` so the guard also
+  /// survives this view being torn down and recreated mid-write; the default fresh
+  /// instance keeps tests isolated. A save writes an immutable snapshot, not this
+  /// live buffer, so editing is never paused — the guard only keeps two writes of
+  /// the same buffer from overlapping.
   var saveTracker = DocumentSaveTracker()
-
-  /// Whether the buffer currently shown has a save writing on a background thread.
-  /// Buffer *mutations* are paused while true so the background read never races an
-  /// edit; reads (rendering, selection) stay safe because the core buffer is `Sync`.
-  var isSaving: Bool {
-    guard let buffer = editableBuffer else { return false }
-    return saveTracker.isSaving(buffer)
-  }
 
   /// Reports the buffer's dirty state to the host after each edit/undo, so it can
   /// decide whether an external change may safely reload (clean) or conflicts
@@ -1749,7 +1743,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// coalesces consecutive typing into a single undo step.
   @discardableResult
   private func replace(globalStart start: Int, globalEnd end: Int, with string: String) -> Bool {
-    guard !isSaving, let buffer = editableBuffer else { return false }
+    guard let buffer = editableBuffer else { return false }
     do {
       if end > start {
         try buffer.replace(string, fromUTF16: start, toUTF16: end)
@@ -1829,7 +1823,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// (true while editable), regardless of whether anything was undone.
   @discardableResult
   func undoEdit() -> Bool {
-    guard isEditable, !isSaving, let buffer = editableBuffer else { return false }
+    guard isEditable, let buffer = editableBuffer else { return false }
     composition = nil
     if (try? buffer.undo()) == true {
       afterUndoRedo()
@@ -1840,7 +1834,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Re-applies the most recently undone edit. See `undoEdit` for the return value.
   @discardableResult
   func redoEdit() -> Bool {
-    guard isEditable, !isSaving, let buffer = editableBuffer else { return false }
+    guard isEditable, let buffer = editableBuffer else { return false }
     composition = nil
     if (try? buffer.redo()) == true {
       afterUndoRedo()
@@ -1883,7 +1877,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Deletes the UTF-16 range between two endpoints and collapses the caret to
   /// the start. Endpoints must already be ordered (`from` before `to`).
   private func deleteRange(from start: TextSelection.Endpoint, to end: TextSelection.Endpoint) {
-    guard !isSaving, let buffer = editableBuffer, let startOffset = utf16Offset(of: start),
+    guard let buffer = editableBuffer, let startOffset = utf16Offset(of: start),
       let endOffset = utf16Offset(of: end), endOffset > startOffset
     else {
       return
@@ -1955,14 +1949,23 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   // MARK: Save
 
-  /// Saves the buffer to `saveURL` on a background thread so the write never
-  /// blocks the UI. `isSaving` is set synchronously here (before any await) to
-  /// pause buffer mutations for the write's duration; rendering keeps reading the
-  /// buffer concurrently, which is sound because the core buffer is `Sync`.
+  /// Saves the buffer to `saveURL` on a background thread so the write never blocks
+  /// the UI. Captures an immutable snapshot synchronously (before any await), then
+  /// streams that off-main; the live buffer stays editable during the write because
+  /// the snapshot is independent of it. A per-buffer in-flight guard keeps two
+  /// writes of the same buffer from overlapping.
   func requestSave() {
     guard isEditable, let buffer = editableBuffer, buffer.isDirty, let saveURL,
       saveTracker.begin(buffer)
     else {
+      return
+    }
+    // Capture an immutable snapshot of the current content on the main actor
+    // (`O(1)`); the background write reads only this, so the live buffer stays
+    // editable during the save. If the core somehow refuses, release the in-flight
+    // mark so a later edit can retry.
+    guard let snapshot = buffer.takeSaveSnapshot() else {
+      saveTracker.finish(buffer)
       return
     }
     invalidateVisibleArea()
@@ -1972,13 +1975,6 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // switch), so completion must act on the buffer that was actually saved and
     // route to the entry that requested it — never the current one.
     let savedBuffer = buffer
-    // Revision at save start. Edits to this buffer are paused for the write's
-    // duration, so it normally still matches at completion; the check lets the
-    // completion decline to mark *newer*, not-yet-written content as saved if the
-    // buffer somehow diverged (e.g. a reopened cached buffer edited after this
-    // view was torn down mid-save).
-    let startRevision = buffer.revision
-    let pending = SendableTextBuffer(buffer)
     let store = bufferStore
     let completion = onSaveCompletion
     let encoding = saveEncoding
@@ -1989,7 +1985,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       let result: Result<DocumentFileFingerprint?, Error>
       do {
         let fingerprint = try await Task.detached {
-          try store.save(pending.buffer, to: saveURL, encoding: encoding)
+          try store.save(snapshot, to: saveURL, encoding: encoding)
           // Read the new fingerprint here, still off-main, so the host can record
           // the post-save state before the change monitor's debounced event.
           return DocumentFileFingerprint.read(at: saveURL)
@@ -2004,7 +2000,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       // and save-error reporting would be silently dropped (leaving the cached
       // buffer stuck dirty or provoking a false external-change conflict later).
       Self.completeSave(
-        result, savedBuffer: savedBuffer, startRevision: startRevision, saveTracker: tracker,
+        result, savedBuffer: savedBuffer, snapshot: snapshot, saveTracker: tracker,
         completion: completion)
       // Live-view cleanup: repaint and re-report dirty state. The in-flight mark was
       // already cleared in `completeSave`; this is skipped harmlessly if the view is
@@ -2018,26 +2014,29 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// buffer, clears the buffer's in-flight-save mark, and reports to the save's own
   /// completion. Clearing the mark here (rather than in the view-local continuation)
   /// is what guarantees a torn-down view never leaves the shared tracker stuck
-  /// "saving". Marking "saved" is withheld when the buffer diverged from the written
-  /// revision, so newer, unwritten content is never recorded as on disk.
+  /// "saving". Marking "saved" records exactly the written snapshot's content, so a
+  /// buffer edited during the write stays dirty until its newer content is saved.
   @MainActor
   static func completeSave(
     _ result: Result<DocumentFileFingerprint?, Error>,
     savedBuffer: TextBuffer,
-    startRevision: UInt64,
+    snapshot: TextBufferSnapshot,
     saveTracker: DocumentSaveTracker,
     completion: ((Result<DocumentFileFingerprint?, Error>) -> Void)?
   ) {
     switch result {
     case .success:
-      if savedBuffer.revision == startRevision {
-        savedBuffer.markSaved()
-      }
+      // Mark exactly the written snapshot's content as saved — not the buffer's
+      // current content — so a buffer edited during the write stays dirty (its
+      // newer content is not yet on disk) and undoing back to the saved content
+      // reads clean again.
+      savedBuffer.markSaved(snapshot)
     case .failure:
       NSSound.beep()
     }
-    // Always clear the in-flight mark so edits re-enable, even if the originating
-    // view is gone; the shared tracker would otherwise pause this buffer forever.
+    // Always clear the in-flight mark so a later save can start, even if the
+    // originating view is gone; the shared tracker would otherwise block this
+    // buffer's saves forever.
     saveTracker.finish(savedBuffer)
     completion?(result)
   }
@@ -2054,8 +2053,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   /// Test seam: marks the current buffer as having a save in flight — the same
-  /// state `requestSave` sets at the start of a write — so tests can verify edits
-  /// pause without driving the asynchronous, disk-touching writer.
+  /// state `requestSave` sets at the start of a write — so tests can drive
+  /// save-in-flight behavior without the asynchronous, disk-touching writer.
   func beginSaveForTesting() {
     guard let buffer = editableBuffer else { return }
     saveTracker.begin(buffer)
@@ -2532,9 +2531,7 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
   /// Commit path: insert (replacing the selection, or `replacementRange`) and end
   /// any composition. Also the plain typing path when not composing.
   func insertText(_ string: Any, replacementRange: NSRange) {
-    // Reject input while saving before touching composition, so a save in
-    // progress does not silently drop a keystroke mid-composition.
-    guard !isSaving, let text = Self.plainText(from: string) else { return }
+    guard let text = Self.plainText(from: string) else { return }
     let wasComposing = composition != nil
     composition = nil
     guard isEditable, editableBuffer != nil else {
@@ -2555,7 +2552,7 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
   /// Updates the in-progress composition. The marked text is not written to the
   /// buffer; it is drawn inline at a collapsed caret until committed.
   func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-    guard isEditable, !isSaving, editableBuffer != nil, let text = Self.plainText(from: string)
+    guard isEditable, editableBuffer != nil, let text = Self.plainText(from: string)
     else {
       return
     }
@@ -3052,17 +3049,6 @@ private enum LoadedDocument: @unchecked Sendable {
   case readOnly(LargeFile)
 }
 
-/// Carries the `TextBuffer` to the background save thread. Sound because the
-/// save only *reads* the buffer (`write_to`) and the main thread pauses buffer
-/// mutations (tracked per buffer by `DocumentSaveTracker`) for the write's
-/// duration; concurrent reads are safe because the core buffer is `Sync`.
-private struct SendableTextBuffer: @unchecked Sendable {
-  let buffer: TextBuffer
-  init(_ buffer: TextBuffer) {
-    self.buffer = buffer
-  }
-}
-
 /// A progress spinner that only appears after a short grace period, so a load
 /// that finishes quickly never flashes a spinner. If the load completes first,
 /// this view leaves the tree and its `.task` is cancelled before the sleep
@@ -3088,56 +3074,39 @@ struct DelayedProgressView: View {
   }
 }
 
-/// Tracks which editable text buffers have a background save in flight so the
-/// editor can pause edits to a buffer for the full duration of its write.
+/// Tracks which editable text buffers have a background save in flight, so the
+/// editor never starts a second, overlapping write of the same buffer (two
+/// concurrent atomic writes to one file would race). It does *not* pause edits:
+/// the writer streams an immutable `TextBufferSnapshot`, so the live buffer keeps
+/// being edited during the write.
 ///
-/// The pause must outlive a document swap: the open-document cache reuses the same
-/// `TextBuffer` instance when the user switches away from a file and back, so a
-/// per-view flag (reset on every swap) could let an edit run while the off-main
-/// writer is still reading that buffer — a data race, since a mutation needs
-/// exclusive access. Keying by object identity keeps unrelated buffers editable,
-/// and recording each buffer's revision at save start lets the caller decline to
-/// mark a buffer "saved" if it was somehow edited mid-write (which would otherwise
-/// silently treat newer, unwritten content as on disk).
+/// The guard must outlive a document swap: the open-document cache reuses the same
+/// `TextBuffer` instance when the user switches away from a file and back, and the
+/// view can be torn down and recreated mid-write. Keying by globally-unique buffer
+/// identity (rather than a per-view flag that resets on swap) keeps the in-flight
+/// mark correct across both, and `finish` always runs on completion, so no stale
+/// "saving" entry outlives a write. Tests use their own instances for isolation.
 @MainActor
 final class DocumentSaveTracker {
-  /// Process-wide shared tracker the editor uses in production. The in-flight-save
-  /// guard must survive the text view being torn down and *recreated* — not just
-  /// reused — while a slow write is still reading the cached buffer (e.g. switching
-  /// to a non-text document and back, or closing and reopening the file mid-save).
-  /// A per-view tracker would forget the save, letting the new view's edit race the
-  /// background read. Keying by globally-unique buffer identity makes one shared
-  /// instance correct, and `finish` always runs on completion, so no stale "saving"
-  /// entry outlives a write. Tests use their own instances for isolation.
+  /// Process-wide shared tracker the editor uses in production.
   static let shared = DocumentSaveTracker()
 
-  private var revisionAtSaveStart: [ObjectIdentifier: UInt64] = [:]
+  private var saving: Set<ObjectIdentifier> = []
 
   /// Whether `buffer` currently has a save in flight.
   func isSaving(_ buffer: TextBuffer) -> Bool {
-    revisionAtSaveStart[ObjectIdentifier(buffer)] != nil
+    saving.contains(ObjectIdentifier(buffer))
   }
 
-  /// Marks `buffer` as saving and records its revision. Returns `false` if a save
-  /// is already in flight for it, so the caller skips starting a second write.
+  /// Marks `buffer` as saving. Returns `false` if a save is already in flight for
+  /// it, so the caller skips starting a second, overlapping write.
   @discardableResult
   func begin(_ buffer: TextBuffer) -> Bool {
-    let identifier = ObjectIdentifier(buffer)
-    guard revisionAtSaveStart[identifier] == nil else { return false }
-    revisionAtSaveStart[identifier] = buffer.revision
-    return true
+    saving.insert(ObjectIdentifier(buffer)).inserted
   }
 
-  /// Clears the in-flight mark for `buffer` and reports whether its content is
-  /// unchanged since `begin` — i.e. whether it is safe to mark it saved. Returns
-  /// `false` if no save was in flight or the buffer's revision advanced meanwhile.
-  @discardableResult
-  func finish(_ buffer: TextBuffer) -> Bool {
-    guard
-      let startRevision = revisionAtSaveStart.removeValue(forKey: ObjectIdentifier(buffer))
-    else {
-      return false
-    }
-    return buffer.revision == startRevision
+  /// Clears the in-flight mark for `buffer` (a no-op if none was set).
+  func finish(_ buffer: TextBuffer) {
+    saving.remove(ObjectIdentifier(buffer))
   }
 }

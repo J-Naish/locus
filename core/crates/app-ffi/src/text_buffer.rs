@@ -335,6 +335,148 @@ pub unsafe extern "C" fn locus_text_buffer_write_path(
     }
 }
 
+// MARK: - Save snapshot (immutable, background-writable)
+
+/// Opaque, Rust-owned immutable snapshot of a [`LocusTextBuffer`]'s whole content,
+/// taken with `locus_text_buffer_take_save_snapshot` for a background save.
+/// Unlike `LocusTextSnapshot` (a borrowed line-range text block for viewport
+/// reads), this owns a structurally-shared rope clone of the entire document:
+/// cheap to take (`O(1)`, no content copy), isolated from later edits, and
+/// `Send + Sync`, so the platform can write it on a background thread while the
+/// user keeps editing the live buffer. Release it exactly once with
+/// `locus_text_buffer_snapshot_free`.
+pub struct LocusTextBufferSnapshot {
+    snapshot: app_core::text_buffer::TextSnapshot,
+}
+
+/// Takes an immutable snapshot of the buffer's current content for a background
+/// save and seals the current insert-coalescing run, so the buffer stays editable
+/// during the write while the dirty flag remains correct (see
+/// `locus_text_buffer_mark_saved_snapshot`). `O(1)`: a structurally-shared rope
+/// clone, no content copy.
+///
+/// # Safety
+/// `buffer` must be NULL or a live handle. `out_snapshot` must point to
+/// caller-owned writable storage for a `*mut LocusTextBufferSnapshot`. On success
+/// the caller owns the snapshot and must release it exactly once with
+/// `locus_text_buffer_snapshot_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_take_save_snapshot(
+    buffer: *mut LocusTextBuffer,
+    out_snapshot: *mut *mut LocusTextBufferSnapshot,
+) -> u32 {
+    clear_last_error_message();
+    if out_snapshot.is_null() {
+        set_last_error_message("out_snapshot must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    }
+    // SAFETY: out_snapshot is non-null (checked above). Clear it so the caller's
+    // pointer is never left stale on a failure path.
+    unsafe {
+        *out_snapshot = std::ptr::null_mut();
+    }
+    // SAFETY: buffer is NULL or a live handle the caller still owns.
+    let Some(handle) = (unsafe { buffer.as_mut() }) else {
+        set_last_error_message("buffer must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    };
+    let snapshot = handle.buffer.snapshot_for_save();
+    // SAFETY: out_snapshot is non-null (checked above).
+    unsafe {
+        *out_snapshot = Box::into_raw(Box::new(LocusTextBufferSnapshot { snapshot }));
+    }
+    LOCUS_STATUS_OK
+}
+
+/// Writes a save snapshot's full content to the file at `path`, creating or
+/// truncating it, streamed through a buffered writer (no full-document buffer).
+/// The snapshot is immutable and `Send + Sync`, so this may run on a background
+/// thread while the originating buffer is edited. The caller owns any
+/// atomic-rename / symlink policy (this writes directly to `path`).
+///
+/// # Safety
+/// `snapshot` must be NULL or a live handle. `path` must be a NUL-terminated UTF-8
+/// C string.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_snapshot_write_path(
+    snapshot: *const LocusTextBufferSnapshot,
+    path: *const c_char,
+) -> u32 {
+    clear_last_error_message();
+    // SAFETY: snapshot is NULL or a live handle the caller still owns.
+    let Some(handle) = (unsafe { snapshot.as_ref() }) else {
+        set_last_error_message("snapshot must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    };
+    let Some(path) = string_from_c_str(path) else {
+        set_last_error_message("path must be non-NULL UTF-8");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    };
+
+    let file = match std::fs::File::create(&path) {
+        Ok(file) => file,
+        Err(error) => {
+            set_last_error_message(error.to_string());
+            return LOCUS_TEXT_STATUS_IO;
+        }
+    };
+    let mut writer = std::io::BufWriter::new(file);
+    match handle
+        .snapshot
+        .write_to(&mut writer)
+        .and_then(|()| writer.flush())
+    {
+        Ok(()) => LOCUS_STATUS_OK,
+        Err(error) => {
+            set_last_error_message(error.to_string());
+            LOCUS_TEXT_STATUS_IO
+        }
+    }
+}
+
+/// Marks the content captured by `snapshot` as the saved baseline, so a buffer
+/// edited while the snapshot was being written stays dirty (its newer content is
+/// not yet on disk) and undoing back to the saved content reads clean again. Pair
+/// with `locus_text_buffer_take_save_snapshot`.
+///
+/// # Safety
+/// `buffer` must be NULL or a live handle. `snapshot` must be NULL or a live
+/// handle from `locus_text_buffer_take_save_snapshot`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_mark_saved_snapshot(
+    buffer: *mut LocusTextBuffer,
+    snapshot: *const LocusTextBufferSnapshot,
+) -> u32 {
+    clear_last_error_message();
+    // SAFETY: buffer is NULL or a live handle the caller still owns.
+    let Some(handle) = (unsafe { buffer.as_mut() }) else {
+        set_last_error_message("buffer must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    };
+    // SAFETY: snapshot is NULL or a live handle the caller still owns.
+    let Some(snapshot) = (unsafe { snapshot.as_ref() }) else {
+        set_last_error_message("snapshot must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    };
+    handle.buffer.mark_saved_snapshot(&snapshot.snapshot);
+    LOCUS_STATUS_OK
+}
+
+/// Releases a save snapshot. NULL is a no-op.
+///
+/// # Safety
+/// `snapshot` must be NULL or a live handle that has not been freed.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_snapshot_free(snapshot: *mut LocusTextBufferSnapshot) {
+    if snapshot.is_null() {
+        return;
+    }
+    // SAFETY: snapshot was created by Box::into_raw in take_save_snapshot.
+    unsafe {
+        drop(Box::from_raw(snapshot));
+    }
+}
+
 // MARK: - Viewport read
 
 /// Snapshots the text of lines `[start_line, start_line + count)` (clamped) as
@@ -1113,6 +1255,138 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&path).expect("read back"), "bye");
         let _ = std::fs::remove_file(&path);
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn save_snapshot_writes_content_to_disk() {
+        let handle = open("hello");
+        let mut snapshot: *mut LocusTextBufferSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe { locus_text_buffer_take_save_snapshot(handle, &mut snapshot) },
+            LOCUS_STATUS_OK
+        );
+        assert!(!snapshot.is_null());
+
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "locus-ffi-save-snapshot-{}.txt",
+            std::process::id()
+        ));
+        let c_path = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe { locus_text_buffer_snapshot_write_path(snapshot, c_path.as_ptr()) },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), "hello");
+
+        let _ = std::fs::remove_file(&path);
+        unsafe { locus_text_buffer_snapshot_free(snapshot) };
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn save_snapshot_is_isolated_from_edits_during_write() {
+        let handle = open("hello");
+        let mut snapshot: *mut LocusTextBufferSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe { locus_text_buffer_take_save_snapshot(handle, &mut snapshot) },
+            LOCUS_STATUS_OK
+        );
+        // Edit the live buffer after taking the snapshot.
+        let world = CString::new("world").unwrap();
+        unsafe { locus_text_buffer_insert(handle, 5, world.as_ptr()) };
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("locus-ffi-save-iso-{}.txt", std::process::id()));
+        let c_path = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe { locus_text_buffer_snapshot_write_path(snapshot, c_path.as_ptr()) },
+            LOCUS_STATUS_OK
+        );
+        // The snapshot wrote its captured content, not the live "helloworld".
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), "hello");
+        assert_eq!(snapshot_all(handle), "helloworld");
+
+        let _ = std::fs::remove_file(&path);
+        unsafe { locus_text_buffer_snapshot_free(snapshot) };
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn mark_saved_snapshot_keeps_buffer_dirty_when_edited_during_save() {
+        let handle = open("");
+        let hello = CString::new("hello").unwrap();
+        unsafe { locus_text_buffer_insert(handle, 0, hello.as_ptr()) };
+        assert!(unsafe { locus_text_buffer_is_dirty(handle) });
+
+        let mut snapshot: *mut LocusTextBufferSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe { locus_text_buffer_take_save_snapshot(handle, &mut snapshot) },
+            LOCUS_STATUS_OK
+        );
+        // Edit during the "write".
+        let world = CString::new("world").unwrap();
+        unsafe { locus_text_buffer_insert(handle, 5, world.as_ptr()) };
+        assert_eq!(
+            unsafe { locus_text_buffer_mark_saved_snapshot(handle, snapshot) },
+            LOCUS_STATUS_OK
+        );
+        // Only "hello" reached disk, so the live "helloworld" stays dirty.
+        assert!(unsafe { locus_text_buffer_is_dirty(handle) });
+
+        unsafe { locus_text_buffer_snapshot_free(snapshot) };
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn mark_saved_snapshot_clears_dirty_when_unchanged() {
+        let handle = open("");
+        let hello = CString::new("hello").unwrap();
+        unsafe { locus_text_buffer_insert(handle, 0, hello.as_ptr()) };
+
+        let mut snapshot: *mut LocusTextBufferSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe { locus_text_buffer_take_save_snapshot(handle, &mut snapshot) },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(
+            unsafe { locus_text_buffer_mark_saved_snapshot(handle, snapshot) },
+            LOCUS_STATUS_OK
+        );
+        assert!(!unsafe { locus_text_buffer_is_dirty(handle) });
+
+        unsafe { locus_text_buffer_snapshot_free(snapshot) };
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn save_snapshot_rejects_null_handles() {
+        // NULL buffer -> INVALID_ARGUMENT, out pointer cleared.
+        let mut snapshot: *mut LocusTextBufferSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe { locus_text_buffer_take_save_snapshot(ptr::null_mut(), &mut snapshot) },
+            LOCUS_TEXT_STATUS_INVALID_ARGUMENT
+        );
+        assert!(snapshot.is_null());
+
+        let handle = open("x");
+        // NULL out pointer -> INVALID_ARGUMENT.
+        assert_eq!(
+            unsafe { locus_text_buffer_take_save_snapshot(handle, ptr::null_mut()) },
+            LOCUS_TEXT_STATUS_INVALID_ARGUMENT
+        );
+        // NULL snapshot to write / mark -> INVALID_ARGUMENT; NULL free is a no-op.
+        let c_path = CString::new("/dev/null").unwrap();
+        assert_eq!(
+            unsafe { locus_text_buffer_snapshot_write_path(ptr::null(), c_path.as_ptr()) },
+            LOCUS_TEXT_STATUS_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            unsafe { locus_text_buffer_mark_saved_snapshot(handle, ptr::null()) },
+            LOCUS_TEXT_STATUS_INVALID_ARGUMENT
+        );
+        unsafe { locus_text_buffer_snapshot_free(ptr::null_mut()) };
         unsafe { locus_text_buffer_free(handle) };
     }
 

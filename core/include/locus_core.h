@@ -266,12 +266,16 @@ void locus_workspace_snapshot_free(LocusWorkspaceSnapshot *snapshot);
  * the line-range and UTF-16-range snapshots) plus locus_text_buffer_write_path,
  * which only reads the buffer to stream it out. The mutating calls --
  * locus_text_buffer_insert_bytes, locus_text_buffer_delete,
- * locus_text_buffer_replace, locus_text_buffer_undo, locus_text_buffer_redo, and
- * locus_text_buffer_mark_saved -- plus locus_text_buffer_free require exclusive
- * access: the caller must ensure no other call on the same handle (read or
- * write) overlaps them. Overlapping a mutation with any other access is
- * undefined behavior. This is what lets a background save read the buffer while
- * the UI thread keeps rendering, as long as edits are paused for the save.
+ * locus_text_buffer_replace, locus_text_buffer_undo, locus_text_buffer_redo,
+ * locus_text_buffer_mark_saved, locus_text_buffer_take_save_snapshot, and
+ * locus_text_buffer_mark_saved_snapshot -- plus locus_text_buffer_free require
+ * exclusive access: the caller must ensure no other call on the same handle (read
+ * or write) overlaps them. Overlapping a mutation with any other access is
+ * undefined behavior. To save without pausing edits, take_save_snapshot captures
+ * an immutable clone under that exclusive access; locus_text_buffer_snapshot_write_path
+ * then streams that clone (a separate LocusTextBufferSnapshot handle, not the live
+ * buffer) to disk on a background thread while the buffer is edited and rendered
+ * concurrently.
  */
 #define LOCUS_TEXT_STATUS_INVALID_ARGUMENT ((LocusStatus)100u)
 #define LOCUS_TEXT_STATUS_IO ((LocusStatus)101u)
@@ -298,6 +302,7 @@ typedef struct LocusTextPosition {
  */
 typedef struct LocusTextBuffer LocusTextBuffer;
 typedef struct LocusTextSnapshot LocusTextSnapshot;
+typedef struct LocusTextBufferSnapshot LocusTextBufferSnapshot;
 
 /**
  * Opens a text file into a buffer. The file must be valid UTF-8; a non-UTF-8
@@ -443,6 +448,31 @@ LocusStatus locus_text_buffer_redo(LocusTextBuffer *buffer, bool *out_did_redo);
  */
 LocusStatus locus_text_buffer_write_path(
     const LocusTextBuffer *buffer, const char *path);
+
+/*
+ * Save-snapshot API (ABI version 4): write the document on a background thread
+ * while the user keeps editing. take_save_snapshot captures an immutable,
+ * structurally-shared clone of the whole document (O(1), no content copy) and
+ * seals the current insert run so the buffer can keep being edited without the
+ * dirty flag drifting. snapshot_write_path streams that snapshot to disk and only
+ * reads it, so unlike the mutating calls it may run concurrently with edits to
+ * the originating buffer. After the write, mark_saved_snapshot records exactly the
+ * snapshotted content as saved: a buffer edited during the write stays dirty, and
+ * undoing back to the saved content reads clean again. The LocusTextBufferSnapshot
+ * handle is distinct from LocusTextSnapshot (the borrowed viewport-read block) and
+ * is released exactly once with locus_text_buffer_snapshot_free.
+ *
+ * Ownership: on LOCUS_STATUS_OK, take_save_snapshot writes a Rust-owned snapshot to
+ * *out_snapshot. take_save_snapshot and mark_saved_snapshot mutate the buffer and
+ * need exclusive access to it; snapshot_write_path only reads the snapshot.
+ */
+LocusStatus locus_text_buffer_take_save_snapshot(
+    LocusTextBuffer *buffer, LocusTextBufferSnapshot **out_snapshot);
+LocusStatus locus_text_buffer_snapshot_write_path(
+    const LocusTextBufferSnapshot *snapshot, const char *path);
+LocusStatus locus_text_buffer_mark_saved_snapshot(
+    LocusTextBuffer *buffer, const LocusTextBufferSnapshot *snapshot);
+void locus_text_buffer_snapshot_free(LocusTextBufferSnapshot *snapshot);
 
 /*
  * Read-only, line-indexed large-file viewer (see app_core::line_index).

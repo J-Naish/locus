@@ -17,7 +17,7 @@ final class TextBufferStoreTests: XCTestCase {
     try buffer.replace("bye", fromUTF16: 0, toUTF16: 5)
     XCTAssertTrue(buffer.isDirty)
 
-    try TextBufferStore().save(buffer, to: url)
+    try TextBufferStore().save(XCTUnwrap(buffer.takeSaveSnapshot()), to: url)
     XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "bye")
   }
 
@@ -29,7 +29,7 @@ final class TextBufferStoreTests: XCTestCase {
     let buffer = try TextBuffer.open(at: url)
     try buffer.insert("X", atUTF16: 0)  // edit only the start; CRLF must survive
 
-    try TextBufferStore().save(buffer, to: url)
+    try TextBufferStore().save(XCTUnwrap(buffer.takeSaveSnapshot()), to: url)
     XCTAssertEqual(try Data(contentsOf: url), Data("Xa\r\nb".utf8))
   }
 
@@ -47,7 +47,7 @@ final class TextBufferStoreTests: XCTestCase {
 
     let buffer = try TextBuffer.open(at: link)
     try buffer.replace("updated!", fromUTF16: 0, toUTF16: 8)
-    try TextBufferStore().save(buffer, to: link)
+    try TextBufferStore().save(XCTUnwrap(buffer.takeSaveSnapshot()), to: link)
 
     // The link still points at the target, and the target now holds the edit.
     XCTAssertNotNil(try? FileManager.default.destinationOfSymbolicLink(atPath: link.path))
@@ -88,7 +88,7 @@ final class TextBufferStoreTests: XCTestCase {
     XCTAssertEqual(opened.encoding, .shiftJIS)
 
     try opened.buffer.replace("請求書\n", fromUTF16: 0, toUTF16: opened.buffer.utf16Length)
-    try store.save(opened.buffer, to: url, encoding: opened.encoding)
+    try store.save(XCTUnwrap(opened.buffer.takeSaveSnapshot()), to: url, encoding: opened.encoding)
 
     let data = try Data(contentsOf: url)
     XCTAssertNil(String(data: data, encoding: .utf8))  // not rewritten as UTF-8
@@ -107,7 +107,7 @@ final class TextBufferStoreTests: XCTestCase {
     XCTAssertEqual(opened.encoding, .utf16LittleEndian)
 
     try opened.buffer.replace("やあ\n", fromUTF16: 0, toUTF16: opened.buffer.utf16Length)
-    try store.save(opened.buffer, to: url, encoding: opened.encoding)
+    try store.save(XCTUnwrap(opened.buffer.takeSaveSnapshot()), to: url, encoding: opened.encoding)
 
     let saved = try Data(contentsOf: url)
     XCTAssertEqual(saved.prefix(2), Data([0xFF, 0xFE]))  // LE BOM preserved
@@ -126,7 +126,7 @@ final class TextBufferStoreTests: XCTestCase {
     XCTAssertEqual(opened.encoding, .utf16BigEndian)
 
     try opened.buffer.replace("ねこ\n", fromUTF16: 0, toUTF16: opened.buffer.utf16Length)
-    try store.save(opened.buffer, to: url, encoding: opened.encoding)
+    try store.save(XCTUnwrap(opened.buffer.takeSaveSnapshot()), to: url, encoding: opened.encoding)
 
     let saved = try Data(contentsOf: url)
     XCTAssertEqual(saved.prefix(2), Data([0xFE, 0xFF]))  // big-endian byte order kept
@@ -142,7 +142,8 @@ final class TextBufferStoreTests: XCTestCase {
     let opened = try store.open(at: url)
     try opened.buffer.replace("😀\n", fromUTF16: 0, toUTF16: opened.buffer.utf16Length)
 
-    XCTAssertThrowsError(try store.save(opened.buffer, to: url, encoding: opened.encoding)) {
+    let snapshot = try XCTUnwrap(opened.buffer.takeSaveSnapshot())
+    XCTAssertThrowsError(try store.save(snapshot, to: url, encoding: opened.encoding)) {
       error in
       guard case TextEncoding.CodingError.unrepresentable = error else {
         return XCTFail("expected unrepresentable, got \(error)")
