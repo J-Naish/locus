@@ -14,3 +14,11 @@ rust-version = "1.83"
 
 [workspace.lints.rust]
 unsafe_code = "warn"
+
+# The release artifacts ship behind a C ABI (a staticlib linked into the native
+# app), where unwinding has no meaning: a core panic is a bug, so fail fast
+# with a defined abort at the panic site and keep release codegen free of
+# landing pads. Test profiles ignore this setting, so `cargo test` still
+# unwinds normally.
+[profile.release]
+panic = "abort"
