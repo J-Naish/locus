@@ -394,10 +394,11 @@ pub unsafe extern "C" fn locus_large_file_position_for_utf16(
 
 /// Maps a 0-based line and UTF-16 column (from the line start) to a full
 /// position. Like the UTF-16 mapping above, this is clamp-safe: a column past the
-/// line content is clamped to the line end, and a line past the last line is
-/// clamped to the last line rather than rejected (the platform bounds the line
-/// before calling in). Only a NULL handle/`out_position` or an underlying read
-/// error is reported. Writes `*out_position` on success.
+/// line content is clamped to the line end, a column inside a surrogate pair is
+/// floored to that character's start, and a line past the last line is clamped
+/// to the last line rather than rejected (the platform bounds the line before
+/// calling in). Only a NULL handle/`out_position` or an underlying read error is
+/// reported. Writes `*out_position` on success.
 ///
 /// # Safety
 ///
@@ -696,5 +697,30 @@ mod tests {
         unsafe {
             assert_eq!(locus_large_file_utf16_length(std::ptr::null()), 0);
         }
+    }
+
+    #[test]
+    fn extreme_integer_inputs_clamp_instead_of_panicking() {
+        // The read-only backend is clamp-style by contract, so even maximal
+        // `usize` arguments must come back as clamped reads — never an
+        // arithmetic overflow or a panic that would abort the host app.
+        let path = temp_file(MIXED.as_bytes());
+        unsafe {
+            let handle = open(&path);
+            assert_eq!(snapshot_text(handle, usize::MAX, usize::MAX), "");
+            assert_eq!(snapshot_text(handle, 0, usize::MAX), MIXED);
+            assert_eq!(
+                snapshot_text_capped(handle, 0, usize::MAX, usize::MAX),
+                MIXED
+            );
+            assert_eq!(snapshot_text_utf16(handle, usize::MAX, usize::MAX), "");
+
+            let end = utf16_position(handle, usize::MAX);
+            assert_eq!((end.line, end.byte, end.utf16), (2, 11, 9));
+            let clamped = line_column_position(handle, usize::MAX, usize::MAX);
+            assert_eq!((clamped.line, clamped.byte), (2, 11));
+            locus_large_file_free(handle);
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

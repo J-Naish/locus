@@ -265,7 +265,9 @@ impl<S: ByteSource> LineIndex<S> {
     }
 
     /// Position at `column_utf16` UTF-16 units into `line` (both clamped). Maps a
-    /// (line, column) caret/selection endpoint to a global offset.
+    /// (line, column) caret/selection endpoint to a global offset. A column that
+    /// lands inside a surrogate pair floors to that character's start, mirroring
+    /// [`Self::position_for_utf16`].
     pub fn position_for_line_column(
         &self,
         line: usize,
@@ -594,8 +596,11 @@ impl<S: ByteSource> LineIndex<S> {
                         }
                         return Ok(());
                     }
+                    // Floor, mirroring AtUtf16: a column inside a surrogate pair
+                    // resolves to the code point's start, never past it.
                     Stop::AtColumnInLine(col)
-                        if is_char_start && cursor.utf16 - cursor.line_start_utf16 >= col =>
+                        if is_char_start
+                            && cursor.utf16 - cursor.line_start_utf16 + width > col =>
                     {
                         return Ok(())
                     }
@@ -810,6 +815,19 @@ mod tests {
         assert_eq!(at(1, 2), (7, 4, 5, 1, 2)); // after 😀 (2 utf16, 4 bytes)
         assert_eq!(at(1, 3), (8, 5, 6, 1, 3)); // after 😀x
         assert_eq!(at(1, 99), (8, 5, 6, 1, 3)); // column clamps to line content
+    }
+
+    #[test]
+    fn column_inside_a_surrogate_pair_floors_to_the_character_start() {
+        // Column 1 of "😀x" lands between the emoji's two UTF-16 units. Like
+        // `position_for_utf16`, the clamp-style mapping floors to the code
+        // point's start — it must not skip forward past the character.
+        let idx = index(MIXED, 1024);
+        let p = idx.position_for_line_column(1, 1).unwrap();
+        assert_eq!(
+            (p.byte, p.char, p.utf16, p.line, p.column_utf16),
+            (3, 3, 3, 1, 0)
+        );
     }
 
     #[test]
