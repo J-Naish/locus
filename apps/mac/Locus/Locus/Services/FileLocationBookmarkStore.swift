@@ -15,19 +15,30 @@ struct ResolvedFileLocationBookmark: Equatable, Sendable {
   let timestamp: Date
 }
 
+/// Main-actor isolated: every mutation is a read-modify-write of the same
+/// UserDefaults key, so two concurrent writers could lose entries. All callers
+/// are UI-driven today; the isolation turns that assumption into a
+/// compiler-checked invariant. The init stays `nonisolated` (it only stores
+/// Sendable configuration) so stores can be built anywhere.
+@MainActor
 struct FileLocationBookmarkStore {
   enum RequiredResource {
     case directory
     case regularFile
   }
 
-  private let userDefaults: UserDefaults
+  // UserDefaults is documented thread-safe per call but the SDK does not mark
+  // it Sendable, which would forbid the `nonisolated init` from storing it.
+  // The opt-out is sound: the reference is immutable, each raw access is
+  // thread-safe, and the read-modify-write sequences around it run on the main
+  // actor — which is the invariant this type's isolation exists to protect.
+  nonisolated(unsafe) private let userDefaults: UserDefaults
   private let key: String
   private let maxCount: Int?
   private let requiredResource: RequiredResource
   private let logger: Logger
 
-  init(
+  nonisolated init(
     userDefaults: UserDefaults = .standard,
     key: String,
     maxCount: Int? = nil,

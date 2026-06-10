@@ -182,7 +182,7 @@ struct LocusApp: App {
     }
   }
 
-  private static let recentFolderStore: RecentFolderStore = {
+  @MainActor private static let recentFolderStore: RecentFolderStore = {
     #if DEBUG
       guard ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1" else {
         return RecentFolderStore()
@@ -209,7 +209,7 @@ struct LocusApp: App {
     #endif
   }()
 
-  private static let recentFileStore: RecentFileStore = {
+  @MainActor private static let recentFileStore: RecentFileStore = {
     #if DEBUG
       guard ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1" else {
         return RecentFileStore()

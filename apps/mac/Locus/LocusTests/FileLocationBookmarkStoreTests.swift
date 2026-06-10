@@ -2,6 +2,7 @@ import XCTest
 
 @testable import Locus
 
+@MainActor
 final class FileLocationBookmarkStoreTests: XCTestCase {
   private var userDefaults: UserDefaults!
   private var suiteName: String!
