@@ -28,10 +28,10 @@ build: ## Build (Debug) without launching
 build-release: ## Build (Release) without launching
 	scripts/mac/run-app.sh --release --no-open
 
-test: ## Run the full macOS test suite (unit + UI)
+test: core-test ## Run Rust core tests and the full macOS test suite (unit + UI)
 	xcodebuild test -project $(PROJECT) -scheme $(SCHEME) -destination '$(DEST)'
 
-unit: ## Run only the unit tests (fast)
+unit: core-test ## Run Rust core tests and only the macOS unit tests (fast)
 	xcodebuild test -project $(PROJECT) -scheme $(SCHEME) -destination '$(DEST)' -only-testing:LocusTests
 
 perf: ## Run the speed/size smoke budgets

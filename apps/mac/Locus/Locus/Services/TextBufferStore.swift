@@ -35,8 +35,9 @@ enum TextBufferStoreError: LocalizedError {
 ///
 /// Saving streams UTF-8 straight to disk without materializing a full copy; a
 /// non-UTF-8 file is re-encoded to its original encoding (refusing, rather than
-/// losing, characters that cannot be represented). It writes atomically for a
-/// regular file and in place through a symlink (so the link target is updated).
+/// losing, characters that cannot be represented). It writes through an atomic
+/// replacement for both regular files and symlink targets, so a crash during
+/// save does not leave a truncated document behind.
 struct TextBufferStore {
   /// Largest plain-UTF-8 file `open` loads into the editable in-memory buffer
   /// (worst-case editable RAM ≈ this size). A larger file is refused here; the
@@ -101,7 +102,7 @@ struct TextBufferStore {
     }
 
     // Legacy encoding: materialize the (small) content and re-encode it.
-    let text = try utf8Text(of: snapshot, siblingOf: url)
+    let text = try utf8Text(of: snapshot)
     let data = try TextEncoding.encode(text, as: encoding)
     try writeAtomically(to: url) { destination in
       try data.write(to: destination)
@@ -123,36 +124,64 @@ struct TextBufferStore {
     return (try TextBuffer.open(bytes: Data(document.text.utf8)), document.encoding)
   }
 
-  /// The snapshot's exact content as a UTF-8 string, via a sibling temp file so the
-  /// streaming write path is reused (no in-memory content materialization in Rust).
-  private func utf8Text(of snapshot: TextBufferSnapshot, siblingOf url: URL) throws -> String {
-    let temporaryURL = url.deletingLastPathComponent()
-      .appendingPathComponent(".locus-reencode-\(UUID().uuidString).tmp")
+  /// The snapshot's exact content as a UTF-8 string, via a process temp file so
+  /// the streaming write path is reused without touching the user's folder.
+  private func utf8Text(of snapshot: TextBufferSnapshot) throws -> String {
+    let temporaryURL = FileManager.default.temporaryDirectory
+      .appending(path: "locus-reencode-\(UUID().uuidString).tmp", directoryHint: .notDirectory)
     defer { try? FileManager.default.removeItem(at: temporaryURL) }
     try snapshot.write(toPath: temporaryURL.path(percentEncoded: false))
     return String(decoding: try Data(contentsOf: temporaryURL), as: UTF8.self)
   }
 
-  /// Writes via `write` using the atomic-vs-symlink policy: through a symlink in
-  /// place, otherwise to a sibling temp file then replaced.
+  /// Writes via `write` to a temporary replacement item, then atomically swaps it
+  /// into place. If `url` is a symlink, the symlink itself is preserved and its
+  /// target is replaced atomically instead of being truncated in place.
   private func writeAtomically(to url: URL, _ write: (URL) throws -> Void) throws {
-    if Self.isSymbolicLink(at: url) {
-      try write(url)
-      return
-    }
-    let temporaryURL = url.deletingLastPathComponent()
-      .appendingPathComponent(".locus-save-\(UUID().uuidString).tmp")
+    let destinationURL = try Self.atomicWriteDestination(for: url)
+    let fileManager = FileManager.default
+    let destinationPath = destinationURL.path(percentEncoded: false)
+    let appropriateURL =
+      fileManager.fileExists(atPath: destinationPath)
+      ? destinationURL : destinationURL.deletingLastPathComponent()
+    let replacementDirectory = try fileManager.url(
+      for: .itemReplacementDirectory,
+      in: .userDomainMask,
+      appropriateFor: appropriateURL,
+      create: true
+    )
+    defer { try? fileManager.removeItem(at: replacementDirectory) }
+    let temporaryURL =
+      replacementDirectory
+      .appending(path: "locus-save-\(UUID().uuidString).tmp", directoryHint: .notDirectory)
+
     do {
       try write(temporaryURL)
-      if FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) {
-        _ = try FileManager.default.replaceItemAt(url, withItemAt: temporaryURL)
+      if fileManager.fileExists(atPath: destinationPath) {
+        _ = try fileManager.replaceItemAt(destinationURL, withItemAt: temporaryURL)
       } else {
-        try FileManager.default.moveItem(at: temporaryURL, to: url)
+        try fileManager.moveItem(at: temporaryURL, to: destinationURL)
       }
     } catch {
       try? FileManager.default.removeItem(at: temporaryURL)
       throw error
     }
+  }
+
+  private static func atomicWriteDestination(for url: URL) throws -> URL {
+    let path = url.path(percentEncoded: false)
+    guard let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: path) else {
+      return url
+    }
+
+    if destination.hasPrefix("/") {
+      return URL(filePath: destination)
+    }
+    return URL(
+      fileURLWithPath: destination,
+      relativeTo: url.deletingLastPathComponent()
+    )
+    .standardizedFileURL
   }
 
   private static func hasByteOrderMark(at url: URL) -> Bool {
@@ -166,9 +195,4 @@ struct TextBufferStore {
       || head.starts(with: [0xFE, 0xFF])  // UTF-16 BE BOM
   }
 
-  private static func isSymbolicLink(at url: URL) -> Bool {
-    (try? FileManager.default.destinationOfSymbolicLink(
-      atPath: url.path(percentEncoded: false)
-    )) != nil
-  }
 }

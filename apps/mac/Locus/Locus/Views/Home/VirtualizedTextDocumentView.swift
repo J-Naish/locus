@@ -493,7 +493,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// A huge line's content start (UTF-16) and content length (terminator
   /// excluded), via two position lookups. Both backends resolve these in bounded
-  /// time: the editable piece-tree buffer in `O(log n)`, and the windowed
+  /// time: the editable persistent-rope buffer in `O(log n)`, and the windowed
   /// large-file index from byte-cadence checkpoints (so an in-line seek scans at
   /// most one checkpoint gap, not the whole line). Passing a huge column for the
   /// end clamps to the line's content end, which the core resolves directly rather
@@ -2461,6 +2461,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       // newer content is not yet on disk) and undoing back to the saved content
       // reads clean again.
       savedBuffer.markSaved(snapshot)
+      if !savedBuffer.isDirty {
+        savedBuffer.markSavedAndClearHistory()
+      }
     case .failure:
       NSSound.beep()
     }
@@ -2492,20 +2495,42 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Text-relative x of the caret at `endpoint`, measured within its visual row.
   private func caretX(for endpoint: TextSelection.Endpoint) -> CGFloat {
-    if let length = hugeLength(endpoint.line) {
-      let columns = hugeLineColumns
-      let rowIndex = min(hugeRowCount(utf16Length: length) - 1, endpoint.columnUTF16 / columns)
-      let rowStart = rowIndex * columns
-      let rowText = hugeRowText(line: endpoint.line, rowIndex: rowIndex, utf16Length: length)
-      return xOffset(forColumn: min(endpoint.columnUTF16 - rowStart, rowText.length), in: rowText)
-    }
     let attributed = attributedLine(forLine: endpoint.line)
-    let starts = visualRowStartOffsets(ofLine: endpoint.line, attributed: attributed)
-    let rowIndex = visualRowIndex(forColumn: endpoint.columnUTF16, starts: starts)
+    return caretGeometry(
+      forColumn: endpoint.columnUTF16, line: endpoint.line, attributed: attributed
+    )
+    .x
+  }
+
+  private struct CaretGeometry {
+    let x: CGFloat
+    let visualRow: Int
+  }
+
+  /// Text-relative x and global visual row for a caret column in `line`.
+  private func caretGeometry(
+    forColumn column: Int, line: Int, attributed: NSAttributedString
+  ) -> CaretGeometry {
+    if let length = hugeLength(line) {
+      let columns = hugeLineColumns
+      let rowIndex = min(hugeRowCount(utf16Length: length) - 1, max(0, column) / columns)
+      let rowStart = rowIndex * columns
+      let rowText = hugeRowText(line: line, rowIndex: rowIndex, utf16Length: length)
+      return CaretGeometry(
+        x: xOffset(forColumn: min(max(0, column - rowStart), rowText.length), in: rowText),
+        visualRow: firstVisualRow(ofLine: line) + rowIndex
+      )
+    }
+    let boundedColumn = max(0, min(column, attributed.length))
+    let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
+    let rowIndex = visualRowIndex(forColumn: boundedColumn, starts: starts)
     let bounds = rowRange(rowIndex, starts: starts, length: attributed.length)
     let rowText = attributed.attributedSubstring(
       from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
-    return xOffset(forColumn: min(endpoint.columnUTF16, bounds.end) - bounds.start, in: rowText)
+    return CaretGeometry(
+      x: xOffset(forColumn: min(boundedColumn, bounds.end) - bounds.start, in: rowText),
+      visualRow: firstVisualRow(ofLine: line) + rowIndex
+    )
   }
 
   private func scrollCaretToVisible(_ endpoint: TextSelection.Endpoint) {
@@ -2868,24 +2893,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private func drawCaret(
     forColumn column: Int, line: Int, attributed: NSAttributedString, textX: CGFloat
   ) {
-    if let length = hugeLength(line) {
-      let columns = hugeLineColumns
-      let rowIndex = min(hugeRowCount(utf16Length: length) - 1, column / columns)
-      let rowText = hugeRowText(line: line, rowIndex: rowIndex, utf16Length: length)
-      let x =
-        textX + xOffset(forColumn: min(column - rowIndex * columns, rowText.length), in: rowText)
-      let y = CGFloat(firstVisualRow(ofLine: line) + rowIndex) * layout.lineHeight
-      NSColor.textColor.setFill()
-      NSRect(x: x, y: y, width: 1.5, height: layout.lineHeight).fill()
-      return
-    }
-    let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
-    let rowIndex = visualRowIndex(forColumn: column, starts: starts)
-    let bounds = rowRange(rowIndex, starts: starts, length: attributed.length)
-    let rowText = attributed.attributedSubstring(
-      from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
-    let x = textX + xOffset(forColumn: min(column, bounds.end) - bounds.start, in: rowText)
-    let y = CGFloat(firstVisualRow(ofLine: line) + rowIndex) * layout.lineHeight
+    let geometry = caretGeometry(forColumn: column, line: line, attributed: attributed)
+    let x = textX + geometry.x
+    let y = CGFloat(geometry.visualRow) * layout.lineHeight
     NSColor.textColor.setFill()
     NSRect(x: x, y: y, width: 1.5, height: layout.lineHeight).fill()
   }
@@ -3080,28 +3090,37 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
   func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
     actualRange?.pointee = range
     guard let window else { return .zero }
-    let line: Int
-    let textRelativeX: CGFloat
+    return window.convertToScreen(
+      convert(firstRectInViewCoordinates(forCharacterRange: range), to: nil))
+  }
+
+  func firstRectInViewCoordinates(forCharacterRange range: NSRange) -> NSRect {
+    let geometry: CaretGeometry
     if let composition, let anchor = utf16Offset(of: composition.anchor) {
-      line = composition.anchor.line
+      let line = composition.anchor.line
       let base = attributedLine(forLine: line)
       let column = max(0, min(composition.anchor.columnUTF16, base.length))
       let markedText = composition.text as NSString
       let within = max(0, min(range.location - anchor, markedText.length))
-      textRelativeX =
-        xOffset(forColumn: column, in: base)
-        + markedText.substring(to: within).size(withAttributes: [.font: font]).width
+      geometry = caretGeometry(
+        forColumn: column + within,
+        line: line,
+        attributed: composedLineForDisplay(line: line, base: base)
+      )
     } else {
       let caret = selection?.head ?? navigationHead
-      line = caret.line
-      textRelativeX = caretX(for: caret)
+      let attributed = attributedLine(forLine: caret.line)
+      geometry = caretGeometry(
+        forColumn: caret.columnUTF16,
+        line: caret.line,
+        attributed: attributed
+      )
     }
-    let rect = NSRect(
-      x: gutterWidth + horizontalPadding + textRelativeX,
-      y: layout.yOffset(forLine: line),
+    return NSRect(
+      x: gutterWidth + horizontalPadding + geometry.x,
+      y: CGFloat(geometry.visualRow) * layout.lineHeight,
       width: 1,
       height: layout.lineHeight)
-    return window.convertToScreen(convert(rect, to: nil))
   }
 
   func characterIndex(for point: NSPoint) -> Int {

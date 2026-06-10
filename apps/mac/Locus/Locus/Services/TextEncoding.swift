@@ -93,6 +93,7 @@ enum TextEncoding {
   private static let fallbackEncodings: [String.Encoding] = [
     .utf8,
     .shiftJIS,
+    .windowsCP1252,
     .isoLatin1,
   ]
 }

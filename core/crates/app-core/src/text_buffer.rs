@@ -35,6 +35,11 @@ mod rope;
 
 use rope::Node;
 
+/// Default retained undo/redo byte budget. This is deliberately much smaller
+/// than the editable file-size cap: a document can be large, but history should
+/// not grow without bound during a long session.
+pub const DEFAULT_HISTORY_BYTE_LIMIT: usize = 64 * 1024 * 1024;
+
 /// Borrowed access to the buffer's original content bytes.
 ///
 /// Every buffer uses [`OwnedBytes`] (heap-owned) today. Keeping this a trait
@@ -130,6 +135,12 @@ struct EditRecord {
     inserted: Node,
 }
 
+impl EditRecord {
+    fn retained_byte_len(&self) -> usize {
+        self.removed.byte_len() + self.inserted.byte_len()
+    }
+}
+
 /// The document span one undo or redo step rewrote, in the coordinates of the
 /// document that step produced. The content before `start_utf16` is identical
 /// on both sides of the step; at that offset the step replaced `old_len_utf16`
@@ -154,6 +165,7 @@ pub struct TextBuffer {
     /// if saved while empty). The buffer is dirty when the current top differs.
     saved_seq: Option<u64>,
     revision: u64,
+    history_byte_limit: usize,
     /// Set by [`snapshot_for_save`](Self::snapshot_for_save) so the next insert
     /// starts a fresh undo record instead of coalescing into the snapshotted run.
     /// This keeps the snapshot's captured `seq` a faithful identifier of its
@@ -206,6 +218,7 @@ impl TextBuffer {
             seq_counter: 0,
             saved_seq: None,
             revision: 0,
+            history_byte_limit: DEFAULT_HISTORY_BYTE_LIMIT,
             seal_coalescing: false,
         })
     }
@@ -242,9 +255,40 @@ impl TextBuffer {
         self.current_top_seq() != self.saved_seq
     }
 
+    /// Approximate bytes retained by undo/redo records. This counts the edited
+    /// sub-ropes' logical content bytes; shared original backing may make the
+    /// process-retained memory higher, but this is stable enough for caps and UI
+    /// diagnostics.
+    pub fn history_byte_len(&self) -> usize {
+        self.undo_stack
+            .iter()
+            .chain(self.redo_stack.iter())
+            .map(EditRecord::retained_byte_len)
+            .sum()
+    }
+
+    /// Sets the best-effort retained-history budget and immediately prunes old
+    /// records. The latest undo record is kept even if it alone exceeds the
+    /// budget, so dirty tracking and one-step undo do not silently disappear.
+    pub fn set_history_byte_limit(&mut self, byte_limit: usize) {
+        self.history_byte_limit = byte_limit;
+        self.prune_history_to_limit();
+    }
+
     /// Marks the current content as the saved baseline.
     pub fn mark_saved(&mut self) {
         self.saved_seq = self.current_top_seq();
+    }
+
+    /// Marks the current content as saved and releases undo/redo history. The
+    /// platform uses this after a completed save when the live buffer still
+    /// matches the saved snapshot, so old rope nodes and original backing bytes
+    /// are not pinned for the rest of a long session.
+    pub fn mark_saved_and_clear_history(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.saved_seq = None;
+        self.seal_coalescing = false;
     }
 
     /// Returns the content of lines `[start_line, start_line + count)` joined by
@@ -373,6 +417,7 @@ impl TextBuffer {
                     && Some(top.seq) != saved_seq
                 {
                     top.inserted = Node::concat(top.inserted.clone(), inserted);
+                    self.prune_history_to_limit();
                     return Ok(());
                 }
             }
@@ -385,6 +430,7 @@ impl TextBuffer {
             removed: Node::empty(),
             inserted,
         });
+        self.prune_history_to_limit();
         Ok(())
     }
 
@@ -414,6 +460,7 @@ impl TextBuffer {
             removed,
             inserted: Node::empty(),
         });
+        self.prune_history_to_limit();
         Ok(())
     }
 
@@ -452,6 +499,7 @@ impl TextBuffer {
             removed,
             inserted,
         });
+        self.prune_history_to_limit();
         Ok(())
     }
 
@@ -493,6 +541,7 @@ impl TextBuffer {
         );
         let start_utf16 = coords::utf16_before_byte(&self.root, record.at_byte);
         self.undo_stack.push(record);
+        self.prune_history_to_limit();
         Some(EditSpan {
             start_utf16,
             old_len_utf16,
@@ -526,6 +575,20 @@ impl TextBuffer {
     fn next_seq(&mut self) -> u64 {
         self.seq_counter += 1;
         self.seq_counter
+    }
+
+    fn prune_history_to_limit(&mut self) {
+        while self.history_byte_len() > self.history_byte_limit {
+            if self.undo_stack.len() > 1 {
+                self.undo_stack.remove(0);
+                continue;
+            }
+            if self.redo_stack.len() > 1 {
+                self.redo_stack.remove(0);
+                continue;
+            }
+            break;
+        }
     }
 }
 
@@ -703,6 +766,45 @@ mod tests {
         assert!(buffer.undo().is_some()); // back to "hello"
         assert_eq!(contents(&buffer), "hello");
         assert!(!buffer.is_dirty()); // matches disk again
+    }
+
+    #[test]
+    fn mark_saved_and_clear_history_releases_undo_records() {
+        let mut buffer = buffer("abcdef");
+        buffer.replace(1, 5, "x").expect("replace");
+        assert!(buffer.is_dirty());
+        assert!(buffer.history_byte_len() > 0);
+
+        buffer.mark_saved_and_clear_history();
+
+        assert!(!buffer.is_dirty());
+        assert_eq!(buffer.history_byte_len(), 0);
+        assert!(buffer.undo().is_none());
+    }
+
+    #[test]
+    fn history_byte_limit_prunes_old_records() {
+        let mut buffer = buffer("abcdef");
+        buffer.set_history_byte_limit(4);
+        buffer.replace(0, 1, "A").expect("replace");
+        buffer.replace(2, 3, "C").expect("replace");
+        buffer.replace(4, 5, "E").expect("replace");
+
+        assert!(buffer.history_byte_len() <= 4);
+        assert!(buffer.undo().is_some());
+        assert!(buffer.undo().is_some());
+        assert!(buffer.undo().is_none());
+    }
+
+    #[test]
+    fn history_byte_limit_keeps_latest_large_record() {
+        let mut buffer = buffer("abcdef");
+        buffer.set_history_byte_limit(1);
+        buffer.replace(0, 6, "replacement").expect("replace");
+
+        assert!(buffer.history_byte_len() > 1);
+        assert!(buffer.undo().is_some());
+        assert_eq!(contents(&buffer), "abcdef");
     }
 
     // MARK: - Read (read-only slice behavior, retained)

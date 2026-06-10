@@ -163,6 +163,7 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
         isCached: true,
         baselineFingerprint: fingerprint,
         currentFingerprint: fingerprint,
+        hasPendingConflict: false,
         hasUnsavedEdits: true
       ),
       .keepBuffer
@@ -173,6 +174,7 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
         isCached: true,
         baselineFingerprint: nil,
         currentFingerprint: nil,
+        hasPendingConflict: false,
         hasUnsavedEdits: true
       ),
       .keepBuffer
@@ -186,6 +188,7 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
         isCached: false,
         baselineFingerprint: makeFingerprint(size: 5),
         currentFingerprint: makeFingerprint(size: 9),
+        hasPendingConflict: false,
         hasUnsavedEdits: false
       ),
       .keepBuffer
@@ -198,6 +201,7 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
         isCached: true,
         baselineFingerprint: makeFingerprint(size: 5),
         currentFingerprint: makeFingerprint(size: 9),
+        hasPendingConflict: false,
         hasUnsavedEdits: true
       ),
       .conflict
@@ -210,6 +214,7 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
         isCached: true,
         baselineFingerprint: makeFingerprint(size: 5),
         currentFingerprint: makeFingerprint(size: 9),
+        hasPendingConflict: false,
         hasUnsavedEdits: false
       ),
       .reloadFromDisk
@@ -224,6 +229,7 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
         isCached: true,
         baselineFingerprint: makeFingerprint(size: 5),
         currentFingerprint: nil,
+        hasPendingConflict: false,
         hasUnsavedEdits: true
       ),
       .conflict
@@ -234,9 +240,24 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
         isCached: true,
         baselineFingerprint: nil,
         currentFingerprint: makeFingerprint(size: 5),
+        hasPendingConflict: false,
         hasUnsavedEdits: false
       ),
       .reloadFromDisk
+    )
+  }
+
+  func testReconciliationPreservesAnUnresolvedPendingConflict() {
+    let fingerprint = makeFingerprint(size: 5)
+    XCTAssertEqual(
+      WorkspaceDocumentSurfaceSupport.reconciliation(
+        isCached: true,
+        baselineFingerprint: fingerprint,
+        currentFingerprint: fingerprint,
+        hasPendingConflict: true,
+        hasUnsavedEdits: true
+      ),
+      .conflict
     )
   }
 

@@ -47,6 +47,22 @@ final class OpenDocumentCacheTests: XCTestCase {
     XCTAssertNil(cache.fingerprint(forKey: "missing"))
   }
 
+  func testPendingConflictIsStoredAndClearedWithEntry() throws {
+    let cache = OpenDocumentCache()
+    cache.store(buffer: try makeBuffer("hello"), encoding: .utf8, fingerprint: nil, forKey: "a")
+    XCTAssertFalse(cache.hasPendingConflict(forKey: "a"))
+
+    cache.setPendingConflict(true, forKey: "a")
+    XCTAssertTrue(cache.hasPendingConflict(forKey: "a"))
+
+    cache.setPendingConflict(false, forKey: "a")
+    XCTAssertFalse(cache.hasPendingConflict(forKey: "a"))
+
+    cache.setPendingConflict(true, forKey: "a")
+    cache.drop(forKey: "a")
+    XCTAssertFalse(cache.hasPendingConflict(forKey: "a"))
+  }
+
   func testDropRemovesEntry() throws {
     let cache = OpenDocumentCache()
     cache.store(buffer: try makeBuffer("hello"), encoding: .utf8, fingerprint: nil, forKey: "a")
@@ -89,6 +105,16 @@ final class OpenDocumentCacheTests: XCTestCase {
     XCTAssertNotNil(cache.cached(forKey: "a"))
     XCTAssertNotNil(cache.cached(forKey: "c"))
     XCTAssertEqual(cache.count, 2)  // both kept despite maxRetained == 1
+  }
+
+  func testReportsWhetherAnyCachedDocumentIsDirty() throws {
+    let cache = OpenDocumentCache()
+    cache.store(buffer: try makeBuffer("a"), encoding: .utf8, fingerprint: nil, forKey: "a")
+    XCTAssertFalse(cache.hasDirtyDocuments)
+
+    cache.store(
+      buffer: try makeBuffer("b", dirty: true), encoding: .utf8, fingerprint: nil, forKey: "b")
+    XCTAssertTrue(cache.hasDirtyDocuments)
   }
 
   /// A clean buffer whose UTF-8 byte length is exactly `byteCount` (ASCII fill).

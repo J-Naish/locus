@@ -157,9 +157,16 @@ enum WorkspaceDocumentSurfaceSupport {
     isCached: Bool,
     baselineFingerprint: DocumentFileFingerprint?,
     currentFingerprint: DocumentFileFingerprint?,
+    hasPendingConflict: Bool,
     hasUnsavedEdits: Bool
   ) -> InactiveDocumentReconciliation {
-    guard isCached, baselineFingerprint != currentFingerprint else {
+    guard isCached else {
+      return .keepBuffer
+    }
+    if hasPendingConflict {
+      return .conflict
+    }
+    guard baselineFingerprint != currentFingerprint else {
       return .keepBuffer
     }
     return hasUnsavedEdits ? .conflict : .reloadFromDisk

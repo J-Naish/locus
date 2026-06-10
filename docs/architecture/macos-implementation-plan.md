@@ -11,7 +11,7 @@ The implementation should keep the product native, local-first, fast, and docume
 - `apps/mac/Locus/` contains the active native macOS prototype.
 - The app launches into the home folder when available, supports explicit folder opening, shows a name-first sidebar file browser, expands folders inline, colors Git-changed entries passively when available, keeps session folder history, and tracks recent files/folders.
 - The document surface supports editable Markdown, structured text, plain text, and common source files, plus native previews for images, PDFs, media, and Office files through Quick Look where macOS can render them.
-- `core/` contains the Rust workspace with `app-core`, `app-ffi`, and `app-cli`; the current core covers file type classification, shallow folder listing, lightweight listing metadata, ignored-name policy, FFI snapshots, a UTF-8 piece-tree text buffer (line snapshots, position lookups, insert/delete/replace, undo/redo, file open, encoded save), and a performance-listing CLI.
+- `core/` contains the Rust workspace with `app-core`, `app-ffi`, and `app-cli`; the current core covers file type classification, shallow folder listing, lightweight listing metadata, ignored-name policy, FFI snapshots, a UTF-8 persistent-rope text buffer (line snapshots, position lookups, insert/delete/replace, undo/redo, file open, encoded save), and a performance-listing CLI.
 - The Rust FFI surface exposes ABI/version checks, folder listing with explicit options, stable status codes, partial listing errors, Rust-owned snapshot release functions, and opaque text-buffer handle APIs (open/free, visible-band line snapshots, edits, undo/redo, save).
 - Product scope and architecture are defined in:
   - `docs/product/mvp-roadmap.md`
@@ -84,7 +84,7 @@ Current ownership:
 
 - `file_type`: extension and MIME-ish classification used by both app and CLI.
 - `workspace`: open a folder, list child entries, apply shallow filters, sort folders/files.
-- `text_buffer`: UTF-8 piece tree backing text editing up to a bounded in-memory size (larger files open read-only in the same viewer) — line index and snapshots, byte/char/UTF-16/line/column position lookups, insert/delete/replace and undo/redo, dirty tracking, and streaming save. Opened by reading a UTF-8 file into an owned buffer, or from already-decoded bytes. Text encoding detection/conversion and all UI, IME, drawing, and selection stay in the macOS app.
+- `text_buffer`: UTF-8 persistent rope backing text editing up to a bounded in-memory size (larger files open read-only in the same viewer) — line index and snapshots, byte/char/UTF-16/line/column position lookups, insert/delete/replace and undo/redo, dirty tracking, and streaming save. Opened by reading a UTF-8 file into an owned buffer, or from already-decoded bytes. Text encoding detection/conversion and all UI, IME, drawing, and selection stay in the macOS app.
 
 Deferred modules and boundaries:
 

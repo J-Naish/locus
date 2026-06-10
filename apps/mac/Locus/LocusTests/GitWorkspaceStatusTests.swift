@@ -377,6 +377,61 @@ final class GitWorkspaceStatusTests: XCTestCase {
     XCTAssertEqual(statuses["/tmp/locus/file-4999.txt"], .added)
   }
 
+  func testProviderAddsSecurityOverridesToGitInvocations() async throws {
+    let scriptURL = try makeExecutableScript(
+      """
+      case "$*" in
+        *"core.fsmonitor=false"*"-c core.hooksPath=/dev/null"*)
+          printf '?? README.md\\0'
+          ;;
+        *)
+          exit 42
+          ;;
+      esac
+      """
+    )
+    let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 1)
+
+    let statuses = await provider.sidebarStatuses(
+      for: URL(filePath: "/tmp/locus"),
+      repositoryRootURL: URL(filePath: "/tmp/locus")
+    )
+
+    XCTAssertEqual(statuses["/tmp/locus/README.md"], .added)
+  }
+
+  func testSanitizedEnvironmentDropsGitConfigInjection() {
+    let sanitized = GitWorkspaceStatusProvider.sanitizedEnvironment(
+      from: [
+        "PATH": "/tmp/malicious",
+        "HOME": "/Users/example",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "/tmp/run-me",
+        "GIT_DIR": "/tmp/repo/.git",
+        "GIT_WORK_TREE": "/tmp/repo",
+        "GIT_EXTERNAL_DIFF": "/tmp/diff",
+        "GIT_SSH_COMMAND": "/tmp/ssh",
+        "LANG": "en_US.UTF-8",
+      ]
+    )
+
+    XCTAssertNil(sanitized["GIT_CONFIG_COUNT"])
+    XCTAssertNil(sanitized["GIT_CONFIG_KEY_0"])
+    XCTAssertNil(sanitized["GIT_CONFIG_VALUE_0"])
+    XCTAssertNil(sanitized["GIT_DIR"])
+    XCTAssertNil(sanitized["GIT_WORK_TREE"])
+    XCTAssertNil(sanitized["GIT_EXTERNAL_DIFF"])
+    XCTAssertNil(sanitized["GIT_SSH_COMMAND"])
+    XCTAssertEqual(sanitized["GIT_CONFIG_NOSYSTEM"], "1")
+    XCTAssertEqual(sanitized["GIT_CONFIG_GLOBAL"], "/dev/null")
+    XCTAssertEqual(sanitized["GIT_OPTIONAL_LOCKS"], "0")
+    XCTAssertEqual(sanitized["GIT_ASKPASS"], "/usr/bin/false")
+    XCTAssertEqual(sanitized["PATH"], "/usr/bin:/bin:/usr/sbin:/sbin")
+    XCTAssertEqual(sanitized["HOME"], "/Users/example")
+    XCTAssertEqual(sanitized["LANG"], "en_US.UTF-8")
+  }
+
   func testProviderReturnsEmptyStatusesWhenGitCommandTimesOut() async throws {
     let scriptURL = try makeExecutableScript("sleep 1")
     let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 0.05)

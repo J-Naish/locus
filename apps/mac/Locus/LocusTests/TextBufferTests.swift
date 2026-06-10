@@ -107,6 +107,32 @@ final class TextBufferTests: XCTestCase {
     XCTAssertFalse(buffer.isDirty)
   }
 
+  func testMarkSavedAndClearHistoryReleasesUndoRecords() throws {
+    let buffer = try TextBuffer.open(bytes: Data(String(repeating: "a", count: 1024).utf8))
+    try buffer.replace("b", fromUTF16: 0, toUTF16: buffer.utf16Length)
+    XCTAssertTrue(buffer.isDirty)
+    XCTAssertGreaterThan(buffer.historyByteLength, 0)
+
+    buffer.markSavedAndClearHistory()
+
+    XCTAssertFalse(buffer.isDirty)
+    XCTAssertEqual(buffer.historyByteLength, 0)
+    XCTAssertNil(try buffer.undo())
+  }
+
+  func testHistoryByteLimitPrunesOldUndoRecords() throws {
+    let buffer = try TextBuffer.open(bytes: Data("abcdef".utf8))
+    try buffer.setHistoryByteLimit(4)
+    try buffer.replace("A", fromUTF16: 0, toUTF16: 1)
+    try buffer.replace("C", fromUTF16: 2, toUTF16: 3)
+    try buffer.replace("E", fromUTF16: 4, toUTF16: 5)
+
+    XCTAssertLessThanOrEqual(buffer.historyByteLength, 4)
+    XCTAssertNotNil(try buffer.undo())
+    XCTAssertNotNil(try buffer.undo())
+    XCTAssertNil(try buffer.undo())
+  }
+
   func testInsertHandlesMultibyteAndNUL() throws {
     let buffer = try TextBuffer.open(bytes: Data("aあ".utf8))
     // Insert after "aあ" (UTF-16 offset 2) text that contains a NUL.

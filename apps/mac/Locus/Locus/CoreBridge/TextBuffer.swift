@@ -99,8 +99,9 @@ protocol TextDocumentReading: AnyObject {
 ///
 /// Not `Sendable`. The underlying Rust buffer is `Send + Sync`, so concurrent
 /// *immutable* reads are safe (rendering reads it on the main thread). Mutations
-/// (`insert`/`replace`/`delete`/`undo`/`redo`/`markSaved`/`takeSaveSnapshot`) must
-/// not overlap any other access, so the caller keeps all mutation on one actor.
+/// (`insert`/`replace`/`delete`/`undo`/`redo`/`markSaved`/history changes/
+/// `takeSaveSnapshot`) must not overlap any other access, so the caller keeps all
+/// mutation on one actor.
 /// A background save no longer reads this live buffer: `takeSaveSnapshot()` hands
 /// the writer an immutable ``TextBufferSnapshot``, so editing continues during the
 /// write.
@@ -150,10 +151,29 @@ final class TextBuffer {
   var utf16Length: Int { locus_text_buffer_utf16_length(handle) }
   var revision: UInt64 { locus_text_buffer_revision(handle) }
   var isDirty: Bool { locus_text_buffer_is_dirty(handle) }
+  var historyByteLength: Int { locus_text_buffer_history_byte_length(handle) }
 
   /// Marks the current content as saved (clears the dirty flag).
   func markSaved() {
     locus_text_buffer_mark_saved(handle)
+  }
+
+  /// Sets the retained undo/redo byte budget. The core keeps the latest undo
+  /// record even if it alone exceeds the budget.
+  func setHistoryByteLimit(_ byteLimit: Int) throws {
+    guard byteLimit >= 0 else {
+      throw TextBufferError.invalidArgument("history byte limit must be non-negative")
+    }
+    let status = locus_text_buffer_set_history_byte_limit(handle, byteLimit)
+    guard status == LOCUS_STATUS_OK else {
+      throw Self.error(for: status)
+    }
+  }
+
+  /// Marks the current content as saved and releases undo/redo records so old
+  /// rope nodes do not pin memory after a completed save.
+  func markSavedAndClearHistory() {
+    locus_text_buffer_mark_saved_and_clear_history(handle)
   }
 
   /// Captures an immutable snapshot of the current content for a background save
@@ -249,7 +269,7 @@ final class TextBuffer {
   /// Copies a borrowed snapshot's text into a Swift `String` and frees it,
   /// decoding by the length-counted ABI contract (not a NUL terminator).
   fileprivate static func decodeSnapshot(
-    _ status: UInt32, _ snapshot: OpaquePointer?, context: String
+    _ status: UInt32, _ snapshot: OpaquePointer?, context: String, failureText: String? = nil
   ) -> String {
     guard status == LOCUS_STATUS_OK, let snapshot else {
       if status != LOCUS_STATUS_OK {
@@ -257,7 +277,7 @@ final class TextBuffer {
         // an unexpected failure is visible rather than silently empty.
         logger.error("\(context) failed with status \(status)")
       }
-      return ""
+      return failureText ?? ""
     }
     defer { locus_text_snapshot_free(snapshot) }
     guard let text = locus_text_snapshot_text(snapshot) else {
@@ -496,7 +516,11 @@ final class LargeFile: @unchecked Sendable {
     }
     var snapshot: OpaquePointer?
     let status = locus_large_file_snapshot_line_range(handle, start, count, &snapshot)
-    return TextBuffer.decodeSnapshot(status, snapshot, context: "LargeFile.text(forLineRange:)")
+    return TextBuffer.decodeSnapshot(
+      status,
+      snapshot,
+      context: "LargeFile.text(forLineRange:)",
+      failureText: failureText(for: status))
   }
 
   /// Like `text(forLineRange:count:)`, but never returns more than `maxBytesPerLine`
@@ -510,7 +534,10 @@ final class LargeFile: @unchecked Sendable {
     let status = locus_large_file_snapshot_line_range_capped(
       handle, start, count, maxBytesPerLine, &snapshot)
     return TextBuffer.decodeSnapshot(
-      status, snapshot, context: "LargeFile.text(forLineRange:maxBytesPerLine:)")
+      status,
+      snapshot,
+      context: "LargeFile.text(forLineRange:maxBytesPerLine:)",
+      failureText: failureText(for: status))
   }
 
   /// Raw text of the UTF-16 range `[start, end)`, with no line-terminator stripping
@@ -524,7 +551,17 @@ final class LargeFile: @unchecked Sendable {
     var snapshot: OpaquePointer?
     let status = locus_large_file_snapshot_utf16_range(handle, start, end, &snapshot)
     return TextBuffer.decodeSnapshot(
-      status, snapshot, context: "LargeFile.text(fromUTF16:toUTF16:)")
+      status,
+      snapshot,
+      context: "LargeFile.text(fromUTF16:toUTF16:)",
+      failureText: failureText(for: status))
+  }
+
+  private func failureText(for status: UInt32) -> String? {
+    guard status != LOCUS_STATUS_OK else {
+      return nil
+    }
+    return TextBuffer.error(for: status).localizedDescription
   }
 
   /// Maps a UTF-16 offset to a full position. The core clamps an out-of-range

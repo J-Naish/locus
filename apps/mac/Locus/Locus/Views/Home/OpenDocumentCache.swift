@@ -22,6 +22,7 @@ final class OpenDocumentCache: ObservableObject {
     let buffer: TextBuffer
     let encoding: String.Encoding
     var fingerprint: DocumentFileFingerprint?
+    var hasPendingConflict: Bool
     var lastUsedTick: Int
   }
 
@@ -53,6 +54,12 @@ final class OpenDocumentCache: ObservableObject {
 
   var count: Int { entries.count }
 
+  /// Whether any retained buffer currently holds unsaved edits, including
+  /// inactive documents the user switched away from.
+  var hasDirtyDocuments: Bool {
+    entries.values.contains { $0.buffer.isDirty }
+  }
+
   func contains(forKey key: String) -> Bool { entries[key] != nil }
 
   /// Whether the cached buffer for `key` has unsaved edits. Read directly from the
@@ -74,6 +81,18 @@ final class OpenDocumentCache: ObservableObject {
     entries[key]?.fingerprint
   }
 
+  /// Whether a disk-change conflict was detected for a retained dirty buffer and
+  /// has not yet been explicitly resolved by keeping edits, reloading, or saving.
+  func hasPendingConflict(forKey key: String) -> Bool {
+    entries[key]?.hasPendingConflict ?? false
+  }
+
+  func setPendingConflict(_ hasPendingConflict: Bool, forKey key: String) {
+    guard var entry = entries[key] else { return }
+    entry.hasPendingConflict = hasPendingConflict
+    entries[key] = entry
+  }
+
   /// Updates the in-sync fingerprint for an existing entry (after a save or after
   /// an external change is reconciled).
   func setFingerprint(_ fingerprint: DocumentFileFingerprint?, forKey key: String) {
@@ -90,7 +109,11 @@ final class OpenDocumentCache: ObservableObject {
   ) {
     tick += 1
     entries[key] = Entry(
-      buffer: buffer, encoding: encoding, fingerprint: fingerprint, lastUsedTick: tick)
+      buffer: buffer,
+      encoding: encoding,
+      fingerprint: fingerprint,
+      hasPendingConflict: false,
+      lastUsedTick: tick)
     evictIfNeeded()
   }
 

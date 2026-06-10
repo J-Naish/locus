@@ -95,6 +95,19 @@ final class TextBufferStoreTests: XCTestCase {
     XCTAssertEqual(String(data: data, encoding: .shiftJIS), "請求書\n")
   }
 
+  func testOpensWindowsCP1252SmartQuotesAsText() throws {
+    let url = temporaryFileURL()
+    // 0x93/0x94 are smart quotes in Windows-1252. Interpreting them as ISO-8859-1
+    // yields C1 controls, which must not make the document look binary.
+    try Data([0x93, 0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x94, 0x0A]).write(to: url)
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let opened = try TextBufferStore().open(at: url)
+
+    XCTAssertEqual(opened.encoding, .windowsCP1252)
+    XCTAssertEqual(opened.buffer.text(forLineRange: 0, count: 1), "\u{201C}Hello\u{201D}")
+  }
+
   func testRoundTripsUTF16PreservingEncoding() throws {
     let url = temporaryFileURL()
     var data = Data([0xFF, 0xFE])  // UTF-16 LE BOM

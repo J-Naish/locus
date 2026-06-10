@@ -48,8 +48,8 @@ The Rust core owns behavior that should be shared, tested, and reused across pla
 - file scanning
 - lightweight listing metadata, with richer file metadata loaded lazily
 - the UTF-8 text buffer for editing text up to a bounded in-memory size (larger
-  files open read-only): piece tree, line index and snapshots, position lookups,
-  and edit/undo primitives exposed through the C ABI
+  files open read-only): persistent rope, line index and snapshots, position
+  lookups, and edit/undo primitives exposed through the C ABI
 - hashing
 - diffing
 - search indexes

@@ -33,6 +33,11 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
   private let gitExecutableURL: URL
   private let statusTimeout: TimeInterval
 
+  private static let securityOverrideArguments = [
+    "-c", "core.fsmonitor=false",
+    "-c", "core.hooksPath=/dev/null",
+  ]
+
   init(
     gitExecutableURL: URL = URL(filePath: "/usr/bin/git"),
     statusTimeout: TimeInterval = Defaults.statusTimeout
@@ -113,9 +118,37 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
   private func gitOutput(for workspaceURL: URL, arguments: [String]) async throws -> Data {
     try await Self.runGit(
       gitExecutableURL: gitExecutableURL,
-      arguments: arguments,
+      arguments: Self.securityOverrideArguments + arguments,
       timeout: statusTimeout
     )
+  }
+
+  static func sanitizedEnvironment(from environment: [String: String]) -> [String: String] {
+    var sanitized: [String: String] = [
+      "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+      "GIT_CONFIG_NOSYSTEM": "1",
+      "GIT_CONFIG_GLOBAL": "/dev/null",
+      "GIT_OPTIONAL_LOCKS": "0",
+      "GIT_TERMINAL_PROMPT": "0",
+      "GIT_ASKPASS": "/usr/bin/false",
+    ]
+
+    if let home = environment["HOME"], !home.isEmpty {
+      sanitized["HOME"] = home
+    } else {
+      sanitized["HOME"] = NSHomeDirectory()
+    }
+    if let temporaryDirectory = environment["TMPDIR"], !temporaryDirectory.isEmpty {
+      sanitized["TMPDIR"] = temporaryDirectory
+    }
+    if let language = environment["LANG"], !language.isEmpty {
+      sanitized["LANG"] = language
+    }
+    if let locale = environment["LC_ALL"], !locale.isEmpty {
+      sanitized["LC_ALL"] = locale
+    }
+
+    return sanitized
   }
 
   /// Runs git and returns its standard output. Output goes to temporary files
@@ -152,6 +185,7 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
     let process = Process()
     process.executableURL = gitExecutableURL
     process.arguments = arguments
+    process.environment = sanitizedEnvironment(from: ProcessInfo.processInfo.environment)
 
     process.standardOutput = outputHandle
     process.standardError = errorHandle

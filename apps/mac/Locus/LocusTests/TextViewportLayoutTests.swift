@@ -1677,6 +1677,25 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testFirstRectForCompositionUsesWrappedVisualRow() throws {
+    let view = try makeEditableViewer(String(repeating: "word ", count: 60))
+    view.frame = NSRect(x: 0, y: 0, width: 140, height: 400)
+    view.updateLayout()
+    XCTAssertGreaterThan(view.visualRowCount, 1)
+
+    view.moveToDocumentEdge(end: false, extend: false)
+    for _ in 0..<30 {
+      view.moveHorizontally(forward: true, extend: false)
+    }
+    view.setMarkedText(
+      "あ", selectedRange: NSRange(location: 0, length: 0), replacementRange: Self.noReplacement)
+
+    let viewRect = view.firstRectInViewCoordinates(forCharacterRange: view.markedRange())
+
+    XCTAssertGreaterThanOrEqual(viewRect.origin.y, view.layout.lineHeight)
+  }
+
+  @MainActor
   func testDoCommandInsertNewlineInsertsLineBreak() throws {
     let view = try makeEditableViewer("ab")
     view.moveToDocumentEdge(end: true, extend: false)  // caret (0,2)
@@ -2022,4 +2041,3 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertTrue(buffer.isDirty)  // a failed write does not mark the buffer saved
   }
 }
-

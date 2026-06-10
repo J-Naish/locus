@@ -112,6 +112,7 @@
 		1A0000010000000000000014 /* CoreBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreBridgeTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InitialFolderURLResolverTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000015 /* LocusCoreBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LocusCoreBridge.h; sourceTree = "<group>"; };
+		1A0000010000000000000F20 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		1A0000010000000000000091 /* FileLocationShortcut.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileLocationShortcut.swift; sourceTree = "<group>"; };
 		1A000001000000000000007F /* FileLocationBookmarkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileLocationBookmarkStore.swift; sourceTree = "<group>"; };
 		1A0000010000000000000093 /* FuzzyMatching.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FuzzyMatching.swift; sourceTree = "<group>"; };
@@ -211,6 +212,7 @@
 		1A0000010000000000000019 /* Locus */ = {
 			isa = PBXGroup;
 			children = (
+				1A0000010000000000000F20 /* Info.plist */,
 				1A0000010000000000000022 /* App */,
 				1A0000010000000000000023 /* CoreBridge */,
 				1A0000010000000000000044 /* Services */,
@@ -661,10 +663,9 @@
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../../core/include";
-				INFOPLIST_KEY_CFBundleDisplayName = Locus;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_FILE = Locus/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -672,7 +673,7 @@
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../../core/target/$(LOCUS_RUST_PROFILE_DIR)";
 				LOCUS_RUST_PROFILE_DIR = debug;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				OTHER_LDFLAGS = "-lapp_ffi";
+				OTHER_LDFLAGS = "$(SRCROOT)/../../../core/target/$(LOCUS_RUST_PROFILE_DIR)/libapp_ffi.a";
 				PRODUCT_BUNDLE_IDENTIFIER = com.nash.locus;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = Locus/CoreBridge/LocusCoreBridge.h;
@@ -685,10 +686,10 @@
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
-				GENERATE_INFOPLIST_FILE = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../../core/include";
-				INFOPLIST_KEY_CFBundleDisplayName = Locus;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_FILE = Locus/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -696,7 +697,7 @@
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../../core/target/$(LOCUS_RUST_PROFILE_DIR)";
 				LOCUS_RUST_PROFILE_DIR = release;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				OTHER_LDFLAGS = "-lapp_ffi";
+				OTHER_LDFLAGS = "$(SRCROOT)/../../../core/target/$(LOCUS_RUST_PROFILE_DIR)/libapp_ffi.a";
 				PRODUCT_BUNDLE_IDENTIFIER = com.nash.locus;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = Locus/CoreBridge/LocusCoreBridge.h;
@@ -720,7 +721,6 @@
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../../core/target/$(LOCUS_RUST_PROFILE_DIR)";
 				LOCUS_RUST_PROFILE_DIR = debug;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				OTHER_LDFLAGS = "-lapp_ffi";
 				PRODUCT_BUNDLE_IDENTIFIER = com.nash.locus.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = Locus/CoreBridge/LocusCoreBridge.h;
@@ -745,7 +745,6 @@
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../../core/target/$(LOCUS_RUST_PROFILE_DIR)";
 				LOCUS_RUST_PROFILE_DIR = release;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				OTHER_LDFLAGS = "-lapp_ffi";
 				PRODUCT_BUNDLE_IDENTIFIER = com.nash.locus.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = Locus/CoreBridge/LocusCoreBridge.h;

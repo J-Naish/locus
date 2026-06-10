@@ -128,10 +128,10 @@ final class WorkspaceTreeMonitor {
 
   deinit {
     // Backstop for the app-teardown path where `stopMonitoring()` did not run.
-    // No `queue` drain here: `deinit` must not block, and in the normal path
-    // `stopMonitoring()` already released the stream, so `stream` is nil and this
-    // is a no-op.
-    Self.teardown(stream)
+    // Drain the serial FSEvents queue before releasing: the stream stores `self`
+    // unretained in its C context, so a queued callback must not be allowed to
+    // read it after deallocation.
+    Self.teardown(stream, queue: queue)
     pendingRefreshTask?.cancel()
   }
 
@@ -279,13 +279,16 @@ final class WorkspaceTreeMonitor {
 
   // `nonisolated` so `deinit` (a nonisolated context) can tear the stream down;
   // it touches only the passed FSEvents stream, never actor-isolated state.
-  private nonisolated static func teardown(_ stream: FSEventStreamRef?) {
+  private nonisolated static func teardown(
+    _ stream: FSEventStreamRef?, queue: DispatchQueue? = nil
+  ) {
     guard let stream else {
       return
     }
 
     FSEventStreamStop(stream)
     FSEventStreamInvalidate(stream)
+    queue?.sync {}
     FSEventStreamRelease(stream)
   }
 }

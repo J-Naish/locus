@@ -90,6 +90,10 @@ struct WorkspaceDocumentSurface: View {
       \.documentSaveCommand,
       DocumentSaveCommand(canSave: !isSaveDisabled, save: saveSelectedDocument)
     )
+    .background(
+      WindowUnsavedChangesGuard(hasUnsavedChanges: hasUnsavedDocuments)
+        .frame(width: 0, height: 0)
+    )
     .task(id: entry?.id) {
       // Start before and after preparing so external writes during the prepare
       // path still trigger a sync without relying on the later refresh token.
@@ -153,7 +157,7 @@ struct WorkspaceDocumentSurface: View {
           Spacer(minLength: 0)
           // Dismiss the warning and keep editing the in-memory version; the
           // divergence from disk is resolved (by overwriting it) on the next save.
-          Button("Keep Editing") { documentConflict = false }
+          Button("Keep Editing") { keepEditingAfterExternalConflict() }
           Button("Reload from Disk") { reloadDocumentDiscardingEdits() }
         }
         .padding(12)
@@ -189,6 +193,10 @@ struct WorkspaceDocumentSurface: View {
       return true
     }
     return !documentDirty
+  }
+
+  private var hasUnsavedDocuments: Bool {
+    documentDirty || openDocuments.hasDirtyDocuments
   }
 
   /// Establishes the external-change baseline for a freshly selected text
@@ -230,6 +238,7 @@ struct WorkspaceDocumentSurface: View {
       isCached: openDocuments.contains(forKey: key),
       baselineFingerprint: baseline,
       currentFingerprint: current,
+      hasPendingConflict: openDocuments.hasPendingConflict(forKey: key),
       hasUnsavedEdits: openDocuments.isDirty(forKey: key)
     )
     switch reconciliation {
@@ -237,9 +246,11 @@ struct WorkspaceDocumentSurface: View {
       return
     case .conflict:
       openDocuments.setFingerprint(current, forKey: key)
+      openDocuments.setPendingConflict(true, forKey: key)
       documentConflict = true  // keep the unsaved edits; warn about the divergence
     case .reloadFromDisk:
       openDocuments.setFingerprint(current, forKey: key)
+      openDocuments.setPendingConflict(false, forKey: key)
       documentConflict = false
       openDocuments.drop(forKey: key)  // clean → reopen to show the new disk content
       documentReloadGeneration &+= 1
@@ -290,6 +301,7 @@ struct WorkspaceDocumentSurface: View {
       // Keep the retained buffer's baseline current so switching back later does
       // not mistake our own save for an external change.
       openDocuments.setFingerprint(fingerprint, forKey: entry.url.locusStandardizedPath)
+      openDocuments.setPendingConflict(false, forKey: entry.url.locusStandardizedPath)
       // An edit just landed on disk; let the host refresh Git status so the
       // sidebar reflects the new "modified" state without another trigger.
       onDocumentSaved()
@@ -319,9 +331,18 @@ struct WorkspaceDocumentSurface: View {
     documentDirty = false
     // Drop the retained (edited) buffer so the reopen reads fresh disk content.
     if let entry {
+      openDocuments.setPendingConflict(false, forKey: entry.url.locusStandardizedPath)
       openDocuments.drop(forKey: entry.url.locusStandardizedPath)
     }
     documentReloadGeneration &+= 1
+  }
+
+  @MainActor
+  private func keepEditingAfterExternalConflict() {
+    documentConflict = false
+    if let entry {
+      openDocuments.setPendingConflict(false, forKey: entry.url.locusStandardizedPath)
+    }
   }
 
 }
@@ -353,6 +374,7 @@ extension WorkspaceDocumentSurface {
     if WorkspaceTextDocumentSupport.canEdit(entry), documentDirty {
       // Editable text with unsaved edits: do not reopen (that would discard them).
       // Surface a conflict so the user chooses to reload or keep their changes.
+      openDocuments.setPendingConflict(true, forKey: entry.url.locusStandardizedPath)
       documentConflict = true
     } else {
       // Clean text, or a non-editable preview (image/PDF/media): reopen to show the
@@ -360,6 +382,7 @@ extension WorkspaceDocumentSurface {
       // (e.g. one made clean by undo). Drop the retained buffer first so the reopen
       // reads fresh disk content (a no-op for non-text entries).
       documentConflict = false
+      openDocuments.setPendingConflict(false, forKey: entry.url.locusStandardizedPath)
       openDocuments.drop(forKey: entry.url.locusStandardizedPath)
       documentReloadGeneration &+= 1
     }

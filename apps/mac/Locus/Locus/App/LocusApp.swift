@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum LocusWindowMetrics {
@@ -153,8 +154,144 @@ private struct WorkspaceSidebarVisibilityCommandMenu: Commands {
   }
 }
 
+@MainActor
+enum LocusUnsavedChangesPrompt {
+  static func confirmDiscardForWindowClose() -> Bool {
+    confirmDiscard(
+      messageText: "Close Window with Unsaved Edits?",
+      informativeText: "This window has unsaved edits. Closing it will discard them.",
+      discardTitle: "Discard Changes"
+    )
+  }
+
+  static func confirmDiscardForApplicationTermination() -> Bool {
+    confirmDiscard(
+      messageText: "Quit Locus with Unsaved Edits?",
+      informativeText: "One or more windows have unsaved edits. Quitting will discard them.",
+      discardTitle: "Discard and Quit"
+    )
+  }
+
+  private static func confirmDiscard(
+    messageText: String,
+    informativeText: String,
+    discardTitle: String
+  ) -> Bool {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = messageText
+    alert.informativeText = informativeText
+    alert.addButton(withTitle: "Cancel")
+    alert.addButton(withTitle: discardTitle)
+    return alert.runModal() == .alertSecondButtonReturn
+  }
+}
+
+@MainActor
+final class LocusApplicationDelegate: NSObject, NSApplicationDelegate {
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    guard sender.windows.contains(where: \.isDocumentEdited) else {
+      return .terminateNow
+    }
+    return LocusUnsavedChangesPrompt.confirmDiscardForApplicationTermination()
+      ? .terminateNow : .terminateCancel
+  }
+}
+
+struct WindowUnsavedChangesGuard: NSViewRepresentable {
+  let hasUnsavedChanges: Bool
+
+  func makeNSView(context: Context) -> TrackingView {
+    let view = TrackingView()
+    view.coordinator = context.coordinator
+    view.isHidden = true
+    return view
+  }
+
+  func updateNSView(_ nsView: TrackingView, context: Context) {
+    context.coordinator.hasUnsavedChanges = hasUnsavedChanges
+    if let window = nsView.window {
+      context.coordinator.attach(to: window)
+    }
+  }
+
+  static func dismantleNSView(_ nsView: TrackingView, coordinator: Coordinator) {
+    coordinator.detach()
+  }
+
+  func makeCoordinator() -> Coordinator {
+    Coordinator()
+  }
+
+  final class TrackingView: NSView {
+    weak var coordinator: Coordinator?
+
+    override func viewDidMoveToWindow() {
+      super.viewDidMoveToWindow()
+      if let window {
+        coordinator?.attach(to: window)
+      } else {
+        coordinator?.detach()
+      }
+    }
+  }
+
+  @MainActor
+  final class Coordinator: NSObject, NSWindowDelegate {
+    var hasUnsavedChanges = false {
+      didSet { updateEditedState() }
+    }
+
+    private weak var window: NSWindow?
+    private weak var previousDelegate: NSWindowDelegate?
+
+    func attach(to newWindow: NSWindow) {
+      guard window !== newWindow else {
+        updateEditedState()
+        return
+      }
+
+      detach()
+      previousDelegate = newWindow.delegate
+      window = newWindow
+      newWindow.delegate = self
+      updateEditedState()
+    }
+
+    func detach() {
+      if let window, window.delegate === self {
+        window.isDocumentEdited = false
+        window.delegate = previousDelegate
+      }
+      window = nil
+      previousDelegate = nil
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+      if !hasUnsavedChanges {
+        return previousDelegate?.windowShouldClose?(sender) ?? true
+      }
+      guard LocusUnsavedChangesPrompt.confirmDiscardForWindowClose() else {
+        return false
+      }
+      return previousDelegate?.windowShouldClose?(sender) ?? true
+    }
+
+    func windowWillClose(_ notification: Notification) {
+      previousDelegate?.windowWillClose?(notification)
+      detach()
+    }
+
+    private func updateEditedState() {
+      window?.isDocumentEdited = hasUnsavedChanges
+    }
+  }
+}
+
 @main
 struct LocusApp: App {
+  @NSApplicationDelegateAdaptor(LocusApplicationDelegate.self) private var appDelegate
+
   init() {
     Self.resetUITestUserDefaultsIfNeeded()
   }

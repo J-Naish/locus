@@ -2,10 +2,45 @@ import Foundation
 import OSLog
 
 struct StoredFileLocationBookmark: Codable, Equatable, Sendable {
+  static let currentSchemaVersion = 1
+
+  let schemaVersion: Int
   let bookmarkData: Data
   let displayName: String
   let path: String
   let timestamp: Date
+
+  init(
+    schemaVersion: Int = StoredFileLocationBookmark.currentSchemaVersion,
+    bookmarkData: Data,
+    displayName: String,
+    path: String,
+    timestamp: Date
+  ) {
+    self.schemaVersion = schemaVersion
+    self.bookmarkData = bookmarkData
+    self.displayName = displayName
+    self.path = path
+    self.timestamp = timestamp
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case schemaVersion
+    case bookmarkData
+    case displayName
+    case path
+    case timestamp
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    schemaVersion =
+      try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 0
+    bookmarkData = try container.decode(Data.self, forKey: .bookmarkData)
+    displayName = try container.decode(String.self, forKey: .displayName)
+    path = try container.decode(String.self, forKey: .path)
+    timestamp = try container.decode(Date.self, forKey: .timestamp)
+  }
 }
 
 struct ResolvedFileLocationBookmark: Equatable, Sendable {
@@ -67,7 +102,11 @@ struct FileLocationBookmarkStore {
           bookmarkDataIsStale: &isStale
         )
       else {
-        shouldSave = true
+        if isExistingRequiredResource(URL(filePath: record.path)) {
+          logger.error("Failed to resolve stored file location bookmark for \(record.path)")
+        } else {
+          shouldSave = true
+        }
         return nil
       }
 

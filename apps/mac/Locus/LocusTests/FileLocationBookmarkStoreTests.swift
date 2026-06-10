@@ -109,6 +109,25 @@ final class FileLocationBookmarkStoreTests: XCTestCase {
     XCTAssertTrue(store.resolvedLocations().isEmpty)
   }
 
+  func testResolvedLocationsKeepsUnresolvableBookmarkDataForFutureMigration() throws {
+    let key = "invalid-bookmark-record"
+    let fileURL = try makeFile(named: "still-present.txt")
+    let record = StoredFileLocationBookmark(
+      bookmarkData: Data("not a bookmark".utf8),
+      displayName: "Missing",
+      path: fileURL.locusStandardizedPath,
+      timestamp: Date(timeIntervalSince1970: 1)
+    )
+    userDefaults.set(try PropertyListEncoder().encode([record]), forKey: key)
+    let store = makeStore(key: key)
+
+    XCTAssertTrue(store.resolvedLocations().isEmpty)
+    let storedData = try XCTUnwrap(userDefaults.data(forKey: key))
+    let stored = try PropertyListDecoder().decode(
+      [StoredFileLocationBookmark].self, from: storedData)
+    XCTAssertEqual(stored, [record])
+  }
+
   func testResolvedLocationsRefreshesStaleBookmarkAfterRename() throws {
     let store = makeStore()
     let originalURL = try makeFile(named: "original.txt")

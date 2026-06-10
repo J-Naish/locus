@@ -307,6 +307,40 @@ pub unsafe extern "C" fn locus_text_buffer_is_dirty(buffer: *const LocusTextBuff
     }
 }
 
+/// Approximate bytes retained by undo/redo records. NULL returns 0.
+///
+/// # Safety
+/// `buffer` must be NULL or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_history_byte_length(
+    buffer: *const LocusTextBuffer,
+) -> usize {
+    // SAFETY: buffer is NULL or a live handle the caller still owns.
+    match unsafe { buffer.as_ref() } {
+        Some(handle) => handle.buffer.history_byte_len(),
+        None => 0,
+    }
+}
+
+/// Sets the best-effort retained undo/redo byte budget.
+///
+/// # Safety
+/// `buffer` must be NULL or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_set_history_byte_limit(
+    buffer: *mut LocusTextBuffer,
+    byte_limit: usize,
+) -> u32 {
+    clear_last_error_message();
+    // SAFETY: buffer is NULL or a live handle the caller still owns.
+    let Some(handle) = (unsafe { buffer.as_mut() }) else {
+        set_last_error_message("buffer must not be NULL");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    };
+    handle.buffer.set_history_byte_limit(byte_limit);
+    LOCUS_STATUS_OK
+}
+
 /// Marks the buffer's current content as saved. NULL is a no-op.
 ///
 /// # Safety
@@ -316,6 +350,21 @@ pub unsafe extern "C" fn locus_text_buffer_mark_saved(buffer: *mut LocusTextBuff
     // SAFETY: buffer is NULL or a live handle the caller still owns.
     if let Some(handle) = unsafe { buffer.as_mut() } {
         handle.buffer.mark_saved();
+    }
+}
+
+/// Marks the current content as saved and releases undo/redo history. NULL is a
+/// no-op.
+///
+/// # Safety
+/// `buffer` must be NULL or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn locus_text_buffer_mark_saved_and_clear_history(
+    buffer: *mut LocusTextBuffer,
+) {
+    // SAFETY: buffer is NULL or a live handle the caller still owns.
+    if let Some(handle) = unsafe { buffer.as_mut() } {
+        handle.buffer.mark_saved_and_clear_history();
     }
 }
 
@@ -1452,6 +1501,58 @@ mod tests {
         unsafe { locus_text_buffer_mark_saved(handle) };
         assert!(!unsafe { locus_text_buffer_is_dirty(handle) });
         unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn history_metrics_and_clear_are_exposed() {
+        let handle = open("abcdef");
+        assert_eq!(unsafe { locus_text_buffer_history_byte_length(handle) }, 0);
+
+        assert_eq!(
+            unsafe { locus_text_buffer_replace(handle, 1, 5, b"x".as_ptr(), 1) },
+            LOCUS_STATUS_OK
+        );
+        assert!(unsafe { locus_text_buffer_history_byte_length(handle) } > 0);
+        unsafe { locus_text_buffer_mark_saved_and_clear_history(handle) };
+
+        assert_eq!(unsafe { locus_text_buffer_history_byte_length(handle) }, 0);
+        assert!(!unsafe { locus_text_buffer_is_dirty(handle) });
+        let mut did = true;
+        assert_eq!(
+            unsafe { locus_text_buffer_undo(handle, &mut did, ptr::null_mut()) },
+            LOCUS_STATUS_OK
+        );
+        assert!(!did);
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn history_byte_limit_prunes_through_ffi() {
+        let handle = open("abcdef");
+        assert_eq!(
+            unsafe { locus_text_buffer_set_history_byte_limit(handle, 4) },
+            LOCUS_STATUS_OK
+        );
+
+        unsafe { locus_text_buffer_replace(handle, 0, 1, b"A".as_ptr(), 1) };
+        unsafe { locus_text_buffer_replace(handle, 2, 3, b"C".as_ptr(), 1) };
+        unsafe { locus_text_buffer_replace(handle, 4, 5, b"E".as_ptr(), 1) };
+
+        assert!(unsafe { locus_text_buffer_history_byte_length(handle) } <= 4);
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn history_limit_rejects_null_buffer() {
+        assert_eq!(
+            unsafe { locus_text_buffer_history_byte_length(ptr::null()) },
+            0
+        );
+        assert_eq!(
+            unsafe { locus_text_buffer_set_history_byte_limit(ptr::null_mut(), 1024) },
+            LOCUS_TEXT_STATUS_INVALID_ARGUMENT
+        );
+        unsafe { locus_text_buffer_mark_saved_and_clear_history(ptr::null_mut()) };
     }
 
     #[test]

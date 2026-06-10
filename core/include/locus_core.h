@@ -262,20 +262,22 @@ void locus_workspace_snapshot_free(LocusWorkspaceSnapshot *snapshot);
  * but it obeys the standard readers-writer (shared-XOR-exclusive) rule, so a
  * caller may run any number of read-only calls on one handle concurrently from
  * different threads. The read-only calls are every accessor and snapshot getter
- * (line count, byte/UTF-16 length, revision, is-dirty, the position queries, and
- * the line-range and UTF-16-range snapshots) plus locus_text_buffer_write_path,
- * which only reads the buffer to stream it out. The mutating calls --
+ * (line count, byte/UTF-16 length, revision, is-dirty, history byte length, the
+ * position queries, and the line-range and UTF-16-range snapshots) plus
+ * locus_text_buffer_write_path, which only reads the buffer to stream it out.
+ * The mutating calls --
  * locus_text_buffer_insert_bytes, locus_text_buffer_delete,
  * locus_text_buffer_replace, locus_text_buffer_undo, locus_text_buffer_redo,
- * locus_text_buffer_mark_saved, locus_text_buffer_take_save_snapshot, and
- * locus_text_buffer_mark_saved_snapshot -- plus locus_text_buffer_free require
- * exclusive access: the caller must ensure no other call on the same handle (read
- * or write) overlaps them. Overlapping a mutation with any other access is
- * undefined behavior. To save without pausing edits, take_save_snapshot captures
- * an immutable clone under that exclusive access; locus_text_buffer_snapshot_write_path
- * then streams that clone (a separate LocusTextBufferSnapshot handle, not the live
- * buffer) to disk on a background thread while the buffer is edited and rendered
- * concurrently.
+ * locus_text_buffer_mark_saved, locus_text_buffer_mark_saved_and_clear_history,
+ * locus_text_buffer_set_history_byte_limit, locus_text_buffer_take_save_snapshot,
+ * and locus_text_buffer_mark_saved_snapshot -- plus locus_text_buffer_free
+ * require exclusive access: the caller must ensure no other call on the same
+ * handle (read or write) overlaps them. Overlapping a mutation with any other
+ * access is undefined behavior. To save without pausing edits,
+ * take_save_snapshot captures an immutable clone under that exclusive access;
+ * locus_text_buffer_snapshot_write_path then streams that clone (a separate
+ * LocusTextBufferSnapshot handle, not the live buffer) to disk on a background
+ * thread while the buffer is edited and rendered concurrently.
  */
 #define LOCUS_TEXT_STATUS_INVALID_ARGUMENT ((LocusStatus)100u)
 #define LOCUS_TEXT_STATUS_IO ((LocusStatus)101u)
@@ -356,9 +358,24 @@ size_t locus_text_buffer_byte_length(const LocusTextBuffer *buffer);
 size_t locus_text_buffer_utf16_length(const LocusTextBuffer *buffer);
 uint64_t locus_text_buffer_revision(const LocusTextBuffer *buffer);
 bool locus_text_buffer_is_dirty(const LocusTextBuffer *buffer);
+size_t locus_text_buffer_history_byte_length(const LocusTextBuffer *buffer);
+
+/*
+ * Sets the best-effort retained undo/redo byte budget. The latest undo record is
+ * kept even if it alone exceeds the budget, so one-step undo does not disappear.
+ */
+LocusStatus locus_text_buffer_set_history_byte_limit(
+    LocusTextBuffer *buffer, size_t byte_limit);
 
 /* Marks the current content as saved (clears dirty). NULL is a no-op. */
 void locus_text_buffer_mark_saved(LocusTextBuffer *buffer);
+
+/*
+ * Marks the current content as saved and releases undo/redo history. Intended
+ * for a completed save when the live buffer still matches the saved snapshot.
+ * NULL is a no-op.
+ */
+void locus_text_buffer_mark_saved_and_clear_history(LocusTextBuffer *buffer);
 
 /**
  * Snapshots the text of lines [start_line, start_line + count) (clamped) as one
