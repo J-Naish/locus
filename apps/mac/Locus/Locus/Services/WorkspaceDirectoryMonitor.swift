@@ -138,7 +138,6 @@ final class WorkspaceTreeMonitor {
   func startMonitoring(_ folderURL: URL, onChange: @escaping @MainActor () -> Void) {
     stopMonitoring()
     monitorGeneration &+= 1
-    self.onChange = onChange
 
     // `passUnretained`: the stream does not own `self`. Safe because the host view
     // calls `stopMonitoring()` (onDisappear / re-target) before the monitor can
@@ -186,6 +185,11 @@ final class WorkspaceTreeMonitor {
     }
 
     self.stream = stream
+    // Retain the host's closure only once the stream is actually delivering:
+    // on the failure paths above the monitor must not keep the closure's
+    // captured context alive behind a stream that does not exist ("onChange is
+    // set" and "stream is live" stay equivalent).
+    self.onChange = onChange
   }
 
   func stopMonitoring() {
@@ -261,11 +265,15 @@ final class WorkspaceTreeMonitor {
   /// directories whose changes are not worth reloading the sidebar for (the
   /// editor "watcher exclude" idea). Unambiguous tool directories only, so a
   /// user's own folder named e.g. "build" is still watched.
-  private static let excludedPathComponents: Set<String> = [
+  private nonisolated static let excludedPathComponents: Set<String> = [
     ".git", "node_modules", ".build", "DerivedData", ".next", "__pycache__", ".venv",
   ]
 
-  private static func isExcludedChurnPath(_ path: String) -> Bool {
+  /// Whether `path` lies inside an excluded churn directory. Matches whole path
+  /// components, never substrings, so e.g. `.github` or `my.git` stay watched.
+  /// `nonisolated`: a pure function over its argument (also keeps it directly
+  /// unit-testable off the main actor).
+  nonisolated static func isExcludedChurnPath(_ path: String) -> Bool {
     path.split(separator: "/").contains { excludedPathComponents.contains(String($0)) }
   }
 
