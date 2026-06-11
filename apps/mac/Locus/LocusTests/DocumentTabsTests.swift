@@ -423,8 +423,10 @@ final class DocumentCardModifierTests: XCTestCase {
     )
     // The side gap keeps the field visible left of the card.
     XCTAssertLessThan(try sample(4, 100).alphaComponent, 0.5)
-    // The top gap is thin but still present.
-    XCTAssertLessThan(try sample(100, 0).alphaComponent, 0.5)
+    // The card runs all the way to the top edge, flush under the header band.
+    let topEdge = try sample(100, 0)
+    XCTAssertGreaterThan(topEdge.alphaComponent, 0.5)
+    XCTAssertLessThan(topEdge.greenComponent, 0.3)
   }
 }
 
