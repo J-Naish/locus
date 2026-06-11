@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum DocumentCardMetrics {
-  static let cornerRadius: CGFloat = 12
+  static let cornerRadius: CGFloat = 14
   static let inset: CGFloat = 10
   static let borderWidth: CGFloat = 1
   static let shadowOpacity: Double = 0.06
