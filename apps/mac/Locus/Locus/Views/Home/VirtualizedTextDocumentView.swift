@@ -12,6 +12,15 @@ enum TextViewportBackend {
   case readOnly(LargeFile)
 }
 
+enum LargeTextViewportMetrics {
+  /// Breathing room between the viewport's top edge and the first text line,
+  /// applied as a scroll-view content inset so scrolled content still clips
+  /// at the frame. Top only: a bottom inset would extend the scrollable range
+  /// past the scroll-past-end frame and push the last line out of view at
+  /// maximum scroll.
+  static let topContentInset: CGFloat = 10
+}
+
 struct LargeTextViewport: NSViewRepresentable {
   let backend: TextViewportBackend
   let accessibilityLabel: String
@@ -53,6 +62,17 @@ struct LargeTextViewport: NSViewRepresentable {
     scrollView.borderType = .noBorder
     scrollView.drawsBackground = true
     scrollView.backgroundColor = .textBackgroundColor
+    // Breathing room above the first line inside the scroll viewport: at rest
+    // the first line sits inset from the card's top edge, while scrolled
+    // content draws all the way to the frame and clips at the card border
+    // (outer padding would clip at the inset line instead).
+    scrollView.automaticallyAdjustsContentInsets = false
+    scrollView.contentInsets = NSEdgeInsets(
+      top: LargeTextViewportMetrics.topContentInset,
+      left: 0,
+      bottom: 0,
+      right: 0
+    )
 
     let documentView = LineRenderingTextView()
     // Share the in-flight-save guard across editor views so a save started by a
