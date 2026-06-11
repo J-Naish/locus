@@ -2594,6 +2594,17 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         gutterWidth + horizontalPadding + maxObservedLineWidth + trailingContentMargin
       setFrameSize(NSSize(width: max(visibleWidth, contentWidth), height: height))
     }
+    // Align the horizontal scroller's track with the text area: the gutter is
+    // pinned viewport chrome drawn by this view, so the scroller track starts at
+    // the gutter's right edge. The vertical scroller is governed by the other
+    // insets and stays untouched. Write only on change so repeated layout passes
+    // remain idempotent and do not re-tile the scrollers.
+    if let scrollView = enclosingScrollView {
+      let horizontalScrollerInset = gutterWidth
+      if scrollView.scrollerInsets.left != horizontalScrollerInset {
+        scrollView.scrollerInsets.left = horizontalScrollerInset
+      }
+    }
     // The visible band and gutter width may have changed; re-establish the
     // I-beam cursor rect so its boundary stays aligned with the gutter edge.
     window?.invalidateCursorRects(for: self)

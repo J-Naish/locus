@@ -409,6 +409,127 @@ final class TextWrapTests: XCTestCase {
     XCTAssertLessThanOrEqual(originY, maxLegalOffset)
   }
 
+  // MARK: Horizontal scroller / gutter alignment
+
+  @MainActor
+  func testHorizontalScrollerInsetMatchesGutterWidthAfterLayout() throws {
+    let (scrollView, view) = try makeScrollerEquippedViewer(numberedLines(60))
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+
+    XCTAssertGreaterThan(view.gutterWidth, 0)
+    XCTAssertEqual(scrollView.scrollerInsets.left, view.gutterWidth)
+  }
+
+  @MainActor
+  func testHorizontalScrollerInsetTracksGutterDigitGrowthOnDocumentSwap() throws {
+    let (scrollView, view) = try makeScrollerEquippedViewer(numberedLines(5))
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+    let initialInset = scrollView.scrollerInsets.left
+
+    view.setBuffer(try TextBuffer.open(bytes: Data(numberedLines(10_000).utf8)))
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+
+    let expected = GutterMetrics.width(
+      lineCount: view.lineCount, font: GutterMetrics.lineNumberFont)
+    XCTAssertEqual(view.gutterWidth, expected)
+    XCTAssertEqual(scrollView.scrollerInsets.left, expected)
+    XCTAssertGreaterThan(scrollView.scrollerInsets.left, initialInset)
+  }
+
+  @MainActor
+  func testHorizontalScrollerInsetCollapsesWhenLineNumbersAreHidden() throws {
+    let (scrollView, view) = try makeScrollerEquippedViewer(numberedLines(60))
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+    XCTAssertGreaterThan(scrollView.scrollerInsets.left, 0)
+
+    view.showsLineNumbers = false
+
+    XCTAssertEqual(scrollView.scrollerInsets.left, 0)
+  }
+
+  @MainActor
+  func testScrollerInsetLeavesVerticalScrollerAndOtherEdgesUntouched() throws {
+    let (scrollView, view) = try makeScrollerEquippedViewer(
+      numberedLines(60), autohidesScrollers: false)
+    view.showsLineNumbers = false
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+    scrollView.layoutSubtreeIfNeeded()
+    let initialVerticalFrame = try XCTUnwrap(scrollView.verticalScroller).frame
+
+    view.showsLineNumbers = true
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+    scrollView.layoutSubtreeIfNeeded()
+
+    XCTAssertEqual(scrollView.verticalScroller?.frame.origin.x, initialVerticalFrame.origin.x)
+    XCTAssertEqual(scrollView.verticalScroller?.frame.origin.y, initialVerticalFrame.origin.y)
+    XCTAssertEqual(scrollView.verticalScroller?.frame.size.width, initialVerticalFrame.size.width)
+    XCTAssertEqual(scrollView.verticalScroller?.frame.size.height, initialVerticalFrame.size.height)
+    XCTAssertEqual(scrollView.scrollerInsets.top, 0)
+    XCTAssertEqual(scrollView.scrollerInsets.bottom, 0)
+    XCTAssertEqual(scrollView.scrollerInsets.right, 0)
+  }
+
+  @MainActor
+  func testHorizontalScrollerTrackStartsAtGutterEdge() throws {
+    let longLine = String(repeating: "wide ", count: 200)
+    let (scrollView, view) = try makeScrollerEquippedViewer("", autohidesScrollers: false)
+    view.wrapsLines = false
+    view.setBuffer(try TextBuffer.open(bytes: Data(longLine.utf8)))
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+
+    _ = render(view, dirtyRect: view.bounds)
+    view.updateLayout()
+    scrollView.layoutSubtreeIfNeeded()
+
+    let horizontalFrame = try XCTUnwrap(scrollView.horizontalScroller).frame
+    XCTAssertEqual(horizontalFrame.minX, view.gutterWidth, accuracy: 0.5)
+    XCTAssertLessThanOrEqual(horizontalFrame.maxX, scrollView.bounds.maxX)
+  }
+
+  @MainActor
+  func testUpdateLayoutWithScrollersStaysIdempotent() throws {
+    let (scrollView, view) = try makeScrollerEquippedViewer(numberedLines(60))
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+    scroll(scrollView, toY: 120)
+
+    view.updateLayout()
+    scrollView.layoutSubtreeIfNeeded()
+    let frame = view.frame
+    let origin = scrollView.contentView.bounds.origin
+    let inset = scrollView.scrollerInsets.left
+
+    view.updateLayout()
+    scrollView.layoutSubtreeIfNeeded()
+
+    XCTAssertEqual(view.frame.origin.x, frame.origin.x)
+    XCTAssertEqual(view.frame.origin.y, frame.origin.y)
+    XCTAssertEqual(view.frame.size.width, frame.size.width)
+    XCTAssertEqual(view.frame.size.height, frame.size.height)
+    XCTAssertEqual(scrollView.contentView.bounds.origin.x, origin.x)
+    XCTAssertEqual(scrollView.contentView.bounds.origin.y, origin.y)
+    XCTAssertEqual(scrollView.scrollerInsets.left, inset)
+  }
+
+  @MainActor
+  func testWrapModeKeepsViewportWidthWithScrollerInsetApplied() throws {
+    let (scrollView, view) = try makeScrollerEquippedViewer(
+      String(repeating: "word ", count: 200))
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+
+    XCTAssertTrue(view.isSoftWrapping)
+    XCTAssertEqual(view.frame.width, scrollView.contentView.bounds.width)
+    XCTAssertEqual(scrollView.scrollerInsets.left, view.gutterWidth)
+  }
+
   @MainActor
   func testExceedingLineCountFallsBackToNoWrap() throws {
     // Past the line-count safety valve the synchronous wrap-index build is
@@ -526,6 +647,20 @@ final class TextWrapTests: XCTestCase {
     view.frame = NSRect(origin: .zero, size: size)
     scrollView.documentView = view
     view.setBuffer(try TextBuffer.open(bytes: Data(contents.utf8)))
+    return (scrollView, view)
+  }
+
+  @MainActor
+  private func makeScrollerEquippedViewer(
+    _ contents: String,
+    size: NSSize = NSSize(width: 600, height: 400),
+    autohidesScrollers: Bool = true
+  ) throws -> (NSScrollView, LineRenderingTextView) {
+    let (scrollView, view) = try makeScrollViewViewer(contents, size: size)
+    scrollView.hasVerticalScroller = true
+    scrollView.hasHorizontalScroller = true
+    scrollView.autohidesScrollers = autohidesScrollers
+    scrollView.scrollerStyle = .legacy
     return (scrollView, view)
   }
 
