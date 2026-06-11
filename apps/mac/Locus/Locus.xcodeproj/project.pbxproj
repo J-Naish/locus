@@ -9,6 +9,9 @@
 /* Begin PBXBuildFile section */
 		1A0000010000000000000001 /* LocusApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000011 /* LocusApp.swift */; };
 		1A0000010000000000000F32 /* WorkspaceBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F33 /* WorkspaceBrowserView.swift */; };
+		1A0000010000000000000F40 /* DocumentTabs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F41 /* DocumentTabs.swift */; };
+		1A0000010000000000000F42 /* DocumentTabStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F43 /* DocumentTabStripView.swift */; };
+		1A0000010000000000000F44 /* DocumentTabsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F45 /* DocumentTabsTests.swift */; };
 		1A00000100000000000000A8 /* InitialFolderURLResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000A9 /* InitialFolderURLResolver.swift */; };
 		1A0000010000000000000002 /* CoreBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000012 /* CoreBridge.swift */; };
 		1A00000100000000000000E2 /* TextBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000E3 /* TextBuffer.swift */; };
@@ -114,7 +117,10 @@
 		1A0000010000000000000079 /* EmptyWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyWorkspaceView.swift; sourceTree = "<group>"; };
 		1A0000010000000000000013 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		1A0000010000000000000F33 /* WorkspaceBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceBrowserView.swift; sourceTree = "<group>"; };
+		1A0000010000000000000F41 /* DocumentTabs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentTabs.swift; sourceTree = "<group>"; };
+		1A0000010000000000000F43 /* DocumentTabStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentTabStripView.swift; sourceTree = "<group>"; };
 		1A0000010000000000000014 /* CoreBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreBridgeTests.swift; sourceTree = "<group>"; };
+		1A0000010000000000000F45 /* DocumentTabsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentTabsTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InitialFolderURLResolverTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000015 /* LocusCoreBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LocusCoreBridge.h; sourceTree = "<group>"; };
 		1A0000010000000000000F20 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -240,6 +246,7 @@
 				1A0000010000000000000083 /* RecentFileStoreTests.swift */,
 				1A0000010000000000000075 /* RecentFolderStoreTests.swift */,
 				1A00000100000000000000C3 /* DocumentChangeMonitorTests.swift */,
+				1A0000010000000000000F45 /* DocumentTabsTests.swift */,
 				1A0000010000000000000F13 /* OpenDocumentCacheTests.swift */,
 				1A000001000000000000008D /* WorkspaceDirectoryMonitorTests.swift */,
 				1A0000010000000000000067 /* WorkspaceEntryOpenActionTests.swift */,
@@ -336,6 +343,8 @@
 			isa = PBXGroup;
 			children = (
 				1A0000010000000000000079 /* EmptyWorkspaceView.swift */,
+				1A0000010000000000000F43 /* DocumentTabStripView.swift */,
+				1A0000010000000000000F41 /* DocumentTabs.swift */,
 				1A0000010000000000000091 /* FileLocationShortcut.swift */,
 				1A0000010000000000000093 /* FuzzyMatching.swift */,
 				1A0000010000000000000013 /* HomeView.swift */,
@@ -541,6 +550,8 @@
 				1A00000100000000000000E6 /* VirtualizedTextDocumentView.swift in Sources */,
 				1A0000010000000000000F30 /* LineRenderingTextView.swift in Sources */,
 				1A0000010000000000000F32 /* WorkspaceBrowserView.swift in Sources */,
+				1A0000010000000000000F42 /* DocumentTabStripView.swift in Sources */,
+				1A0000010000000000000F40 /* DocumentTabs.swift in Sources */,
 				1A0000010000000000000F10 /* OpenDocumentCache.swift in Sources */,
 				1A00000100000000000000EA /* GutterMetrics.swift in Sources */,
 				1A0000010000000000000064 /* WorkspaceEntryOpenAction.swift in Sources */,
@@ -574,6 +585,7 @@
 				1A0000010000000000000082 /* RecentFileStoreTests.swift in Sources */,
 				1A0000010000000000000074 /* RecentFolderStoreTests.swift in Sources */,
 				1A00000100000000000000C2 /* DocumentChangeMonitorTests.swift in Sources */,
+				1A0000010000000000000F44 /* DocumentTabsTests.swift in Sources */,
 				1A0000010000000000000F12 /* OpenDocumentCacheTests.swift in Sources */,
 				1A000001000000000000008C /* WorkspaceDirectoryMonitorTests.swift in Sources */,
 				1A0000010000000000000066 /* WorkspaceEntryOpenActionTests.swift in Sources */,

@@ -42,8 +42,6 @@ struct WorkspaceDocumentSurface: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      Divider()
-
       Group {
         if let entry {
           switch WorkspaceDocumentSurfaceSupport.surfaceKind(for: entry) {
@@ -84,8 +82,11 @@ struct WorkspaceDocumentSurface: View {
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-    .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
-    .background(.background)
+    .frame(
+      minWidth: LocusWindowMetrics.documentSurfaceMinimumWidth - 2 * DocumentCardMetrics.inset,
+      maxWidth: .infinity,
+      maxHeight: .infinity
+    )
     .focusedSceneValue(
       \.documentSaveCommand,
       DocumentSaveCommand(canSave: !isSaveDisabled, save: saveSelectedDocument)

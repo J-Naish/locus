@@ -97,6 +97,7 @@ struct WorkspaceBrowserView: View {
   let quickLookDocumentStore: any QuickLookDocumentStoring
   let gitWorkspaceStatusProvider: any GitWorkspaceStatusProviding
   @Binding var selectedEntryID: WorkspaceEntry.ID?
+  @Binding var documentTabs: DocumentTabsState
   let shortcutActions: FileLocationShortcutActions
   let actions: WorkspaceActions
   @State private var searchQuery = ""
@@ -105,6 +106,7 @@ struct WorkspaceBrowserView: View {
   @State private var sidebarSelectionState: WorkspaceSidebarSelectionState
   @State private var openDocumentEntry: WorkspaceEntry?
   @State private var isDocumentTextInputFocused = false
+  @State private var detailContentWidth: CGFloat = 0
   @State private var columnVisibility: NavigationSplitViewVisibility = .all
   @State private var gitStatusesByPath: [String: GitWorkspaceChangeKind] = [:]
   @State private var gitStatusRefreshGeneration: UInt64 = 0
@@ -137,6 +139,7 @@ struct WorkspaceBrowserView: View {
     quickLookDocumentStore: any QuickLookDocumentStoring,
     gitWorkspaceStatusProvider: any GitWorkspaceStatusProviding,
     selectedEntryID: Binding<WorkspaceEntry.ID?>,
+    documentTabs: Binding<DocumentTabsState>,
     shortcutActions: FileLocationShortcutActions,
     actions: WorkspaceActions
   ) {
@@ -152,6 +155,7 @@ struct WorkspaceBrowserView: View {
     self.quickLookDocumentStore = quickLookDocumentStore
     self.gitWorkspaceStatusProvider = gitWorkspaceStatusProvider
     self._selectedEntryID = selectedEntryID
+    self._documentTabs = documentTabs
     self.shortcutActions = shortcutActions
     self.actions = actions
     self._searchResults = State(
@@ -238,8 +242,11 @@ struct WorkspaceBrowserView: View {
     .onChange(of: openDocumentEntry) { oldEntry, newEntry in
       // Compare ids so snapshot refreshes of the already-open document
       // (same path, new metadata) do not count as opening it again.
-      if let newEntry, newEntry.id != oldEntry?.id {
-        actions.recordWorkspaceEngagement(folderURL)
+      if let newEntry {
+        documentTabs.recordOpen(of: newEntry)
+        if newEntry.id != oldEntry?.id {
+          actions.recordWorkspaceEngagement(folderURL)
+        }
       }
     }
     .task(id: gitStatusRefreshKey) {
@@ -1075,6 +1082,23 @@ struct WorkspaceBrowserView: View {
     updateOpenDocumentEntry(for: selectedEntryID, from: entries)
   }
 
+  private func openDocumentTab(_ tab: DocumentTab) {
+    openDocumentEntry = tab.entry
+    selectedEntryID = tab.entry.id
+  }
+
+  private func closeDocumentTab(_ tab: DocumentTab) {
+    switch documentTabs.closeTab(withID: tab.id, activeTabID: openDocumentEntry?.id) {
+    case .keepCurrent:
+      break
+    case .activate(let nextTab):
+      openDocumentTab(nextTab)
+    case .showEmpty:
+      openDocumentEntry = nil
+      selectedEntryID = nil
+    }
+  }
+
   private var workspaceDetail: some View {
     Group {
       if snapshot.entries.isEmpty {
@@ -1102,12 +1126,45 @@ struct WorkspaceBrowserView: View {
             actions.recordWorkspaceEngagement(folderURL)
           }
         )
-        .navigationSplitViewColumnWidth(
-          min: LocusWindowMetrics.documentSurfaceMinimumWidth,
-          ideal: LocusWindowMetrics.documentSurfaceIdealWidth
-        )
       }
     }
+    .modifier(DocumentCardModifier())
+    // The field paints up through the titlebar band so the header and the area
+    // around the card read as one continuous surface. Hiding the whole window
+    // toolbar background instead would also strip the sidebar section's glass
+    // and float the traffic lights off the sidebar.
+    .background(
+      Color(nsColor: LocusChromeColors.documentField)
+        .ignoresSafeArea(.container, edges: .top)
+    )
+    .onGeometryChange(for: CGFloat.self) { geometry in
+      geometry.size.width
+    } action: { width in
+      detailContentWidth = width
+    }
+    .toolbar {
+      DocumentTabToolbar(
+        tabs: documentTabs.tabs,
+        activeTabID: openDocumentEntry?.id,
+        maxStripWidth: max(
+          0,
+          detailContentWidth - DocumentTabStripMetrics.toolbarTrailingReserve
+        ),
+        onSelect: openDocumentTab,
+        onClose: closeDocumentTab
+      )
+    }
+    // Hides the toolbar glass and its bottom hairline in the header band so the
+    // field shows through and the header reads as one surface with the card
+    // area. Safe with the .unified toolbar style: the full-height sidebar keeps
+    // the traffic lights and toggle on its own surface. (.unifiedCompact is the
+    // style that floats the sidebar panel below the titlebar — do not combine
+    // it with this modifier.)
+    .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+    .navigationSplitViewColumnWidth(
+      min: LocusWindowMetrics.documentSurfaceMinimumWidth,
+      ideal: LocusWindowMetrics.documentSurfaceIdealWidth
+    )
     .safeAreaInset(edge: .top, spacing: 0) {
       if !snapshot.partialErrors.isEmpty {
         PartialErrorsView(errors: snapshot.partialErrors)

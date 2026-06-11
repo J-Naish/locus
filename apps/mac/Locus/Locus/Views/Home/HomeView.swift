@@ -81,6 +81,7 @@ struct HomeView: View {
   @State private var navigationHistory = WorkspaceNavigationHistory()
   @State private var recentFiles: [RecentFile] = []
   @State private var recentFolders: [RecentFolder] = []
+  @State private var documentTabs = DocumentTabsState()
   // Folder loads can overlap when the directory monitor reloads or users
   // choose another folder.
   // quickly; only the latest generation is allowed to update visible state.
@@ -152,6 +153,7 @@ struct HomeView: View {
       quickLookDocumentStore: quickLookDocumentStore,
       gitWorkspaceStatusProvider: gitWorkspaceStatusProvider,
       selectedEntryID: $selectedEntryID,
+      documentTabs: $documentTabs,
       emptyActions: EmptyWorkspaceActions(
         openFolder: openFolder,
         shortcuts: shortcutActions
@@ -518,6 +520,7 @@ struct HomeView: View {
         selectedEntryID = nil
       }
       workspaceState = .ready(folderURL: folderURL, snapshot: snapshot, loadedAt: Date())
+      documentTabs.prepareForWorkspace(folderURL)
       startWorkspaceChangeMonitoring(for: folderURL)
       if request.recordRecent,
         RecentFolderRecordPolicy.allowsRecording(folderURL, homeDirectoryURL: homeDirectoryURL)
@@ -525,12 +528,14 @@ struct HomeView: View {
         recentFolderStore.record(folderURL)
         refreshRecentFolders()
       }
-      if request.recordsEngagementWhenSelectionOpens,
-        let openedEntryID = entryID(in: snapshot.entries, matching: request.selectedURL),
+      if let openedEntryID = entryID(in: snapshot.entries, matching: request.selectedURL),
         let openedEntry = snapshot.entries.first(where: { $0.id == openedEntryID }),
         case .openInPlace = WorkspaceEntryOpenActionResolver.action(for: [openedEntry])
       {
-        recordWorkspaceEngagement(in: folderURL)
+        documentTabs.recordOpen(of: openedEntry)
+        if request.recordsEngagementWhenSelectionOpens {
+          recordWorkspaceEngagement(in: folderURL)
+        }
       }
       request.onSuccess?()
     } catch {
@@ -744,6 +749,9 @@ struct HomeView: View {
     }
 
     let deletedPaths = Set(deletedItems.map(\.originalURL.locusStandardizedPath))
+    for path in deletedPaths {
+      documentTabs.closeTabs(underPath: path)
+    }
     if let selectedEntryID,
       entries.contains(where: {
         $0.id == selectedEntryID && deletedPaths.contains($0.url.locusStandardizedPath)
@@ -786,6 +794,9 @@ struct HomeView: View {
       recordWorkspaceEngagement(in: folderURL)
     }
     let deletedPaths = Set(deletedItems.map(\.originalURL.locusStandardizedPath))
+    for path in deletedPaths {
+      documentTabs.closeTabs(underPath: path)
+    }
     if let selectedEntryID, deletedPaths.contains(selectedEntryID) {
       self.selectedEntryID = nil
     }
@@ -1008,6 +1019,7 @@ private struct WorkspaceContentView: View {
   let quickLookDocumentStore: any QuickLookDocumentStoring
   let gitWorkspaceStatusProvider: any GitWorkspaceStatusProviding
   @Binding var selectedEntryID: WorkspaceEntry.ID?
+  @Binding var documentTabs: DocumentTabsState
   let emptyActions: EmptyWorkspaceActions
   let shortcutActions: FileLocationShortcutActions
   let actions: WorkspaceActions
@@ -1040,6 +1052,7 @@ private struct WorkspaceContentView: View {
           quickLookDocumentStore: quickLookDocumentStore,
           gitWorkspaceStatusProvider: gitWorkspaceStatusProvider,
           selectedEntryID: $selectedEntryID,
+          documentTabs: $documentTabs,
           shortcutActions: shortcutActions,
           actions: actions
         )
