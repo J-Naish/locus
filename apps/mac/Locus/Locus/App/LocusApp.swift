@@ -189,12 +189,6 @@ enum LocusUnsavedChangesPrompt {
 
 @MainActor
 final class LocusApplicationDelegate: NSObject, NSApplicationDelegate {
-  func applicationWillFinishLaunching(_ notification: Notification) {
-    // Light is the product's default appearance for now. LocusChromeColors
-    // keeps dark variants so a future appearance setting only removes this.
-    NSApp.appearance = NSAppearance(named: .aqua)
-  }
-
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
     guard sender.windows.contains(where: \.isDocumentEdited) else {
       return .terminateNow
@@ -300,6 +294,11 @@ struct LocusApp: App {
 
   init() {
     Self.resetUITestUserDefaultsIfNeeded()
+    // Light is the product's default appearance for now. LocusChromeColors
+    // keeps dark variants so a future appearance setting only removes this.
+    // Set here, before the first scene materializes: an application-delegate
+    // launch hook raced scene bringup and occasionally launched dark.
+    NSApplication.shared.appearance = NSAppearance(named: .aqua)
   }
 
   var body: some Scene {
