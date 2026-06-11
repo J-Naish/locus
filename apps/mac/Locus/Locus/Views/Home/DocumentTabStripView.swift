@@ -54,6 +54,10 @@ enum DocumentTabStripMetrics {
   static let activeChipShadowOffsetY: CGFloat = 1
   static let chipShadowHeadroom: CGFloat = 4
   static let toolbarTrailingReserve: CGFloat = 24
+  /// Optical centering within the unified toolbar: the chips sit a touch high
+  /// in the bar, so nudge them down. An offset, not padding — it must not
+  /// change the strip's fitting size, which the toolbar treats as a minimum.
+  static let toolbarVerticalNudge: CGFloat = 2
 }
 
 struct DocumentCardModifier: ViewModifier {
@@ -187,6 +191,7 @@ struct DocumentTabToolbar: ToolbarContent {
       onSelect: onSelect,
       onClose: onClose
     )
+    .offset(y: DocumentTabStripMetrics.toolbarVerticalNudge)
   }
 }
 
