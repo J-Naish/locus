@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum DocumentCardMetrics {
-  static let cornerRadius: CGFloat = 18
+  static let cornerRadius: CGFloat = 12
   /// Thin: the toolbar row above already provides the visual breathing room.
   static let topInset: CGFloat = 2
   /// 8pt matches the gutter the system leaves around the floating sidebar
