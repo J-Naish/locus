@@ -189,6 +189,14 @@ enum LocusUnsavedChangesPrompt {
 
 @MainActor
 final class LocusApplicationDelegate: NSObject, NSApplicationDelegate {
+  func applicationDidFinishLaunching(_ notification: Notification) {
+    // Re-assert the light appearance set in LocusApp.init: that early write
+    // alone occasionally lost a launch race and the first window came up
+    // dark. (The SwiftUI-level .preferredColorScheme pin is not an option —
+    // it detaches the sidebar panel from the titlebar.)
+    NSApp.appearance = NSAppearance(named: .aqua)
+  }
+
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
     guard sender.windows.contains(where: \.isDocumentEdited) else {
       return .terminateNow
@@ -309,14 +317,16 @@ struct LocusApp: App {
         initialFolderResolution: Self.initialFolderResolution,
         homeDirectoryURL: Self.homeDirectoryURL
       )
-      // Belt and suspenders with the NSApp.appearance line in init: the
-      // AppKit-level override alone still lost a launch race on occasion and
-      // the window came up dark; this pins the scene itself to light.
-      .preferredColorScheme(.light)
+      // Light is pinned at the AppKit level only (see init and the app
+      // delegate): .preferredColorScheme(.light) here detached the sidebar
+      // panel from the titlebar, floating the traffic lights and the sidebar
+      // toggle above it.
     }
-    // Compact keeps the header band as short as the tab chips need, giving
-    // the document card the extra height.
-    .windowToolbarStyle(.unifiedCompact(showsTitle: false))
+    // Unified (not unifiedCompact): the compact style floats the sidebar
+    // panel below the titlebar, detaching the traffic lights and the sidebar
+    // toggle from the sidebar surface. Unified extends the panel to the
+    // window top, at the cost of a taller header band.
+    .windowToolbarStyle(.unified(showsTitle: false))
     .windowResizability(.contentMinSize)
     .defaultSize(
       width: LocusWindowMetrics.defaultWidth,
