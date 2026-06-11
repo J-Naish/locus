@@ -1274,9 +1274,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     rebuildWrapIndex()  // the previous buffer's wrap index does not apply
     updateLayout()
     // A new document always opens at the top-left; otherwise a reused scroll view
-    // would keep the previous file's scroll position.
+    // would keep the previous file's scroll position. With content insets, the
+    // rest position sits above the content origin so the first line keeps its
+    // breathing room without scrolling up first.
     if let scrollView = enclosingScrollView {
-      scrollView.contentView.scroll(to: .zero)
+      let insets = scrollView.contentInsets
+      scrollView.contentView.scroll(to: NSPoint(x: -insets.left, y: -insets.top))
       scrollView.reflectScrolledClipView(scrollView.contentView)
     }
     invalidateVisibleArea()

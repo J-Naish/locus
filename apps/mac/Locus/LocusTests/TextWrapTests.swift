@@ -636,6 +636,21 @@ final class TextWrapTests: XCTestCase {
         visible: NSRect(x: 0, y: 0, width: 40, height: 400), gutterEdge: 40))
   }
 
+  // Opening a document scrolls to the top — which, with a top content inset,
+  // is above the content origin so the first line rests its inset below the
+  // viewport edge (not pre-scrolled past the breathing room).
+  @MainActor
+  func testOpeningADocumentRestsAtTheInsetTopNotTheContentOrigin() throws {
+    let (scrollView, view) = try makeScrollViewViewer(numberedLines(60))
+    scrollView.automaticallyAdjustsContentInsets = false
+    scrollView.contentInsets = NSEdgeInsets(top: 10, left: 0, bottom: 0, right: 0)
+    scrollView.layoutSubtreeIfNeeded()
+
+    view.setBuffer(try TextBuffer.open(bytes: Data(numberedLines(40).utf8)))
+
+    XCTAssertEqual(scrollView.contentView.bounds.origin.y, -10, accuracy: 0.5)
+  }
+
   private func makeWrappingViewer(_ contents: String, width: CGFloat) throws
     -> LineRenderingTextView
   {
