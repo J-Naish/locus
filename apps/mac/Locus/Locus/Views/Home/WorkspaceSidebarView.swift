@@ -521,23 +521,34 @@ struct WorkspaceSidebarView: View {
   /// swapping in the new listing only once it arrives and only if it differs.
   /// Unlike `loadChildrenIfNeeded`, it refreshes a folder that is already
   /// `.loaded` without first clearing it, so a reload never flashes empty.
+  /// True while a child-load task's result is still wanted: the task is not
+  /// cancelled, no newer expansion pass started, and the folder is still
+  /// expanded. Shared by every load/refresh guard so the currency rule lives
+  /// (and changes) in one place.
+  private func childLoadIsCurrent(for entry: WorkspaceEntry, generation: UInt64) -> Bool {
+    !Task.isCancelled && generation == expansionGeneration
+      && expandedFolderIDs.contains(entry.id)
+  }
+
+  /// Clears an entry's load bookkeeping if `token` still identifies its current
+  /// task (otherwise a newer task owns the entries and is left alone).
+  private func finishChildLoadTask(for entry: WorkspaceEntry, token: UUID) {
+    if childLoadTokens[entry.id] == token {
+      childLoadTasks[entry.id] = nil
+      childLoadTokens[entry.id] = nil
+    }
+  }
+
   private func refreshLoadedChild(for entry: WorkspaceEntry) {
     let generation = expansionGeneration
     let loadToken = UUID()
     childLoadTokens[entry.id] = loadToken
     childLoadTasks[entry.id] = Task { @MainActor in
-      defer {
-        if childLoadTokens[entry.id] == loadToken {
-          childLoadTasks[entry.id] = nil
-          childLoadTokens[entry.id] = nil
-        }
-      }
+      defer { finishChildLoadTask(for: entry, token: loadToken) }
 
       do {
         let snapshot = try await actions.loadFolderChildren(entry.url)
-        guard !Task.isCancelled,
-          generation == expansionGeneration,
-          expandedFolderIDs.contains(entry.id),
+        guard childLoadIsCurrent(for: entry, generation: generation),
           childLoadTokens[entry.id] == loadToken,
           childStates[entry.id] != .loaded(snapshot)
         else {
@@ -583,18 +594,10 @@ struct WorkspaceSidebarView: View {
     let loadToken = UUID()
     childLoadTokens[entry.id] = loadToken
     childLoadTasks[entry.id] = Task { @MainActor in
-      defer {
-        if childLoadTokens[entry.id] == loadToken {
-          childLoadTasks[entry.id] = nil
-          childLoadTokens[entry.id] = nil
-        }
-      }
+      defer { finishChildLoadTask(for: entry, token: loadToken) }
 
       do {
-        guard !Task.isCancelled,
-          generation == expansionGeneration,
-          expandedFolderIDs.contains(entry.id)
-        else {
+        guard childLoadIsCurrent(for: entry, generation: generation) else {
           return
         }
 
@@ -623,10 +626,7 @@ struct WorkspaceSidebarView: View {
         }
 
         let snapshot = try await actions.loadFolderChildren(entry.url)
-        guard !Task.isCancelled,
-          generation == expansionGeneration,
-          expandedFolderIDs.contains(entry.id)
-        else {
+        guard childLoadIsCurrent(for: entry, generation: generation) else {
           return
         }
 
@@ -634,10 +634,7 @@ struct WorkspaceSidebarView: View {
       } catch is CancellationError {
         return
       } catch {
-        guard !Task.isCancelled,
-          generation == expansionGeneration,
-          expandedFolderIDs.contains(entry.id)
-        else {
+        guard childLoadIsCurrent(for: entry, generation: generation) else {
           return
         }
 
@@ -1007,8 +1004,8 @@ extension NSView {
 
   /// The sidebar's backing `NSTableView` nearest this marker view: the smallest
   /// table whose frame overlaps the marker, in the same window. Used by the
-  /// empty-area click and root-drop overlays, which both sit over the List but
-  /// need the table to tell the empty area from the rows.
+  /// empty-area click overlay, which sits over the List but needs the table to
+  /// tell the empty area from the rows.
   fileprivate func locusNearbySidebarTableView() -> NSTableView? {
     guard let window, let contentView = window.contentView else {
       return nil
