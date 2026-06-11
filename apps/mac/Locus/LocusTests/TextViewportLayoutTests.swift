@@ -41,6 +41,36 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(layout.contentHeight(lineCount: 0), 10)
   }
 
+  func testFrameHeightAddsScrollPastEndTailForTallDocuments() {
+    let frameHeight = layout.frameHeight(visualRows: 100, viewportHeight: 400)
+
+    XCTAssertEqual(frameHeight, 1390)
+    XCTAssertEqual(frameHeight - 400, 1000 - 10)
+  }
+
+  func testFrameHeightKeepsSingleRowDocumentsAtViewportHeight() {
+    XCTAssertEqual(layout.frameHeight(visualRows: 0, viewportHeight: 400), 400)
+    XCTAssertEqual(layout.frameHeight(visualRows: 1, viewportHeight: 400), 400)
+  }
+
+  func testFrameHeightAddsScrollPastEndTailForFittingMultiRowDocuments() {
+    XCTAssertEqual(layout.frameHeight(visualRows: 2, viewportHeight: 400), 410)
+    XCTAssertEqual(layout.frameHeight(visualRows: 40, viewportHeight: 400), 790)
+  }
+
+  func testFrameHeightActivatesOverscrollOnceContentExceedsViewport() {
+    XCTAssertEqual(layout.frameHeight(visualRows: 41, viewportHeight: 400), 800)
+  }
+
+  func testFrameHeightClampsOverscrollForTinyViewports() {
+    XCTAssertEqual(layout.frameHeight(visualRows: 100, viewportHeight: 6), 1000)
+    XCTAssertEqual(layout.frameHeight(visualRows: 100, viewportHeight: 0), 1000)
+  }
+
+  func testFrameHeightTreatsEmptyBufferAsOneRow() {
+    XCTAssertEqual(layout.frameHeight(visualRows: 0, viewportHeight: 400), 400)
+  }
+
   func testYOffsetIsLineTimesHeight() {
     XCTAssertEqual(layout.yOffset(forLine: 0), 0)
     XCTAssertEqual(layout.yOffset(forLine: 7), 70)
@@ -482,9 +512,7 @@ final class TextViewportLayoutTests: XCTestCase {
       selection.columnSpan(onLine: 3, lineLengthUTF16: 8).map { [$0.start, $0.end] }, [0, 2])
   }
 
-
   // MARK: selectedText (copy)
-
 
   /// Builds a viewer over a temporary file through the read-only large-file
   /// backend, exercising the `setReadOnlyDocument` path the surface uses for files
@@ -752,7 +780,6 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(view.selectedText(), "abcdefghij")  // copy budget is far larger
   }
 
-
   // MARK: Editing
 
   @MainActor
@@ -770,7 +797,6 @@ final class TextViewportLayoutTests: XCTestCase {
     view.deleteWordForward()
     XCTAssertEqual(content(of: view), " two three")
   }
-
 
   @MainActor
   func testEditingIsIgnoredWhenNotEditable() throws {

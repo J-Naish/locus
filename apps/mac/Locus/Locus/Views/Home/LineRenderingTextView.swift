@@ -16,6 +16,19 @@ struct TextViewportLayout: Equatable {
     CGFloat(max(lineCount, 1)) * lineHeight
   }
 
+  /// Rows that stay anchored at the viewport top at maximum overscroll.
+  static let overscrollAnchorRowCount = 1
+
+  /// Document frame height for VS Code-style scroll past end: every document gets
+  /// enough tail space below the final row that it can scroll until that row
+  /// reaches the top of the viewport. Empty and single-row documents still collapse
+  /// to the viewport-fill height because the first row is already at the top.
+  func frameHeight(visualRows: Int, viewportHeight: CGFloat) -> CGFloat {
+    let contentHeight = contentHeight(lineCount: visualRows)
+    let tailHeight = max(0, viewportHeight - CGFloat(Self.overscrollAnchorRowCount) * lineHeight)
+    return max(viewportHeight, contentHeight + tailHeight)
+  }
+
   /// The y offset of the top of `line`.
   func yOffset(forLine line: Int) -> CGFloat {
     CGFloat(line) * lineHeight
@@ -2560,12 +2573,19 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     let visibleSize = enclosingScrollView?.documentVisibleRect.size
     let visibleWidth = visibleSize?.width ?? frame.width
-    // Fill at least the viewport height so a short document's empty area below the
-    // last line is still part of the text view: it shows the editor background,
-    // takes the I-beam cursor, and accepts a click (which lands at the document
-    // end). A tall document keeps its content height, so virtualization is intact.
-    let contentHeight = CGFloat(max(totalVisualRows, 1)) * layout.lineHeight
-    let height = max(contentHeight, visibleSize?.height ?? frame.height)
+    let contentHeight = layout.contentHeight(lineCount: totalVisualRows)
+    let height: CGFloat
+    if let viewportHeight = visibleSize?.height {
+      // VS Code-style scroll past end: the document gets a tail of empty space
+      // below the last row, so it can scroll until that row reaches the top.
+      // Empty and single-row documents still fill only the viewport because the
+      // first row is already at the top.
+      height = layout.frameHeight(visualRows: totalVisualRows, viewportHeight: viewportHeight)
+    } else {
+      // Detached views do not have a stable viewport height. Feeding frame.height
+      // back into the scroll-past-end formula would grow the frame on every pass.
+      height = max(contentHeight, frame.height)
+    }
     if wrapIndex != nil {
       // Wrapped: fill the viewport width; no horizontal scrolling.
       setFrameSize(NSSize(width: visibleWidth, height: height))
@@ -2684,7 +2704,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       return
     }
     let rows = visibleVisualRowRange(in: dirtyRect)
+    let gutter = gutterWidth
     guard !rows.isEmpty else {
+      // In the scroll-past-end tail, the dirty band can sit entirely past the
+      // content. Keep the viewport-pinned gutter chrome visible there; numbers
+      // stop at the last line, matching the area below a short document.
+      if gutter > 0 {
+        drawGutter(width: gutter, lineRange: 0..<0, dirtyRect: dirtyRect)
+      }
       return
     }
     // Visible visual rows map back to a logical-line band to fetch.
@@ -2692,7 +2719,6 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let lastLine = lineLocation(ofVisualRow: rows.upperBound - 1).line
     let range = firstLine..<(lastLine + 1)
 
-    let gutter = gutterWidth
     let textX = gutter + horizontalPadding
     let lines = attributedBandLines(for: buffer, range: range)
 

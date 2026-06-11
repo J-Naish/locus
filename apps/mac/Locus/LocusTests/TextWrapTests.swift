@@ -239,14 +239,174 @@ final class TextWrapTests: XCTestCase {
 
   @MainActor
   func testShortDocumentFillsTheViewportHeight() throws {
-    // A short document's view fills at least the viewport height, so the empty
-    // area below the last line is still part of the text view (takes the I-beam
-    // and accepts a click) even though the content is a single row.
+    // A single-row document still fills the viewport; the only row is already at
+    // the top, so scroll-past-end adds no scrollable distance.
     let view = LineRenderingTextView()
     view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
     view.setBuffer(try TextBuffer.open(bytes: Data("hi".utf8)))
     XCTAssertEqual(view.visualRowCount, 1)  // content is one row…
     XCTAssertEqual(view.frame.height, 400)  // …but the view fills the viewport
+  }
+
+  @MainActor
+  func testDetachedTallDocumentLayoutIsIdempotentWithoutScrollPastEndTail() throws {
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+    view.setBuffer(try TextBuffer.open(bytes: Data(numberedLines(5).utf8)))
+
+    let firstHeight = view.frame.height
+    XCTAssertEqual(firstHeight, max(contentHeight(of: view), CGFloat(400)))
+
+    view.updateLayout()
+    let secondHeight = view.frame.height
+    view.updateLayout()
+
+    XCTAssertEqual(secondHeight, firstHeight)
+    XCTAssertEqual(view.frame.height, secondHeight)
+  }
+
+  @MainActor
+  func testScrollPastEndFrameTracksTheScrollViewViewport() throws {
+    let (scrollView, view) = try makeScrollViewViewer(numberedLines(60))
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+
+    let viewportHeight = scrollView.contentView.bounds.height
+    let contentHeight = CGFloat(view.visualRowCount) * view.layout.lineHeight
+    let expected = contentHeight + (viewportHeight - view.layout.lineHeight)
+    XCTAssertEqual(view.frame.height, expected)
+  }
+
+  @MainActor
+  func testTwoLineDocumentScrollsUntilSecondLineIsAtTop() throws {
+    let (scrollView, view) = try makeScrollViewViewer("one\ntwo")
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+
+    let viewportHeight = scrollView.contentView.bounds.height
+    let expectedHeight = contentHeight(of: view) + (viewportHeight - view.layout.lineHeight)
+    XCTAssertEqual(view.frame.height, expectedHeight)
+
+    scroll(scrollView, toY: maxScrollPastEndOffset(of: view))
+
+    XCTAssertEqual(scrollView.contentView.bounds.origin.y, view.layout.lineHeight)
+  }
+
+  @MainActor
+  func testGutterChromeIsDrawnWhenTheVisibleBandIsPastTheContent() throws {
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+    view.showsLineNumbers = true
+    view.setBuffer(try TextBuffer.open(bytes: Data(numberedLines(60).utf8)))
+
+    let contentHeight = CGFloat(view.visualRowCount) * view.layout.lineHeight
+    let lineBand = render(view, dirtyRect: NSRect(x: 0, y: 0, width: 600, height: 30))
+    let tailBand = render(
+      view, dirtyRect: NSRect(x: 0, y: contentHeight + 40, width: 600, height: 30))
+
+    let sampleWidth = min(120, max(1, Int(ceil(view.gutterWidth)) + 2))
+    let lineColumns = verticalChromeColumns(in: lineBand, sampleXUpperBound: sampleWidth)
+    let tailColumns = verticalChromeColumns(in: tailBand, sampleXUpperBound: sampleWidth)
+
+    XCTAssertFalse(lineColumns.isEmpty)
+    XCTAssertEqual(tailColumns, lineColumns)
+  }
+
+  @MainActor
+  func testClickInScrollPastEndTailLandsAtDocumentEnd() throws {
+    let view = LineRenderingTextView()
+    view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+    view.setBuffer(try TextBuffer.open(bytes: Data(numberedLines(60).utf8)))
+
+    let contentHeight = contentHeight(of: view)
+    let endpoint = view.endpoint(at: NSPoint(x: 60, y: contentHeight + 100))
+
+    XCTAssertEqual(endpoint, TextSelection.Endpoint(line: 59, columnUTF16: "line 59".utf16.count))
+  }
+
+  @MainActor
+  func testCaretRevealAtEndOfDocumentDoesNotScrollIntoTheTail() throws {
+    let (scrollView, view) = try makeScrollViewViewer(numberedLines(60))
+    view.isEditable = true
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+
+    view.moveToDocumentEdge(end: true, extend: false)
+
+    let expected = contentHeight(of: view) - scrollView.contentView.bounds.height
+    XCTAssertEqual(scrollView.contentView.bounds.origin.y, expected)
+  }
+
+  @MainActor
+  func testUpdateLayoutIsIdempotentWithScrollPastEnd() throws {
+    let (scrollView, view) = try makeScrollViewViewer(numberedLines(60))
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+    scroll(scrollView, toY: 200)
+
+    view.updateLayout()
+    let frame = view.frame
+    let origin = scrollView.contentView.bounds.origin
+    view.updateLayout()
+
+    XCTAssertEqual(view.frame.origin.x, frame.origin.x)
+    XCTAssertEqual(view.frame.origin.y, frame.origin.y)
+    XCTAssertEqual(view.frame.size.width, frame.size.width)
+    XCTAssertEqual(view.frame.size.height, frame.size.height)
+    XCTAssertEqual(scrollView.contentView.bounds.origin.x, origin.x)
+    XCTAssertEqual(scrollView.contentView.bounds.origin.y, origin.y)
+  }
+
+  @MainActor
+  func testDocumentSwapResetsScrollFromTheTail() throws {
+    let (scrollView, view) = try makeScrollViewViewer(numberedLines(60))
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+    scroll(scrollView, toY: maxScrollPastEndOffset(of: view))
+
+    view.setBuffer(try TextBuffer.open(bytes: Data("short\ndoc".utf8)))
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+
+    XCTAssertEqual(scrollView.contentView.bounds.origin.x, 0)
+    XCTAssertEqual(scrollView.contentView.bounds.origin.y, 0)
+    let viewportHeight = scrollView.contentView.bounds.height
+    let expectedHeight = contentHeight(of: view) + (viewportHeight - view.layout.lineHeight)
+    XCTAssertEqual(view.frame.height, expectedHeight)
+  }
+
+  @MainActor
+  func testParkedOffsetSurvivesViewportResize() throws {
+    let (scrollView, view) = try makeScrollViewViewer(numberedLines(60))
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+    let maxOffset = maxScrollPastEndOffset(of: view)
+    scroll(scrollView, toY: maxOffset)
+
+    scrollView.setFrameSize(NSSize(width: 600, height: 280))
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+
+    XCTAssertEqual(scrollView.contentView.bounds.origin.y, maxOffset)
+  }
+
+  @MainActor
+  func testShrinkingContentClampsTheParkedOffset() throws {
+    let (scrollView, view) = try makeScrollViewViewer(numberedLines(60))
+    view.isEditable = true
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+    scroll(scrollView, toY: maxScrollPastEndOffset(of: view))
+
+    view.selectAll(nil)
+    view.deleteBackward()
+    scrollView.layoutSubtreeIfNeeded()
+    view.updateLayout()
+
+    let originY = scrollView.contentView.bounds.origin.y
+    let maxLegalOffset = max(0, view.frame.height - scrollView.contentView.bounds.height)
+    XCTAssertGreaterThanOrEqual(originY, 0)
+    XCTAssertLessThanOrEqual(originY, maxLegalOffset)
   }
 
   @MainActor
@@ -326,6 +486,7 @@ final class TextWrapTests: XCTestCase {
   }
 
   /// A viewer whose frame is set *before* the buffer, so soft wrap is active.
+  /// Detached viewers use viewport-fill fallback until placed in an NSScrollView.
   @MainActor
   private func makeWrappingViewer(_ contents: String, width: CGFloat) throws
     -> LineRenderingTextView
@@ -336,6 +497,95 @@ final class TextWrapTests: XCTestCase {
     view.setBuffer(buffer)
     view.isEditable = true
     return view
+  }
+
+  private func numberedLines(_ count: Int) -> String {
+    (0..<count).map { "line \($0)" }.joined(separator: "\n")
+  }
+
+  private func contentHeight(of view: LineRenderingTextView) -> CGFloat {
+    CGFloat(max(view.visualRowCount, 1)) * view.layout.lineHeight
+  }
+
+  private func maxScrollPastEndOffset(of view: LineRenderingTextView) -> CGFloat {
+    max(0, contentHeight(of: view) - view.layout.lineHeight)
+  }
+
+  @MainActor
+  private func scroll(_ scrollView: NSScrollView, toY y: CGFloat) {
+    scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))
+    scrollView.reflectScrolledClipView(scrollView.contentView)
+  }
+
+  @MainActor
+  private func makeScrollViewViewer(
+    _ contents: String, size: NSSize = NSSize(width: 600, height: 400)
+  ) throws -> (NSScrollView, LineRenderingTextView) {
+    let scrollView = NSScrollView(frame: NSRect(origin: .zero, size: size))
+    let view = LineRenderingTextView()
+    view.frame = NSRect(origin: .zero, size: size)
+    scrollView.documentView = view
+    view.setBuffer(try TextBuffer.open(bytes: Data(contents.utf8)))
+    return (scrollView, view)
+  }
+
+  @MainActor
+  private func render(_ view: LineRenderingTextView, dirtyRect: NSRect) -> NSBitmapImageRep {
+    let rep = NSBitmapImageRep(
+      bitmapDataPlanes: nil,
+      pixelsWide: max(1, Int(ceil(dirtyRect.width))),
+      pixelsHigh: max(1, Int(ceil(dirtyRect.height))),
+      bitsPerSample: 8,
+      samplesPerPixel: 4,
+      hasAlpha: true,
+      isPlanar: false,
+      colorSpaceName: .deviceRGB,
+      bytesPerRow: 0,
+      bitsPerPixel: 0
+    )!
+    let context = NSGraphicsContext(bitmapImageRep: rep)!
+    NSGraphicsContext.saveGraphicsState()
+    defer { NSGraphicsContext.restoreGraphicsState() }
+    NSGraphicsContext.current = context
+    context.cgContext.translateBy(x: -dirtyRect.minX, y: -dirtyRect.minY)
+    view.draw(dirtyRect)
+    context.flushGraphics()
+    return rep
+  }
+
+  private func verticalChromeColumns(
+    in rep: NSBitmapImageRep, sampleXUpperBound: Int
+  ) -> Set<Int> {
+    let background = rgbPixel(in: rep, x: 0, y: 0)
+    let height = rep.pixelsHigh
+    let threshold = max(1, height * 3 / 4)
+    var columns = Set<Int>()
+    for x in 0..<min(sampleXUpperBound, rep.pixelsWide) {
+      var changed = 0
+      for y in 0..<height where pixelDistance(rgbPixel(in: rep, x: x, y: y), background) > 2 {
+        changed += 1
+      }
+      if changed >= threshold {
+        columns.insert(x)
+      }
+    }
+    return columns
+  }
+
+  private func rgbPixel(in rep: NSBitmapImageRep, x: Int, y: Int) -> [Int] {
+    guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
+      return [0, 0, 0, 0]
+    }
+    return [
+      Int((color.redComponent * 255).rounded()),
+      Int((color.greenComponent * 255).rounded()),
+      Int((color.blueComponent * 255).rounded()),
+      Int((color.alphaComponent * 255).rounded()),
+    ]
+  }
+
+  private func pixelDistance(_ lhs: [Int], _ rhs: [Int]) -> Int {
+    zip(lhs, rhs).map { abs($0 - $1) }.max() ?? 0
   }
 
   @MainActor
