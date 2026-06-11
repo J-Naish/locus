@@ -31,17 +31,18 @@ enum LocusChromeColors {
 
 enum DocumentTabStripMetrics {
   static let chipSpacing: CGFloat = 6
-  static let chipCornerRadius: CGFloat = 8
   static let chipMaxWidth: CGFloat = 180
-  static let chipHorizontalPadding: CGFloat = 10
+  static let chipLeadingPadding: CGFloat = 12
+  static let chipTrailingPadding: CGFloat = 14
   static let chipVerticalPadding: CGFloat = 6
   static let documentIconFontSize: CGFloat = 11
   static let closeIconFontSize: CGFloat = 9
   static let closeHitTarget: CGFloat = 16
   static let inactiveHoverOpacity: Double = 0.08
-  static let activeChipShadowOpacity: Double = 0.12
-  static let activeChipShadowRadius: CGFloat = 2
+  static let activeChipShadowOpacity: Double = 0.06
+  static let activeChipShadowRadius: CGFloat = 3
   static let activeChipShadowOffsetY: CGFloat = 1
+  static let chipShadowHeadroom: CGFloat = 4
   static let toolbarTrailingReserve: CGFloat = 24
 }
 
@@ -102,6 +103,7 @@ struct DocumentTabStripView: View {
           chipContentWidth = width
         }
       }
+      .scrollClipDisabled()
       .onChange(of: activeTabID) { _, newID in
         if let newID {
           proxy.scrollTo(newID, anchor: .center)
@@ -112,6 +114,7 @@ struct DocumentTabStripView: View {
     // Without this explicit cap, SwiftUI publishes the full ideal tab width and
     // the toolbar sends the item into the overflow menu.
     .frame(width: min(max(chipContentWidth, 0), max(maxWidth, 0)), alignment: .leading)
+    .clipShape(Rectangle().inset(by: -DocumentTabStripMetrics.chipShadowHeadroom))
     .accessibilityIdentifier("document-tab-strip")
   }
 }
@@ -157,10 +160,7 @@ private struct DocumentTabChip: View {
   @State private var isHovering = false
 
   var body: some View {
-    let shape = RoundedRectangle(
-      cornerRadius: DocumentTabStripMetrics.chipCornerRadius,
-      style: .continuous
-    )
+    let shape = Capsule(style: .continuous)
 
     Button(action: onSelect) {
       HStack(spacing: 4) {
@@ -186,7 +186,8 @@ private struct DocumentTabChip: View {
           .truncationMode(.tail)
           .foregroundStyle(isActive ? .primary : .secondary)
       }
-      .padding(.horizontal, DocumentTabStripMetrics.chipHorizontalPadding)
+      .padding(.leading, DocumentTabStripMetrics.chipLeadingPadding)
+      .padding(.trailing, DocumentTabStripMetrics.chipTrailingPadding)
       .padding(.vertical, DocumentTabStripMetrics.chipVerticalPadding)
       .frame(maxWidth: DocumentTabStripMetrics.chipMaxWidth)
       .background(
@@ -219,7 +220,7 @@ private struct DocumentTabChip: View {
         width: DocumentTabStripMetrics.closeHitTarget,
         height: DocumentTabStripMetrics.closeHitTarget
       )
-      .padding(.leading, DocumentTabStripMetrics.chipHorizontalPadding)
+      .padding(.leading, DocumentTabStripMetrics.chipLeadingPadding)
       .opacity(showsCloseButton ? 1 : 0)
       .accessibilityLabel("Close \(tab.name)")
       .accessibilityIdentifier("document-tab-close-\(tab.id)")
