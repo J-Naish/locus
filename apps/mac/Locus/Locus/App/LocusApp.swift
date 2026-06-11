@@ -309,6 +309,10 @@ struct LocusApp: App {
         initialFolderResolution: Self.initialFolderResolution,
         homeDirectoryURL: Self.homeDirectoryURL
       )
+      // Belt and suspenders with the NSApp.appearance line in init: the
+      // AppKit-level override alone still lost a launch race on occasion and
+      // the window came up dark; this pins the scene itself to light.
+      .preferredColorScheme(.light)
     }
     // Compact keeps the header band as short as the tab chips need, giving
     // the document card the extra height.
