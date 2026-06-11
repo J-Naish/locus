@@ -1206,15 +1206,29 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   // the I-beam covers the visible band to the right of it. `viewportDidScroll`
   // and `updateLayout` invalidate these rects so the boundary stays aligned as
   // the document scrolls horizontally or the gutter width changes.
+  //
+  // Fragile foundation, measured 2026-06-12: a SwiftUI `.clipShape` wrapped
+  // around this editor suppresses these cursor rects — they register with
+  // correct window geometry, yet the arrow wins until the clip is removed.
+  // The document card therefore paints its rounded corners instead of
+  // clipping (see DocumentCardModifier); do not reintroduce a clip container
+  // around the editor.
   override func resetCursorRects() {
-    let visible = visibleRect
-    guard !visible.isEmpty else { return }
     let gutterEdge = (enclosingScrollView?.contentView.bounds.origin.x ?? 0) + gutterWidth
+    guard let textRect = Self.iBeamCursorRect(visible: visibleRect, gutterEdge: gutterEdge)
+    else { return }
+    addCursorRect(textRect, cursor: .iBeam)
+  }
+
+  /// The I-beam region of the visible band: everything right of the pinned
+  /// gutter's edge. `nil` when nothing is visible or the gutter spans the
+  /// whole band.
+  static func iBeamCursorRect(visible: NSRect, gutterEdge: CGFloat) -> NSRect? {
+    guard !visible.isEmpty else { return nil }
     let textMinX = max(visible.minX, gutterEdge)
     let textRect = NSRect(
       x: textMinX, y: visible.minY, width: visible.maxX - textMinX, height: visible.height)
-    guard textRect.width > 0 else { return }
-    addCursorRect(textRect, cursor: .iBeam)
+    return textRect.width > 0 ? textRect : nil
   }
 
   /// Loads an editable document. Editing and saving are enabled when the host

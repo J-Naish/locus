@@ -609,6 +609,33 @@ final class TextWrapTests: XCTestCase {
   /// A viewer whose frame is set *before* the buffer, so soft wrap is active.
   /// Detached viewers use viewport-fill fallback until placed in an NSScrollView.
   @MainActor
+  // MARK: I-beam cursor region
+
+  // The editor shows the text I-beam right of the pinned gutter and the arrow
+  // over the gutter itself, via cursor rects built from this pure region math
+  // (`resetCursorRects` feeds it the visible band and the gutter's right edge).
+  func testIBeamCursorRectCoversVisibleBandRightOfGutter() {
+    let rect = LineRenderingTextView.iBeamCursorRect(
+      visible: NSRect(x: 0, y: 0, width: 600, height: 400), gutterEdge: 42)
+    XCTAssertEqual(rect, NSRect(x: 42, y: 0, width: 558, height: 400))
+  }
+
+  func testIBeamCursorRectFollowsTheScrolledVisibleBand() {
+    // Scrolled 100pt right and 300pt down: the gutter is viewport-pinned, so
+    // its edge moves with the scroll origin and the band tracks the viewport.
+    let rect = LineRenderingTextView.iBeamCursorRect(
+      visible: NSRect(x: 100, y: 300, width: 600, height: 400), gutterEdge: 142)
+    XCTAssertEqual(rect, NSRect(x: 142, y: 300, width: 558, height: 400))
+  }
+
+  func testIBeamCursorRectIsNilWhenNothingIsVisibleOrGutterCoversTheBand() {
+    XCTAssertNil(
+      LineRenderingTextView.iBeamCursorRect(visible: .zero, gutterEdge: 0))
+    XCTAssertNil(
+      LineRenderingTextView.iBeamCursorRect(
+        visible: NSRect(x: 0, y: 0, width: 40, height: 400), gutterEdge: 40))
+  }
+
   private func makeWrappingViewer(_ contents: String, width: CGFloat) throws
     -> LineRenderingTextView
   {

@@ -53,8 +53,23 @@ struct DocumentCardModifier: ViewModifier {
       style: .continuous
     )
 
-    content
-      .clipShape(shape)
+    return
+      content
+      // The rounded corners are painted on, not clipped: a SwiftUI clip
+      // container around the AppKit editor suppresses its pointer cursor
+      // (measured — both legacy cursor rects and the editor's own cursorUpdate
+      // tracking areas register correctly yet the arrow wins while .clipShape
+      // is present, and recover as soon as it is removed). Field-colored caps
+      // over the square corners are visually identical to clipping here,
+      // because everything outside the card's border is the field.
+      .overlay(
+        RoundedCornerCaps(cornerRadius: DocumentCardMetrics.cornerRadius)
+          .fill(
+            Color(nsColor: LocusChromeColors.documentField),
+            style: FillStyle(eoFill: true)
+          )
+          .allowsHitTesting(false)
+      )
       .background(
         shape
           .fill(Color(nsColor: LocusChromeColors.documentCard))
@@ -69,8 +84,29 @@ struct DocumentCardModifier: ViewModifier {
           Color(nsColor: .separatorColor),
           lineWidth: DocumentCardMetrics.borderWidth
         )
+        // The hairline is decoration only; keep it out of hit testing so it
+        // never intercepts clicks meant for the card content.
+        .allowsHitTesting(false)
       )
       .padding(DocumentCardMetrics.inset)
+  }
+}
+
+/// The region between a rectangle and its inscribed continuous rounded
+/// rectangle — the four corner notches. Filled with `FillStyle(eoFill: true)`
+/// it covers exactly what `clipShape` would have masked at the corners.
+private struct RoundedCornerCaps: Shape {
+  let cornerRadius: CGFloat
+
+  func path(in rect: CGRect) -> Path {
+    var path = Path()
+    path.addRect(rect)
+    path.addRoundedRect(
+      in: rect,
+      cornerSize: CGSize(width: cornerRadius, height: cornerRadius),
+      style: .continuous
+    )
+    return path
   }
 }
 
