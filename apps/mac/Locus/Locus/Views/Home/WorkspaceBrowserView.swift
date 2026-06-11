@@ -210,6 +210,13 @@ struct WorkspaceBrowserView: View {
     } detail: {
       workspaceDetail
     }
+    // The window background shows through the ~8pt gutter around the floating
+    // sidebar glass panel (and anywhere no content paints). It must be the
+    // field color so the sidebar's backdrop reads as the same surface as the
+    // rest of the window; the glass pass adds only its own subtle edge shadow.
+    .containerBackground(
+      Color(nsColor: LocusChromeColors.documentField), for: .window
+    )
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onChange(of: searchQuery) {
       refreshSearchResults()
@@ -1130,9 +1137,7 @@ struct WorkspaceBrowserView: View {
     }
     .modifier(DocumentCardModifier())
     // The field paints up through the titlebar band so the header and the area
-    // around the card read as one continuous surface. Hiding the whole window
-    // toolbar background instead would also strip the sidebar section's glass
-    // and float the traffic lights off the sidebar.
+    // around the card read as one continuous surface.
     .background(
       Color(nsColor: LocusChromeColors.documentField)
         .ignoresSafeArea(.container, edges: .top)

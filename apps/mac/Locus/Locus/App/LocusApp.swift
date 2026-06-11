@@ -189,6 +189,12 @@ enum LocusUnsavedChangesPrompt {
 
 @MainActor
 final class LocusApplicationDelegate: NSObject, NSApplicationDelegate {
+  func applicationWillFinishLaunching(_ notification: Notification) {
+    // Light is the product's default appearance for now. LocusChromeColors
+    // keeps dark variants so a future appearance setting only removes this.
+    NSApp.appearance = NSAppearance(named: .aqua)
+  }
+
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
     guard sender.windows.contains(where: \.isDocumentEdited) else {
       return .terminateNow

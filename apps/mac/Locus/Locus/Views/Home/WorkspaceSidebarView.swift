@@ -176,6 +176,7 @@ struct WorkspaceSidebarView: View {
         }
       }
       .listStyle(.sidebar)
+      .scrollContentBackground(.hidden)
       .focused($isListFocused)
       .contextMenu(forSelectionType: WorkspaceEntry.ID.self) { selection in
         let selectedEntries = entries(for: selection)
@@ -278,6 +279,13 @@ struct WorkspaceSidebarView: View {
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+    // Opaque field behind the whole sidebar column, up through the titlebar
+    // band: replaces the system vibrancy material, which let the desktop
+    // wallpaper tint the column.
+    .background(
+      Color(nsColor: LocusChromeColors.documentField)
+        .ignoresSafeArea(.container, edges: .top)
+    )
     .onAppear {
       publishVisibleEntries()
     }
