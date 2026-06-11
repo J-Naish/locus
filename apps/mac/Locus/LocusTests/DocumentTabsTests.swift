@@ -364,15 +364,28 @@ final class DocumentCardModifierTests: XCTestCase {
       throw XCTSkip("Offscreen rendering produced an empty bitmap.")
     }
 
-    let center = try XCTUnwrap(imageRep.colorAt(x: 100, y: 100))
-    let cornerProbe = Int(DocumentCardMetrics.inset + 1)
-    let corner = try XCTUnwrap(imageRep.colorAt(x: cornerProbe, y: cornerProbe))
+    // Sample in points regardless of the bitmap's backing scale.
+    let scale = max(1, imageRep.pixelsWide / Int(host.bounds.width))
+    let center = try XCTUnwrap(imageRep.colorAt(x: 100 * scale, y: 100 * scale))
+    let corner = try XCTUnwrap(
+      imageRep.colorAt(
+        x: (Int(DocumentCardMetrics.horizontalInset) + 1) * scale,
+        y: (Int(DocumentCardMetrics.topInset) + 1) * scale
+      )
+    )
 
+    // The hosted red content shows through the card interior...
     XCTAssertGreaterThan(center.redComponent, 0.8)
-    XCTAssertLessThan(corner.redComponent, 0.5)
+    XCTAssertLessThan(center.greenComponent, 0.3)
+    // ...while the top-left corner notch is covered by the field-colored cap
+    // (an opaque light gray), not the red content.
+    XCTAssertGreaterThan(corner.greenComponent, 0.8)
   }
 
-  func testDocumentCardShowsTopGapAboveCard() throws {
+  // The card floats inside the window like the sidebar panel does: gaps on
+  // the sides and bottom (matching the sidebar's gutter), a thin top gap, and
+  // rounded corners on all four sides.
+  func testDocumentCardFloatsWithGapsAndRoundedCornersOnAllSides() throws {
     let host = NSHostingView(
       rootView: RedAppKitView()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -391,19 +404,27 @@ final class DocumentCardModifierTests: XCTestCase {
       throw XCTSkip("Offscreen rendering produced an empty bitmap.")
     }
 
-    let topGap = try XCTUnwrap(imageRep.colorAt(x: 100, y: 5))
-    let cardInterior = try XCTUnwrap(imageRep.colorAt(x: 100, y: 100))
+    let scale = max(1, imageRep.pixelsWide / Int(host.bounds.width))
+    func sample(_ x: Int, _ y: Int) throws -> NSColor {
+      try XCTUnwrap(imageRep.colorAt(x: x * scale, y: y * scale))
+    }
 
-    XCTAssertLessThan(
-      topGap.alphaComponent,
-      0.5,
-      "Expected top gap to be transparent, got \(topGap)."
-    )
+    // The bottom gap matches the sidebar's gutter: transparent padding below
+    // the card.
+    XCTAssertLessThan(try sample(100, 197).alphaComponent, 0.5)
+    // The bottom-left corner is rounded again: its notch shows the
+    // field-colored cap, not the red card content.
     XCTAssertGreaterThan(
-      cardInterior.redComponent,
-      0.8,
-      "Expected card interior to show the hosted red view, got \(cardInterior)."
+      try sample(
+        Int(DocumentCardMetrics.horizontalInset) + 1,
+        198 - Int(DocumentCardMetrics.bottomInset)
+      ).greenComponent,
+      0.8
     )
+    // The side gap keeps the field visible left of the card.
+    XCTAssertLessThan(try sample(4, 100).alphaComponent, 0.5)
+    // The top gap is thin but still present.
+    XCTAssertLessThan(try sample(100, 0).alphaComponent, 0.5)
   }
 }
 

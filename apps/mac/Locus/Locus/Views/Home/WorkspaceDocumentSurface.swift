@@ -83,7 +83,8 @@ struct WorkspaceDocumentSurface: View {
       .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     .frame(
-      minWidth: LocusWindowMetrics.documentSurfaceMinimumWidth - 2 * DocumentCardMetrics.inset,
+      minWidth: LocusWindowMetrics.documentSurfaceMinimumWidth
+        - 2 * DocumentCardMetrics.horizontalInset,
       maxWidth: .infinity,
       maxHeight: .infinity
     )

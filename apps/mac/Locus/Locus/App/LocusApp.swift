@@ -310,7 +310,9 @@ struct LocusApp: App {
         homeDirectoryURL: Self.homeDirectoryURL
       )
     }
-    .windowToolbarStyle(.unified(showsTitle: false))
+    // Compact keeps the header band as short as the tab chips need, giving
+    // the document card the extra height.
+    .windowToolbarStyle(.unifiedCompact(showsTitle: false))
     .windowResizability(.contentMinSize)
     .defaultSize(
       width: LocusWindowMetrics.defaultWidth,

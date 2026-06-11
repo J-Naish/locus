@@ -1,12 +1,21 @@
 import SwiftUI
 
 enum DocumentCardMetrics {
-  static let cornerRadius: CGFloat = 14
-  static let inset: CGFloat = 10
+  static let cornerRadius: CGFloat = 18
+  /// Thin: the toolbar row above already provides the visual breathing room.
+  static let topInset: CGFloat = 2
+  /// 8pt matches the gutter the system leaves around the floating sidebar
+  /// panel, so the card's side and bottom margins read as the sidebar's.
+  static let horizontalInset: CGFloat = 8
+  static let bottomInset: CGFloat = 8
   static let borderWidth: CGFloat = 1
   static let shadowOpacity: Double = 0.06
   static let shadowRadius: CGFloat = 3
   static let shadowOffsetY: CGFloat = 1
+
+  static var shape: RoundedRectangle {
+    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+  }
 }
 
 enum LocusChromeColors {
@@ -48,10 +57,7 @@ enum DocumentTabStripMetrics {
 
 struct DocumentCardModifier: ViewModifier {
   func body(content: Content) -> some View {
-    let shape = RoundedRectangle(
-      cornerRadius: DocumentCardMetrics.cornerRadius,
-      style: .continuous
-    )
+    let shape = DocumentCardMetrics.shape
 
     return
       content
@@ -63,7 +69,7 @@ struct DocumentCardModifier: ViewModifier {
       // over the square corners are visually identical to clipping here,
       // because everything outside the card's border is the field.
       .overlay(
-        RoundedCornerCaps(cornerRadius: DocumentCardMetrics.cornerRadius)
+        RoundedCornerCaps()
           .fill(
             Color(nsColor: LocusChromeColors.documentField),
             style: FillStyle(eoFill: true)
@@ -88,24 +94,20 @@ struct DocumentCardModifier: ViewModifier {
         // never intercepts clicks meant for the card content.
         .allowsHitTesting(false)
       )
-      .padding(DocumentCardMetrics.inset)
+      .padding(.top, DocumentCardMetrics.topInset)
+      .padding(.horizontal, DocumentCardMetrics.horizontalInset)
+      .padding(.bottom, DocumentCardMetrics.bottomInset)
   }
 }
 
-/// The region between a rectangle and its inscribed continuous rounded
-/// rectangle — the four corner notches. Filled with `FillStyle(eoFill: true)`
-/// it covers exactly what `clipShape` would have masked at the corners.
+/// The region between a rectangle and the inscribed card shape — the notches
+/// at the rounded top corners. Filled with `FillStyle(eoFill: true)` it covers
+/// exactly what `clipShape` would have masked.
 private struct RoundedCornerCaps: Shape {
-  let cornerRadius: CGFloat
-
   func path(in rect: CGRect) -> Path {
     var path = Path()
     path.addRect(rect)
-    path.addRoundedRect(
-      in: rect,
-      cornerSize: CGSize(width: cornerRadius, height: cornerRadius),
-      style: .continuous
-    )
+    path.addPath(DocumentCardMetrics.shape.path(in: rect))
     return path
   }
 }
