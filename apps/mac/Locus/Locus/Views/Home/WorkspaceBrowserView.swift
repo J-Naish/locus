@@ -214,10 +214,10 @@ struct WorkspaceBrowserView: View {
       refreshSearchResults()
     }
     .onChange(of: recentFiles) {
-      refreshSearchResults()
+      refreshSearchShortcuts()
     }
     .onChange(of: recentFolders) {
-      refreshSearchResults()
+      refreshSearchShortcuts()
     }
     .onChange(of: folderURL) {
       clearWorkspaceUndoActions()
@@ -234,6 +234,13 @@ struct WorkspaceBrowserView: View {
     .onChange(of: selectedEntryID) { _, newSelection in
       sidebarSelectionState.setActiveEntryID(newSelection)
       updateOpenDocumentEntry(for: newSelection, from: sidebarVisibleEntries)
+    }
+    .onChange(of: openDocumentEntry) { oldEntry, newEntry in
+      // Compare ids so snapshot refreshes of the already-open document
+      // (same path, new metadata) do not count as opening it again.
+      if let newEntry, newEntry.id != oldEntry?.id {
+        actions.recordWorkspaceEngagement(folderURL)
+      }
     }
     .task(id: gitStatusRefreshKey) {
       await refreshGitStatuses()
@@ -316,6 +323,20 @@ struct WorkspaceBrowserView: View {
     }
   }
 
+  /// Recents feed only the (hidden) search shortcut results; they never alter
+  /// the folder tree. Refreshing them must not rebuild `sidebarVisibleEntries`
+  /// or re-evaluate selection: recording engagement updates Recents, and going
+  /// through `refreshSearchResults` would deselect — and close — a document
+  /// opened from a chevron-expanded subfolder the moment it opens or saves.
+  private func refreshSearchShortcuts() {
+    searchResults = WorkspaceBrowserSearchResults.resolve(
+      entries: snapshot.entries,
+      recentFiles: recentFiles,
+      recentFolders: recentFolders,
+      query: searchQuery
+    )
+  }
+
   private var workspaceNavigationCommands: WorkspaceNavigationCommands {
     let canGoBack = !isDocumentTextInputFocused && actions.canGoBack
     let canGoForward = !isDocumentTextInputFocused && actions.canGoForward
@@ -394,7 +415,8 @@ struct WorkspaceBrowserView: View {
       moveItems: actions.moveItems,
       importItems: actions.importItems,
       loadFolderChildren: actions.loadFolderChildren,
-      performOpenAction: actions.performOpenAction
+      performOpenAction: actions.performOpenAction,
+      recordWorkspaceEngagement: actions.recordWorkspaceEngagement
     )
   }
 
@@ -1072,7 +1094,13 @@ struct WorkspaceBrowserView: View {
           onTextInputFocusChange: { isFocused in
             isDocumentTextInputFocused = isFocused
           },
-          onDocumentSaved: requestGitStatusRefresh
+          onDocumentSaved: {
+            requestGitStatusRefresh()
+            // The closure captures this browser's folder by value, so a save
+            // that completes after navigating away credits the folder the
+            // document was saved in, not wherever the user browsed to.
+            actions.recordWorkspaceEngagement(folderURL)
+          }
         )
         .navigationSplitViewColumnWidth(
           min: LocusWindowMetrics.documentSurfaceMinimumWidth,

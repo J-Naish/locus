@@ -1,5 +1,14 @@
 import Foundation
 
+/// Gate for every Recent Folders write. The home folder is the app's launch
+/// landing spot and always one step away, so a Recents row for it would be
+/// redundant noise.
+enum RecentFolderRecordPolicy {
+  static func allowsRecording(_ folderURL: URL, homeDirectoryURL: URL) -> Bool {
+    folderURL.locusStandardizedPath != homeDirectoryURL.locusStandardizedPath
+  }
+}
+
 struct RecentFolder: Identifiable, Equatable, Sendable {
   let id: String
   let url: URL

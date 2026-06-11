@@ -16,7 +16,10 @@ Must support:
 - move backward and forward through the current session's folder navigation
   history
 - show a collapsed Recent Folders section below the sidebar's folder tree for
-  folders the user has explicitly opened
+  folders the user explicitly opened as a location (folder picker or an
+  existing Recent entry) or did real work in (opened a document, saved, or
+  changed files there); navigating into a folder while browsing does not by
+  itself create a Recent entry
 - show the current location as a name-first file and folder list; Type, Size,
   and Modified columns are intentionally not part of the default browser
 - keep default folder listing lightweight; size and modified-time metadata
@@ -224,7 +227,8 @@ Must preserve:
 - local-first behavior
 - no hidden upload of user files
 - no recursive home-directory scanning on launch
-- no automatic Recent entry for the home folder opened at launch
+- no Recent entry for the home folder itself, including the launch-time
+  automatic open
 - no built-in AI chat or agent
 - no bundled AI model
 - no plugin execution

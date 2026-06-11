@@ -39,6 +39,11 @@ struct HomeView: View {
     var recordRecent = false
     var showsLoading = true
     var selectedURL: URL?
+    // When the load was made to open `selectedURL` as a document, engagement
+    // must be recorded here in `loadWorkspace`: a load slow enough to pass
+    // through `.loading` recreates `WorkspaceBrowserView`, whose open-document
+    // `onChange` never fires for a seeded initial value.
+    var recordsEngagementWhenSelectionOpens = false
     var restoreOnFailure: WorkspaceLoadFailureRecovery?
     var onSuccess: (() -> Void)?
   }
@@ -167,7 +172,8 @@ struct HomeView: View {
         moveItems: moveWorkspaceItems,
         importItems: importWorkspaceItems,
         loadFolderChildren: loadSidebarFolderChildren,
-        performOpenAction: performOpenAction
+        performOpenAction: performOpenAction,
+        recordWorkspaceEngagement: recordWorkspaceEngagement(in:)
       )
     )
     .frame(
@@ -208,8 +214,8 @@ struct HomeView: View {
     case .folder(let initialFolderURL):
       // Normal launch starts in the home folder, but this path must stay a
       // non-recursive immediate-children listing. Do not add startup scans.
-      // Auto-opened home is also not a recent item; only explicit user
-      // folder choices should be recorded in Recents.
+      // Home is never a recent item (RecentFolderRecordPolicy); Recents fill
+      // from explicitly opened locations and folders where real work happened.
       startWorkspaceLoad(
         WorkspaceLoadRequest(folderURL: initialFolderURL, rootChange: .set(initialFolderURL)))
     }
@@ -239,7 +245,7 @@ struct HomeView: View {
         return
       }
 
-      navigateToWorkspaceFolder(folderURL, rootChange: .set(folderURL), recordRecent: true)
+      navigateToWorkspaceFolder(folderURL, rootChange: .set(folderURL), intent: .openLocation)
     case .failure(let error):
       // SwiftUI's .fileImporter delivers user cancellation as a Cocoa
       // user-cancelled error or as Swift's CancellationError. Treat both
@@ -351,13 +357,16 @@ struct HomeView: View {
   }
 
   /// Triggers a user-initiated folder change and records it in browser-style
-  /// history. Use `startWorkspaceLoad` directly for monitor-driven reloads and restores.
+  /// history. `.openLocation` additionally records the folder in Recents;
+  /// `.browse` never does. Use `startWorkspaceLoad` directly for monitor-driven
+  /// reloads and restores.
   @MainActor
   private func navigateToWorkspaceFolder(
     _ folderURL: URL,
     rootChange: WorkspaceRootChange = .preserve,
-    recordRecent: Bool = false,
-    selecting selectedURL: URL? = nil
+    intent: WorkspaceNavigationIntent = .browse,
+    selecting selectedURL: URL? = nil,
+    recordsEngagementWhenSelectionOpens: Bool = false
   ) {
     let currentEntry = currentHistoryEntry()
     let destinationEntry = WorkspaceHistoryEntry(
@@ -369,8 +378,9 @@ struct HomeView: View {
     let request = WorkspaceLoadRequest(
       folderURL: folderURL,
       rootChange: rootChange,
-      recordRecent: recordRecent,
+      recordRecent: intent.recordsRecent,
       selectedURL: selectedURL,
+      recordsEngagementWhenSelectionOpens: recordsEngagementWhenSelectionOpens,
       onSuccess: {
         recordCompletedNavigation(from: currentEntry, to: destinationEntry)
       }
@@ -509,9 +519,18 @@ struct HomeView: View {
       }
       workspaceState = .ready(folderURL: folderURL, snapshot: snapshot, loadedAt: Date())
       startWorkspaceChangeMonitoring(for: folderURL)
-      if request.recordRecent {
+      if request.recordRecent,
+        RecentFolderRecordPolicy.allowsRecording(folderURL, homeDirectoryURL: homeDirectoryURL)
+      {
         recentFolderStore.record(folderURL)
         refreshRecentFolders()
+      }
+      if request.recordsEngagementWhenSelectionOpens,
+        let openedEntryID = entryID(in: snapshot.entries, matching: request.selectedURL),
+        let openedEntry = snapshot.entries.first(where: { $0.id == openedEntryID }),
+        case .openInPlace = WorkspaceEntryOpenActionResolver.action(for: [openedEntry])
+      {
+        recordWorkspaceEngagement(in: folderURL)
       }
       request.onSuccess?()
     } catch {
@@ -551,7 +570,8 @@ struct HomeView: View {
     navigateToWorkspaceFolder(
       containingFolderURL,
       rootChange: .set(rootURLContainingFile(standardizedURL)),
-      selecting: standardizedURL
+      selecting: standardizedURL,
+      recordsEngagementWhenSelectionOpens: true
     )
   }
 
@@ -560,9 +580,28 @@ struct HomeView: View {
     navigateToFile(file.url)
   }
 
+  /// Real work observed in a loaded folder — opening a document, saving,
+  /// or changing files — promotes it into Recents; merely browsing through
+  /// folders never does. This is what keeps pass-through folders out while
+  /// letting purely in-app navigation still build up Recent Folders.
+  /// Callers pass the folder captured when the work was requested, so a
+  /// completion that arrives after the user navigated away (an import copy,
+  /// a slow save) still credits the folder the work actually happened in
+  /// rather than wherever the user browsed to since.
+  @MainActor
+  private func recordWorkspaceEngagement(in folderURL: URL) {
+    guard RecentFolderRecordPolicy.allowsRecording(folderURL, homeDirectoryURL: homeDirectoryURL)
+    else {
+      return
+    }
+
+    recentFolderStore.record(folderURL)
+    refreshRecentFolders()
+  }
+
   @MainActor
   private func openRecentFolder(_ folder: RecentFolder) {
-    navigateToWorkspaceFolder(folder.url, rootChange: .set(folder.url), recordRecent: true)
+    navigateToWorkspaceFolder(folder.url, rootChange: .set(folder.url), intent: .openLocation)
   }
 
   @MainActor
@@ -635,6 +674,7 @@ struct HomeView: View {
     }
 
     let createdURL = try WorkspaceItemCreation.create(kind, named: name, in: targetFolderURL)
+    recordWorkspaceEngagement(in: folderURL)
     if targetFolderURL.locusStandardizedPath == folderURL.locusStandardizedPath {
       startWorkspaceLoad(
         WorkspaceLoadRequest(
@@ -699,6 +739,10 @@ struct HomeView: View {
       return
     }
 
+    if !deletedItems.isEmpty {
+      recordWorkspaceEngagement(in: folderURL)
+    }
+
     let deletedPaths = Set(deletedItems.map(\.originalURL.locusStandardizedPath))
     if let selectedEntryID,
       entries.contains(where: {
@@ -738,6 +782,9 @@ struct HomeView: View {
     }
 
     let deletedItems = try WorkspaceItemDeletion.deleteURLs(urls, in: folderURL)
+    if !deletedItems.isEmpty {
+      recordWorkspaceEngagement(in: folderURL)
+    }
     let deletedPaths = Set(deletedItems.map(\.originalURL.locusStandardizedPath))
     if let selectedEntryID, deletedPaths.contains(selectedEntryID) {
       self.selectedEntryID = nil
@@ -767,6 +814,9 @@ struct HomeView: View {
     }
 
     let restoredURLs = try WorkspaceItemRestoration.restore(deletedItems)
+    if !restoredURLs.isEmpty {
+      recordWorkspaceEngagement(in: folderURL)
+    }
     startWorkspaceLoad(
       WorkspaceLoadRequest(
         folderURL: folderURL,
@@ -826,6 +876,12 @@ struct HomeView: View {
 
   @MainActor
   private func finishWorkspaceItemMove(_ moved: [WorkspaceMovedItem], folderURL: URL) {
+    // `folderURL` was captured when the operation started; an import copy
+    // suspends across an await, so the user may have browsed elsewhere by now.
+    if !moved.isEmpty {
+      recordWorkspaceEngagement(in: folderURL)
+    }
+
     let movedSourcePaths = Set(moved.map(\.originalURL.locusStandardizedPath))
     if let selectedEntryID, movedSourcePaths.contains(selectedEntryID) {
       self.selectedEntryID = nil
@@ -860,7 +916,7 @@ struct HomeView: View {
   private func performOpenAction(_ action: WorkspaceEntryOpenAction) {
     switch action {
     case .browseFolder(let url):
-      navigateToWorkspaceFolder(url, recordRecent: true)
+      navigateToWorkspaceFolder(url)
     case .openInPlace(let url):
       navigateToFile(url)
     }
@@ -1018,6 +1074,11 @@ struct WorkspaceActions {
   let importItems: ([WorkspacePlannedMove]) async -> WorkspaceMoveExecution
   let loadFolderChildren: (URL) async throws -> WorkspaceSnapshot
   let performOpenAction: (WorkspaceEntryOpenAction) -> Void
+  // Real work in a loaded folder (opening a document, saving) promotes it
+  // into Recent Folders; browsing alone never records. Callers pass the folder
+  // they were built for, so late completions credit the right place. File
+  // operations report engagement inside their HomeView implementations.
+  let recordWorkspaceEngagement: (URL) -> Void
 }
 
 private struct LoadingWorkspaceView: View {

@@ -124,6 +124,41 @@ final class RecentFolderStoreTests: XCTestCase {
     XCTAssertEqual(RecentFolderStore.defaultMaxCount, 10)
   }
 
+  func testRecordPolicyNeverAllowsTheHomeFolderItself() {
+    let home = URL(filePath: "/Users/tester", directoryHint: .isDirectory)
+
+    XCTAssertFalse(
+      RecentFolderRecordPolicy.allowsRecording(
+        URL(filePath: "/Users/tester", directoryHint: .isDirectory),
+        homeDirectoryURL: home
+      ))
+    XCTAssertFalse(
+      RecentFolderRecordPolicy.allowsRecording(
+        URL(filePath: "/Users/tester/", directoryHint: .isDirectory),
+        homeDirectoryURL: home
+      ))
+    XCTAssertFalse(
+      RecentFolderRecordPolicy.allowsRecording(
+        URL(filePath: "/Users/tester/Reports/..", directoryHint: .isDirectory),
+        homeDirectoryURL: home
+      ))
+  }
+
+  func testRecordPolicyAllowsSubfoldersOfHomeAndFoldersOutsideHome() {
+    let home = URL(filePath: "/Users/tester", directoryHint: .isDirectory)
+
+    XCTAssertTrue(
+      RecentFolderRecordPolicy.allowsRecording(
+        URL(filePath: "/Users/tester/Reports", directoryHint: .isDirectory),
+        homeDirectoryURL: home
+      ))
+    XCTAssertTrue(
+      RecentFolderRecordPolicy.allowsRecording(
+        URL(filePath: "/Volumes/Shared/Projects", directoryHint: .isDirectory),
+        homeDirectoryURL: home
+      ))
+  }
+
   private func makeFolder(named name: String) throws -> URL {
     let url = temporaryDirectory.appending(path: name, directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

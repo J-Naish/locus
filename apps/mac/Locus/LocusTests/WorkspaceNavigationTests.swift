@@ -104,6 +104,14 @@ final class WorkspaceNavigationTests: XCTestCase {
     XCTAssertFalse("/Users/nashville/project".locusHasPathPrefix("/Users/nash"))
   }
 
+  func testOpeningALocationRecordsARecentFolder() {
+    XCTAssertTrue(WorkspaceNavigationIntent.openLocation.recordsRecent)
+  }
+
+  func testBrowsingDoesNotRecordARecentFolder() {
+    XCTAssertFalse(WorkspaceNavigationIntent.browse.recordsRecent)
+  }
+
   private func historyEntry(
     _ folderPath: String,
     rootPath: String? = nil,

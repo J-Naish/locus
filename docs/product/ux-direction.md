@@ -32,7 +32,8 @@ The primary model is:
 
 - one window usually represents one current working location
 - a normal launch starts at the user's home folder as the first working location
-- the launch-time home location is not treated as a user-chosen recent folder
+- the home folder itself never appears in Recent Folders; it is the
+  always-available launch location, whether opened automatically or chosen later
 - the home folder view should stay quiet by hiding hidden files and folders whether it was opened at launch or chosen later; explicit project folders may still show useful dotfiles such as `.env` and `.agents`
 - switching locations should be fast
 - the current location should always be clear
@@ -52,8 +53,12 @@ contents. Nested folder rows can expand inline by clicking the disclosure
 chevron so users can peek into nearby folders without losing the current
 location. Double-click remains the deliberate gesture for navigating into a
 folder. The sidebar also keeps a collapsed Recent Folders section at the bottom
-so users can reopen locations they have explicitly visited without interrupting
-the current folder tree.
+so users can reopen their working locations without interrupting the current
+folder tree. A folder becomes a Recent entry when the user explicitly opens it
+as a location (folder picker or an existing Recent entry) or does real work in
+it (opens a document, saves, or changes files there); navigating into or
+through folders does not by itself create Recent entries, so pass-through
+folders never crowd the list.
 
 The document surface currently shows the selected file or folder directly.
 Previously opened files are not kept as separate document shortcuts in the

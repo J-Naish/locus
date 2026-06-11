@@ -1,5 +1,20 @@
 import Foundation
 
+/// Why the user is moving to a folder. Opening a location is a deliberate
+/// "this is a place I chose" action (folder picker, Recent Folders row);
+/// browsing is movement within or through places and must not create Recent
+/// Folders entries on its own — pass-through folders would crowd out real
+/// locations. Browsed folders still reach Recents through
+/// `recordWorkspaceEngagement` once real work happens in them.
+enum WorkspaceNavigationIntent {
+  case openLocation
+  case browse
+
+  var recordsRecent: Bool {
+    self == .openLocation
+  }
+}
+
 struct WorkspaceHistoryEntry: Equatable {
   let folderURL: URL
   let rootURL: URL?
