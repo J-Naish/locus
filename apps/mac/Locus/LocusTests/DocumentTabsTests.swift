@@ -247,6 +247,39 @@ final class DocumentTabStripViewTests: XCTestCase {
     XCTAssertLessThan(host.fittingSize.width, 250)
   }
 
+  func testStripFittingWidthIsStableWhenTabBecomesActive() throws {
+    try skipIfHeadlessHostingLayoutIsUnavailable()
+    let tab = DocumentTab(
+      entry: makeEntry(
+        path: "/tmp/locus-test/planning-notes.md",
+        name: "planning-notes.md"
+      ))
+
+    let inactiveHost = NSHostingView(
+      rootView: DocumentTabStripView(
+        tabs: [tab],
+        activeTabID: nil,
+        maxWidth: 600,
+        onSelect: { _ in },
+        onClose: { _ in }
+      )
+    )
+    let activeHost = NSHostingView(
+      rootView: DocumentTabStripView(
+        tabs: [tab],
+        activeTabID: tab.id,
+        maxWidth: 600,
+        onSelect: { _ in },
+        onClose: { _ in }
+      )
+    )
+
+    layoutHostedView(inactiveHost)
+    layoutHostedView(activeHost)
+
+    XCTAssertEqual(inactiveHost.fittingSize.width, activeHost.fittingSize.width, accuracy: 0.5)
+  }
+
   private func skipIfHeadlessHostingLayoutIsUnavailable() throws {
     let host = NSHostingView(rootView: Text("x"))
     host.layoutSubtreeIfNeeded()

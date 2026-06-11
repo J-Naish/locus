@@ -181,7 +181,7 @@ private struct DocumentTabChip: View {
           }
 
         Text(tab.name)
-          .font(.callout.weight(isActive ? .medium : .regular))
+          .font(.callout)
           .lineLimit(1)
           .truncationMode(.tail)
           .foregroundStyle(isActive ? .primary : .secondary)
