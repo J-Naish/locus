@@ -1,6 +1,8 @@
 import AppKit
 import CoreText
 
+// Tested in TextViewportLayoutTests.swift (viewport, selection, editing, IME, save)
+// and TextWrapTests.swift (soft wrap and the background wrap build).
 /// Pure geometry for a uniform-line-height virtualized text view: it maps
 /// between scroll offsets and line indices so only the visible band is drawn.
 /// Kept free of AppKit state so it is unit-testable without a window.

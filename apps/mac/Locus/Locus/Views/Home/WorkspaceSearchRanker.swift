@@ -1,5 +1,6 @@
 import Foundation
 
+// Tested in WorkspaceEntrySearchTests.swift (there is no WorkspaceSearchRankerTests.swift).
 enum WorkspaceSearchMatchKind: Int, Comparable {
   case exactName = 0
   case stem = 1

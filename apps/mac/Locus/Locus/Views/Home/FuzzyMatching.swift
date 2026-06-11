@@ -1,5 +1,6 @@
 import Foundation
 
+// Tested in WorkspaceEntrySearchTests.swift (there is no FuzzyMatchingTests.swift).
 enum FuzzyMatching {
   static func isSingleTypoMatch(_ lhs: [Character], _ rhs: [Character]) -> Bool {
     let lengthDifference = lhs.count - rhs.count

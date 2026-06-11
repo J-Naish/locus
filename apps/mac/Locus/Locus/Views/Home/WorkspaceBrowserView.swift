@@ -1,5 +1,7 @@
 import SwiftUI
 
+// WorkspaceBrowserSearchResults is tested in WorkspaceEntrySearchTests.swift
+// (there is no WorkspaceBrowserViewTests.swift).
 @MainActor
 private final class WorkspaceUndoRegistrar: NSObject {
   private var handlers: [UUID: @MainActor () -> Void] = [:]

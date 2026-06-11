@@ -1,5 +1,6 @@
 import AppKit
 
+// Tested in TextViewportLayoutTests.swift (there is no GutterMetricsTests.swift).
 /// Shared line-number gutter geometry, used by both the editable text view and
 /// the large-file viewer so their gutters render identically. Kept pure (no
 /// view state) so it is unit-testable and neither view owns the other's layout.

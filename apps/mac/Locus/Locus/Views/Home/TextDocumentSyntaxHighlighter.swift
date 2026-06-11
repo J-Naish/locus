@@ -1,6 +1,8 @@
 import AppKit
 import Foundation
 
+// Tested in TextViewportLayoutTests.swift and WorkspaceTextDocumentSupportTests.swift
+// (there is no TextDocumentSyntaxHighlighterTests.swift).
 enum TextDocumentSyntax: Equatable {
   case markdown
   case structuredText
