@@ -52,9 +52,25 @@ enum MarkdownDocumentMetrics {
   static let quoteBarWidth: CGFloat = 3
   static let quoteBarInset: CGFloat = 14
   static let markerColumnWidth: CGFloat = 24
+  static let quoteIndentWidth: CGFloat = 17
   static let checkboxSize: CGFloat = 14
+  static let codeCardInset: CGFloat = 12
   static let codeBlockCornerRadius: CGFloat = 8
   static let inlineCodeCornerRadius: CGFloat = 4
+  static let tableColumnGutter: CGFloat = 40
+  static let tableColumnMinimumWidth: CGFloat = 48
+  static let tableColumnMaximumWidth: CGFloat = 240
+  static let tableFallbackColumnWidth: CGFloat = 160
+  static let tableHeaderFontSize: CGFloat = 12
+  /// How far the top and bottom rules breathe outward into an adjacent blank
+  /// line, so the text inside the table is never pressed against its rules.
+  static let tableRuleBreath: CGFloat = 4
+  /// Row height of a table delimiter row — a slim row, so the header→body gap
+  /// approaches the body line spacing instead of consuming a full text row.
+  static let tableSeparatorRowHeight: CGFloat = 6
+  /// Horizontal inset between the rules' ends and the first/last column's
+  /// text, so the rules extend slightly past the content on both sides.
+  static let tableEdgeInset: CGFloat = 10
 
   static func headingFont(level: Int) -> NSFont {
     switch level {
@@ -90,6 +106,22 @@ enum MarkdownDocumentMetrics {
   static var ruleColor: NSColor { .separatorColor }
   static var accentColor: NSColor { .controlAccentColor }
   static var markerColor: NSColor { .tertiaryLabelColor }
+  static var tableRuleColor: NSColor { .separatorColor }
+
+  static var tableHeaderFont: NSFont {
+    .systemFont(ofSize: tableHeaderFontSize, weight: .semibold)
+  }
+}
+
+enum MarkdownTableColumnAlignment: Equatable, Sendable {
+  case left
+  case center
+  case right
+}
+
+struct MarkdownTableColumn: Equatable, Sendable {
+  var width: CGFloat
+  var alignment: MarkdownTableColumnAlignment
 }
 
 struct MarkdownLineStyleState: Equatable, Sendable {
@@ -98,6 +130,14 @@ struct MarkdownLineStyleState: Equatable, Sendable {
   var isSetextUnderline = false
   var insideFrontMatter = false
   var isFenceDelimiter = false
+  var isIndentedCodeBlock = false
+  var isReferenceDefinition = false
+  var isTableRow = false
+  var isTableHeader = false
+  var isTableSeparator = false
+  var tableColumns: [MarkdownTableColumn] = []
+  var quoteDepth = 0
+  var listDepth = 0
 
   static let plain = MarkdownLineStyleState()
 }
@@ -118,14 +158,26 @@ struct MarkdownTypography: @unchecked Sendable {
 
   init(baseFont: NSFont) {
     let manager = NSFontManager.shared
+    self.init(baseFont: baseFont) { manager.convert($0, toHaveTrait: .italicFontMask) }
+  }
+
+  /// A typography whose italic variants reuse the upright fonts. Italic
+  /// advances match the upright ones for the system font, so this measures
+  /// identically — without touching `NSFontManager`, which is not safe off
+  /// the main thread (table column widths are computed on the wrap worker).
+  static func measurement(baseFont: NSFont) -> MarkdownTypography {
+    MarkdownTypography(baseFont: baseFont) { $0 }
+  }
+
+  init(baseFont: NSFont, italicize: (NSFont) -> NSFont) {
     func fontSet(base: NSFont, boldWeight: NSFont.Weight = .bold) -> MarkdownFontSet {
       let bold = NSFont.systemFont(ofSize: base.pointSize, weight: boldWeight)
-      let italic = manager.convert(base, toHaveTrait: .italicFontMask)
+      let italic = italicize(base)
       return MarkdownFontSet(
         regular: base,
         bold: bold,
         italic: italic,
-        boldItalic: manager.convert(bold, toHaveTrait: .italicFontMask)
+        boldItalic: italicize(bold)
       )
     }
 
@@ -430,6 +482,12 @@ enum TextDocumentSyntaxHighlighter {
     var stylesInline: Bool
   }
 
+  private struct MarkdownLineContext {
+    let quoteDepth: Int
+    let quotePrefixLength: Int
+    let body: String
+  }
+
   private static func renderedMarkdownLine(
     _ line: String,
     font: NSFont,
@@ -451,6 +509,12 @@ enum TextDocumentSyntaxHighlighter {
         foregroundColor: block.foregroundColor,
         includeVisualAttributes: includeVisualAttributes),
       range: fullRange)
+    if state.isTableRow {
+      attributed.addAttribute(
+        .paragraphStyle,
+        value: markdownTableParagraphStyle(columns: state.tableColumns),
+        range: fullRange)
+    }
     if block.stylesInline {
       applyRenderedMarkdownInline(
         to: attributed,
@@ -482,11 +546,27 @@ enum TextDocumentSyntaxHighlighter {
         stylesInline: stylesInline)
     }
 
+    let context = markdownLineContext(in: line)
+
     if state.insideFrontMatter {
       return block(
         displayFont: typography.codeBlock,
         foregroundColor: .secondaryLabelColor,
         stylesInline: false)
+    }
+
+    if state.isReferenceDefinition || state.isTableSeparator {
+      return block(stylesInline: false)
+    }
+
+    if state.isTableHeader {
+      return block(
+        displayFont: MarkdownDocumentMetrics.tableHeaderFont,
+        foregroundColor: .secondaryLabelColor)
+    }
+
+    if state.isIndentedCodeBlock {
+      return block(displayFont: typography.codeBlock, stylesInline: false)
     }
 
     if state.isFenceDelimiter, markdownFenceInfo(in: line) != nil {
@@ -512,7 +592,7 @@ enum TextDocumentSyntaxHighlighter {
       return block(stylesInline: false)
     }
 
-    if let heading = markdownHeadingInfo(in: line) {
+    if let heading = markdownHeadingInfo(in: context.body) {
       let fonts = typography.heading(level: heading.level)
       return block(
         fonts: fonts,
@@ -520,11 +600,11 @@ enum TextDocumentSyntaxHighlighter {
         foregroundColor: heading.level == 6 ? .secondaryLabelColor : .labelColor)
     }
 
-    if markdownThematicBreak(in: line) {
+    if markdownThematicBreak(in: context.body) {
       return block(stylesInline: false)
     }
 
-    if markdownBlockPrefixLength(in: line) != nil {
+    if markdownBlockPrefixLength(in: context.body, allowIndentedList: state.listDepth > 0) != nil {
       return block()
     }
 
@@ -536,8 +616,10 @@ enum TextDocumentSyntaxHighlighter {
     state: MarkdownLineStyleState
   ) -> MarkdownDisplayMap {
     let baseMap = renderedMarkdownBlockDisplayMap(line, state: state)
+    let context = markdownLineContext(in: line)
     guard !state.insideFence, !state.insideFrontMatter, !state.isSetextUnderline,
-      !markdownThematicBreak(in: line)
+      !state.isIndentedCodeBlock, !state.isReferenceDefinition, !state.isTableSeparator,
+      !markdownThematicBreak(in: context.body)
     else {
       return baseMap
     }
@@ -550,6 +632,15 @@ enum TextDocumentSyntaxHighlighter {
   ) -> MarkdownDisplayMap {
     let nsLine = line as NSString
     let sourceLength = nsLine.length
+    let context = markdownLineContext(in: line)
+
+    if state.isReferenceDefinition || state.isTableSeparator {
+      return .empty(sourceText: line)
+    }
+
+    if state.isTableRow, let table = markdownTableDisplayMap(for: line) {
+      return table
+    }
 
     if state.insideFrontMatter {
       if markdownFrontMatterDelimiter(in: line) {
@@ -573,18 +664,36 @@ enum TextDocumentSyntaxHighlighter {
     if state.insideFence {
       return .identity(line)
     }
+    if state.isIndentedCodeBlock {
+      let body = context.body as NSString
+      let startInBody = min(markdownLeadingSpaceLength(in: body), 4)
+      let sourceStart = min(sourceLength, context.quotePrefixLength + startInBody)
+      return .map(
+        sourceText: line,
+        displayText: nsLine.substring(from: sourceStart),
+        sourceStart: sourceStart)
+    }
     if state.isSetextUnderline || markdownThematicBreak(in: line) {
       return .empty(sourceText: line)
     }
-    if let heading = markdownHeadingInfo(in: line) {
-      let start = min(heading.prefixLength, sourceLength)
+    if let heading = markdownHeadingInfo(in: context.body) {
+      let start = min(context.quotePrefixLength + heading.prefixLength, sourceLength)
       return .map(
         sourceText: line, displayText: nsLine.substring(from: start), sourceStart: start)
     }
-    if let prefixLength = markdownBlockPrefixLength(in: line) {
-      let start = min(prefixLength, sourceLength)
+    if let prefixLength = markdownBlockPrefixLength(
+      in: context.body, allowIndentedList: state.listDepth > 0)
+    {
+      let start = min(context.quotePrefixLength + prefixLength, sourceLength)
       return .map(
         sourceText: line, displayText: nsLine.substring(from: start), sourceStart: start)
+    }
+    if context.quoteDepth > 0 {
+      let start = min(context.quotePrefixLength, sourceLength)
+      return .map(
+        sourceText: line,
+        displayText: nsLine.substring(from: start),
+        sourceStart: start)
     }
     return .identity(line)
   }
@@ -618,6 +727,12 @@ enum TextDocumentSyntaxHighlighter {
     var current = map
     var protectedRanges: [NSRange] = []
     replaceRenderedMatchesInMap(
+      expression: escapeExpression,
+      replacementGroup: 1,
+      map: &current,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+    replaceRenderedMatchesInMap(
       expression: inlineCodeExpression,
       replacementGroup: 1,
       map: &current,
@@ -636,29 +751,45 @@ enum TextDocumentSyntaxHighlighter {
       protectedRanges: &protectedRanges,
       protectsReplacement: true)
     replaceRenderedMatchesInMap(
-      expression: boldItalicExpression,
+      expression: referenceLinkExpression,
       replacementGroup: 1,
       map: &current,
       protectedRanges: &protectedRanges,
       protectsReplacement: true)
+    replaceRenderedMatchesInMap(
+      expression: autolinkExpression,
+      replacementGroup: 1,
+      map: &current,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+    replaceRenderedMatchesInMap(
+      expression: boldItalicExpression,
+      replacementGroup: 1,
+      map: &current,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true,
+      allowsContainedProtectedRanges: true)
     replaceRenderedMatchesInMap(
       expression: boldExpression,
       replacementGroup: 1,
       map: &current,
       protectedRanges: &protectedRanges,
-      protectsReplacement: true)
+      protectsReplacement: true,
+      allowsContainedProtectedRanges: true)
     replaceRenderedMatchesInMap(
       expression: italicExpression,
       replacementGroup: 1,
       map: &current,
       protectedRanges: &protectedRanges,
-      protectsReplacement: true)
+      protectsReplacement: true,
+      allowsContainedProtectedRanges: true)
     replaceRenderedMatchesInMap(
       expression: strikeExpression,
       replacementGroup: 1,
       map: &current,
       protectedRanges: &protectedRanges,
-      protectsReplacement: true)
+      protectsReplacement: true,
+      allowsContainedProtectedRanges: true)
     return current
   }
 
@@ -667,7 +798,8 @@ enum TextDocumentSyntaxHighlighter {
     replacementGroup: Int,
     map: inout MarkdownDisplayMap,
     protectedRanges: inout [NSRange],
-    protectsReplacement: Bool
+    protectsReplacement: Bool,
+    allowsContainedProtectedRanges: Bool = false
   ) {
     let original = map.displayText
     let nsOriginal = original as NSString
@@ -679,10 +811,16 @@ enum TextDocumentSyntaxHighlighter {
       let group = match.range(at: replacementGroup)
       guard group.location != NSNotFound else { continue }
       let adjustedMatch = match.range.offset(by: locationDelta)
-      guard !protectedRanges.contains(where: { rangesIntersect($0, adjustedMatch) }) else {
+      let adjustedGroup = group.offset(by: locationDelta)
+      guard
+        !protectedRanges.contains(where: {
+          protectedRangeBlocksReplacement(
+            $0, match: adjustedMatch, group: adjustedGroup,
+            allowsContainedProtectedRanges: allowsContainedProtectedRanges)
+        })
+      else {
         continue
       }
-      let adjustedGroup = group.offset(by: locationDelta)
       guard adjustedMatch.location >= 0,
         NSMaxRange(adjustedMatch) <= map.displayLength,
         adjustedGroup.location >= 0,
@@ -695,7 +833,8 @@ enum TextDocumentSyntaxHighlighter {
       let replacementRange = NSRange(location: adjustedMatch.location, length: adjustedGroup.length)
       let delta = map.displayLength - beforeLength
       locationDelta += delta
-      protectedRanges = shiftRanges(protectedRanges, after: adjustedMatch, by: delta)
+      protectedRanges = remapRanges(
+        protectedRanges, replacing: adjustedMatch, withGroup: adjustedGroup, by: delta)
       if protectsReplacement, replacementRange.length > 0 {
         protectedRanges.append(replacementRange)
       }
@@ -709,6 +848,16 @@ enum TextDocumentSyntaxHighlighter {
     includeVisualAttributes: Bool
   ) {
     var protectedRanges: [NSRange] = []
+    replaceRenderedMatches(
+      expression: escapeExpression,
+      replacementGroup: 1,
+      attributes: markdownAttributes(
+        font: lineFonts.regular,
+        foregroundColor: .labelColor,
+        includeVisualAttributes: includeVisualAttributes),
+      in: attributed,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
     replaceRenderedMatches(
       expression: inlineCodeExpression,
       replacementGroup: 1,
@@ -730,6 +879,24 @@ enum TextDocumentSyntaxHighlighter {
       protectsReplacement: true)
     replaceRenderedMatches(
       expression: renderedLinkExpression,
+      replacementGroup: 1,
+      attributes: renderedLinkAttributes(
+        font: lineFonts.regular,
+        includeVisualAttributes: includeVisualAttributes),
+      in: attributed,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+    replaceRenderedMatches(
+      expression: referenceLinkExpression,
+      replacementGroup: 1,
+      attributes: renderedLinkAttributes(
+        font: lineFonts.regular,
+        includeVisualAttributes: includeVisualAttributes),
+      in: attributed,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+    replaceRenderedMatches(
+      expression: autolinkExpression,
       replacementGroup: 1,
       attributes: renderedLinkAttributes(
         font: lineFonts.regular,
@@ -773,7 +940,9 @@ enum TextDocumentSyntaxHighlighter {
     attributes: [NSAttributedString.Key: Any],
     in attributed: NSMutableAttributedString,
     protectedRanges: inout [NSRange],
-    protectsReplacement: Bool
+    protectsReplacement: Bool,
+    allowsContainedProtectedRanges: Bool = false,
+    preservesProtectedAttributes: Bool = false
   ) {
     let original = attributed.string
     let nsOriginal = original as NSString
@@ -785,25 +954,54 @@ enum TextDocumentSyntaxHighlighter {
       let group = match.range(at: replacementGroup)
       guard group.location != NSNotFound else { continue }
       let adjustedMatch = match.range.offset(by: locationDelta)
-      guard !protectedRanges.contains(where: { rangesIntersect($0, adjustedMatch) }) else {
+      let adjustedGroup = group.offset(by: locationDelta)
+      guard
+        !protectedRanges.contains(where: {
+          protectedRangeBlocksReplacement(
+            $0, match: adjustedMatch, group: adjustedGroup,
+            allowsContainedProtectedRanges: allowsContainedProtectedRanges)
+        })
+      else {
         continue
       }
-      let adjustedGroup = group.offset(by: locationDelta)
       guard adjustedGroup.location >= 0,
         NSMaxRange(adjustedGroup) <= (attributed.string as NSString).length
       else {
         continue
       }
-      let replacement = (attributed.string as NSString).substring(with: adjustedGroup)
-      let replacementLength = (replacement as NSString).length
+      let preservedAttributes: [(range: NSRange, string: NSAttributedString)] =
+        preservesProtectedAttributes
+        ? protectedRanges.compactMap { range in
+          guard range.location >= adjustedGroup.location,
+            NSMaxRange(range) <= NSMaxRange(adjustedGroup)
+          else {
+            return nil
+          }
+          return (
+            NSRange(
+              location: adjustedMatch.location + (range.location - adjustedGroup.location),
+              length: range.length),
+            attributed.attributedSubstring(from: range)
+          )
+        }
+        : []
+      let replacement = attributed.attributedSubstring(from: adjustedGroup)
+      let replacementLength = replacement.length
       attributed.replaceCharacters(in: adjustedMatch, with: replacement)
       let replacementRange = NSRange(location: adjustedMatch.location, length: replacementLength)
       if replacementLength > 0 {
         attributed.addAttributes(attributes, range: replacementRange)
+        for preserved in preservedAttributes
+        where preserved.range.length > 0
+          && NSMaxRange(preserved.range) <= attributed.length
+        {
+          attributed.replaceCharacters(in: preserved.range, with: preserved.string)
+        }
       }
       let delta = replacementLength - adjustedMatch.length
       locationDelta += delta
-      protectedRanges = shiftRanges(protectedRanges, after: adjustedMatch, by: delta)
+      protectedRanges = remapRanges(
+        protectedRanges, replacing: adjustedMatch, withGroup: adjustedGroup, by: delta)
       if protectsReplacement {
         protectedRanges.append(replacementRange)
       }
@@ -838,24 +1036,291 @@ enum TextDocumentSyntaxHighlighter {
       attributes: attributes,
       in: attributed,
       protectedRanges: &protectedRanges,
-      protectsReplacement: true)
+      protectsReplacement: true,
+      allowsContainedProtectedRanges: true,
+      preservesProtectedAttributes: true)
   }
 
-  private static func shiftRanges(_ ranges: [NSRange], after replacedRange: NSRange, by delta: Int)
-    -> [NSRange]
-  {
-    guard delta != 0 else { return ranges }
-    return ranges.map { range in
-      if range.location >= NSMaxRange(replacedRange) {
+  private static func protectedRangeBlocksReplacement(
+    _ protected: NSRange,
+    match: NSRange,
+    group: NSRange,
+    allowsContainedProtectedRanges: Bool
+  ) -> Bool {
+    guard rangesIntersect(protected, match) else { return false }
+    if allowsContainedProtectedRanges,
+      protected.location >= group.location,
+      NSMaxRange(protected) <= NSMaxRange(group)
+    {
+      return false
+    }
+    return true
+  }
+
+  private static func remapRanges(
+    _ ranges: [NSRange],
+    replacing match: NSRange,
+    withGroup group: NSRange,
+    by delta: Int
+  ) -> [NSRange] {
+    ranges.map { range in
+      if range.location >= group.location, NSMaxRange(range) <= NSMaxRange(group) {
+        return NSRange(
+          location: match.location + (range.location - group.location),
+          length: range.length)
+      }
+      if range.location >= NSMaxRange(match) {
         return NSRange(location: range.location + delta, length: range.length)
       }
       return range
     }
   }
 
+  private static func markdownLineContext(in line: String) -> MarkdownLineContext {
+    let nsLine = line as NSString
+    var index = 0
+    var depth = 0
+    while index < nsLine.length {
+      let markerStart = index
+      var spaces = 0
+      while spaces < 3, index < nsLine.length, nsLine.character(at: index) == 32 {
+        spaces += 1
+        index += 1
+      }
+      guard index < nsLine.length, nsLine.character(at: index) == 62 else {  // ">"
+        index = markerStart
+        break
+      }
+      depth += 1
+      index += 1
+      if index < nsLine.length, nsLine.character(at: index) == 32 {
+        index += 1
+      }
+    }
+    return MarkdownLineContext(
+      quoteDepth: depth,
+      quotePrefixLength: index,
+      body: nsLine.substring(from: index))
+  }
+
+  private static func markdownLeadingSpaceLength(in line: NSString) -> Int {
+    var index = 0
+    while index < line.length, line.character(at: index) == 32 {
+      index += 1
+    }
+    return index
+  }
+
+  private static func markdownReferenceDefinition(in line: String) -> Bool {
+    referenceDefinitionExpression.firstMatch(
+      in: line, range: NSRange(location: 0, length: (line as NSString).length)) != nil
+  }
+
+  private static func markdownTableCells(in line: String) -> [NSRange]? {
+    let nsLine = line as NSString
+    var start = 0
+    var end = nsLine.length
+    while start < end, nsLine.character(at: start) == 32 || nsLine.character(at: start) == 9 {
+      start += 1
+    }
+    while end > start {
+      let character = nsLine.character(at: end - 1)
+      guard character == 32 || character == 9 else { break }
+      end -= 1
+    }
+    guard start < end else { return nil }
+    if nsLine.character(at: start) == 124 { start += 1 }  // "|"
+    if end > start, nsLine.character(at: end - 1) == 124 { end -= 1 }
+    guard start < end else { return nil }
+
+    var cells: [NSRange] = []
+    var cellStart = start
+    var cursor = start
+    while cursor <= end {
+      if cursor == end || nsLine.character(at: cursor) == 124 {
+        var trimmedStart = cellStart
+        var trimmedEnd = cursor
+        while trimmedStart < trimmedEnd {
+          let character = nsLine.character(at: trimmedStart)
+          guard character == 32 || character == 9 else { break }
+          trimmedStart += 1
+        }
+        while trimmedEnd > trimmedStart {
+          let character = nsLine.character(at: trimmedEnd - 1)
+          guard character == 32 || character == 9 else { break }
+          trimmedEnd -= 1
+        }
+        cells.append(NSRange(location: trimmedStart, length: max(0, trimmedEnd - trimmedStart)))
+        cellStart = cursor + 1
+      }
+      cursor += 1
+    }
+    return cells.count >= 2 ? cells : nil
+  }
+
+  private static func markdownTableSeparatorAlignments(in line: String)
+    -> [MarkdownTableColumnAlignment]?
+  {
+    guard let cells = markdownTableCells(in: line) else { return nil }
+    let nsLine = line as NSString
+    var alignments: [MarkdownTableColumnAlignment] = []
+    for cell in cells {
+      let text = nsLine.substring(with: cell)
+      let trimmed = text.trimmingCharacters(in: .whitespaces)
+      guard trimmed.count >= 3 else { return nil }
+      let body = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
+      guard body.count >= 3, body.allSatisfy({ $0 == "-" }) else { return nil }
+      if trimmed.hasPrefix(":"), trimmed.hasSuffix(":") {
+        alignments.append(.center)
+      } else if trimmed.hasSuffix(":") {
+        alignments.append(.right)
+      } else {
+        alignments.append(.left)
+      }
+    }
+    return alignments
+  }
+
+  private static func markdownTableDisplayMap(for line: String) -> MarkdownDisplayMap? {
+    guard let cells = markdownTableCells(in: line) else { return nil }
+    let nsLine = line as NSString
+    let sourceLength = nsLine.length
+    var display = ""
+    var boundaries: [Int] = [cells.first?.location ?? 0]
+    var characterRanges: [NSRange] = []
+
+    func appendText(_ text: String, sourceRange: NSRange) {
+      let nsText = text as NSString
+      for offset in 0..<nsText.length {
+        characterRanges.append(NSRange(location: sourceRange.location + offset, length: 1))
+        boundaries.append(min(sourceLength, sourceRange.location + offset + 1))
+      }
+      display += text
+    }
+
+    func appendTab(after sourceColumn: Int) {
+      display += "\t"
+      characterRanges.append(NSRange(location: min(sourceColumn, sourceLength), length: 0))
+      boundaries.append(min(sourceColumn, sourceLength))
+    }
+
+    for (index, cell) in cells.enumerated() {
+      if index > 0 {
+        appendTab(after: cell.location)
+      }
+      appendText(nsLine.substring(with: cell), sourceRange: cell)
+    }
+
+    return MarkdownDisplayMap(
+      sourceText: line,
+      displayText: display,
+      boundaryColumns: boundaries,
+      characterRanges: characterRanges)
+  }
+
+  private static func markdownTableColumns(
+    rowBodies: [String],
+    alignments: [MarkdownTableColumnAlignment]
+  ) -> [MarkdownTableColumn] {
+    guard !alignments.isEmpty else { return [] }
+    let font = TextDocumentSyntax.markdown.font
+    let typography = MarkdownTypography.measurement(baseFont: font)
+    var widths = Array(
+      repeating: MarkdownDocumentMetrics.tableColumnMinimumWidth,
+      count: alignments.count)
+
+    for (rowIndex, rowBody) in rowBodies.enumerated() {
+      var state = MarkdownLineStyleState()
+      state.isTableRow = true
+      state.isTableHeader = rowIndex == 0
+      let rendered = markdownMeasurementLine(
+        rowBody, font: font, state: state, typography: typography)
+      var location = 0
+      for (column, cell) in rendered.string.components(separatedBy: "\t").enumerated() {
+        let length = (cell as NSString).length
+        defer { location += length + 1 }
+        guard column < widths.count else { break }
+        let measured = ceil(
+          rendered.attributedSubstring(from: NSRange(location: location, length: length))
+            .size().width)
+        widths[column] = min(
+          MarkdownDocumentMetrics.tableColumnMaximumWidth,
+          max(widths[column], measured))
+      }
+    }
+
+    let gutters =
+      MarkdownDocumentMetrics.tableColumnGutter * CGFloat(max(0, alignments.count - 1))
+    let maxTotal =
+      MarkdownDocumentMetrics.maxMeasureWidth - gutters
+      - MarkdownDocumentMetrics.tableEdgeInset * 2
+    let total = widths.reduce(0, +)
+    if total > maxTotal, total > 0 {
+      let scale = maxTotal / total
+      widths = widths.map {
+        max(MarkdownDocumentMetrics.tableColumnMinimumWidth, floor($0 * scale))
+      }
+    }
+
+    return zip(widths, alignments).map { width, alignment in
+      MarkdownTableColumn(width: width, alignment: alignment)
+    }
+  }
+
+  private static func markdownListMarkerPrefixLength(
+    in line: String,
+    allowIndentedList: Bool
+  ) -> Int? {
+    let nsLine = line as NSString
+    let length = nsLine.length
+    let index = markdownLeadingSpaceLength(in: nsLine)
+    guard index < length else { return nil }
+    guard allowIndentedList || index < 4 else { return nil }
+    if index + 1 < length, isBulletMarker(nsLine.character(at: index)),
+      nsLine.character(at: index + 1) == 32
+    {
+      var prefixEnd = index + 2
+      if prefixEnd + 3 <= length,
+        nsLine.character(at: prefixEnd) == 91,  // "["
+        nsLine.character(at: prefixEnd + 1) == 32
+          || nsLine.character(at: prefixEnd + 1) == 120
+          || nsLine.character(at: prefixEnd + 1) == 88,
+        nsLine.character(at: prefixEnd + 2) == 93  // "]"
+      {
+        prefixEnd += 3
+        if prefixEnd < length, nsLine.character(at: prefixEnd) == 32 {
+          prefixEnd += 1
+        }
+      }
+      return prefixEnd
+    }
+
+    var digitEnd = index
+    while digitEnd < length {
+      let value = nsLine.character(at: digitEnd)
+      guard value >= 48, value <= 57 else { break }
+      digitEnd += 1
+    }
+    if digitEnd > index, digitEnd + 1 < length,
+      nsLine.character(at: digitEnd) == 46 || nsLine.character(at: digitEnd) == 41,
+      nsLine.character(at: digitEnd + 1) == 32
+    {
+      return digitEnd + 2
+    }
+    return nil
+  }
+
   static func markdownLineStates(for lines: [String]) -> [MarkdownLineStyleState] {
     var states = Array(repeating: MarkdownLineStyleState.plain, count: lines.count)
     guard !lines.isEmpty else { return states }
+
+    for index in lines.indices {
+      let context = markdownLineContext(in: lines[index])
+      states[index].quoteDepth = context.quoteDepth
+      if markdownReferenceDefinition(in: context.body) {
+        states[index].isReferenceDefinition = true
+      }
+    }
 
     if markdownFrontMatterDelimiter(in: lines[0]) {
       var closingIndex: Int?
@@ -892,9 +1357,88 @@ enum TextDocumentSyntaxHighlighter {
       }
     }
 
+    var listIndentStack: [Int] = []
+    for index in lines.indices {
+      guard !states[index].insideFrontMatter, !states[index].insideFence,
+        !states[index].isFenceDelimiter
+      else {
+        listIndentStack.removeAll()
+        continue
+      }
+      let body = markdownLineContext(in: lines[index]).body
+      let nsBody = body as NSString
+      let trimmed = body.trimmingCharacters(in: .whitespaces)
+      guard !trimmed.isEmpty else {
+        states[index].listDepth = listIndentStack.count
+        continue
+      }
+      let leadingSpaces = markdownLeadingSpaceLength(in: nsBody)
+      let markerPrefix = markdownListMarkerPrefixLength(
+        in: body, allowIndentedList: !listIndentStack.isEmpty)
+      if leadingSpaces >= 4, listIndentStack.isEmpty {
+        states[index].isIndentedCodeBlock = true
+        listIndentStack.removeAll()
+        continue
+      }
+      if markerPrefix != nil {
+        if listIndentStack.isEmpty {
+          listIndentStack = [leadingSpaces]
+        } else {
+          while let last = listIndentStack.last, leadingSpaces < last {
+            listIndentStack.removeLast()
+          }
+          if let last = listIndentStack.last, leadingSpaces > last {
+            listIndentStack.append(leadingSpaces)
+          } else if listIndentStack.isEmpty {
+            listIndentStack = [leadingSpaces]
+          }
+        }
+        states[index].listDepth = max(1, listIndentStack.count)
+      } else if !listIndentStack.isEmpty, leadingSpaces > 0 {
+        states[index].listDepth = listIndentStack.count
+      } else {
+        listIndentStack.removeAll()
+      }
+    }
+
+    for index in lines.indices.dropFirst() {
+      guard !states[index].insideFence, !states[index].insideFrontMatter,
+        !states[index].isIndentedCodeBlock,
+        let alignments = markdownTableSeparatorAlignments(
+          in: markdownLineContext(in: lines[index]).body),
+        let previousCells = markdownTableCells(in: markdownLineContext(in: lines[index - 1]).body),
+        previousCells.count == alignments.count
+      else {
+        continue
+      }
+      var tableRowIndices = [index - 1]
+      states[index].isTableSeparator = true
+      states[index - 1].isTableRow = true
+      states[index - 1].isTableHeader = true
+      var rowIndex = index + 1
+      while rowIndex < lines.count,
+        !states[rowIndex].insideFence,
+        !states[rowIndex].insideFrontMatter,
+        let cells = markdownTableCells(in: markdownLineContext(in: lines[rowIndex]).body),
+        cells.count == alignments.count
+      {
+        states[rowIndex].isTableRow = true
+        tableRowIndices.append(rowIndex)
+        rowIndex += 1
+      }
+      let columns = markdownTableColumns(
+        rowBodies: tableRowIndices.map { markdownLineContext(in: lines[$0]).body },
+        alignments: alignments)
+      states[index].tableColumns = columns
+      for tableRow in tableRowIndices {
+        states[tableRow].tableColumns = columns
+      }
+    }
+
     for index in lines.indices.dropFirst() {
       guard !states[index].insideFence, !states[index].insideFrontMatter,
         !states[index - 1].insideFence, !states[index - 1].insideFrontMatter,
+        !states[index].isTableSeparator, !states[index - 1].isTableRow,
         let level = markdownSetextHeadingLevel(in: lines[index]),
         markdownCanBecomeSetextHeading(lines[index - 1], state: states[index - 1])
       else {
@@ -1278,6 +1822,44 @@ enum TextDocumentSyntaxHighlighter {
     return attributes
   }
 
+  private static func markdownTableParagraphStyle(columns: [MarkdownTableColumn])
+    -> NSParagraphStyle
+  {
+    let style = NSMutableParagraphStyle()
+    style.defaultTabInterval = 0
+    let columns =
+      columns.isEmpty
+      ? [
+        MarkdownTableColumn(
+          width: MarkdownDocumentMetrics.tableFallbackColumnWidth,
+          alignment: .left)
+      ]
+      : columns
+    let gutter = MarkdownDocumentMetrics.tableColumnGutter
+    var origin: CGFloat = 0
+    var tabStops: [NSTextTab] = []
+    for index in 1..<columns.count {
+      origin += columns[index - 1].width + gutter
+      let column = columns[index]
+      let location: CGFloat
+      let alignment: NSTextAlignment
+      switch column.alignment {
+      case .left:
+        location = origin
+        alignment = .left
+      case .center:
+        location = origin + column.width / 2
+        alignment = .center
+      case .right:
+        location = origin + column.width
+        alignment = .right
+      }
+      tabStops.append(NSTextTab(textAlignment: alignment, location: location, options: [:]))
+    }
+    style.tabStops = tabStops
+    return style
+  }
+
   private static func renderedLinkAttributes(
     font: NSFont,
     includeVisualAttributes: Bool
@@ -1325,50 +1907,20 @@ enum TextDocumentSyntaxHighlighter {
     return (level, index + level + 1)
   }
 
-  private static func markdownBlockPrefixLength(in line: String) -> Int? {
+  private static func markdownBlockPrefixLength(
+    in line: String,
+    allowIndentedList: Bool = false
+  ) -> Int? {
     let nsLine = line as NSString
     let length = nsLine.length
-    var index = 0
-    while index < length, nsLine.character(at: index) == 32 {
-      index += 1
-    }
+    var index = markdownLeadingSpaceLength(in: nsLine)
     if index < length, nsLine.character(at: index) == 62 {  // ">"
       while index < length, nsLine.character(at: index) == 62 || nsLine.character(at: index) == 32 {
         index += 1
       }
       return index
     }
-    if index + 1 < length, isBulletMarker(nsLine.character(at: index)),
-      nsLine.character(at: index + 1) == 32
-    {
-      var prefixEnd = index + 2
-      if prefixEnd + 3 <= length,
-        nsLine.character(at: prefixEnd) == 91,  // "["
-        nsLine.character(at: prefixEnd + 1) == 32
-          || nsLine.character(at: prefixEnd + 1) == 120
-          || nsLine.character(at: prefixEnd + 1) == 88,
-        nsLine.character(at: prefixEnd + 2) == 93  // "]"
-      {
-        prefixEnd += 3
-        if prefixEnd < length, nsLine.character(at: prefixEnd) == 32 {
-          prefixEnd += 1
-        }
-      }
-      return prefixEnd
-    }
-    var digitEnd = index
-    while digitEnd < length {
-      let value = nsLine.character(at: digitEnd)
-      guard value >= 48, value <= 57 else { break }
-      digitEnd += 1
-    }
-    if digitEnd > index, digitEnd + 1 < length,
-      nsLine.character(at: digitEnd) == 46 || nsLine.character(at: digitEnd) == 41,
-      nsLine.character(at: digitEnd + 1) == 32
-    {
-      return digitEnd + 2
-    }
-    return nil
+    return markdownListMarkerPrefixLength(in: line, allowIndentedList: allowIndentedList)
   }
 
   private static func markdownFenceInfo(in line: String) -> (markerLength: Int, marker: Character)?
@@ -1398,12 +1950,15 @@ enum TextDocumentSyntaxHighlighter {
     _ line: String, state: MarkdownLineStyleState
   ) -> Bool {
     guard !state.insideFence, !state.insideFrontMatter else { return false }
-    let trimmed = line.trimmingCharacters(in: .whitespaces)
+    let body = markdownLineContext(in: line).body
+    let trimmed = body.trimmingCharacters(in: .whitespaces)
     guard !trimmed.isEmpty else { return false }
-    if markdownHeadingInfo(in: line) != nil { return false }
-    if markdownBlockPrefixLength(in: line) != nil { return false }
-    if markdownFenceInfo(in: line) != nil { return false }
-    if markdownThematicBreak(in: line) { return false }
+    if markdownHeadingInfo(in: body) != nil { return false }
+    if markdownBlockPrefixLength(in: body, allowIndentedList: state.listDepth > 0) != nil {
+      return false
+    }
+    if markdownFenceInfo(in: body) != nil { return false }
+    if markdownThematicBreak(in: body) { return false }
     return true
   }
 
@@ -1421,6 +1976,10 @@ enum TextDocumentSyntaxHighlighter {
   private static let inlineCodeExpression = markdownRegex(#"`([^`\n]+)`"#)
   private static let linkExpression = markdownRegex(#"(?<!!)\[([^\]\n]+)\]\((https?://[^\)\n]+)\)"#)
   private static let renderedLinkExpression = markdownRegex(#"(?<!!)\[([^\]\n]+)\]\(([^\)\n]+)\)"#)
+  private static let referenceLinkExpression = markdownRegex(#"(?<!!)\[([^\]\n]+)\]\[([^\]\n]*)\]"#)
+  private static let referenceDefinitionExpression = markdownRegex(#"^\s{0,3}\[[^\]\n]+\]:\s+\S+"#)
+  private static let autolinkExpression = markdownRegex(#"<(https?://[^>\s]+)>"#)
+  private static let escapeExpression = markdownRegex(#"\\([\\`*_{}\[\]()#+\-.!>~|])"#)
   private static let imageExpression = markdownRegex(#"!\[([^\]\n]*)\]\(([^\)\n]+)\)"#)
   private static let boldItalicExpression = markdownRegex(
     #"(?<![\\*])\*\*\*([^\*\n]+)(?<!\\)\*\*\*(?!\*)"#)

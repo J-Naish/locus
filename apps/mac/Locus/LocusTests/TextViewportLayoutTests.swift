@@ -860,55 +860,201 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
-  func testMarkdownMarginLineNumbersAreAlwaysVisibleForVisibleLogicalLines() throws {
-    let view = try makeViewer("a\nb\nc")
-    view.syntax = .markdown
-
-    XCTAssertEqual(
-      view.markdownMarginLineNumbersForTesting(lineRange: 0..<3, visibleRows: 0..<3),
-      [0, 1, 2]
-    )
-  }
-
-  @MainActor
-  func testMarkdownMarginLineNumberAppearsOnlyOnFirstWrappedVisualRow() throws {
-    let view = try makeViewer(String(repeating: "wide ", count: 80))
-    view.setFrameSize(NSSize(width: 260, height: 300))
-    view.syntax = .markdown
-    view.updateLayout()
-    XCTAssertGreaterThan(view.visualRowCount, 1)
-
-    XCTAssertEqual(
-      view.markdownMarginLineNumbersForTesting(lineRange: 0..<1, visibleRows: 0..<1),
-      [0]
-    )
-    XCTAssertEqual(
-      view.markdownMarginLineNumbersForTesting(lineRange: 0..<1, visibleRows: 1..<2),
-      []
-    )
-  }
-
-  @MainActor
-  func testMarkdownLineNumberRailStaysInsideNarrowViewport() throws {
-    let view = try makeViewer((1...1_000).map { "line \($0)" }.joined(separator: "\n"))
-    view.setFrameSize(NSSize(width: 260, height: 300))
+  func testMarkdownDecoratedLinesShiftTextStartInsideColumn() throws {
+    let view = try makeViewer("plain\n- Item\n> Quote")
+    view.setFrameSize(NSSize(width: 420, height: 300))
     view.syntax = .markdown
     view.updateLayout()
 
-    let rail = view.markdownLineNumberRailFrameForTesting(
-      textX: view.markdownTextColumnXForTesting())
-    XCTAssertGreaterThanOrEqual(rail.minX, -0.5)
-    XCTAssertLessThan(rail.maxX, view.markdownTextColumnXForTesting())
-    XCTAssertGreaterThan(view.markdownWrapContentWidthForTesting(), 0)
+    let baseX = view.markdownTextColumnXForTesting(line: 0)
+
+    XCTAssertEqual(view.markdownTextColumnXForTesting(line: 1), baseX + 24, accuracy: 0.5)
+    XCTAssertEqual(view.markdownTextColumnXForTesting(line: 2), baseX + 17, accuracy: 0.5)
+    XCTAssertLessThan(
+      view.markdownWrapContentWidthForTesting(line: 1),
+      view.markdownWrapContentWidthForTesting())
   }
 
-  func testMarkdownLineNumberRailUsesThreeDigitFloor() {
-    let twoDigits = LineRenderingTextView.markdownLineNumberRailWidth(lineCount: 99)
-    let threeDigits = LineRenderingTextView.markdownLineNumberRailWidth(lineCount: 999)
-    let fourDigits = LineRenderingTextView.markdownLineNumberRailWidth(lineCount: 1_000)
+  @MainActor
+  func testMarkdownCodeCardStaysFlushWithTextColumnAndIndentsCode() throws {
+    let view = try makeViewer("```swift\nlet value = 1\n```")
+    view.setFrameSize(NSSize(width: 520, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
 
-    XCTAssertEqual(twoDigits, threeDigits)
-    XCTAssertGreaterThan(fourDigits, threeDigits)
+    let baseX = view.markdownTextColumnXForTesting()
+    let frame = try XCTUnwrap(
+      view.markdownCodeBlockFrameForTesting(fromLine: 0, toLine: 2, visibleRows: 0..<3))
+
+    XCTAssertEqual(frame.minX, baseX, accuracy: 0.5)
+    XCTAssertEqual(frame.width, view.markdownWrapContentWidthForTesting(), accuracy: 0.5)
+    XCTAssertEqual(
+      view.markdownTextColumnXForTesting(line: 1),
+      baseX + MarkdownDocumentMetrics.codeCardInset,
+      accuracy: 0.5)
+    XCTAssertEqual(
+      view.markdownWrapContentWidthForTesting(line: 1),
+      view.markdownWrapContentWidthForTesting()
+        - MarkdownDocumentMetrics.codeCardInset,
+      accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownIndentedCodeUsesCodeCardFamily() throws {
+    let view = try makeViewer("    - nishi")
+    view.setFrameSize(NSSize(width: 520, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let baseX = view.markdownTextColumnXForTesting()
+    let frame = try XCTUnwrap(
+      view.markdownCodeBlockFrameForTesting(fromLine: 0, toLine: 0, visibleRows: 0..<1))
+
+    XCTAssertEqual(frame.minX, baseX, accuracy: 0.5)
+    XCTAssertEqual(
+      view.markdownTextColumnXForTesting(line: 0),
+      baseX + MarkdownDocumentMetrics.codeCardInset,
+      accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownTableChromeStaysInsideTextColumn() throws {
+    let view = try makeViewer(
+      """
+      | Metric | Delta |
+      | :--- | ---: |
+      | Revenue | 1200 |
+      """)
+    view.setFrameSize(NSSize(width: 560, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let baseX = view.markdownTextColumnXForTesting()
+    let frame = try XCTUnwrap(
+      view.markdownTableFrameForTesting(fromLine: 0, toLine: 2, visibleRows: 0..<3))
+
+    XCTAssertEqual(frame.minX, baseX, accuracy: 0.5)
+    XCTAssertGreaterThan(frame.width, 120)
+    XCTAssertLessThanOrEqual(frame.maxX, baseX + view.markdownWrapContentWidthForTesting() + 0.5)
+    XCTAssertEqual(
+      view.markdownTextColumnXForTesting(line: 0),
+      baseX + MarkdownDocumentMetrics.tableEdgeInset,
+      accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownTableDrawsExactlyThreeRules() throws {
+    let view = try makeViewer(
+      """
+      | Metric | Delta |
+      | :--- | ---: |
+      | Revenue | 1200 |
+      | Costs | 800 |
+      """)
+    view.setFrameSize(NSSize(width: 560, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let rules = try XCTUnwrap(
+      view.markdownTableRuleYsForTesting(fromLine: 0, toLine: 3, visibleRows: 0..<4))
+    let rowHeight = view.layout.lineHeight
+
+    let separatorHeight = MarkdownDocumentMetrics.tableSeparatorRowHeight
+    XCTAssertEqual(rules.count, 3)
+    XCTAssertEqual(rules[0], 0, accuracy: 0.5)
+    XCTAssertEqual(rules[1], rowHeight + separatorHeight / 2, accuracy: 0.5)
+    XCTAssertEqual(rules[2], rowHeight * 3 + separatorHeight, accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownTableRulesBreatheIntoAdjacentBlankLines() throws {
+    let view = try makeViewer(
+      """
+
+      | Metric | Delta |
+      | :--- | ---: |
+      | Revenue | 1200 |
+
+      """)
+    view.setFrameSize(NSSize(width: 560, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let rules = try XCTUnwrap(
+      view.markdownTableRuleYsForTesting(fromLine: 1, toLine: 3, visibleRows: 0..<5))
+    let rowHeight = view.layout.lineHeight
+    let breath = MarkdownDocumentMetrics.tableRuleBreath
+
+    let separatorHeight = MarkdownDocumentMetrics.tableSeparatorRowHeight
+    XCTAssertEqual(rules.count, 3)
+    XCTAssertEqual(rules[0], rowHeight - breath, accuracy: 0.5)
+    XCTAssertEqual(rules[1], rowHeight * 2 + separatorHeight / 2, accuracy: 0.5)
+    XCTAssertEqual(rules[2], rowHeight * 3 + separatorHeight + breath, accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownTableSeparatorRowIsSlim() throws {
+    let view = try makeViewer(
+      """
+      | Metric | Delta |
+      | :--- | ---: |
+      | Revenue | 1200 |
+      """)
+    view.setFrameSize(NSSize(width: 560, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let rowHeight = view.layout.lineHeight
+    let separatorHeight = MarkdownDocumentMetrics.tableSeparatorRowHeight
+    // The body row starts one full header row plus one slim separator row down.
+    let body = try XCTUnwrap(view.endpointYForTesting(line: 2))
+    XCTAssertEqual(body, rowHeight + separatorHeight, accuracy: 0.5)
+    // Hit-testing inside the body row's vertical span resolves to line 2.
+    XCTAssertEqual(
+      view.endpoint(at: NSPoint(x: 200, y: rowHeight + separatorHeight + rowHeight / 2)).line,
+      2)
+  }
+
+  func testWrapIndexUniformDocumentsKeepRowTimesHeightGeometry() {
+    let index = WrapIndex(
+      visualRowsPerLine: [1, 2, 1], rowHeightsPerLine: [24, 24, 24], uniformRowHeight: 24)
+
+    XCTAssertFalse(index.hasCustomRowHeights)
+    for row in 0..<4 {
+      XCTAssertEqual(
+        index.yOffset(ofVisualRow: row, uniformRowHeight: 24), CGFloat(row) * 24, accuracy: 0.01)
+    }
+    XCTAssertEqual(index.totalHeight(uniformRowHeight: 24), 96, accuracy: 0.01)
+  }
+
+  func testWrapIndexCustomRowHeightsProduceCumulativeYGeometry() {
+    // header (24), slim separator (6), wrapped body line (2 rows × 24), body (24).
+    let index = WrapIndex(
+      visualRowsPerLine: [1, 1, 2, 1], rowHeightsPerLine: [24, 6, 24, 24], uniformRowHeight: 24)
+
+    XCTAssertTrue(index.hasCustomRowHeights)
+    XCTAssertEqual(index.yOffset(ofLine: 1, uniformRowHeight: 24), 24, accuracy: 0.01)
+    XCTAssertEqual(index.yOffset(ofLine: 2, uniformRowHeight: 24), 30, accuracy: 0.01)
+    XCTAssertEqual(index.yOffset(ofLine: 3, uniformRowHeight: 24), 78, accuracy: 0.01)
+    XCTAssertEqual(index.yOffset(ofVisualRow: 3, uniformRowHeight: 24), 54, accuracy: 0.01)
+    XCTAssertEqual(index.totalHeight(uniformRowHeight: 24), 102, accuracy: 0.01)
+    XCTAssertEqual(index.rowHeight(ofLine: 1, uniformRowHeight: 24), 6, accuracy: 0.01)
+
+    XCTAssertEqual(index.location(forY: 25, uniformRowHeight: 24).line, 1)
+    XCTAssertEqual(index.location(forY: 31, uniformRowHeight: 24).line, 2)
+    let secondRow = index.location(forY: 55, uniformRowHeight: 24)
+    XCTAssertEqual(secondRow.line, 2)
+    XCTAssertEqual(secondRow.rowInLine, 1)
+    XCTAssertEqual(index.location(forY: 90, uniformRowHeight: 24).line, 3)
+  }
+
+  func testRowVerticalInsetCentersShortFragments() {
+    XCTAssertEqual(
+      LineRenderingTextView.rowVerticalInset(rowHeight: 24, naturalHeight: 18), 3, accuracy: 0.01)
+    XCTAssertEqual(
+      LineRenderingTextView.rowVerticalInset(rowHeight: 24, naturalHeight: 24), 0, accuracy: 0.01)
+    XCTAssertEqual(
+      LineRenderingTextView.rowVerticalInset(rowHeight: 24, naturalHeight: 30), 0, accuracy: 0.01)
   }
 
   @MainActor

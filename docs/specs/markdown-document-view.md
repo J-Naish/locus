@@ -27,8 +27,12 @@ is [markdown-rendered-view-milestone.md](markdown-rendered-view-milestone.md).
 - The document is editable in place: click, type, fix a word, add a list
   item. The file on disk stays byte-honest — every gesture is a plain
   buffer edit, and nothing is ever written that the user did not do.
-- Line position stays first-class: margin line numbers map 1:1 to source
-  lines, because agents talk about files as `file:line`.
+- The page is margin and content, nothing else: **no line numbers in the
+  Markdown view** (product decision, 2026-06-13 — the number rail
+  constrained the page; an earlier margin-number design shipped and was
+  removed; if agent-driven `file:line` navigation needs them later they
+  return as an opt-in affordance). The classic gutter stays for
+  code/config syntaxes.
 
 ## Non-goals
 
@@ -86,38 +90,91 @@ only Markdown styling path.
   renumbered); unsupported constructs render as plain text, never an
   error state.
 
-### Layout, line numbers, type scale
+### Layout and type scale
 
-Unchanged from the current implementation: centered 600 pt measure with
-symmetric rail reservation; always-visible margin line numbers
-(quaternary, logical lines, first visual row only; caret line one step
-stronger now that a caret exists again); the interim compressed type
-scale inside the uniform 24 pt row (full scale arrives with Phase A
-variable row heights):
+Centered 600 pt measure with symmetric 32 pt minimum side padding (no
+number rail — see Goal); the interim compressed type scale inside the
+uniform 24 pt row (full scale arrives with Phase A variable row
+heights):
 Body 15 regular / H1 20 bold / H2 18 bold / H3 16 semibold / H4 15
 semibold / H5 14 semibold / H6 13 semibold secondary / code 13 mono /
-fence label 11 mono / blank lines 24 pt.
+fence label 11 mono / blank lines 24 pt. Row text is **vertically
+centered** within its 24 pt row (a fragment's natural line height is
+often shorter than the row; the slack splits evenly top and bottom,
+never pooling at the bottom).
 
 ### Block and inline elements
 
-As implemented in the rendered pipeline (markers removed, decorations
-drawn): typeset bullets `•`/`◦`/`▪` and ordered numbers (source number +
-delimiter, tabular, secondary) and checkboxes in the marker column;
-stacked quote bars (3 pt per depth ≤3) with per-depth inset; fence cards
-with the info string as a muted 11 pt label on the opening row and empty
-delimiter rows; frontmatter as a muted mono card; thematic breaks as
-drawn rules on empty rows; setext underlines as empty rows; links show
-the label in accent (URL removed; schemes other than `http`/`https`
-render as plain text); images show alt text in secondary; escapes render
-the escaped character. Both asterisk and underscore emphasis forms.
-Depth detection is tolerant (2–4 spaces, marker-relative); marker-choice
-invariance holds (`-`/`*`/`+`, `1.`/`1)`, equivalent nesting spellings
-render identically). **Fences require closure**: an unclosed fence
-renders as literal text rather than swallowing the rest of the document —
-a deliberate CommonMark divergence so that typing ``` ``` ``` never
-restyles the whole page per keystroke; the block snaps to a code card
-once when the closing fence lands. (Frontmatter already requires its
-closing delimiter.)
+**Structure lives inside the text column.** Bullets, ordered numbers,
+checkboxes, and quote bars draw *inside* the centered column, in indent
+cells the content is shifted right to reserve — exactly like Notion —
+never in the left margin. Per-line
+layout: a list item at depth d indents its content by d × 24 pt with the
+glyph drawn in the last 24 pt cell; a quote at depth d indents by
+d × 17 pt with one 3 pt bar per level drawn inside the inset; wrapped
+continuation rows hang-align to the content start; an indented
+continuation paragraph under a list item aligns to its parent item's
+content. Wrap width per line = measure − indent.
+
+- **Headings** (ATX, setext): flush left at scale; setext underline rows
+  render empty.
+- **Lists**: typeset `•`/`◦`/`▪`, ordered = source number + delimiter
+  (tabular, secondary, never renumbered), checkboxes (clickable). Depth
+  is list-context-aware: nesting steps of 2–4 spaces count only while a
+  list is open; marker-choice invariance holds.
+- **Blockquotes** (≤3): stacked bars; **the quoted remainder is
+  re-classified for block constructs** — `> ### Title`, `> - item`,
+  `> - [ ] task` render as a heading/list/task inside the quote (one
+  nesting level), indents composed.
+- **Fenced code**: card; info string as the muted 11 pt label; empty
+  delimiter rows. **The card sits flush with the text column** — its
+  left and right edges are the column's edges (composed with any
+  quote/list indent), and the code content is inset 12 pt inside it on
+  both sides. Fences require closure (unclosed fences render literally —
+  deliberate divergence so typing ``` ``` ``` never restyles the whole
+  page; frontmatter likewise, with the same flush card).
+- **Indented code blocks** (4+ spaces *outside* an open list context):
+  mono on the same flush card, grouped like fences. Inside a list
+  context the same indent is a continuation paragraph — this distinction
+  is what keeps `  - nested` a list item and `    code` a code block.
+- **Tables**: a block of pipe rows confirmed by a delimiter row renders
+  as a **print-quality three-rule table** (booktab style) — no outer
+  box, no vertical lines, no background fills. Structure comes from
+  exactly three hairline rules spanning the table's content width: above
+  the header row, through the center of the delimiter row, and under the
+  last body row. The delimiter row is a **slim 6 pt row** (the engine's
+  first variable-height row — per-line row heights with a uniform fast
+  path), so the header sits close to its body the way body rows sit to
+  each other; the top and bottom rules breathe 4 pt into adjacent blank
+  lines. Header cells are 12 pt semibold in the
+  secondary color — a column label, unmistakably not body text; body
+  cells are 13 pt. Columns are separated by a 32 pt gutter, the first
+  column flush with the text column's left edge; column widths come from
+  the **styled** rendered cell (chips, code fonts, and emphasis measured
+  as drawn, never plain text), per-column max 240 pt, total clamped to
+  the measure with proportional shrink and ellipsis clipping until
+  Phase A enables cell wrapping. **Column alignment markers are
+  honored** (`:---` left, `:---:` center, `---:` right) via aligned tab
+  stops. One source row stays one 24 pt row. Cell text edits work
+  normally; the cell-boundary tab is structural — deleting it is a no-op
+  and the caret steps across. A pipe line without a delimiter row stays
+  literal. (Tunable later: ultralight row hairlines for tables longer
+  than ~8 rows.)
+- **Frontmatter / thematic breaks**: unchanged (muted mono card; drawn
+  rule on an empty row).
+- **Inline**: bold/italic/bold-italic/strike (asterisk and underscore
+  forms), inline code chips, links (label in accent; Cmd+click opens
+  `http`/`https`), **reference links** `[text][label]` resolved through
+  a document-wide definitions map (`[label]: url` definition lines render
+  as small muted mono; unresolved references render plain), **autolinks**
+  `<https://…>` (URL as the visible label, brackets removed; clickable
+  per the scheme rule) and email autolinks (brackets removed, rendered
+  as plain text — not a link, nothing pretends to be clickable that is
+  not), images as secondary alt text, escapes render the escaped
+  character with the backslash removed, a trailing `<br>` is removed
+  from the display (the line break is already real). Inline constructs
+  nest: code spans and links inside emphasis render both (code binds
+  tighter than emphasis). Other inline HTML stays literal.
 
 ### Editing contract
 

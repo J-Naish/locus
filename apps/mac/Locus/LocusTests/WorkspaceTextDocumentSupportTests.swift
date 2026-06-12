@@ -260,6 +260,226 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       true)
   }
 
+  func testMarkdownRenderedBoldCanContainInlineCodeWithoutRawFallback() {
+    let line = TextDocumentSyntaxHighlighter.highlightedLine(
+      "Use **bold with `code` inside** now",
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertEqual(line.string, "Use bold with code inside now")
+    XCTAssertEqual(
+      line.resolvedFont(in: line.string, matching: "bold")?.fontDescriptor.symbolicTraits
+        .contains(.bold),
+      true)
+    XCTAssertEqual(
+      line.resolvedFont(in: line.string, matching: "code")?.fontDescriptor.symbolicTraits
+        .contains(.monoSpace),
+      true)
+  }
+
+  func testMarkdownRenderedEscapesRemoveBackslashWithoutStyling() {
+    let line = TextDocumentSyntaxHighlighter.highlightedLine(
+      #"Use \*literal* marker"#,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertEqual(line.string, "Use *literal* marker")
+    XCTAssertEqual(
+      line.resolvedFont(in: line.string, matching: "literal")?.fontDescriptor.symbolicTraits
+        .contains(.italic),
+      false)
+  }
+
+  func testMarkdownRenderedReferenceLinksAndAutolinksRemoveSyntax() {
+    let lines = [
+      "[Product brief][product-brief]",
+      "[product-brief]: docs/product/brief.md",
+      "<https://example.com/roadmap>",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[0], font: TextDocumentSyntax.markdown.font, state: states[0]),
+      "Product brief")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[1], font: TextDocumentSyntax.markdown.font, state: states[1]),
+      "")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[2], font: TextDocumentSyntax.markdown.font, state: states[2]),
+      "https://example.com/roadmap")
+  }
+
+  func testMarkdownRenderedQuoteHeadingReclassifiesInnerBlock() {
+    let line = "> ### Heading"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+    let rendered = TextDocumentSyntaxHighlighter.highlightedLine(
+      line,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: state
+    )
+
+    XCTAssertEqual(rendered.string, "Heading")
+    XCTAssertEqual(
+      rendered.resolvedFont(at: 0)?.pointSize,
+      MarkdownDocumentMetrics.headingFont(level: 3).pointSize)
+  }
+
+  func testMarkdownIndentedCodeDoesNotBecomeAListItemOutsideListContext() {
+    let line = "    - nishi"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+    let rendered = TextDocumentSyntaxHighlighter.highlightedLine(
+      line,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: state
+    )
+
+    XCTAssertEqual(rendered.string, "- nishi")
+    XCTAssertEqual(
+      rendered.resolvedFont(at: 0)?.fontDescriptor.symbolicTraits.contains(.monoSpace),
+      true)
+  }
+
+  func testMarkdownIndentedListMarkerInsideListStaysAListItem() {
+    let lines = [
+      "- Parent",
+      "    - Child",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let rendered = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[1],
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[1]
+    )
+
+    XCTAssertEqual(rendered.string, "Child")
+    XCTAssertEqual(states[1].listDepth, 2)
+    XCTAssertEqual(
+      rendered.resolvedFont(at: 0)?.fontDescriptor.symbolicTraits.contains(.monoSpace),
+      false)
+  }
+
+  func testMarkdownTablesRenderRowsWithoutPipeSyntax() {
+    let lines = [
+      "| Metric | Delta | Status |",
+      "| :--- | ---: | :---: |",
+      "| Revenue | 1200 | ready |",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[0], font: TextDocumentSyntax.markdown.font, state: states[0]),
+      "Metric\tDelta\tStatus")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[1], font: TextDocumentSyntax.markdown.font, state: states[1]),
+      "")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[2], font: TextDocumentSyntax.markdown.font, state: states[2]),
+      "Revenue\t1200\tready")
+    XCTAssertEqual(states[0].isTableHeader, true)
+    XCTAssertEqual(states[0].tableColumns.map(\.alignment), [.left, .right, .center])
+    XCTAssertEqual(states[2].tableColumns, states[0].tableColumns)
+    let header = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[0],
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[0])
+    XCTAssertEqual(
+      header.resolvedFont(in: header.string, matching: "Metric")?.pointSize,
+      MarkdownDocumentMetrics.tableHeaderFontSize)
+    let paragraphStyle = try? XCTUnwrap(
+      header.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)
+    XCTAssertEqual(paragraphStyle?.tabStops.count, 2)
+    XCTAssertEqual(paragraphStyle?.tabStops.first?.alignment, .right)
+    XCTAssertEqual(paragraphStyle?.tabStops.last?.alignment, .center)
+  }
+
+  func testMarkdownTableHeaderRendersAsMutedColumnLabel() {
+    let lines = ["| Team | Owner |", "| --- | --- |", "| Sales | Nishi |"]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    let header = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[0],
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[0])
+    let body = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[2],
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[2])
+
+    XCTAssertEqual(
+      header.resolvedFont(in: header.string, matching: "Team")?.pointSize,
+      MarkdownDocumentMetrics.tableHeaderFontSize)
+    XCTAssertEqual(
+      header.foregroundColor(in: header.string, matching: "Team"),
+      NSColor.secondaryLabelColor)
+    XCTAssertEqual(
+      body.resolvedFont(in: body.string, matching: "Sales")?.pointSize,
+      TextDocumentSyntax.markdown.font.pointSize)
+  }
+
+  func testMarkdownTableColumnWidthsMeasureStyledCells() throws {
+    let lines = [
+      "| Field | Example |",
+      "| --- | --- |",
+      "| Code | `status: draft` |",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let columns = states[2].tableColumns
+    XCTAssertEqual(columns.count, 2)
+
+    let styled = TextDocumentSyntaxHighlighter.markdownMeasurementLine(
+      "`status: draft`",
+      font: TextDocumentSyntax.markdown.font,
+      state: .plain,
+      typography: MarkdownTypography(baseFont: TextDocumentSyntax.markdown.font))
+    let expected = max(
+      MarkdownDocumentMetrics.tableColumnMinimumWidth, ceil(styled.size().width))
+    let exampleColumn = try XCTUnwrap(columns.last)
+    XCTAssertEqual(exampleColumn.width, expected, accuracy: 1)
+  }
+
+  func testMarkdownTableTabStopsUseGutterModel() throws {
+    let lines = [
+      "| Metric | Delta | Status |",
+      "| :--- | ---: | :---: |",
+      "| Revenue | 1200 | ready |",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let columns = states[0].tableColumns
+    XCTAssertEqual(columns.count, 3)
+
+    let rendered = TextDocumentSyntaxHighlighter.markdownMeasurementLine(
+      lines[2],
+      font: TextDocumentSyntax.markdown.font,
+      state: states[2],
+      typography: MarkdownTypography(baseFont: TextDocumentSyntax.markdown.font))
+    let style = try XCTUnwrap(
+      rendered.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)
+    let stops = style.tabStops
+    XCTAssertEqual(stops.count, 2)
+
+    let gutter = MarkdownDocumentMetrics.tableColumnGutter
+    let deltaOrigin = columns[0].width + gutter
+    XCTAssertEqual(stops[0].alignment, .right)
+    XCTAssertEqual(stops[0].location, deltaOrigin + columns[1].width, accuracy: 0.5)
+    let statusOrigin = deltaOrigin + columns[1].width + gutter
+    XCTAssertEqual(stops[1].alignment, .center)
+    XCTAssertEqual(stops[1].location, statusOrigin + columns[2].width / 2, accuracy: 0.5)
+  }
+
   func testMarkdownRenderedFenceLineShowsOnlyInfoString() {
     XCTAssertEqual(
       TextDocumentSyntaxHighlighter.renderedMarkdownLineText(

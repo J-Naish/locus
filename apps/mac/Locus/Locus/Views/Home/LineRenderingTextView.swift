@@ -57,19 +57,45 @@ struct WrapIndex: Equatable {
   /// `rowOffsets[i]` is the first visual row of logical line `i`; the last element
   /// is the total visual-row count. Always has `lineCount + 1` elements.
   private let rowOffsets: [Int]
+  /// Per-line row heights, present only when at least one line diverges from the
+  /// uniform height (slim marker rows). All wrapped rows of a line share its
+  /// height. `nil` keeps the uniform O(1) arithmetic fast path.
+  private let lineRowHeights: [CGFloat]?
+  /// Cumulative y offsets per line (`lineCount + 1` elements); present exactly
+  /// when `lineRowHeights` is.
+  private let lineYOffsets: [CGFloat]?
 
   /// Builds the index from per-logical-line visual-row counts (each clamped to at
-  /// least 1, since even an empty line occupies one row).
-  init(visualRowsPerLine: [Int]) {
+  /// least 1, since even an empty line occupies one row). `rowHeightsPerLine`
+  /// supplies a custom row height per line; pass `nil` (or all-uniform heights)
+  /// for uniform documents.
+  init(visualRowsPerLine: [Int], rowHeightsPerLine: [CGFloat]? = nil, uniformRowHeight: CGFloat = 0)
+  {
     var offsets = [Int](repeating: 0, count: visualRowsPerLine.count + 1)
     for (index, rows) in visualRowsPerLine.enumerated() {
       offsets[index + 1] = offsets[index] + max(1, rows)
     }
     rowOffsets = offsets
+    if let heights = rowHeightsPerLine,
+      heights.count == visualRowsPerLine.count,
+      heights.contains(where: { $0 != uniformRowHeight })
+    {
+      var ys = [CGFloat](repeating: 0, count: heights.count + 1)
+      for (index, rows) in visualRowsPerLine.enumerated() {
+        ys[index + 1] = ys[index] + CGFloat(max(1, rows)) * heights[index]
+      }
+      lineRowHeights = heights
+      lineYOffsets = ys
+    } else {
+      lineRowHeights = nil
+      lineYOffsets = nil
+    }
   }
 
   var lineCount: Int { max(0, rowOffsets.count - 1) }
   var totalVisualRows: Int { rowOffsets.last ?? 0 }
+  /// Whether any line carries a non-uniform row height.
+  var hasCustomRowHeights: Bool { lineRowHeights != nil }
 
   /// The first visual row of `line` (clamped to the document).
   func firstVisualRow(ofLine line: Int) -> Int {
@@ -99,6 +125,69 @@ struct WrapIndex: Equatable {
       }
     }
     return (low, target - rowOffsets[low])
+  }
+
+  /// The row height of `line` under the given uniform fallback.
+  func rowHeight(ofLine line: Int, uniformRowHeight: CGFloat) -> CGFloat {
+    guard let heights = lineRowHeights, line >= 0, line < heights.count else {
+      return uniformRowHeight
+    }
+    return heights[line]
+  }
+
+  /// The y offset of the top of `line` under the given uniform fallback.
+  func yOffset(ofLine line: Int, uniformRowHeight: CGFloat) -> CGFloat {
+    guard let ys = lineYOffsets else {
+      return CGFloat(firstVisualRow(ofLine: line)) * uniformRowHeight
+    }
+    return ys[min(max(0, line), lineCount)]
+  }
+
+  /// The y offset of the top of a global visual row.
+  func yOffset(ofVisualRow row: Int, uniformRowHeight: CGFloat) -> CGFloat {
+    guard lineYOffsets != nil else { return CGFloat(row) * uniformRowHeight }
+    guard lineCount > 0 else { return 0 }
+    if row >= totalVisualRows {
+      return totalHeight(uniformRowHeight: uniformRowHeight)
+        + CGFloat(row - totalVisualRows) * uniformRowHeight
+    }
+    let (line, rowInLine) = location(ofVisualRow: row)
+    return yOffset(ofLine: line, uniformRowHeight: uniformRowHeight)
+      + CGFloat(rowInLine) * rowHeight(ofLine: line, uniformRowHeight: uniformRowHeight)
+  }
+
+  /// Total document content height.
+  func totalHeight(uniformRowHeight: CGFloat) -> CGFloat {
+    guard let ys = lineYOffsets else { return CGFloat(totalVisualRows) * uniformRowHeight }
+    return ys.last ?? 0
+  }
+
+  /// The line and row-within-line whose vertical span contains `y` (clamped to
+  /// the document).
+  func location(forY y: CGFloat, uniformRowHeight: CGFloat) -> (line: Int, rowInLine: Int) {
+    guard let ys = lineYOffsets else {
+      guard uniformRowHeight > 0 else { return (0, 0) }
+      return location(ofVisualRow: Int((y / uniformRowHeight).rounded(.down)))
+    }
+    guard lineCount > 0 else { return (0, 0) }
+    let target = min(max(0, y), max(0, (ys.last ?? 0) - 0.001))
+    // Largest `line` with `ys[line] <= target`.
+    var low = 0
+    var high = lineCount - 1
+    while low < high {
+      let mid = (low + high + 1) / 2
+      if ys[mid] <= target {
+        low = mid
+      } else {
+        high = mid - 1
+      }
+    }
+    let height = rowHeight(ofLine: low, uniformRowHeight: uniformRowHeight)
+    guard height > 0 else { return (low, 0) }
+    let rowInLine = min(
+      visualRowCount(ofLine: low) - 1,
+      max(0, Int(((target - ys[low]) / height).rounded(.down))))
+    return (low, rowInLine)
   }
 }
 
@@ -268,10 +357,6 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private let gutterFont = GutterMetrics.lineNumberFont
   private let gutterTextColor: NSColor = .secondaryLabelColor
   private let gutterSeparatorColor: NSColor = .separatorColor
-  private let markdownLineNumberFont = NSFont.monospacedDigitSystemFont(
-    ofSize: 12, weight: .medium)
-  private let markdownLineNumberMinimumDigits = 3
-  private let markdownLineNumberGap: CGFloat = 40
 
   var syntax: TextDocumentSyntax = .plainText {
     didSet {
@@ -599,19 +684,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return visible - gutterWidth - horizontalPadding * 2
   }
 
-  private var markdownLineNumberRailWidth: CGFloat {
-    Self.markdownLineNumberRailWidth(
-      lineCount: lineCount,
-      font: markdownLineNumberFont,
-      minimumDigits: markdownLineNumberMinimumDigits
-    )
-  }
-
   private var markdownDocumentSidePadding: CGFloat {
-    max(
-      MarkdownDocumentMetrics.minimumHorizontalPadding,
-      markdownLineNumberRailWidth + markdownLineNumberGap
-    )
+    MarkdownDocumentMetrics.minimumHorizontalPadding
   }
 
   private var textColumnX: CGFloat {
@@ -622,14 +696,71 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return visible.minX + max(0, (visible.width - wrapContentWidth) / 2)
   }
 
-  static func markdownLineNumberRailWidth(
-    lineCount: Int,
-    font: NSFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
-    minimumDigits: Int = 3
+  private nonisolated static func markdownStructuralIndent(for state: MarkdownLineStyleState)
+    -> CGFloat
+  {
+    CGFloat(max(0, state.quoteDepth)) * MarkdownDocumentMetrics.quoteIndentWidth
+      + CGFloat(max(0, state.listDepth)) * MarkdownDocumentMetrics.markerColumnWidth
+  }
+
+  private nonisolated static func markdownInnerInset(for state: MarkdownLineStyleState) -> CGFloat {
+    if state.insideFence || state.isFenceDelimiter || state.insideFrontMatter
+      || state.isIndentedCodeBlock
+    {
+      return MarkdownDocumentMetrics.codeCardInset
+    }
+    if state.isTableRow {
+      return MarkdownDocumentMetrics.tableEdgeInset
+    }
+    return 0
+  }
+
+  private nonisolated static func markdownLineIndent(for state: MarkdownLineStyleState) -> CGFloat {
+    markdownStructuralIndent(for: state) + markdownInnerInset(for: state)
+  }
+
+  private nonisolated static func markdownWrapContentWidth(
+    baseWidth: CGFloat,
+    state: MarkdownLineStyleState
   ) -> CGFloat {
-    let digits = max(minimumDigits, String(max(1, lineCount)).count)
-    let sample = String(repeating: "8", count: digits) as NSString
-    return ceil(sample.size(withAttributes: [.font: font]).width)
+    max(1, baseWidth - markdownLineIndent(for: state))
+  }
+
+  private nonisolated static func markdownOuterContentWidth(
+    baseWidth: CGFloat,
+    state: MarkdownLineStyleState
+  ) -> CGFloat {
+    max(1, baseWidth - markdownStructuralIndent(for: state))
+  }
+
+  private func markdownLineIndent(forLine line: Int) -> CGFloat {
+    guard usesMarkdownDocumentLayout, let buffer = reader else { return 0 }
+    return Self.markdownLineIndent(for: markdownLineState(forLine: line, in: buffer))
+  }
+
+  private func lineTextColumnX(forLine line: Int) -> CGFloat {
+    textColumnX + markdownLineIndent(forLine: line)
+  }
+
+  private func lineOuterColumnX(forLine line: Int) -> CGFloat {
+    guard usesMarkdownDocumentLayout, let buffer = reader else { return textColumnX }
+    return textColumnX
+      + Self.markdownStructuralIndent(
+        for: markdownLineState(forLine: line, in: buffer))
+  }
+
+  private func lineWrapContentWidth(forLine line: Int) -> CGFloat {
+    guard usesMarkdownDocumentLayout, let buffer = reader else { return wrapContentWidth }
+    return Self.markdownWrapContentWidth(
+      baseWidth: wrapContentWidth,
+      state: markdownLineState(forLine: line, in: buffer))
+  }
+
+  private func lineOuterContentWidth(forLine line: Int) -> CGFloat {
+    guard usesMarkdownDocumentLayout, let buffer = reader else { return wrapContentWidth }
+    return Self.markdownOuterContentWidth(
+      baseWidth: wrapContentWidth,
+      state: markdownLineState(forLine: line, in: buffer))
   }
 
   /// (Re)builds the wrap index for the current buffer and width when the document
@@ -731,10 +862,37 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       }
       let markdownState =
         line < (markdownStates?.count ?? 0) ? markdownStates?[line] ?? .plain : .plain
-      counts.append(wrapRowCount(text: lineText, width: width, markdownLineState: markdownState))
+      let lineWidth =
+        usesMarkdownDocumentLayout
+        ? Self.markdownWrapContentWidth(baseWidth: width, state: markdownState)
+        : width
+      counts.append(
+        wrapRowCount(text: lineText, width: lineWidth, markdownLineState: markdownState))
     }
     wrapRowCounts = counts
-    wrapIndex = WrapIndex(visualRowsPerLine: counts)
+    wrapIndex = WrapIndex(
+      visualRowsPerLine: counts,
+      rowHeightsPerLine: markdownRowHeights(states: markdownStates, lineCount: counts.count),
+      uniformRowHeight: layout.lineHeight)
+  }
+
+  /// Per-line row heights for markdown documents containing slim marker rows
+  /// (table delimiter rows), or `nil` when every line is uniform — which keeps
+  /// the O(1) uniform geometry fast path.
+  private func markdownRowHeights(
+    states: [MarkdownLineStyleState]?, lineCount: Int
+  ) -> [CGFloat]? {
+    guard usesMarkdownDocumentLayout, let states, lineCount > 0 else { return nil }
+    var heights: [CGFloat]?
+    for index in 0..<lineCount {
+      let state = index < states.count ? states[index] : .plain
+      guard state.isTableSeparator else { continue }
+      if heights == nil {
+        heights = [CGFloat](repeating: layout.lineHeight, count: lineCount)
+      }
+      heights?[index] = MarkdownDocumentMetrics.tableSeparatorRowHeight
+    }
+    return heights
   }
 
   // MARK: Background wrap build
@@ -906,7 +1064,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if outcome.wraps {
       hugeLineInfo = outcome.hugeLines
       wrapRowCounts = outcome.rowCounts
-      wrapIndex = WrapIndex(visualRowsPerLine: outcome.rowCounts)
+      wrapIndex = WrapIndex(
+        visualRowsPerLine: outcome.rowCounts,
+        rowHeightsPerLine: markdownRowHeights(
+          states: outcome.markdownLineStates, lineCount: outcome.rowCounts.count),
+        uniformRowHeight: layout.lineHeight)
     } else {
       wrapIndex = nil
       wrapRowCounts = nil
@@ -1049,10 +1211,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       let state = line < states.count ? states[line] : .plain
       let attributed = TextDocumentSyntaxHighlighter.markdownMeasurementLine(
         display, font: input.font, state: state, typography: typography)
+      let lineWidth = markdownWrapContentWidth(baseWidth: input.width, state: state)
       counts.append(
         gridRows
           ?? Self.wrapRowCount(
-            attributed: attributed, width: input.width, maximumRows: input.drawnCharacterCap))
+            attributed: attributed, width: lineWidth, maximumRows: input.drawnCharacterCap))
     }
     return WrapBuildOutcome(
       rowCounts: counts,
@@ -1243,14 +1406,21 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         let line = startLine + offset
         let state =
           line < (markdownStates?.count ?? 0) ? markdownStates?[line] ?? .plain : .plain
-        return wrapRowCount(text: text, width: wrapContentWidth, markdownLineState: state)
+        let lineWidth =
+          usesMarkdownDocumentLayout
+          ? Self.markdownWrapContentWidth(baseWidth: wrapContentWidth, state: state)
+          : wrapContentWidth
+        return wrapRowCount(text: text, width: lineWidth, markdownLineState: state)
       })
     guard counts.count == newLineCount else {
       rebuildWrapIndex()
       return
     }
     wrapRowCounts = counts
-    wrapIndex = WrapIndex(visualRowsPerLine: counts)
+    wrapIndex = WrapIndex(
+      visualRowsPerLine: counts,
+      rowHeightsPerLine: markdownRowHeights(states: markdownStates, lineCount: counts.count),
+      uniformRowHeight: layout.lineHeight)
   }
 
   /// Number of visual rows `text` occupies at `width`.
@@ -1285,12 +1455,47 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return (min(max(0, row), max(0, lineCount - 1)), 0)
   }
 
+  /// The row height of `line` (the uniform height unless the line carries a
+  /// custom slim height, e.g. a table delimiter row).
+  private func rowHeight(forLine line: Int) -> CGFloat {
+    wrapIndex?.rowHeight(ofLine: line, uniformRowHeight: layout.lineHeight) ?? layout.lineHeight
+  }
+
+  /// The y offset of the top of `line`.
+  private func yOffset(ofLine line: Int) -> CGFloat {
+    wrapIndex?.yOffset(ofLine: line, uniformRowHeight: layout.lineHeight)
+      ?? CGFloat(firstVisualRow(ofLine: line)) * layout.lineHeight
+  }
+
+  /// The y offset of the top of a global visual row.
+  private func yOffset(ofVisualRow row: Int) -> CGFloat {
+    wrapIndex?.yOffset(ofVisualRow: row, uniformRowHeight: layout.lineHeight)
+      ?? CGFloat(row) * layout.lineHeight
+  }
+
+  /// The line and row-within-line whose vertical span contains `y`.
+  private func rowLocation(forY y: CGFloat) -> (line: Int, rowInLine: Int) {
+    if let wrapIndex {
+      return wrapIndex.location(forY: y, uniformRowHeight: layout.lineHeight)
+    }
+    guard layout.lineHeight > 0 else { return (0, 0) }
+    return lineLocation(ofVisualRow: Int((y / layout.lineHeight).rounded(.down)))
+  }
+
+  /// Total document content height (the variable-height-aware replacement for
+  /// `totalVisualRows * lineHeight`).
+  private var totalContentHeight: CGFloat {
+    wrapIndex?.totalHeight(uniformRowHeight: layout.lineHeight)
+      ?? CGFloat(totalVisualRows) * layout.lineHeight
+  }
+
   /// UTF-16 start offsets of each visual row within `line` (just `[0]` when the
   /// document is not wrapping). `attributed` is the line's displayed string.
   private func visualRowStartOffsets(ofLine line: Int, attributed: NSAttributedString) -> [Int] {
     guard wrapIndex != nil else { return [0] }
     return LineWrap.visualRowStartOffsets(
-      of: attributed, width: wrapContentWidth, maximumRows: maximumDrawnCharactersPerLine)
+      of: attributed, width: lineWrapContentWidth(forLine: line),
+      maximumRows: maximumDrawnCharactersPerLine)
   }
 
   /// The visual-row index within a line for `column`, given the line's row starts.
@@ -1869,16 +2074,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Maps a point in this view's coordinates to the nearest (line, UTF-16 column)
   /// endpoint, clamped to the document. Internal so hit-testing can be tested.
   func endpoint(at point: NSPoint) -> TextSelection.Endpoint {
-    let rawRow = Int((point.y / layout.lineHeight).rounded(.down))
     // A click in the empty area padded below the last row lands at the document
     // end, regardless of x — not at the column nearest the click on the last line.
-    if rawRow >= totalVisualRows {
+    if point.y >= totalContentHeight {
       let lastLine = max(0, lineCount - 1)
       return TextSelection.Endpoint(line: lastLine, columnUTF16: lineLengthUTF16(lastLine))
     }
-    let row = min(max(0, totalVisualRows - 1), max(0, rawRow))
-    let (line, rowInLine) = lineLocation(ofVisualRow: row)
-    let textRelativeX = point.x - textColumnX
+    let (line, rowInLine) = rowLocation(forY: max(0, point.y))
+    let textRelativeX = point.x - lineTextColumnX(forLine: line)
     if let length = hugeLength(line) {
       let rowStart = rowInLine * hugeLineColumns
       let rowText = hugeRowText(line: line, rowIndex: rowInLine, utf16Length: length)
@@ -3111,12 +3314,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private func scrollCaretToVisible(_ endpoint: TextSelection.Endpoint) {
-    let x = textColumnX + caretX(for: endpoint)
+    let x = lineTextColumnX(forLine: endpoint.line) + caretX(for: endpoint)
     let rect = NSRect(
       x: x - caretScrollMargin,
-      y: CGFloat(visualRow(of: endpoint)) * layout.lineHeight,
+      y: yOffset(ofVisualRow: visualRow(of: endpoint)),
       width: caretScrollMargin * 2,
-      height: layout.lineHeight)
+      height: rowHeight(forLine: endpoint.line))
     scrollToVisible(rect)
   }
 
@@ -3155,14 +3358,19 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     let visibleSize = enclosingScrollView?.documentVisibleRect.size
     let visibleWidth = visibleSize?.width ?? frame.width
-    let contentHeight = layout.contentHeight(lineCount: totalVisualRows)
+    let contentHeight = max(totalContentHeight, layout.lineHeight)
     let height: CGFloat
     if let viewportHeight = visibleSize?.height {
       // VS Code-style scroll past end: the document gets a tail of empty space
       // below the last row, so it can scroll until that row reaches the top.
       // Empty and single-row documents still fill only the viewport because the
       // first row is already at the top.
-      height = layout.frameHeight(visualRows: totalVisualRows, viewportHeight: viewportHeight)
+      let lastLine = max(0, lineCount - 1)
+      let tailHeight = max(
+        0,
+        viewportHeight
+          - CGFloat(TextViewportLayout.overscrollAnchorRowCount) * rowHeight(forLine: lastLine))
+      height = max(viewportHeight, contentHeight + tailHeight)
     } else {
       // Detached views do not have a stable viewport height. Feeding frame.height
       // back into the scroll-past-end formula would grow the frame on every pass.
@@ -3437,8 +3645,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private func visibleVisualRowRange(in rect: CGRect) -> Range<Int> {
     let total = totalVisualRows
     guard total > 0, layout.lineHeight > 0, rect.height > 0 else { return 0..<0 }
-    let first = max(0, Int((rect.minY / layout.lineHeight).rounded(.down)))
-    let last = min(total, Int((rect.maxY / layout.lineHeight).rounded(.up)))
+    guard let wrapIndex, wrapIndex.hasCustomRowHeights else {
+      let first = max(0, Int((rect.minY / layout.lineHeight).rounded(.down)))
+      let last = min(total, Int((rect.maxY / layout.lineHeight).rounded(.up)))
+      return first < last ? first..<last : 0..<0
+    }
+    let (firstLine, firstRowInLine) = rowLocation(forY: max(0, rect.minY))
+    let first = max(0, wrapIndex.firstVisualRow(ofLine: firstLine) + firstRowInLine)
+    let (lastLine, lastRowInLine) = rowLocation(forY: max(0, rect.maxY))
+    let last = min(total, wrapIndex.firstVisualRow(ofLine: lastLine) + lastRowInLine + 1)
     return first < last ? first..<last : 0..<0
   }
 
@@ -3471,7 +3686,6 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if usesMarkdownDocumentLayout {
       drawMarkdownBlockDecorations(
         lines: lines, range: range, textX: textX, visibleRows: rows, buffer: buffer)
-      drawMarkdownMarginLineNumbers(lineRange: range, visibleRows: rows, textX: textX)
     }
 
     if let selection, !selection.isEmpty {
@@ -3484,12 +3698,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       // A huge line is never laid out in full; draw only its visible rows from
       // windows fetched on demand. It always wraps, so it adds no scroll width.
       if let length = hugeLength(lineIndex) {
-        drawHugeLineRows(line: lineIndex, utf16Length: length, textX: textX, visibleRows: rows)
+        drawHugeLineRows(
+          line: lineIndex,
+          utf16Length: length,
+          textX: lineTextColumnX(forLine: lineIndex),
+          visibleRows: rows)
         continue
       }
       let drawn = composedLineForDisplay(line: lineIndex, base: attributedLine)
       widest = max(widest, drawn.size().width)
-      drawVisualRows(of: drawn, line: lineIndex, textX: textX)
+      drawVisualRows(of: drawn, line: lineIndex, textX: lineTextColumnX(forLine: lineIndex))
     }
     drawCaretIfNeeded(lines: lines, range: range, textX: textX)
     if gutter > 0 {
@@ -3522,9 +3740,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     for globalRow in lo..<hi {
       let rowText = hugeRowText(
         line: line, rowIndex: globalRow - firstRow, utf16Length: utf16Length)
-      let y = CGFloat(globalRow) * layout.lineHeight
+      let natural = rowText.size()
+      let y =
+        yOffset(ofVisualRow: globalRow)
+        + Self.rowVerticalInset(rowHeight: layout.lineHeight, naturalHeight: natural.height)
       rowText.draw(
-        with: NSRect(x: textX, y: y, width: rowText.size().width, height: layout.lineHeight),
+        with: NSRect(x: textX, y: y, width: natural.width, height: layout.lineHeight),
         options: [.usesLineFragmentOrigin]
       )
     }
@@ -3534,25 +3755,34 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// wrapping) at its row's y position.
   private func drawVisualRows(of attributed: NSAttributedString, line: Int, textX: CGFloat) {
     let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
-    let firstRow = firstVisualRow(ofLine: line)
+    let lineY = yOffset(ofLine: line)
+    let height = rowHeight(forLine: line)
     let length = attributed.length
     for rowIndex in starts.indices {
       let bounds = rowRange(rowIndex, starts: starts, length: length)
       let rowText = attributed.attributedSubstring(
         from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
-      let y = CGFloat(firstRow + rowIndex) * layout.lineHeight
+      let natural = rowText.size()
+      let y =
+        lineY + CGFloat(rowIndex) * height
+        + Self.rowVerticalInset(rowHeight: height, naturalHeight: natural.height)
       rowText.draw(
-        with: NSRect(x: textX, y: y, width: rowText.size().width, height: layout.lineHeight),
+        with: NSRect(x: textX, y: y, width: natural.width, height: height),
         options: [.usesLineFragmentOrigin]
       )
     }
+  }
+
+  /// Centers a fragment shorter than its row: the slack splits evenly above
+  /// and below instead of pooling at the bottom of the row.
+  nonisolated static func rowVerticalInset(rowHeight: CGFloat, naturalHeight: CGFloat) -> CGFloat {
+    max(0, (rowHeight - naturalHeight) / 2)
   }
 
   private enum MarkdownBlockDecoration: Equatable {
     case bullet
     case ordered(String)
     case task(checked: Bool)
-    case quote(depth: Int)
     case rule
     case fence
   }
@@ -3562,43 +3792,55 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     buffer: any TextDocumentReading
   ) {
     let rawLines = markdownRawLines(for: range, buffer: buffer)
+    drawMarkdownTableBackgrounds(
+      rawLines: rawLines, range: range, visibleRows: visibleRows, buffer: buffer)
     drawMarkdownFenceBackgrounds(
-      rawLines: rawLines, range: range, textX: textX, visibleRows: visibleRows)
+      rawLines: rawLines, range: range, visibleRows: visibleRows)
     for (offset, rawLine) in rawLines.enumerated() {
       let line = range.lowerBound + offset
       guard !isHugeLine(line) else {
         continue
       }
       let state = markdownLineState(forLine: line, in: buffer)
+      let firstRow = firstVisualRow(ofLine: line)
+      let rowCount = max(1, wrapIndex?.visualRowCount(ofLine: line) ?? 1)
+      let lineTextX = lineTextColumnX(forLine: line)
+      if state.quoteDepth > 0 {
+        let startRow = max(firstRow, visibleRows.lowerBound)
+        let endRow = min(firstRow + rowCount, visibleRows.upperBound)
+        if startRow < endRow {
+          drawMarkdownQuoteBar(
+            depth: state.quoteDepth,
+            textX: textX,
+            y: yOffset(ofVisualRow: startRow),
+            height: CGFloat(endRow - startRow) * rowHeight(forLine: line))
+        }
+      }
       guard let decoration = markdownBlockDecoration(for: rawLine, state: state) else {
         continue
       }
-      let firstRow = firstVisualRow(ofLine: line)
-      let rowCount = max(1, wrapIndex?.visualRowCount(ofLine: line) ?? 1)
+      let lineY = yOffset(ofLine: line)
       switch decoration {
       case .bullet:
         guard visibleRows.contains(firstRow) else { continue }
-        drawMarkdownBullet(textX: textX, y: CGFloat(firstRow) * layout.lineHeight)
+        drawMarkdownBullet(
+          markerX: lineTextX - MarkdownDocumentMetrics.markerColumnWidth,
+          y: lineY)
       case .ordered(let marker):
         guard visibleRows.contains(firstRow) else { continue }
-        drawMarkdownOrderedMarker(marker, textX: textX, y: CGFloat(firstRow) * layout.lineHeight)
+        drawMarkdownOrderedMarker(
+          marker,
+          markerX: lineTextX - MarkdownDocumentMetrics.markerColumnWidth,
+          y: lineY)
       case .task(let checked):
         guard visibleRows.contains(firstRow) else { continue }
         drawMarkdownTaskCheckbox(
-          checked: checked, textX: textX, y: CGFloat(firstRow) * layout.lineHeight)
-      case .quote(let depth):
-        let startRow = max(firstRow, visibleRows.lowerBound)
-        let endRow = min(firstRow + rowCount, visibleRows.upperBound)
-        guard startRow < endRow else { continue }
-        drawMarkdownQuoteBar(
-          depth: depth,
-          textX: textX,
-          y: CGFloat(startRow) * layout.lineHeight,
-          height: CGFloat(endRow - startRow) * layout.lineHeight)
+          checked: checked,
+          markerX: lineTextX - MarkdownDocumentMetrics.markerColumnWidth,
+          y: lineY)
       case .rule:
         guard visibleRows.contains(firstRow) else { continue }
-        let y = CGFloat(firstRow) * layout.lineHeight
-        drawMarkdownRule(textX: textX, y: y)
+        drawMarkdownRule(textX: lineTextX, width: lineWrapContentWidth(forLine: line), y: lineY)
       case .fence:
         break
       }
@@ -3621,7 +3863,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private func drawMarkdownFenceBackgrounds(
-    rawLines: [String], range: Range<Int>, textX: CGFloat, visibleRows: Range<Int>
+    rawLines: [String], range: Range<Int>, visibleRows: Range<Int>
   ) {
     guard let buffer = reader else { return }
     let states = markdownLineStates(for: buffer)
@@ -3632,34 +3874,38 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         line >= 0 && line < (states?.count ?? 0)
         ? states?[line] ?? .plain
         : .plain
-      if state.isFenceDelimiter || state.insideFence || state.insideFrontMatter {
+      if state.isFenceDelimiter || state.insideFence || state.insideFrontMatter
+        || state.isIndentedCodeBlock
+      {
         if runStart == nil {
           runStart = line
         }
       } else if let start = runStart {
         drawMarkdownCodeBlockBackground(
-          fromLine: start, toLine: max(start, line - 1), textX: textX, visibleRows: visibleRows)
+          fromLine: start, toLine: max(start, line - 1), visibleRows: visibleRows)
         runStart = nil
       }
     }
     if let start = runStart {
       drawMarkdownCodeBlockBackground(
-        fromLine: start, toLine: max(start, range.upperBound - 1), textX: textX,
-        visibleRows: visibleRows)
+        fromLine: start, toLine: max(start, range.upperBound - 1), visibleRows: visibleRows)
     }
   }
 
-  private func drawMarkdownBullet(textX: CGFloat, y: CGFloat) {
+  private func drawMarkdownBullet(markerX: CGFloat, y: CGFloat) {
     let attributes: [NSAttributedString.Key: Any] = [
       .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
       .foregroundColor: NSColor.secondaryLabelColor.withAlphaComponent(0.75),
     ]
-    NSAttributedString(string: "•", attributes: attributes).draw(
-      with: NSRect(x: textX - 18, y: y, width: 12, height: layout.lineHeight),
+    let bullet = NSAttributedString(string: "•", attributes: attributes)
+    let centeredY =
+      y + Self.rowVerticalInset(rowHeight: layout.lineHeight, naturalHeight: bullet.size().height)
+    bullet.draw(
+      with: NSRect(x: markerX + 6, y: centeredY, width: 12, height: layout.lineHeight),
       options: [.usesLineFragmentOrigin])
   }
 
-  private func drawMarkdownOrderedMarker(_ marker: String, textX: CGFloat, y: CGFloat) {
+  private func drawMarkdownOrderedMarker(_ marker: String, markerX: CGFloat, y: CGFloat) {
     let paragraphStyle = NSMutableParagraphStyle()
     paragraphStyle.alignment = .right
     let attributes: [NSAttributedString.Key: Any] = [
@@ -3667,15 +3913,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       .foregroundColor: NSColor.secondaryLabelColor.withAlphaComponent(0.75),
       .paragraphStyle: paragraphStyle,
     ]
-    NSAttributedString(string: marker, attributes: attributes).draw(
-      with: NSRect(x: textX - 36, y: y + 1, width: 28, height: layout.lineHeight),
+    let number = NSAttributedString(string: marker, attributes: attributes)
+    let centeredY =
+      y + Self.rowVerticalInset(rowHeight: layout.lineHeight, naturalHeight: number.size().height)
+    number.draw(
+      with: NSRect(x: markerX - 4, y: centeredY, width: 22, height: layout.lineHeight),
       options: [.usesLineFragmentOrigin])
   }
 
-  private func drawMarkdownTaskCheckbox(checked: Bool, textX: CGFloat, y: CGFloat) {
+  private func drawMarkdownTaskCheckbox(checked: Bool, markerX: CGFloat, y: CGFloat) {
     let size = MarkdownDocumentMetrics.checkboxSize
     let rect = NSRect(
-      x: textX - 22,
+      x: markerX + 4,
       y: y + (layout.lineHeight - size) / 2,
       width: size,
       height: size)
@@ -3700,11 +3949,129 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     mark.stroke()
   }
 
+  private func drawMarkdownTableBackgrounds(
+    rawLines: [String],
+    range: Range<Int>,
+    visibleRows: Range<Int>,
+    buffer: any TextDocumentReading
+  ) {
+    let states = markdownLineStates(for: buffer)
+    var runStart: Int?
+    for (offset, _) in rawLines.enumerated() {
+      let line = range.lowerBound + offset
+      let state =
+        line >= 0 && line < (states?.count ?? 0)
+        ? states?[line] ?? .plain
+        : .plain
+      if state.isTableRow || state.isTableSeparator {
+        if runStart == nil {
+          runStart = line
+        }
+      } else if let start = runStart {
+        drawMarkdownTableBackground(
+          fromLine: start, toLine: max(start, line - 1), states: states ?? [],
+          visibleRows: visibleRows)
+        runStart = nil
+      }
+    }
+    if let start = runStart {
+      drawMarkdownTableBackground(
+        fromLine: start, toLine: max(start, range.upperBound - 1), states: states ?? [],
+        visibleRows: visibleRows)
+    }
+  }
+
+  /// Draws the table's three rules (booktab style): above the header, through
+  /// the vertical center of the delimiter row, and under the last body row.
+  /// No boxes, no fills, no column lines — structure comes from the rules,
+  /// the column gutters, and the alignment of the cells themselves.
+  private func drawMarkdownTableBackground(
+    fromLine startLine: Int,
+    toLine endLine: Int,
+    states: [MarkdownLineStyleState],
+    visibleRows: Range<Int>
+  ) {
+    guard
+      let frame = markdownTableFrameForTesting(
+        fromLine: startLine, toLine: endLine, states: states, visibleRows: visibleRows),
+      let ruleYs = markdownTableRuleYs(
+        fromLine: startLine, toLine: endLine, states: states, visibleRows: visibleRows),
+      !ruleYs.isEmpty
+    else {
+      return
+    }
+    MarkdownDocumentMetrics.tableRuleColor.setStroke()
+    let path = NSBezierPath()
+    path.lineWidth = 1
+    for y in ruleYs {
+      path.move(to: NSPoint(x: frame.minX, y: y))
+      path.line(to: NSPoint(x: frame.minX + frame.width, y: y))
+    }
+    path.stroke()
+  }
+
+  func markdownTableRuleYsForTesting(
+    fromLine startLine: Int,
+    toLine endLine: Int,
+    visibleRows: Range<Int>
+  ) -> [CGFloat]? {
+    guard let buffer = reader else { return nil }
+    return markdownTableRuleYs(
+      fromLine: startLine,
+      toLine: endLine,
+      states: markdownLineStates(for: buffer) ?? [],
+      visibleRows: visibleRows)
+  }
+
+  private func markdownTableRuleYs(
+    fromLine startLine: Int,
+    toLine endLine: Int,
+    states: [MarkdownLineStyleState],
+    visibleRows: Range<Int>
+  ) -> [CGFloat]? {
+    guard startLine >= 0, startLine < states.count, endLine >= startLine else { return nil }
+    var top = yOffset(ofLine: startLine)
+    var bottom =
+      yOffset(ofLine: endLine)
+      + CGFloat(max(1, wrapIndex?.visualRowCount(ofLine: endLine) ?? 1))
+      * rowHeight(forLine: endLine)
+    if markdownLineIsBlank(startLine - 1) {
+      top -= MarkdownDocumentMetrics.tableRuleBreath
+    }
+    if markdownLineIsBlank(endLine + 1) {
+      bottom += MarkdownDocumentMetrics.tableRuleBreath
+    }
+
+    var rules = [top]
+    let separatorLine = (startLine...endLine).first { line in
+      line < states.count && states[line].isTableSeparator
+    }
+    if let separatorLine {
+      rules.append(yOffset(ofLine: separatorLine) + rowHeight(forLine: separatorLine) / 2)
+    }
+    rules.append(bottom)
+
+    let tolerance = MarkdownDocumentMetrics.tableRuleBreath + 0.5
+    let visibleTop = yOffset(ofVisualRow: visibleRows.lowerBound)
+    let visibleBottom = yOffset(ofVisualRow: visibleRows.upperBound)
+    return rules.filter { $0 >= visibleTop - tolerance && $0 <= visibleBottom + tolerance }
+  }
+
+  /// Whether `line` exists and contains only whitespace — the condition under
+  /// which the table's outer rules may breathe into it.
+  private func markdownLineIsBlank(_ line: Int) -> Bool {
+    guard let buffer = reader, line >= 0, line < buffer.lineCount else { return false }
+    let text = buffer.text(
+      forLineRange: line, count: 1, maxBytesPerLine: maximumFetchedBytesPerLine)
+    return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
   private func drawMarkdownQuoteBar(depth: Int, textX: CGFloat, y: CGFloat, height: CGFloat) {
     MarkdownDocumentMetrics.accentColor.setFill()
     for level in 0..<max(1, min(depth, 3)) {
       NSRect(
-        x: textX - MarkdownDocumentMetrics.quoteBarInset - CGFloat(level) * 8,
+        x: textX + CGFloat(level) * MarkdownDocumentMetrics.quoteIndentWidth
+          + (MarkdownDocumentMetrics.quoteIndentWidth - MarkdownDocumentMetrics.quoteBarWidth) / 2,
         y: y + 1,
         width: MarkdownDocumentMetrics.quoteBarWidth,
         height: max(0, height - 2)
@@ -3723,30 +4090,21 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private func markdownBlockDecoration(
     for line: String, state: MarkdownLineStyleState
   ) -> MarkdownBlockDecoration? {
-    guard !state.insideFrontMatter, !state.insideFence, !state.isSetextUnderline else { return nil }
-    let nsLine = line as NSString
+    guard !state.insideFrontMatter, !state.insideFence, !state.isSetextUnderline,
+      !state.isReferenceDefinition, !state.isIndentedCodeBlock
+    else { return nil }
+    let body = markdownQuoteBody(in: line)
+    let nsLine = body as NSString
     var index = 0
     while index < nsLine.length, nsLine.character(at: index) == 32 {
       index += 1
     }
-    let trimmed = line.trimmingCharacters(in: .whitespaces)
-    if state.isFenceDelimiter, TextDocumentSyntaxHighlighter.isMarkdownFenceLine(line) {
+    let trimmed = body.trimmingCharacters(in: .whitespaces)
+    if state.isFenceDelimiter, TextDocumentSyntaxHighlighter.isMarkdownFenceLine(body) {
       return .fence
     }
     if isMarkdownThematicBreak(trimmed) {
       return .rule
-    }
-    if index < nsLine.length, nsLine.character(at: index) == 62 {
-      var depth = 0
-      var cursor = index
-      while cursor < nsLine.length, nsLine.character(at: cursor) == 62 {
-        depth += 1
-        cursor += 1
-        if cursor < nsLine.length, nsLine.character(at: cursor) == 32 {
-          cursor += 1
-        }
-      }
-      return .quote(depth: depth)
     }
     if index + 1 < nsLine.length, Self.isMarkdownBulletMarker(nsLine.character(at: index)),
       nsLine.character(at: index + 1) == 32
@@ -3778,20 +4136,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private func drawMarkdownCodeBlockBackground(
-    fromLine startLine: Int, toLine endLine: Int, textX: CGFloat, visibleRows: Range<Int>
+    fromLine startLine: Int, toLine endLine: Int, visibleRows: Range<Int>
   ) {
-    let startRow = firstVisualRow(ofLine: startLine)
-    let endRow =
-      firstVisualRow(ofLine: endLine) + max(1, wrapIndex?.visualRowCount(ofLine: endLine) ?? 1)
-    guard endRow > visibleRows.lowerBound, startRow < visibleRows.upperBound else { return }
-    let y = CGFloat(max(startRow, visibleRows.lowerBound)) * layout.lineHeight + 2
-    let bottom = CGFloat(min(endRow, visibleRows.upperBound)) * layout.lineHeight - 2
-    let rect = NSRect(
-      x: textX - 12,
-      y: y,
-      width: wrapContentWidth + 24,
-      height: max(0, bottom - y)
-    )
+    guard
+      let rect = markdownCodeBlockFrameForTesting(
+        fromLine: startLine, toLine: endLine, visibleRows: visibleRows)
+    else {
+      return
+    }
     MarkdownDocumentMetrics.codeBackground.setFill()
     NSBezierPath(
       roundedRect: rect, xRadius: MarkdownDocumentMetrics.codeBlockCornerRadius,
@@ -3800,12 +4152,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     .fill()
   }
 
-  private func drawMarkdownRule(textX: CGFloat, y: CGFloat) {
+  private func drawMarkdownRule(textX: CGFloat, width: CGFloat, y: CGFloat) {
     MarkdownDocumentMetrics.ruleColor.setStroke()
     let path = NSBezierPath()
     let lineY = y + layout.lineHeight / 2
     path.move(to: NSPoint(x: textX, y: lineY))
-    path.line(to: NSPoint(x: textX + wrapContentWidth, y: lineY))
+    path.line(to: NSPoint(x: textX + width, y: lineY))
     path.lineWidth = 1
     path.stroke()
   }
@@ -3814,6 +4166,28 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     guard trimmed.count >= 3 else { return false }
     let characters = Set(trimmed)
     return characters.count == 1 && ["-", "*", "_"].contains(characters.first ?? " ")
+  }
+
+  private func markdownQuoteBody(in line: String) -> String {
+    let nsLine = line as NSString
+    var index = 0
+    while index < nsLine.length {
+      let markerStart = index
+      var spaces = 0
+      while spaces < 3, index < nsLine.length, nsLine.character(at: index) == 32 {
+        spaces += 1
+        index += 1
+      }
+      guard index < nsLine.length, nsLine.character(at: index) == 62 else {
+        index = markerStart
+        break
+      }
+      index += 1
+      if index < nsLine.length, nsLine.character(at: index) == 32 {
+        index += 1
+      }
+    }
+    return nsLine.substring(from: index)
   }
 
   /// Fills the selected column span on each visible line, behind the text. Lines
@@ -3827,6 +4201,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     (focused ? NSColor.selectedTextBackgroundColor : .unemphasizedSelectedTextBackgroundColor)
       .setFill()
     for line in range {
+      let lineTextX = lineTextColumnX(forLine: line)
       let attributed = lines[line - range.lowerBound]
       // A fully-selected line includes its trailing newline; mark it on the line's
       // last visual row.
@@ -3838,11 +4213,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       if let length = hugeLength(line) {
         drawHugeSelectionHighlight(
           line: line, utf16Length: length, span: span, includesNewline: includesNewline,
-          textX: textX, visibleRows: visibleRows)
+          textX: lineTextX, visibleRows: visibleRows)
         continue
       }
       let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
-      let firstRow = firstVisualRow(ofLine: line)
+      let lineY = yOffset(ofLine: line)
+      let height = rowHeight(forLine: line)
       let length = attributed.length
       for rowIndex in starts.indices {
         let bounds = rowRange(rowIndex, starts: starts, length: length)
@@ -3852,14 +4228,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         guard segmentEnd > segmentStart || (includesNewline && isLastRow) else { continue }
         let rowText = attributed.attributedSubstring(
           from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
-        let xStart = textX + xOffset(forColumn: segmentStart - bounds.start, in: rowText)
-        var xEnd = textX + xOffset(forColumn: segmentEnd - bounds.start, in: rowText)
+        let xStart = lineTextX + xOffset(forColumn: segmentStart - bounds.start, in: rowText)
+        var xEnd = lineTextX + xOffset(forColumn: segmentEnd - bounds.start, in: rowText)
         if includesNewline, isLastRow {
           xEnd += newlineSelectionWidth
         }
         NSRect(
-          x: xStart, y: CGFloat(firstRow + rowIndex) * layout.lineHeight,
-          width: max(0, xEnd - xStart), height: layout.lineHeight
+          x: xStart, y: lineY + CGFloat(rowIndex) * height,
+          width: max(0, xEnd - xStart), height: height
         ).fill()
       }
     }
@@ -3893,7 +4269,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         xEnd += newlineSelectionWidth
       }
       NSRect(
-        x: xStart, y: CGFloat(globalRow) * layout.lineHeight,
+        x: xStart, y: yOffset(ofVisualRow: globalRow),
         width: max(0, xEnd - xStart), height: layout.lineHeight
       ).fill()
     }
@@ -3916,7 +4292,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // on the composing line — handled above).
     let displayed = composedLineForDisplay(line: line, base: lines[line - range.lowerBound])
     drawCaret(
-      forColumn: selection.head.columnUTF16, line: line, attributed: displayed, textX: textX)
+      forColumn: selection.head.columnUTF16, line: line, attributed: displayed,
+      textX: lineTextColumnX(forLine: line))
   }
 
   /// Draws the caret within the marked (composing) text at the input method's
@@ -3933,7 +4310,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // The caret sits inside the marked run; map it to the composed line's column.
     drawCaret(
       forColumn: column + within, line: line,
-      attributed: composedLineForDisplay(line: line, base: base), textX: textX)
+      attributed: composedLineForDisplay(line: line, base: base),
+      textX: lineTextColumnX(forLine: line))
   }
 
   /// Draws a 1.5pt caret at `column` on `line`, on the correct visual row.
@@ -3942,65 +4320,100 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   ) {
     let geometry = caretGeometry(forColumn: column, line: line, attributed: attributed)
     let x = textX + geometry.x
-    let y = CGFloat(geometry.visualRow) * layout.lineHeight
+    let y = yOffset(ofVisualRow: geometry.visualRow)
     NSColor.textColor.setFill()
-    NSRect(x: x, y: y, width: 1.5, height: layout.lineHeight).fill()
-  }
-
-  private func drawMarkdownMarginLineNumbers(
-    lineRange: Range<Int>,
-    visibleRows: Range<Int>,
-    textX: CGFloat
-  ) {
-    guard usesMarkdownDocumentLayout, !lineRange.isEmpty else { return }
-    let paragraphStyle = NSMutableParagraphStyle()
-    paragraphStyle.alignment = .right
-    for line in markdownMarginLineNumbersForTesting(lineRange: lineRange, visibleRows: visibleRows)
-    {
-      let firstRow = firstVisualRow(ofLine: line)
-      let attributes: [NSAttributedString.Key: Any] = [
-        .font: markdownLineNumberFont,
-        .foregroundColor: NSColor.tertiaryLabelColor.withAlphaComponent(0.36),
-        .paragraphStyle: paragraphStyle,
-      ]
-      let number = NSAttributedString(string: "\(line + 1)", attributes: attributes)
-      let x = textX - markdownLineNumberGap - markdownLineNumberRailWidth
-      number.draw(
-        with: NSRect(
-          x: x,
-          y: CGFloat(firstRow) * layout.lineHeight,
-          width: markdownLineNumberRailWidth,
-          height: layout.lineHeight),
-        options: [.usesLineFragmentOrigin, .usesFontLeading]
-      )
-    }
-  }
-
-  func markdownMarginLineNumbersForTesting(
-    lineRange: Range<Int>,
-    visibleRows: Range<Int>
-  ) -> [Int] {
-    guard usesMarkdownDocumentLayout, !lineRange.isEmpty else { return [] }
-    return lineRange.filter { line in
-      visibleRows.contains(firstVisualRow(ofLine: line))
-    }
-  }
-
-  func markdownLineNumberRailFrameForTesting(textX: CGFloat) -> NSRect {
-    NSRect(
-      x: textX - markdownLineNumberGap - markdownLineNumberRailWidth,
-      y: 0,
-      width: markdownLineNumberRailWidth,
-      height: layout.lineHeight
-    )
+    NSRect(x: x, y: y, width: 1.5, height: rowHeight(forLine: line)).fill()
   }
 
   func markdownWrapContentWidthForTesting() -> CGFloat {
     wrapContentWidth
   }
 
+  func endpointYForTesting(line: Int) -> CGFloat? {
+    guard line >= 0, line < lineCount else { return nil }
+    return yOffset(ofLine: line)
+  }
+
+  func markdownWrapContentWidthForTesting(line: Int) -> CGFloat {
+    lineWrapContentWidth(forLine: line)
+  }
+
+  func markdownOuterContentWidthForTesting(line: Int) -> CGFloat {
+    lineOuterContentWidth(forLine: line)
+  }
+
   func markdownTextColumnXForTesting() -> CGFloat {
     textColumnX
+  }
+
+  func markdownTextColumnXForTesting(line: Int) -> CGFloat {
+    lineTextColumnX(forLine: line)
+  }
+
+  func markdownOuterColumnXForTesting(line: Int) -> CGFloat {
+    lineOuterColumnX(forLine: line)
+  }
+
+  func markdownCodeBlockFrameForTesting(
+    fromLine startLine: Int,
+    toLine endLine: Int,
+    visibleRows: Range<Int>
+  ) -> NSRect? {
+    let startRow = firstVisualRow(ofLine: startLine)
+    let endRow =
+      firstVisualRow(ofLine: endLine) + max(1, wrapIndex?.visualRowCount(ofLine: endLine) ?? 1)
+    guard endRow > visibleRows.lowerBound, startRow < visibleRows.upperBound else { return nil }
+    let y = yOffset(ofVisualRow: max(startRow, visibleRows.lowerBound)) + 2
+    let bottom = yOffset(ofVisualRow: min(endRow, visibleRows.upperBound)) - 2
+    guard bottom > y else { return nil }
+    return NSRect(
+      x: lineOuterColumnX(forLine: startLine),
+      y: y,
+      width: lineOuterContentWidth(forLine: startLine),
+      height: bottom - y
+    )
+  }
+
+  func markdownTableFrameForTesting(
+    fromLine startLine: Int,
+    toLine endLine: Int,
+    visibleRows: Range<Int>
+  ) -> NSRect? {
+    guard let buffer = reader else { return nil }
+    return markdownTableFrameForTesting(
+      fromLine: startLine,
+      toLine: endLine,
+      states: markdownLineStates(for: buffer) ?? [],
+      visibleRows: visibleRows)
+  }
+
+  func markdownTableFrameForTesting(
+    fromLine startLine: Int,
+    toLine endLine: Int,
+    states: [MarkdownLineStyleState],
+    visibleRows: Range<Int>
+  ) -> NSRect? {
+    guard startLine >= 0, startLine < states.count else { return nil }
+    let columns = states[startLine].tableColumns
+    guard !columns.isEmpty else { return nil }
+    let startRow = firstVisualRow(ofLine: startLine)
+    let endRow =
+      firstVisualRow(ofLine: endLine) + max(1, wrapIndex?.visualRowCount(ofLine: endLine) ?? 1)
+    guard endRow > visibleRows.lowerBound, startRow < visibleRows.upperBound else { return nil }
+    let y = yOffset(ofVisualRow: max(startRow, visibleRows.lowerBound))
+    let bottom = yOffset(ofVisualRow: min(endRow, visibleRows.upperBound))
+    guard bottom > y else { return nil }
+    let contentWidth =
+      columns.reduce(CGFloat(0)) { $0 + $1.width }
+      + MarkdownDocumentMetrics.tableColumnGutter * CGFloat(max(0, columns.count - 1))
+      + MarkdownDocumentMetrics.tableEdgeInset * 2
+    let width = min(contentWidth, lineOuterContentWidth(forLine: startLine))
+    return NSRect(
+      x: lineOuterColumnX(forLine: startLine),
+      y: y,
+      width: width,
+      height: bottom - y
+    )
   }
 
   /// The attributed string to draw for `line`: the base line with any in-progress
@@ -4055,7 +4468,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       number.draw(
         with: NSRect(
           x: originX + max(0, width - GutterMetrics.trailingPadding - numberWidth),
-          y: CGFloat(firstVisualRow(ofLine: line)) * layout.lineHeight,
+          y: yOffset(ofLine: line),
           width: numberWidth,
           height: layout.lineHeight
         ),
@@ -4199,8 +4612,10 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
 
   func firstRectInViewCoordinates(forCharacterRange range: NSRange) -> NSRect {
     let geometry: CaretGeometry
+    let rectLine: Int
     if let composition, let anchor = utf16Offset(of: composition.anchor) {
       let line = composition.anchor.line
+      rectLine = line
       let base = attributedLine(forLine: line)
       let column = max(0, min(composition.anchor.columnUTF16, base.length))
       let markedText = composition.text as NSString
@@ -4212,6 +4627,7 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
       )
     } else {
       let caret = selection?.head ?? navigationHead
+      rectLine = caret.line
       let attributed = attributedLine(forLine: caret.line)
       geometry = caretGeometry(
         forColumn: caret.columnUTF16,
@@ -4220,10 +4636,10 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
       )
     }
     return NSRect(
-      x: textColumnX + geometry.x,
-      y: CGFloat(geometry.visualRow) * layout.lineHeight,
+      x: lineTextColumnX(forLine: rectLine) + geometry.x,
+      y: yOffset(ofVisualRow: geometry.visualRow),
       width: 1,
-      height: layout.lineHeight)
+      height: rowHeight(forLine: rectLine))
   }
 
   func characterIndex(for point: NSPoint) -> Int {
