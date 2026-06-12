@@ -245,4 +245,4 @@ Entities: &amp; &lt; &gt; &copy;
 - [ ] Code fences do not apply Markdown styling inside.
 - [ ] Links are readable without hiding the destination forever.
 - [ ] Front matter is visually distinct.
-- [ ] Markdown markers are hidden at rest and revealed when editing.
+- [ ] Markdown markers are removed from the rendered view.

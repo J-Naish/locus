@@ -73,25 +73,32 @@ Should support:
 
 ## Markdown
 
+Markdown opens as a typeset rendered document that is edited in place
+(see `docs/specs/markdown-document-view.md` and ADR 0009): only the final
+result renders — no Markdown syntax visible, no space reserved for it —
+while light editing works directly in the rendered page.
+
 Must support:
 
-- open Markdown files
-- edit Markdown files
-- save Markdown as Markdown
-- automatically reflect disk changes for an open Markdown file, including while
-  the editor has unsaved text; disk is treated as the latest source of truth in
-  the prototype
-- common formatting such as headings, bold, lists, quotes, and code blocks
-- lightweight syntax highlighting for common readability cues such as headings,
-  inline code, links, and list markers
-- comfortable Japanese text input
+- open Markdown files in the rendered document view
+- render only the final result — headings, bold, lists, quotes, checklists,
+  and code blocks typeset, with no Markdown syntax visible and no space
+  reserved for it
+- light editing in the rendered view: typing, deleting, list continuation,
+  heading/list/quote structure changes via Backspace and Tab, emphasis via
+  Cmd+B/I, checkbox toggling — every edit a plain change to the underlying
+  file
+- save Markdown as Markdown; comfortable Japanese text input
+- automatically reflect disk changes for an open Markdown file; disk is the
+  source of truth
+- margin line numbers that map 1:1 to source lines
+- text selection; copy yields raw Markdown source
 
 Should support:
 
-- rich document-like editing
-- table and checklist support
-- frontmatter support
-- external change synchronization
+- frontmatter presentation
+- a raw Markdown editor surface (optional, later)
+- table presentation
 - diff view
 
 ## Structured Text and Code Files
@@ -104,7 +111,7 @@ Must support:
 - open common extensionless text files such as `.gitignore`, `.env`,
   `README`, `Dockerfile`, and similar local tool configuration files
 - open common source code and script files as plain text
-- edit these files with the same level of care as Markdown
+- edit these files as first-class editable documents
 - preserve valid plain-text file formats on save
 - automatically reflect disk changes for an open text document, including while
   the editor has unsaved text; disk is treated as the latest source of truth in

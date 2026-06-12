@@ -31,7 +31,7 @@ enum WorkspaceDocumentSurfaceSupport {
   static func surfaceKind(for entry: WorkspaceEntry) -> WorkspaceDocumentSurfaceKind {
     switch entry.kind {
     case .file, .symlinkToFile:
-      if WorkspaceTextDocumentSupport.canEdit(entry) {
+      if WorkspaceTextDocumentSupport.canOpenInTextSurface(entry) {
         return .editableText
       }
       if canRenderImageInPlace(entry) {

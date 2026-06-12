@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted.
+Accepted; the editing-time concealment and caret-interaction rules are
+superseded by ADR 0008 (the Markdown view is now a read-only rendered
+document). The rendering model — live styling over the Rust buffer, byte
+fidelity, the Rust-core classification direction — stands.
 
 ## Context
 

@@ -4,9 +4,15 @@ import XCTest
 @testable import Locus
 
 final class WorkspaceTextDocumentSupportTests: XCTestCase {
-  func testMarkdownAndStructuredTextCanBeEdited() {
+  func testMarkdownCanOpenInTextSurfaceAndCanBeEditedInLocus() {
     XCTAssertTrue(
       WorkspaceTextDocumentSupport.canEdit(makeEntry(name: "draft.md", fileType: .markdown)))
+    XCTAssertTrue(
+      WorkspaceTextDocumentSupport.canOpenInTextSurface(
+        makeEntry(name: "draft.md", fileType: .markdown)))
+  }
+
+  func testStructuredTextPlainTextAndCodeCanBeEdited() {
     XCTAssertTrue(
       WorkspaceTextDocumentSupport.canEdit(
         makeEntry(name: "settings.yaml", fileType: .structuredText)))
@@ -46,6 +52,11 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
   func testFileSymlinksUseTargetFileTypeForEditability() {
     XCTAssertTrue(
       WorkspaceTextDocumentSupport.canEdit(
+        makeEntry(name: "linked-notes", kind: .symlinkToFile, fileType: .markdown)
+      )
+    )
+    XCTAssertTrue(
+      WorkspaceTextDocumentSupport.canOpenInTextSurface(
         makeEntry(name: "linked-notes", kind: .symlinkToFile, fileType: .markdown)
       )
     )
@@ -201,18 +212,81 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       storage.resolvedFont(at: 2)?.fontDescriptor.symbolicTraits.contains(.bold), true)
   }
 
-  func testMarkdownLineRevealShowsConcealedMarkersForEditing() throws {
+  func testMarkdownRenderedLineRemovesHeadingMarkerAndScalesTitle() throws {
     let line = TextDocumentSyntaxHighlighter.highlightedLine(
       "# Quarterly review",
       syntax: .markdown,
-      font: TextDocumentSyntax.markdown.font,
-      markdownRevealContext: MarkdownRevealContext(activeColumnUTF16: 2)
+      font: TextDocumentSyntax.markdown.font
     )
 
-    XCTAssertGreaterThan(try XCTUnwrap(line.foregroundColor(at: 0)).alphaComponent, 0.1)
+    XCTAssertEqual(line.string, "Quarterly review")
     XCTAssertEqual(
-      line.resolvedFont(at: 2)?.pointSize,
+      line.resolvedFont(at: 0)?.pointSize,
       MarkdownDocumentMetrics.headingFont(level: 1).pointSize)
+  }
+
+  func testMarkdownRenderedLineRemovesListTaskAndOrderedMarkers() {
+    let typography = MarkdownTypography(baseFont: TextDocumentSyntax.markdown.font)
+
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        "- [ ] Update the summary",
+        font: TextDocumentSyntax.markdown.font,
+        typography: typography),
+      "Update the summary")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        "1) Review the numbers",
+        font: TextDocumentSyntax.markdown.font,
+        typography: typography),
+      "Review the numbers")
+  }
+
+  func testMarkdownRenderedInlineRemovesFormattingMarkers() {
+    let line = TextDocumentSyntaxHighlighter.highlightedLine(
+      "Use **bold** and `code` in [docs](https://example.com/a*b*c)",
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertEqual(line.string, "Use bold and code in docs")
+    XCTAssertEqual(
+      line.resolvedFont(in: line.string, matching: "bold")?.fontDescriptor.symbolicTraits
+        .contains(.bold),
+      true)
+    XCTAssertEqual(
+      line.resolvedFont(in: line.string, matching: "code")?.fontDescriptor.symbolicTraits
+        .contains(.monoSpace),
+      true)
+  }
+
+  func testMarkdownRenderedFenceLineShowsOnlyInfoString() {
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        "```yaml",
+        font: TextDocumentSyntax.markdown.font,
+        state: MarkdownLineStyleState(isFenceDelimiter: true)),
+      "yaml")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        "```",
+        font: TextDocumentSyntax.markdown.font,
+        state: MarkdownLineStyleState(insideFence: true, isFenceDelimiter: true)),
+      "")
+  }
+
+  func testMarkdownUnclosedFenceStaysLiteralUntilClosed() {
+    let lines = ["```yaml", "status: draft"]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertFalse(states[0].isFenceDelimiter)
+    XCTAssertFalse(states[1].insideFence)
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[0],
+        font: TextDocumentSyntax.markdown.font,
+        state: states[0]),
+      "```yaml")
   }
 
   func testMarkdownDocumentStylingConcealsTaskMarkerButKeepsTextReadable() throws {

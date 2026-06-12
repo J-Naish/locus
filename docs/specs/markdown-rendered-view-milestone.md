@@ -1,259 +1,238 @@
-# Markdown Rendered View — Current Milestone Plan
+# Markdown Rendered View — Editing Restoration Plan
 
-Execution plan for the next implementation round on the Markdown document
-view. Design authority is [markdown-document-view.md](markdown-document-view.md)
-(the contract rules cited below live there); this file sequences the
-concrete work and is deleted or absorbed once the round lands. Line
-references are against the current working tree.
+Execution plan for restoring light editing to the rendered Markdown view,
+per [ADR 0009](../adr/0009-markdown-display-space-editing.md): Notion-like
+— markers never visible, editing in display space through a `DisplayMap`.
+Design authority is [markdown-document-view.md](markdown-document-view.md)
+(the editing contract lives there). Line references are against the
+current working tree.
 
-Four workstreams. W1 and W2 are small and land first; W3 is the core; W4's
-splice work is a prerequisite for W3's reveal mechanics, so its first two
-items land before W3.4. Repository TDD rules apply to every item: failing
-test first, smallest change, suite green, `scripts/perf-smoke.sh` at each
-workstream boundary, and judge feel in Release (`make run-release`) — the
-Debug Rust core is ~10x slower.
+Standing rules: failing test first, smallest change, suite green,
+`scripts/perf-smoke.sh` at workstream boundaries, feel judged in Release.
+Japanese IME behavior is release-gating, not optional polish.
 
-## W1 — remove the document status badge
+Current-state facts the plan builds on (verified):
 
-Product decision: the page carries no persistent chrome beyond line
-numbers. Delete entirely (all sites verified; nothing else references
-these symbols):
+- The rendered transformation is real string removal
+  (`renderedMarkdownBlock` strips prefixes via `substring(from:)`;
+  `replaceRenderedMatches` rewrites inline spans with
+  `replaceCharacters(in:with:)` tracking a `locationDelta`), with
+  decorations drawn separately. **No DisplayMap exists** — the mapping is
+  implicit and discarded.
+- Two parallel styling pipelines exist: the rendered path (viewer) and
+  the legacy `muteMarkdownSyntax`/`styleMarkdownLine` concealment path
+  (now unreachable for markdown). Drift risk; the legacy path dies this
+  round.
+- Read-only is one gate: `if syntax == .markdown { return false }`
+  (VirtualizedTextDocumentView.swift:46) plus `canEdit` excluding
+  `.markdown` (WorkspaceTextDocumentSupport.swift:9; consumed by
+  `isSaveDisabled`, the conflict branch, tests).
+- For viewing, the display-space coordinate model is already
+  self-consistent (measure, draw, selection rects, copy all use the
+  rendered string). The buffer crossings that editing adds are exactly
+  `utf16Offset(of:)` (display→buffer) and `finishEdit`'s caret restore
+  (buffer→display); IME's `composedLineForDisplay` splices by
+  buffer-column-as-rendered-index and needs the map.
+- The peel matrix, `toggleMarkdownEmphasis`, and their tests were deleted
+  in the read-only round — recover them from version history / the
+  working diff and adapt to display coordinates; do not reimplement from
+  scratch.
+- Scroll-key handling for read-only documents and the
+  `if !isEditable` Space guard already coexist with editing (Space falls
+  through to self-insert when editable).
 
-- `LineRenderingTextView.swift`: the `drawMarkdownStatusBadge()` call
-  (:3277), `drawMarkdownStatusBadge()` (:3673–3698),
-  `markdownStatusTextForTesting()` (:3700–3702), `markdownStatusText()`
-  (:3704–3721), `compactByteCount(_:)` (:3723–3730).
-- `TextViewportLayoutTests.swift`: `testMarkdownStatusShowsCaretLineDocumentLinesAndByteSize`
-  (:934–941), `testMarkdownStatusShowsSelectedLineRange` (:943–950).
-- Keep `markdownLineNumberFont` (:271) — the margin numbers still use it.
+## E0 — commit the viewer round, then requirement docs
 
-## W2 — stabilize margin line numbers (always visible)
+- **Commit the working tree first.** The entire viewer round (14 modified
+  files + the untracked ADRs) is uncommitted; this plan's
+  recover-from-history references and any rollback point depend on it
+  being committed before E1 starts.
+- Update [core-feature-scope.md](core-feature-scope.md) (Markdown Must:
+  light editing in the rendered view returns; raw editor stays Should)
+  and the roadmap Phase 1C wording. Small doc commit.
 
-The current intent-driven visibility is the instability the user reports:
-`markdownLineNumbersTransientlyVisible` starts false on open and nothing
-reveals until the first `mouseMoved`/`viewportDidScroll` event ("numbers
-appear ~0.5 s after open"), and the 0.6 s hide timer then removes every
-non-caret number ("numbers sometimes disappear"). Replace with the
-always-visible design (spec, "Line numbers"):
+## E1 — DisplayMap as a transformation output; one pipeline
 
-- Delete the state machine: `markdownLineNumbersTransientlyVisible`,
-  `markdownLineNumberHideTimer` (:275–277), `markdownLineNumberFadeDelay`,
-  `revealMarkdownLineNumbersTemporarily()` /
-  `scheduleMarkdownLineNumberHide()` (:1479–1501) and their call sites in
-  `mouseMoved` (:1372), `mouseExited` (:1385), `viewportDidScroll`
-  (:1472), `didSetDocument` (:1437–1439). The
-  `markdownLineNumberWidth`/`Gap` constants (:273–274) are superseded by
-  the rail metrics below.
-- `drawMarkdownMarginLineNumbers` (:3641+): draw every band line
-  unconditionally; right-align the digits (left-aligned today); caret line
-  tertiary, others quaternary — **color-only** emphasis, same font weight
-  (a weight change would pop on every caret move).
-- **Reserve the rail symmetrically.** Today numbers draw at `textX − 56`
-  and clip outside the card below ≈712 pt viewport width. Define
-  `railWidth` from `max(3, digitCount(lineCount))` (the 3-digit floor
-  keeps 999→1000 from re-railing mid-keystroke) and compute the measure as
-  `min(600, width − 2 × max(32, railWidth + 10))` with the column centered
-  in the **full** card width — symmetric reservation, so the column never
-  drifts off optical center. Include the rail in the width-equality
-  guards so a rail-width change triggers a re-measure. The rail's
-  10 pt gap must also clear the quote-bar/code-card overhang (bars at
-  `textX − 14 − 8·depth`, card to `textX − 12`): the number's right edge
-  ends left of `textX − 38` (3-bar depth) on quoted lines, or simply give
-  the rail gap a 40 pt minimum on lines carrying margin decorations.
+- The transformation's removals are NOT recordable as-is — this is real
+  mapping work, not bookkeeping:
+  - `replaceRenderedMatches` runs seven inline passes, each matching the
+    already-mutated string from prior passes, so neither pass-input nor
+    current-string coordinates are buffer coordinates. Record each
+    removal in pass-input coordinates and convert through the
+    accumulated map at record time (block-prefix strip composed first),
+    inserting into a position-sorted structure. Links and images yield
+    *two* removed ranges each (`[` and `](url)`).
+  - The fence-line and frontmatter-delimiter paths derive display text by
+    double trimming with Character arithmetic and compute no offsets;
+    rewrite `markdownFenceInfo`/`markdownFenceInfoText` to produce UTF-16
+    buffer ranges.
+- Output schema is **per-line span records**, not a flat removal list:
+  kind (prefix / code / bold / italic / bold-italic / strike / link /
+  image / escape), content display range, opening/closing removed buffer
+  ranges, and the URL for links (currently matched and discarded). The
+  removal list and `displayColumn(forBuffer:)` /
+  `bufferColumn(forDisplay:affinity:)` derive from the records. Spec
+  rule 5 (span cleanup) and E6 (link opening) are unimplementable
+  without this.
+- **Fence closure requirement** (spec change): the classifier treats an
+  unclosed fence as literal text — typing ``` ``` ``` must never restyle
+  the rest of the document per keystroke; the block converts once when
+  the closing fence lands.
+- Delete the legacy concealment pipeline: `muteMarkdownSyntax`,
+  `styleMarkdownLine`'s markdown branch and inline appliers, and their
+  conceal-era tests — one styling path only.
+- Pure-function tests: per-construct span records and maps; round-trip
+  properties (display→buffer→display identity; monotonicity; boundary
+  affinity); a line where a later pass's removal precedes an earlier
+  pass's (`*i* ` + `` `c` `` + `**b**` on one line) — the compounding
+  case; marker-only lines (empty display); CRLF; clipped/huge lines
+  (identity map by policy); unclosed-fence literal rendering.
 
-Tests (none exist today): all band lines numbered with no event/timer
-dependency; wrapped lines numbered on the first visual row only; rail fit
-at 1–6 digits and at `documentSurfaceMinimumWidth`; caret-line emphasis;
-no rail churn at the 3-digit floor; no overlap with quote bars at depth 3;
-read-only Markdown keeps the classic gutter.
+## E2 — editable routing returns
 
-## W3 — full concealment: render only the final document
+- Remove the markdown gate (VirtualizedTextDocumentView.swift:46);
+  `canEdit` includes `.markdown` again. Save / dirty / conflict banner
+  re-engage through existing machinery (tests). Menu validation flips
+  back automatically; verify.
+- Caret returns (display space — caret x/height math already operates on
+  the rendered string). Restore the caret-line number emphasis (tertiary)
+  dropped in the viewer round.
 
-Replace marker *muting* with marker *concealment*, per the spec contract
-(rules 1–11). Two invariants are the acceptance bar:
+## E3 — display-space editing core
 
-> **Edit visibility.** Every concealed character is (a) caret-unreachable
-> (block prefixes: clamping + Backspace peel; word-deletes clamp to
-> content start), or (b) revealed while the caret/selection touches its
-> span (inline markers *and escapes*, boundary-inclusive), or (c) revealed
-> while the caret is on its line (whole-marker lines: thematic breaks,
-> setext underlines, fence delimiters, frontmatter delimiters). Range
-> deletes remove exactly the selected buffer range — concealed characters
-> strictly inside a visible selection go with it (honest, same as copy);
-> forward-delete at line end removes the newline only, and the merged
-> prefix re-renders as visible plain text.
->
-> **Rest-state purity.** With the caret parked on a blank line, a fixture
-> exercising every supported construct renders zero marker glyphs — the
-> user's literal acceptance criterion. (Fence info strings, ordered
-> numbers, and alt text are final-rendered content, not markers.)
+The seams, the affinity policy, then the gesture set:
 
-### W3.1 — concealment mechanism with fixed advances
+- **Seams (four, not two)**: `utf16Offset(of:)` (display→buffer),
+  `finishEdit`'s caret restore (buffer→display),
+  `setSelection(globalStart:globalEnd:)` (buffer→display — the recovered
+  emphasis toggle ends there), and `afterUndoRedo` (which today *clamps*
+  the stale display selection instead of restoring through any map —
+  this is new code per spec rule 1, not existing machinery).
+- **Per-operation affinity (spec rule 2)**: insertion maps the caret
+  outside inline markers / after block prefixes / to line end on
+  marker-only rows. Deletion and replacement never map caret positions:
+  `currentSelectionUTF16Range()` / `deleteRange(from:to:)` compute the
+  buffer range from the selected visible characters' own ranges, so
+  Backspace after `**bold**` deletes `d`, never `d**`.
+- **Span integrity** (spec rule 5) hooks as a *pre-expansion* of the
+  buffer range inside `deleteRange`/`replace`, before the single
+  `buffer.replace` call — one undo step by construction (a post-hoc
+  marker delete in `finishEdit` would be a second step). The expansion
+  reads the span records from E1's map. Links/images: one Backspace on
+  the last label character removes the whole syntax including the URL —
+  loud test.
+- **Cross-line state cascades (correctness gate for this workstream,
+  not E7)**: `spliceWrapIndex` re-measures only the edited text band,
+  but a one-line edit can change other lines' *states* and therefore
+  their fonts and wrap (setext `===` restyles the line above; fence and
+  frontmatter delimiters restyle whole bands). Interim rule that ships
+  with E3: any edit whose state splice changes lines outside the edited
+  band falls back to a full wrap rebuild — correct first; E7 narrows it
+  to a targeted splice.
+- Live conversion falls out of re-classification on edit; caret-anchored
+  scrolling is verified for parses that change the caret line's row
+  count (converting a long paragraph to a heading swaps to 20 pt bold
+  and can change its wrapped row count — include it) and for
+  above-caret cascades (closing a frontmatter block).
+- Word deletes clamp at content start.
 
-Convert `muteMarkdownSyntax` call sites to a `conceal(width:)` attribute
-treatment: near-zero-size font (one named constant; its advances are
-honored identically by CTTypesetter measurement, CTLine caret/hit-test
-math, and TextKit drawing — no draw-path migration needed) + `.clear`
-color + `.kern` on the run's last character to set the run's total
-advance. This makes the concealed prefix itself the typographic spacer:
+Tests: a typing matrix per construct (type into heading/bold/code/link
+label/list item/fence interior); boundary-rule cases — typing *and
+deleting* at every edge of `**bold**`, `` `code` ``, `[label](url)` (the
+delete-at-trailing-edge case is the trickier seam); span cleanup incl.
+the link-URL deletion; Enter splits; undo/redo caret restoration through
+the map; byte-fidelity assertions on every gesture.
 
-| Concealed run | Total advance |
-| --- | --- |
-| Heading prefix `#…# ` | 0 |
-| Bullet/task prefix per depth step | 24 pt (marker column) |
-| Ordered prefix `N. ` | max(24, typeset number width + 6) |
-| Quote prefix per depth step | 17 pt (3 pt bar + 14 pt inset) |
-| Inline-code backticks | 4 pt each (chip padding) |
-| All other inline markers, escapes, link/image syntax | 0 |
+## E4 — structural gestures (the Notion verbs)
 
-This is what preserves list/quote indentation and the marker column this
-round, without Phase A's `LineLayoutSpec` (which later replaces it
-properly; wrapped continuation rows still align to the column start —
-hanging indent stays a Phase A item). The conceal font and kern values
-are metric attributes, so the existing measurement/draw parity design
-(`markdownMeasurementLine` / `includeVisualAttributes`) carries them to
-both sides automatically; colors stay visual-only.
+State-guarded (never inside fences/frontmatter). Provenance differs:
 
-Note this diverges from the spec's long-term "CTLineDraw + run delegates"
-mechanism — the spec carries an interim-mechanism annotation for this.
+- **Recovered from HEAD (3a6d8e8) and adapted to display coordinates**:
+  the Backspace peel matrix (`peelMarkdownBlockPrefixIfNeeded` /
+  `markdownPeelPrefix` exist at HEAD) — heading→paragraph, quote n→n−1,
+  task→bullet, depth>1 outdent, depth-1→paragraph — plus the genuinely
+  missing ordered-item peel and the setext rule (peel deletes the
+  underline line; Backspace on the underline row does the same). One
+  undo step each.
+- **New work (never existed; earlier plans listed it but no
+  implementation reached it)**: Enter list continuation (same marker;
+  ordered = previous + 1, never renumbering others; task = `- [ ]`;
+  empty item outdents at depth > 1, removes the marker at depth 1, no
+  newline inserted), and Tab / Shift+Tab indent/outdent at item start
+  (Tab is a no-op outside items, a literal tab inside fences — spec
+  rule 12).
+- **Recovered + extended**: Cmd+B / Cmd+I (`toggleMarkdownEmphasis` at
+  HEAD, fed mapped buffer offsets) with the spec rule-7 merge semantics:
+  selection fully inside a span unwraps; overlapping/abutting same-kind
+  spans merge into one (inner markers removed, union wrapped once).
 
-### W3.2 — stylist span output
+Tests: full peel/continuation matrix incl. fence/frontmatter suppression
+and setext; toggle round-trips incl. the merge cases (`bold` + plain
+`er` → select union → one `**bolder**`); undo grouping.
 
-`styleMarkdownLine` (or a sibling pure function) additionally yields the
-per-line `ConcealmentMap`: concealed prefix range and its advance,
-inline-span ranges with marker sub-ranges (including escapes), and the
-whole-marker-line flag. Pure and unit-tested; the caret layer and the
-reveal layer consume it.
+## E5 — IME in display space (release-gating)
 
-### W3.3 — caret clamping, travel, and hit-test normalization
+- A source↔rendered column mapping feeds `composedLineForDisplay` (it
+  currently splices `composition.anchor.columnUTF16` into the rendered
+  string as if buffer == display), `firstRect(forCharacterRange:)`,
+  `characterIndex(for:)`, and marked/selected range exchanges.
+- Freeze the composing line's classification and transformation until
+  commit. The buffer does not change mid-composition (marked text lives
+  only in `composition`), so the real hazards are: (a) the
+  begin-composition selection-deleting `replace()` in `setMarkedText`,
+  which runs `finishEdit` → cache invalidation → a possible restyle and
+  span cleanup *before* composition starts — define and pin its
+  behavior; (b) async state/wrap build completions landing
+  mid-composition — they must not restyle the frozen line. Marked text
+  inherits the line's resolved font (heading-size composition in
+  headings).
+- Tests: composition on a styled heading and inside bold; candidate-rect
+  positions on transformed lines; commit-then-reparse; the freeze rule.
 
-Centralize a `clampToVisible(endpoint)` and apply it at **every** entry
-point that produces an endpoint, not only arrow keys: `endpoint(at:)`
-(mouse down *and* drag-extend, :1861–1886), vertical goal-column moves
-(:2241, :2249 — goal x over a concealed prefix is ambiguous; resolve to
-content start), IME `characterIndex(for:)` (:3955–3959), and the
-`columnUTF16(forX:in:)` results (zero-advance runs make
-`CTLineGetStringIndexForPosition` return arbitrary interior indices).
-Travel rules per spec rule 3 (Left at content start → previous line end;
-Right at line end → next content start; Home → content start; padding/rail
-clicks → nearest position). `deleteWordBackward`/`deleteWordForward`
-(:2612–2635) clamp at the prefix boundary so a word delete never crosses
-into concealed text.
+## E6 — interactive elements and selection semantics
 
-### W3.4 — reveal at caret, threaded through measurement
+- **Checkbox click toggles** the buffer (`[ ]`↔`[x]` at the known offset;
+  hit area = marker cell × row height; mouse-down-drag falls through to
+  selection; dirty/save/undo standard).
+- **Links**: plain click places the caret (this is an editor); **Cmd+click
+  opens** `http`/`https`, using the span records' URL; pointing hand only
+  while Cmd is held over a link span.
+- **Copy/cut/paste per spec rule 9** — copy *and cut* yield raw Markdown
+  of the mapped range (inline markers on whole-visible-span coverage;
+  block prefixes and fence delimiter lines on whole-visible-line
+  coverage; the contract's three concrete examples become tests); paste
+  = plain-text insert + live re-parse. Land cut and copy together —
+  today cut would put display text on the clipboard while deleting raw
+  source. Update the viewer round's visible-text copy tests to the
+  raw-source contract.
+- **Accessibility (spec rule 11)**: audit the mixed-space surface —
+  `accessibilitySelectedTextRange` converts display→buffer today while
+  sibling APIs assume buffer text; route all parameterized ranges
+  through the map so VoiceOver consistently sees the rendered document.
 
-Reveal state is part of line styling, not a draw-time patch: a
-`RevealContext` (caret/selection-touched line + inline span, IME-frozen
-line) becomes an input to `highlightedLine`/band styling **and to all
-three wrap-measurement paths** (sync build, detached worker via
-`WrapBuildInput`, per-edit splice). This is mandatory: revealed markers
-measure at full width, so a wrap rebuild that ignores reveal desyncs
-measured rows from drawn rows on the very first keystroke inside a
-revealed span. Mechanics:
+## E7 — per-keystroke performance
 
-- While the caret/selection touches an inline span (boundary-inclusive),
-  that span's markers render in today's muted treatment (tertiary) — the
-  current muting becomes the *reveal* state. Whole-marker lines reveal as
-  muted source while the caret is on them.
-- Reveal-state changes restyle and re-measure only the affected lines:
-  patch `cachedBand` lines in place *and* pass the context through band
-  rebuilds (any scroll rebuilds the band with exact `(revision, range)`
-  matching, so patching alone is insufficient — the context must be an
-  input to styling itself). Splice the wrap index for those lines and
-  apply caret-anchored scrolling (rule 10) when the caret line's row count
-  changes.
-- The markdown edit path must stop full-rebuilding the wrap index (see
-  W4) so the caret line is always measured in its current reveal state.
+Editing returns the costs the viewer round removed (the first edit after
+E2 hits a wholesale state-cache invalidation plus, per E3's interim rule,
+frequent full wrap rebuilds — correct but O(document)); land before
+calling the round done:
 
-### W3.5 — typeset replacements
-
-Drawn in `draw(_:)`, state-guarded, into the space the fixed advances
-reserve: bullets `•`/`◦`/`▪` by depth in the 24 pt marker cell; ordered
-items typeset the **source number and source delimiter** (`1.` vs `1)`,
-tabular digits, secondary — never renumbered) in their reserved cell;
-task items draw the checkbox glyph in the marker cell (drawn only;
-interactivity stays Phase E); quote bars stay stacked (one 3 pt bar per
-depth, Bear-style — matches the current implementation); fence lines
-conceal the backticks, keep the info string visible (muted 11 pt); hr =
-drawn rule; setext underline = thin rule; frontmatter keeps its card,
-delimiters concealed; links show the label in accent (brackets/URL
-concealed, zero advance); images show alt text in secondary (`![`, `](url)`,
-`)` concealed; the photo-symbol chip stays deferred (spec updated to
-match); escapes conceal the backslash (and reveal per rule 2). Underscore
-emphasis (`_em_`, `__strong__`, intraword `_` excluded per CommonMark) is
-added to the supported subset alongside the asterisk forms.
-
-### W3.6 — peel matrix completion
-
-Mandatory now that prefixes are invisible: add the missing ordered-item
-peel and quote depth n→n−1; the peel range must equal the **full**
-concealed prefix the caret cannot reach; keep the fence/frontmatter
-suppression guards; one undo step per peel.
-
-### W3.7 — IME
-
-Freeze the composing line's concealment, reveal, and block classification;
-marked text inherits the line's resolved font (today it composes at the
-base font on heading lines — fix here). Candidate-window geometry flows
-through the same clamped, concealment-aware x math.
-
-### W3.8 — selection semantics
-
-Concealed runs contribute no visible highlight rect; double-click selects
-the visible word only; copy/cut remain raw source (byte-fidelity
-assertions).
-
-W3 test matrix: per block kind and inline kind, walk the caret through
-the line (Left/Right/Home/Up/Down, click, drag) asserting no position
-lands inside concealed text without reveal; Backspace at every content
-start matches the peel matrix; word/forward/range deletes per the
-invariant; reveal transitions including scroll-during-reveal (band
-rebuild) and typing-inside-reveal (measure parity); measured row counts ==
-drawn row counts on concealed *and* revealed lines in all three wrap
-paths; the rest-state purity fixture; IME on a styled heading.
-
-## W4 — performance
-
-Ordered so W3 can build on it:
-
-1. **Incremental line-state splice** (lands before W3.4). The states are
-   *not* prefix-only: setext assigns `states[i−1]` from line `i`
-   (lookahead), and frontmatter membership depends on a closing delimiter
-   arbitrarily far below. Correct rule: on edit, recompute from
-   `max(0, firstEditedLine − 1)`; compare `recomputed[j]` against
-   `cached[j − lineDelta]`; declare convergence at index `k` only after
-   line `k+1` is processed (the setext retro-assignment trails by one);
-   fall back to a full rebuild when any line in the old band had
-   `insideFrontMatter`, or the edit adds/removes a trimmed `---` while
-   line 0 is a frontmatter delimiter, or a fence delimiter is
-   added/removed (parity cascade). Fetch only the rescanned lines.
-2. **Markdown wrap splice** (lands before W3.4). Today every markdown
-   keystroke routes to a full `rebuildWrapIndex` (:1069–1072) that
-   refetches and re-measures the entire document on the main actor — the
-   real per-keystroke O(n), bigger than the state rescan. After the state
-   splice converges, re-measure exactly the lines whose text *or state or
-   reveal* changed and splice via `spliceWrapIndex`; fix the splice
-   measurement call (:1210) that currently hardcodes the `.plain`
-   markdown state. Full rebuild remains the fallback for the same cascade
-   cases as item 1.
-3. **Kill the open flash on large documents.** The detached wrap worker
-   already computes the full state array (:998–1002) while the draw side
-   styles `.plain` until a *separate* utility build lands — a parity
-   mismatch window, not just a flash. Return the states in
-   `WrapBuildOutcome` and install them into `markdownLineStateCache`
-   inside `completeWrapBuild` atomically with the index swap; drop the
-   duplicate scheduled build. (A small synchronous above-the-fold prefix
-   render remains optional polish, not a correctness mechanism.)
-4. **Reveal-driven restyling is line-local** (W3.4) — caret movement must
-   not restyle or re-measure the visible band.
-5. Markdown micro-benchmarks as XCTest `measure` blocks (state splice,
-   wrap splice, band styling at 4096 lines) with generous ceilings;
-   `scripts/perf-smoke.sh` stays the cross-cutting gate.
+- **Incremental state splice** (the corrected rules from the earlier
+  review): recompute from `max(0, firstEditedLine − 1)`; compare
+  `recomputed[j]` vs `cached[j − lineDelta]`; converge at k only after
+  k+1 is processed (setext lookahead); full-rebuild fallback when the
+  edit band touches frontmatter membership or adds/removes fence
+  delimiters.
+- **Markdown wrap splice**: stop full-rebuilding the wrap index per
+  keystroke; re-measure only lines whose text or state changed and
+  splice (fix any splice-path call that measures with a default state).
+- Typing-latency benchmark (XCTest `measure`, 4096-line doc, mid-document
+  edits) joins the open-path benchmarks; `perf-smoke.sh` +
+  `perf-record.sh` label at round end.
 
 ## Out of scope this round
 
-Variable row heights and the full type scale, hanging indent for wrapped
-list rows (Phase A); checkbox/link interactivity (Phase E); the image
-photo-symbol chip; theme slots for the markdown colors (tracked debt:
-`MarkdownDocumentMetrics.accentColor`/`codeBackground` still bypass
-`LocusTheme`); Rust-core classification (Phase B); tables.
+Slash menus and block chrome (excluded by product decision); variable row
+heights / full type scale (Phase A); raw editor surface (Phase R,
+optional now); link editor popover; find-in-document; tables; inline
+images; theme slots (tracked debt); copy-as-rich-text.

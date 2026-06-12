@@ -39,9 +39,9 @@ Search is part of the MVP product identity, not only a later optimization pass. 
 
 Once local movement and search are reliable, add the document work surface.
 
-- Markdown editing, delivered as the typeset Markdown document view (the
-  Phase 2 "richer Markdown editing" item pulled forward; see
-  `docs/specs/markdown-document-view.md`)
+- Markdown viewing and light editing, delivered as the typeset rendered
+  document view edited in place (see `docs/specs/markdown-document-view.md`
+  and ADR 0009)
 - structured text editing for YAML, JSON, TOML, prompts, instructions, and similar AI-adjacent files
 - readable syntax highlighting without IDE features
 - Quick Look-based Office preview
@@ -72,9 +72,9 @@ After the MVP works end to end, improve search depth, document richness, and pol
 - incremental index updates
 - cross-location search beyond recents
 - saved search scopes
-- richer Markdown editing (pulled forward into Phase 1C as the typeset
-  Markdown document view; remaining richness such as tables and inline
-  images stays here — see `docs/specs/markdown-document-view.md`)
+- richer Markdown presentation and editing (tables, inline images, full
+  type scale; an optional raw Markdown editor surface) — see
+  `docs/specs/markdown-document-view.md` and ADR 0009
 - richer structured text validation
 - PDF annotation persistence
 - delayed thumbnail generation

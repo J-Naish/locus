@@ -352,8 +352,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// main thread being inserted. Over this, the paste is refused with a beep.
   /// Internal so tests can lower it.
   var maximumPastedByteCount = 64 * 1024 * 1024
-  private var cachedBand:
-    (revision: UInt64, range: Range<Int>, markdownRevealLine: Int?, lines: [NSAttributedString])?
+  private var cachedBand: (revision: UInt64, range: Range<Int>, lines: [NSAttributedString])?
   private var markdownLineStateCache: (revision: UInt64, states: [MarkdownLineStyleState])?
   private let markdownSynchronousLineStateLimit = 4_096
   private var markdownLineStateBuildGeneration = 0
@@ -1636,7 +1635,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   override func becomeFirstResponder() -> Bool {
     let didBecome = super.becomeFirstResponder()
     if didBecome {
-      startCaretBlinking()
+      if isEditable {
+        startCaretBlinking()
+      }
       invalidateVisibleArea()
       onFocusChange?(true)
     }
@@ -1674,7 +1675,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private var showsBlinkingCaret: Bool {
-    Self.caretShouldBlink(
+    guard isEditable else { return false }
+    return Self.caretShouldBlink(
       isFirstResponder: window?.firstResponder === self,
       isComposing: composition != nil,
       selectionIsEmpty: selection?.isEmpty == true)
@@ -2073,12 +2075,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Used to bound how much text copy and accessibility will materialize.
   private func selectionByteSpan() -> Int? {
     guard let buffer = reader, let selection, !selection.isEmpty,
-      let startByte =
-        (try? buffer.position(
-          forLine: selection.start.line, columnUTF16: selection.start.columnUTF16))?.byte,
-      let endByte =
-        (try? buffer.position(
-          forLine: selection.end.line, columnUTF16: selection.end.columnUTF16))?.byte
+      let range = currentSelectionUTF16Range(),
+      let startByte = (try? buffer.position(forUTF16: range.start))?.byte,
+      let endByte = (try? buffer.position(forUTF16: range.end))?.byte
     else {
       return nil
     }
@@ -2094,6 +2093,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   override func keyDown(with event: NSEvent) {
     guard reader != nil else {
       super.keyDown(with: event)
+      return
+    }
+    let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    if !isEditable,
+      let characters = event.charactersIgnoringModifiers,
+      characters == " ",
+      modifiers.subtracting([.shift]).isEmpty
+    {
+      scrollPage(down: !modifiers.contains(.shift))
       return
     }
     interpretKeyEvents([event])
@@ -2153,10 +2161,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       moveToDocumentEdge(end: false, extend: true)
     case #selector(NSStandardKeyBindingResponding.moveToEndOfDocumentAndModifySelection(_:)):
       moveToDocumentEdge(end: true, extend: true)
+    case #selector(NSStandardKeyBindingResponding.scrollPageDown(_:)):
+      scrollPage(down: true)
+    case #selector(NSStandardKeyBindingResponding.scrollPageUp(_:)):
+      scrollPage(down: false)
     case #selector(NSStandardKeyBindingResponding.insertNewline(_:)),
       #selector(NSStandardKeyBindingResponding.insertLineBreak(_:)),
       #selector(NSStandardKeyBindingResponding.insertParagraphSeparator(_:)):
-      insertText("\n")
+      insertMarkdownAwareNewline()
     case #selector(NSStandardKeyBindingResponding.insertTab(_:)):
       insertText("\t")
     case #selector(NSStandardKeyBindingResponding.deleteBackward(_:)):
@@ -2451,8 +2463,25 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     deleteRange(from: previous, to: caret)
   }
 
-  /// Wraps or unwraps the current selection with Markdown emphasis markers.
-  /// The edit is byte-honest: it only inserts/removes raw Markdown delimiters.
+  private static func isMarkdownBulletMarker(_ value: unichar) -> Bool {
+    value == 45 || value == 42 || value == 43
+  }
+
+  /// Inserts a newline. In rendered Markdown, a list item continues with the same
+  /// raw prefix so the next visual line still starts at column zero.
+  private func insertMarkdownAwareNewline() {
+    guard syntax == .markdown, isEditable, editableBuffer != nil, selection?.isEmpty != false,
+      let prefix = markdownContinuationPrefix(at: navigationHead)
+    else {
+      insertText("\n")
+      return
+    }
+    insertText("\n" + prefix)
+  }
+
+  /// Wraps or unwraps the current display-space selection with Markdown emphasis
+  /// markers. The edit is made in raw buffer coordinates so the on-screen marker
+  /// removal remains a pure rendering concern.
   func toggleMarkdownEmphasis(marker: String) {
     guard syntax == .markdown, isEditable, let buffer = editableBuffer,
       marker == "*" || marker == "**",
@@ -2514,8 +2543,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private func peelMarkdownBlockPrefixIfNeeded(at caret: TextSelection.Endpoint) -> Bool {
-    guard syntax == .markdown, caret.line >= 0, caret.line < lineCount else { return false }
-    guard let buffer = reader,
+    guard syntax == .markdown, caret.columnUTF16 == 0, caret.line >= 0, caret.line < lineCount,
+      let buffer = reader,
       let states = markdownLineStates(for: buffer),
       caret.line < states.count
     else {
@@ -2523,21 +2552,43 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     let state = states[caret.line]
     guard !state.insideFence, !state.insideFrontMatter else { return false }
-    let line = attributedLine(forLine: caret.line).string
+    let line = rawLineText(caret.line)
     guard let prefix = markdownPeelPrefix(in: line),
-      caret.columnUTF16 == prefix.location + prefix.length
+      let lineStart = globalUTF16Offset(line: caret.line, column: 0)
     else {
       return false
     }
-    guard let lineStart = utf16Offset(of: TextSelection.Endpoint(line: caret.line, columnUTF16: 0))
-    else {
-      return false
-    }
-    return replace(
+    let replacementLength = (prefix.replacement as NSString).length
+    if replace(
       globalStart: lineStart + prefix.location,
       globalEnd: lineStart + prefix.location + prefix.length,
       with: prefix.replacement
-    )
+    ) {
+      setSelection(
+        globalStart: lineStart + prefix.location + replacementLength,
+        globalEnd: lineStart + prefix.location + replacementLength)
+      return true
+    }
+    return false
+  }
+
+  private func markdownContinuationPrefix(at caret: TextSelection.Endpoint) -> String? {
+    guard caret.line >= 0, caret.line < lineCount,
+      let buffer = reader,
+      let states = markdownLineStates(for: buffer),
+      caret.line < states.count,
+      !states[caret.line].insideFence,
+      !states[caret.line].insideFrontMatter
+    else {
+      return nil
+    }
+    let line = rawLineText(caret.line)
+    guard caret.columnUTF16 >= lineLengthUTF16(caret.line),
+      let prefix = markdownListContinuationPrefix(in: line)
+    else {
+      return nil
+    }
+    return prefix
   }
 
   private func markdownMarkerTouchesSameMarker(
@@ -2560,10 +2611,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     location: Int, length: Int, replacement: String
   )? {
     let nsLine = line as NSString
-    var index = 0
-    while index < nsLine.length, nsLine.character(at: index) == 32 {
-      index += 1
-    }
+    let index = markdownLeadingSpaceLength(in: nsLine)
     var headingLevel = 0
     while index + headingLevel < nsLine.length, headingLevel < 6,
       nsLine.character(at: index + headingLevel) == 35
@@ -2582,24 +2630,74 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       }
       return (index, end - index, "")
     }
+    if let list = markdownListMarker(in: line) {
+      if list.taskRange.length > 0 {
+        return (list.taskRange.location, list.taskRange.length, "")
+      }
+      return (list.markerRange.location, list.markerRange.length, "")
+    }
+    return nil
+  }
+
+  private func markdownListContinuationPrefix(in line: String) -> String? {
+    guard let list = markdownListMarker(in: line) else { return nil }
+    let nsLine = line as NSString
+    let marker = nsLine.substring(with: list.markerRange)
+    if list.taskRange.length > 0 {
+      return marker + "[ ] "
+    }
+    return marker
+  }
+
+  private func markdownListMarker(in line: String) -> (
+    markerRange: NSRange, taskRange: NSRange
+  )? {
+    let nsLine = line as NSString
+    let index = markdownLeadingSpaceLength(in: nsLine)
+    guard index < nsLine.length else { return nil }
     if index + 1 < nsLine.length, Self.isMarkdownBulletMarker(nsLine.character(at: index)),
       nsLine.character(at: index + 1) == 32
     {
+      let markerRange = NSRange(location: index, length: 2)
       let taskStart = index + 2
       if taskStart + 3 <= nsLine.length,
         nsLine.character(at: taskStart) == 91,
         nsLine.character(at: taskStart + 2) == 93
       {
-        let end = min(nsLine.length, taskStart + 4)
-        return (taskStart, max(0, end - taskStart), "")
+        var taskEnd = taskStart + 3
+        if taskEnd < nsLine.length, nsLine.character(at: taskEnd) == 32 {
+          taskEnd += 1
+        }
+        return (markerRange, NSRange(location: taskStart, length: taskEnd - taskStart))
       }
-      return (index, 2, "")
+      return (markerRange, NSRange(location: 0, length: 0))
+    }
+
+    var digitEnd = index
+    while digitEnd < nsLine.length,
+      CharacterSet.decimalDigits.contains(
+        UnicodeScalar(nsLine.character(at: digitEnd)) ?? "\0")
+    {
+      digitEnd += 1
+    }
+    if digitEnd > index, digitEnd + 1 < nsLine.length {
+      let delimiter = nsLine.character(at: digitEnd)
+      if delimiter == 46 || delimiter == 41, nsLine.character(at: digitEnd + 1) == 32 {
+        return (
+          NSRange(location: index, length: digitEnd + 2 - index),
+          NSRange(location: 0, length: 0)
+        )
+      }
     }
     return nil
   }
 
-  private static func isMarkdownBulletMarker(_ value: unichar) -> Bool {
-    value == 45 || value == 42 || value == 43
+  private func markdownLeadingSpaceLength(in line: NSString) -> Int {
+    var index = 0
+    while index < line.length, line.character(at: index) == 32 {
+      index += 1
+    }
+    return index
   }
 
   /// Deletes the selection, or one composed character after the caret (merging
@@ -2702,18 +2800,19 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Deletes the UTF-16 range between two endpoints and collapses the caret to
   /// the start. Endpoints must already be ordered (`from` before `to`).
   private func deleteRange(from start: TextSelection.Endpoint, to end: TextSelection.Endpoint) {
-    guard let buffer = editableBuffer, let startOffset = utf16Offset(of: start),
-      let endOffset = utf16Offset(of: end), endOffset > startOffset
+    let selection = TextSelection(anchor: start, head: end)
+    guard let buffer = editableBuffer, let range = rawUTF16Range(for: selection),
+      range.end > range.start
     else {
       return
     }
     do {
-      try buffer.delete(fromUTF16: startOffset, toUTF16: endOffset)
+      try buffer.delete(fromUTF16: range.start, toUTF16: range.end)
       finishEdit(
-        caretUTF16: startOffset,
+        caretUTF16: range.start,
         change: TextChange(
-          startUTF16: startOffset,
-          oldLengthUTF16: endOffset - startOffset,
+          startUTF16: range.start,
+          oldLengthUTF16: range.end - range.start,
           newLengthUTF16: 0
         )
       )
@@ -2726,11 +2825,43 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// the caret when nothing is selected. `nil` only if a position lookup fails.
   private func currentSelectionUTF16Range() -> (start: Int, end: Int)? {
     let selection = self.selection ?? TextSelection(caretAt: navigationHead)
-    guard let start = utf16Offset(of: selection.start), let end = utf16Offset(of: selection.end)
+    return rawUTF16Range(for: selection)
+  }
+
+  private func rawUTF16Range(for selection: TextSelection) -> (start: Int, end: Int)? {
+    if selection.isEmpty {
+      guard let offset = utf16Offset(of: selection.head) else { return nil }
+      return (offset, offset)
+    }
+    if selection.start.line == selection.end.line {
+      guard
+        let lineStart = globalUTF16Offset(line: selection.start.line, column: 0),
+        let range = rawColumnRange(
+          line: selection.start.line,
+          displayStart: selection.start.columnUTF16,
+          displayEnd: selection.end.columnUTF16)
+      else {
+        return nil
+      }
+      return (lineStart + range.location, lineStart + NSMaxRange(range))
+    }
+    guard
+      let startLineStart = globalUTF16Offset(line: selection.start.line, column: 0),
+      let endLineStart = globalUTF16Offset(line: selection.end.line, column: 0),
+      let startLineRange = rawColumnRange(
+        line: selection.start.line,
+        displayStart: selection.start.columnUTF16,
+        displayEnd: lineLengthUTF16(selection.start.line)),
+      let endLineRange = rawColumnRange(
+        line: selection.end.line,
+        displayStart: 0,
+        displayEnd: selection.end.columnUTF16)
     else {
       return nil
     }
-    return (start, end)
+    let start = startLineStart + startLineRange.location
+    let end = endLineStart + NSMaxRange(endLineRange)
+    return (min(start, end), max(start, end))
   }
 
   private func setSelection(globalStart: Int, globalEnd: Int) {
@@ -2741,8 +2872,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       return
     }
     selection = TextSelection(
-      anchor: .init(line: start.line, columnUTF16: start.columnUTF16),
-      head: .init(line: end.line, columnUTF16: end.columnUTF16)
+      anchor: displayEndpoint(for: start),
+      head: displayEndpoint(for: end)
     )
     if let head = selection?.head {
       scrollCaretToVisible(head)
@@ -2753,8 +2884,44 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// The global UTF-16 offset of a (line, column) endpoint, or `nil` if the
   /// buffer is absent or the lookup fails.
   private func utf16Offset(of endpoint: TextSelection.Endpoint) -> Int? {
+    rawUTF16Offset(
+      line: endpoint.line,
+      displayColumn: endpoint.columnUTF16)
+  }
+
+  private func rawUTF16Offset(line: Int, displayColumn: Int) -> Int? {
+    let rawColumn =
+      markdownDisplayMap(forLine: line)?.bufferColumn(forDisplayColumn: displayColumn)
+      ?? displayColumn
+    return globalUTF16Offset(line: line, column: rawColumn)
+  }
+
+  private func rawColumnRange(line: Int, displayStart: Int, displayEnd: Int) -> NSRange? {
+    if let map = markdownDisplayMap(forLine: line) {
+      let includeWholeLineMarkers = displayStart <= 0 && displayEnd >= map.displayLength
+      return map.bufferRange(
+        forDisplayStart: displayStart,
+        end: displayEnd,
+        includeWholeLineMarkers: includeWholeLineMarkers)
+    }
+    let lineLength = lineLengthUTF16(line)
+    let start = min(max(0, displayStart), lineLength)
+    let end = min(max(start, displayEnd), lineLength)
+    return NSRange(location: start, length: end - start)
+  }
+
+  private func globalUTF16Offset(line: Int, column: Int) -> Int? {
     guard let buffer = reader else { return nil }
-    return (try? buffer.position(forLine: endpoint.line, columnUTF16: endpoint.columnUTF16))?.utf16
+    return (try? buffer.position(forLine: line, columnUTF16: column))?.utf16
+  }
+
+  private func displayEndpoint(for position: TextPosition) -> TextSelection.Endpoint {
+    if let map = markdownDisplayMap(forLine: position.line) {
+      return TextSelection.Endpoint(
+        line: position.line,
+        columnUTF16: map.displayColumn(forBufferColumn: position.columnUTF16))
+    }
+    return TextSelection.Endpoint(line: position.line, columnUTF16: position.columnUTF16)
   }
 
   /// Shared post-edit refresh: places the caret at `offset`, drops cached band
@@ -2770,8 +2937,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // band rather than keeping a stale, too-wide horizontal extent.
     maxObservedLineWidth = 0
     if let buffer = reader, let position = try? buffer.position(forUTF16: offset) {
-      selection = TextSelection(
-        caretAt: .init(line: position.line, columnUTF16: position.columnUTF16))
+      selection = TextSelection(caretAt: displayEndpoint(for: position))
     }
     updateWrapIndex(afterChange: change)
     showCaretSolid()
@@ -2954,6 +3120,25 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     scrollToVisible(rect)
   }
 
+  private func scrollPage(down: Bool) {
+    guard let scrollView = enclosingScrollView else { return }
+    let visible = scrollView.contentView.bounds
+    let delta = max(layout.lineHeight, visible.height - layout.lineHeight)
+    scrollViewport(toY: visible.origin.y + (down ? delta : -delta))
+  }
+
+  private func scrollViewport(toY requestedY: CGFloat) {
+    guard let scrollView = enclosingScrollView else { return }
+    let visible = scrollView.contentView.bounds
+    let insets = scrollView.contentInsets
+    let minY = -insets.top
+    let maxY = max(minY, frame.height - visible.height)
+    let y = min(max(requestedY, minY), maxY)
+    scrollView.contentView.scroll(to: NSPoint(x: visible.origin.x, y: y))
+    scrollView.reflectScrolledClipView(scrollView.contentView)
+    viewportDidScroll()
+  }
+
   /// Resizes the document to fit the line count (height) and the widest line seen
   /// so far (width), but never narrower than the visible content area. The width
   /// follows the widest drawn line, which is bounded by
@@ -3011,10 +3196,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     -> [NSAttributedString]
   {
     let revision = buffer.revision
-    let revealLine = markdownRevealLine
-    if let cachedBand, cachedBand.revision == revision, cachedBand.range == range,
-      cachedBand.markdownRevealLine == revealLine
-    {
+    if let cachedBand, cachedBand.revision == revision, cachedBand.range == range {
       return cachedBand.lines
     }
     let lines = buffer.text(
@@ -3031,7 +3213,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         : .plain
       return highlightedLine(line, lineIndex: lineIndex, markdownLineState: state)
     }
-    cachedBand = (revision, range, revealLine, highlighted)
+    cachedBand = (revision, range, highlighted)
     return highlighted
   }
 
@@ -3153,15 +3335,27 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       .map(clippedDisplayLine)
   }
 
-  private var markdownRevealLine: Int? {
-    usesMarkdownDocumentLayout ? selection?.head.line : nil
+  private func rawLineText(_ line: Int) -> String {
+    guard let buffer = reader else { return "" }
+    return
+      buffer.text(forLineRange: line, count: 1, maxBytesPerLine: maximumFetchedBytesPerLine)
+      .components(separatedBy: "\n").first ?? ""
   }
 
-  private func markdownRevealContext(forLine line: Int) -> MarkdownRevealContext {
-    guard usesMarkdownDocumentLayout, line == markdownRevealLine else {
-      return .hidden
+  private func markdownDisplayMap(forLine line: Int) -> MarkdownDisplayMap? {
+    guard usesMarkdownDocumentLayout, syntax == .markdown, let buffer = reader,
+      line >= 0, line < buffer.lineCount
+    else {
+      return nil
     }
-    return MarkdownRevealContext(activeColumnUTF16: selection?.head.columnUTF16)
+    let raw = rawLineText(line)
+    let visible = clippedDisplayLine(raw)
+    let states = markdownLineStates(for: buffer)
+    let state =
+      line >= 0 && line < (states?.count ?? 0)
+      ? states?[line] ?? .plain
+      : .plain
+    return TextDocumentSyntaxHighlighter.markdownDisplayMap(for: visible, state: state)
   }
 
   private func highlightedLine(
@@ -3184,8 +3378,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         font: font,
         applyRules: applyRules,
         markdownLineState: markdownLineState,
-        markdownTypography: markdownTypography,
-        markdownRevealContext: markdownRevealContext(forLine: lineIndex)
+        markdownTypography: markdownTypography
       )
     }
     let attributed = NSMutableAttributedString(string: visible)
@@ -3201,9 +3394,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// The displayed (highlighted, possibly truncated) attributed string for a
   /// line, reusing the cached band when the line falls within it.
   private func attributedLine(forLine line: Int) -> NSAttributedString {
-    if let cachedBand, cachedBand.range.contains(line),
-      cachedBand.markdownRevealLine == markdownRevealLine
-    {
+    if let cachedBand, cachedBand.range.contains(line) {
       return cachedBand.lines[line - cachedBand.range.lowerBound]
     }
     guard let buffer = reader else { return NSAttributedString() }
@@ -3359,7 +3550,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   private enum MarkdownBlockDecoration: Equatable {
     case bullet
-    case task
+    case ordered(String)
+    case task(checked: Bool)
     case quote(depth: Int)
     case rule
     case fence
@@ -3369,21 +3561,31 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     lines: [NSAttributedString], range: Range<Int>, textX: CGFloat, visibleRows: Range<Int>,
     buffer: any TextDocumentReading
   ) {
-    drawMarkdownFenceBackgrounds(lines: lines, range: range, textX: textX, visibleRows: visibleRows)
-    for (offset, attributed) in lines.enumerated() {
+    let rawLines = markdownRawLines(for: range, buffer: buffer)
+    drawMarkdownFenceBackgrounds(
+      rawLines: rawLines, range: range, textX: textX, visibleRows: visibleRows)
+    for (offset, rawLine) in rawLines.enumerated() {
       let line = range.lowerBound + offset
       guard !isHugeLine(line) else {
         continue
       }
       let state = markdownLineState(forLine: line, in: buffer)
-      guard let decoration = markdownBlockDecoration(for: attributed.string, state: state) else {
+      guard let decoration = markdownBlockDecoration(for: rawLine, state: state) else {
         continue
       }
       let firstRow = firstVisualRow(ofLine: line)
       let rowCount = max(1, wrapIndex?.visualRowCount(ofLine: line) ?? 1)
       switch decoration {
-      case .bullet, .task:
-        break
+      case .bullet:
+        guard visibleRows.contains(firstRow) else { continue }
+        drawMarkdownBullet(textX: textX, y: CGFloat(firstRow) * layout.lineHeight)
+      case .ordered(let marker):
+        guard visibleRows.contains(firstRow) else { continue }
+        drawMarkdownOrderedMarker(marker, textX: textX, y: CGFloat(firstRow) * layout.lineHeight)
+      case .task(let checked):
+        guard visibleRows.contains(firstRow) else { continue }
+        drawMarkdownTaskCheckbox(
+          checked: checked, textX: textX, y: CGFloat(firstRow) * layout.lineHeight)
       case .quote(let depth):
         let startRow = max(firstRow, visibleRows.lowerBound)
         let endRow = min(firstRow + rowCount, visibleRows.upperBound)
@@ -3403,20 +3605,34 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
   }
 
+  private func markdownRawLines(
+    for range: Range<Int>, buffer: any TextDocumentReading
+  ) -> [String] {
+    let lines = buffer.text(
+      forLineRange: range.lowerBound,
+      count: range.count,
+      maxBytesPerLine: maximumFetchedBytesPerLine
+    )
+    .components(separatedBy: "\n")
+    if lines.count >= range.count {
+      return Array(lines.prefix(range.count))
+    }
+    return lines + Array(repeating: "", count: range.count - lines.count)
+  }
+
   private func drawMarkdownFenceBackgrounds(
-    lines: [NSAttributedString], range: Range<Int>, textX: CGFloat, visibleRows: Range<Int>
+    rawLines: [String], range: Range<Int>, textX: CGFloat, visibleRows: Range<Int>
   ) {
     guard let buffer = reader else { return }
     let states = markdownLineStates(for: buffer)
     var runStart: Int?
-    for (offset, attributed) in lines.enumerated() {
+    for (offset, _) in rawLines.enumerated() {
       let line = range.lowerBound + offset
-      let isFenceLine = TextDocumentSyntaxHighlighter.isMarkdownFenceLine(attributed.string)
       let state =
         line >= 0 && line < (states?.count ?? 0)
         ? states?[line] ?? .plain
         : .plain
-      if isFenceLine || state.insideFence || state.insideFrontMatter {
+      if state.isFenceDelimiter || state.insideFence || state.insideFrontMatter {
         if runStart == nil {
           runStart = line
         }
@@ -3431,6 +3647,57 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         fromLine: start, toLine: max(start, range.upperBound - 1), textX: textX,
         visibleRows: visibleRows)
     }
+  }
+
+  private func drawMarkdownBullet(textX: CGFloat, y: CGFloat) {
+    let attributes: [NSAttributedString.Key: Any] = [
+      .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+      .foregroundColor: NSColor.secondaryLabelColor.withAlphaComponent(0.75),
+    ]
+    NSAttributedString(string: "•", attributes: attributes).draw(
+      with: NSRect(x: textX - 18, y: y, width: 12, height: layout.lineHeight),
+      options: [.usesLineFragmentOrigin])
+  }
+
+  private func drawMarkdownOrderedMarker(_ marker: String, textX: CGFloat, y: CGFloat) {
+    let paragraphStyle = NSMutableParagraphStyle()
+    paragraphStyle.alignment = .right
+    let attributes: [NSAttributedString.Key: Any] = [
+      .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
+      .foregroundColor: NSColor.secondaryLabelColor.withAlphaComponent(0.75),
+      .paragraphStyle: paragraphStyle,
+    ]
+    NSAttributedString(string: marker, attributes: attributes).draw(
+      with: NSRect(x: textX - 36, y: y + 1, width: 28, height: layout.lineHeight),
+      options: [.usesLineFragmentOrigin])
+  }
+
+  private func drawMarkdownTaskCheckbox(checked: Bool, textX: CGFloat, y: CGFloat) {
+    let size = MarkdownDocumentMetrics.checkboxSize
+    let rect = NSRect(
+      x: textX - 22,
+      y: y + (layout.lineHeight - size) / 2,
+      width: size,
+      height: size)
+    let path = NSBezierPath(
+      roundedRect: rect,
+      xRadius: 3,
+      yRadius: 3)
+    (checked ? MarkdownDocumentMetrics.accentColor : NSColor.secondaryLabelColor)
+      .withAlphaComponent(checked ? 0.75 : 0.5)
+      .setStroke()
+    path.lineWidth = 1.4
+    path.stroke()
+    guard checked else { return }
+    MarkdownDocumentMetrics.accentColor.setStroke()
+    let mark = NSBezierPath()
+    mark.lineWidth = 1.6
+    mark.lineCapStyle = .round
+    mark.lineJoinStyle = .round
+    mark.move(to: NSPoint(x: rect.minX + 3.5, y: rect.midY))
+    mark.line(to: NSPoint(x: rect.minX + 6, y: rect.midY + 3.5))
+    mark.line(to: NSPoint(x: rect.maxX - 3, y: rect.midY - 3.5))
+    mark.stroke()
   }
 
   private func drawMarkdownQuoteBar(depth: Int, textX: CGFloat, y: CGFloat, height: CGFloat) {
@@ -3463,7 +3730,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       index += 1
     }
     let trimmed = line.trimmingCharacters(in: .whitespaces)
-    if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+    if state.isFenceDelimiter, TextDocumentSyntaxHighlighter.isMarkdownFenceLine(line) {
       return .fence
     }
     if isMarkdownThematicBreak(trimmed) {
@@ -3489,9 +3756,23 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         nsLine.character(at: taskStart) == 91,
         nsLine.character(at: taskStart + 2) == 93
       {
-        return .task
+        let value = nsLine.character(at: taskStart + 1)
+        return .task(checked: value == 120 || value == 88)
       }
       return .bullet
+    }
+    var digitEnd = index
+    while digitEnd < nsLine.length {
+      let value = nsLine.character(at: digitEnd)
+      guard value >= 48, value <= 57 else { break }
+      digitEnd += 1
+    }
+    if digitEnd > index, digitEnd + 1 < nsLine.length,
+      nsLine.character(at: digitEnd) == 46 || nsLine.character(at: digitEnd) == 41,
+      nsLine.character(at: digitEnd + 1) == 32
+    {
+      let number = nsLine.substring(with: NSRange(location: index, length: digitEnd - index))
+      return .ordered("\(number).")
     }
     return nil
   }
@@ -3621,7 +3902,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Draws the caret at the (empty) selection head while focused and visible, or
   /// within the marked text while composing.
   private func drawCaretIfNeeded(lines: [NSAttributedString], range: Range<Int>, textX: CGFloat) {
-    guard window?.firstResponder === self else { return }
+    guard isEditable, window?.firstResponder === self else { return }
     if let composition {
       drawCompositionCaret(composition, lines: lines, range: range, textX: textX)
       return
@@ -3672,18 +3953,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     textX: CGFloat
   ) {
     guard usesMarkdownDocumentLayout, !lineRange.isEmpty else { return }
-    let activeLine = min(max(0, navigationHead.line), max(0, lineCount - 1))
     let paragraphStyle = NSMutableParagraphStyle()
     paragraphStyle.alignment = .right
     for line in markdownMarginLineNumbersForTesting(lineRange: lineRange, visibleRows: visibleRows)
     {
       let firstRow = firstVisualRow(ofLine: line)
-      let isActive = line == activeLine
-      let color = (isActive ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor)
-        .withAlphaComponent(isActive ? 0.76 : 0.36)
       let attributes: [NSAttributedString.Key: Any] = [
         .font: markdownLineNumberFont,
-        .foregroundColor: color,
+        .foregroundColor: NSColor.tertiaryLabelColor.withAlphaComponent(0.36),
         .paragraphStyle: paragraphStyle,
       ]
       let number = NSAttributedString(string: "\(line + 1)", attributes: attributes)

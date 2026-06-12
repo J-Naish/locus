@@ -97,6 +97,7 @@ struct MarkdownLineStyleState: Equatable, Sendable {
   var setextHeadingLevel: Int?
   var isSetextUnderline = false
   var insideFrontMatter = false
+  var isFenceDelimiter = false
 
   static let plain = MarkdownLineStyleState()
 }
@@ -146,13 +147,142 @@ struct MarkdownTypography: @unchecked Sendable {
   }
 }
 
-struct MarkdownRevealContext: Equatable, Sendable {
-  var activeColumnUTF16: Int?
+struct MarkdownDisplayMap: Equatable, Sendable {
+  let sourceText: String
+  let displayText: String
+  private let boundaryColumns: [Int]
+  private let characterRanges: [NSRange]
 
-  static let hidden = MarkdownRevealContext(activeColumnUTF16: nil)
+  init(
+    sourceText: String,
+    displayText: String,
+    boundaryColumns: [Int],
+    characterRanges: [NSRange]
+  ) {
+    let displayLength = (displayText as NSString).length
+    self.sourceText = sourceText
+    self.displayText = displayText
+    if boundaryColumns.count == displayLength + 1 {
+      self.boundaryColumns = boundaryColumns
+    } else {
+      self.boundaryColumns = Array(0...displayLength)
+    }
+    if characterRanges.count == displayLength {
+      self.characterRanges = characterRanges
+    } else {
+      self.characterRanges = (0..<displayLength).map { NSRange(location: $0, length: 1) }
+    }
+  }
 
-  var revealsLineMarkers: Bool {
-    activeColumnUTF16 != nil
+  var displayLength: Int { (displayText as NSString).length }
+  var sourceLength: Int { (sourceText as NSString).length }
+
+  static func identity(_ text: String) -> MarkdownDisplayMap {
+    map(sourceText: text, displayText: text, sourceStart: 0)
+  }
+
+  static func empty(sourceText: String, insertionColumn: Int? = nil) -> MarkdownDisplayMap {
+    let length = (sourceText as NSString).length
+    return MarkdownDisplayMap(
+      sourceText: sourceText,
+      displayText: "",
+      boundaryColumns: [min(max(0, insertionColumn ?? length), length)],
+      characterRanges: [])
+  }
+
+  static func map(sourceText: String, displayText: String, sourceStart: Int) -> MarkdownDisplayMap {
+    let displayLength = (displayText as NSString).length
+    let sourceLength = (sourceText as NSString).length
+    let start = min(max(0, sourceStart), sourceLength)
+    return MarkdownDisplayMap(
+      sourceText: sourceText,
+      displayText: displayText,
+      boundaryColumns: (0...displayLength).map { min(sourceLength, start + $0) },
+      characterRanges: (0..<displayLength).map {
+        NSRange(location: min(sourceLength, start + $0), length: 1)
+      })
+  }
+
+  func bufferColumn(forDisplayColumn column: Int) -> Int {
+    let clamped = min(max(0, column), displayLength)
+    return boundaryColumns[clamped]
+  }
+
+  func displayColumn(forBufferColumn column: Int) -> Int {
+    let clamped = min(max(0, column), sourceLength)
+    var best = 0
+    var bestDistance = Int.max
+    for (index, boundary) in boundaryColumns.enumerated() {
+      let distance = abs(boundary - clamped)
+      if distance < bestDistance || (distance == bestDistance && boundary <= clamped) {
+        best = index
+        bestDistance = distance
+      }
+    }
+    return min(max(0, best), displayLength)
+  }
+
+  func bufferRange(forDisplayStart start: Int, end: Int, includeWholeLineMarkers: Bool) -> NSRange {
+    let lower = min(max(0, start), displayLength)
+    let upper = min(max(0, end), displayLength)
+    guard upper > lower else {
+      let column = bufferColumn(forDisplayColumn: lower)
+      return NSRange(location: column, length: 0)
+    }
+    if includeWholeLineMarkers, lower == 0, upper == displayLength {
+      return NSRange(location: 0, length: sourceLength)
+    }
+    let selectedRanges = characterRanges[lower..<upper]
+    let rawStart = selectedRanges.map(\.location).min() ?? bufferColumn(forDisplayColumn: lower)
+    let rawEnd = selectedRanges.map { NSMaxRange($0) }.max() ?? rawStart
+    return NSRange(location: rawStart, length: max(0, rawEnd - rawStart))
+  }
+
+  fileprivate func replacing(match matchRange: NSRange, withGroup groupRange: NSRange)
+    -> MarkdownDisplayMap
+  {
+    let nsDisplay = displayText as NSString
+    let displayLength = nsDisplay.length
+    guard matchRange.location >= 0, groupRange.location >= 0,
+      NSMaxRange(matchRange) <= displayLength,
+      NSMaxRange(groupRange) <= displayLength,
+      NSIntersectionRange(matchRange, groupRange) == groupRange
+    else {
+      return self
+    }
+
+    let prefix = nsDisplay.substring(to: matchRange.location)
+    let replacement = nsDisplay.substring(with: groupRange)
+    let suffix = nsDisplay.substring(from: NSMaxRange(matchRange))
+    let newText = prefix + replacement + suffix
+
+    var newBoundaries: [Int] = []
+    if matchRange.location > 0 {
+      newBoundaries.append(contentsOf: boundaryColumns[0..<matchRange.location])
+    }
+    newBoundaries.append(contentsOf: boundaryColumns[groupRange.location...NSMaxRange(groupRange)])
+    if NSMaxRange(matchRange) < displayLength {
+      newBoundaries.append(
+        contentsOf: boundaryColumns[(NSMaxRange(matchRange) + 1)...displayLength])
+    }
+
+    var newCharacterRanges: [NSRange] = []
+    if matchRange.location > 0 {
+      newCharacterRanges.append(contentsOf: characterRanges[0..<matchRange.location])
+    }
+    if groupRange.length > 0 {
+      newCharacterRanges.append(
+        contentsOf: characterRanges[groupRange.location..<NSMaxRange(groupRange)])
+    }
+    if NSMaxRange(matchRange) < displayLength {
+      newCharacterRanges.append(contentsOf: characterRanges[NSMaxRange(matchRange)..<displayLength])
+    }
+
+    return MarkdownDisplayMap(
+      sourceText: sourceText,
+      displayText: newText,
+      boundaryColumns: newBoundaries,
+      characterRanges: newCharacterRanges)
   }
 }
 
@@ -232,30 +362,22 @@ enum TextDocumentSyntaxHighlighter {
     font: NSFont,
     applyRules: Bool = true,
     markdownLineState: MarkdownLineStyleState = .plain,
-    markdownTypography: MarkdownTypography? = nil,
-    markdownRevealContext: MarkdownRevealContext = .hidden
+    markdownTypography: MarkdownTypography? = nil
   ) -> NSAttributedString {
     let visible = line
-    let attributed = NSMutableAttributedString(string: visible)
-    let fullRange = NSRange(location: 0, length: (visible as NSString).length)
-    if syntax == .markdown, applyRules,
-      fullRange.length <= maximumHighlightedUTF16Length
-    {
-      attributed.setAttributes(baseAttributes(font: font), range: fullRange)
-      styleMarkdownLine(
+    if syntax == .markdown {
+      return renderedMarkdownLine(
         visible,
-        lineRange: fullRange,
-        in: attributed,
+        font: font,
         state: markdownLineState,
         typography: markdownTypography ?? MarkdownTypography(baseFont: font),
-        includeVisualAttributes: true,
-        revealContext: markdownRevealContext
-      )
-    } else {
-      apply(
-        to: attributed, text: visible, syntax: syntax, font: font, range: fullRange,
-        applyRules: applyRules)
+        includeVisualAttributes: true)
     }
+    let attributed = NSMutableAttributedString(string: visible)
+    let fullRange = NSRange(location: 0, length: (visible as NSString).length)
+    apply(
+      to: attributed, text: visible, syntax: syntax, font: font, range: fullRange,
+      applyRules: applyRules)
     return attributed
   }
 
@@ -265,25 +387,470 @@ enum TextDocumentSyntaxHighlighter {
     state: MarkdownLineStyleState,
     typography: MarkdownTypography
   ) -> NSAttributedString {
-    let attributed = NSMutableAttributedString(string: line)
-    let fullRange = NSRange(location: 0, length: (line as NSString).length)
-    guard fullRange.length > 0 else {
-      return attributed
-    }
-    attributed.setAttributes([.font: font], range: fullRange)
-    styleMarkdownLine(
+    renderedMarkdownLine(
       line,
-      lineRange: fullRange,
-      in: attributed,
+      font: font,
       state: state,
       typography: typography,
-      includeVisualAttributes: false,
-      revealContext: .hidden)
-    return attributed
+      includeVisualAttributes: false)
+  }
+
+  static func renderedMarkdownLineText(
+    _ line: String,
+    font: NSFont,
+    state: MarkdownLineStyleState = .plain,
+    typography: MarkdownTypography? = nil
+  ) -> String {
+    renderedMarkdownLine(
+      line,
+      font: font,
+      state: state,
+      typography: typography ?? MarkdownTypography(baseFont: font),
+      includeVisualAttributes: false
+    )
+    .string
+  }
+
+  static func markdownDisplayMap(
+    for line: String,
+    state: MarkdownLineStyleState = .plain
+  ) -> MarkdownDisplayMap {
+    renderedMarkdownDisplayMap(line, state: state)
   }
 
   static func isMarkdownFenceLine(_ line: String) -> Bool {
     markdownFenceInfo(in: line) != nil
+  }
+
+  private struct MarkdownRenderedBlock {
+    var text: String
+    var fonts: MarkdownFontSet
+    var font: NSFont
+    var foregroundColor: NSColor
+    var stylesInline: Bool
+  }
+
+  private static func renderedMarkdownLine(
+    _ line: String,
+    font: NSFont,
+    state: MarkdownLineStyleState,
+    typography: MarkdownTypography,
+    includeVisualAttributes: Bool
+  ) -> NSAttributedString {
+    let displayMap = renderedMarkdownBlockDisplayMap(line, state: state)
+    let block = renderedMarkdownBlock(
+      line, displayText: displayMap.displayText, font: font, state: state, typography: typography)
+    let attributed = NSMutableAttributedString(string: displayMap.displayText)
+    let fullRange = NSRange(location: 0, length: (displayMap.displayText as NSString).length)
+    guard fullRange.length > 0 else {
+      return attributed
+    }
+    attributed.setAttributes(
+      markdownAttributes(
+        font: block.font,
+        foregroundColor: block.foregroundColor,
+        includeVisualAttributes: includeVisualAttributes),
+      range: fullRange)
+    if block.stylesInline {
+      applyRenderedMarkdownInline(
+        to: attributed,
+        lineFonts: block.fonts,
+        typography: typography,
+        includeVisualAttributes: includeVisualAttributes)
+    }
+    return attributed
+  }
+
+  private static func renderedMarkdownBlock(
+    _ line: String,
+    displayText: String,
+    font: NSFont,
+    state: MarkdownLineStyleState,
+    typography: MarkdownTypography
+  ) -> MarkdownRenderedBlock {
+    func block(
+      fonts: MarkdownFontSet = typography.body,
+      displayFont: NSFont? = nil,
+      foregroundColor: NSColor = .labelColor,
+      stylesInline: Bool = true
+    ) -> MarkdownRenderedBlock {
+      MarkdownRenderedBlock(
+        text: displayText,
+        fonts: fonts,
+        font: displayFont ?? font,
+        foregroundColor: foregroundColor,
+        stylesInline: stylesInline)
+    }
+
+    if state.insideFrontMatter {
+      return block(
+        displayFont: typography.codeBlock,
+        foregroundColor: .secondaryLabelColor,
+        stylesInline: false)
+    }
+
+    if state.isFenceDelimiter, markdownFenceInfo(in: line) != nil {
+      return block(
+        displayFont: typography.codeFence,
+        foregroundColor: .secondaryLabelColor,
+        stylesInline: false)
+    }
+
+    if state.insideFence {
+      return block(displayFont: typography.codeBlock, stylesInline: false)
+    }
+
+    if let level = state.setextHeadingLevel {
+      let fonts = typography.heading(level: level)
+      return block(
+        fonts: fonts,
+        displayFont: fonts.regular,
+        foregroundColor: level == 6 ? .secondaryLabelColor : .labelColor)
+    }
+
+    if state.isSetextUnderline {
+      return block(stylesInline: false)
+    }
+
+    if let heading = markdownHeadingInfo(in: line) {
+      let fonts = typography.heading(level: heading.level)
+      return block(
+        fonts: fonts,
+        displayFont: fonts.regular,
+        foregroundColor: heading.level == 6 ? .secondaryLabelColor : .labelColor)
+    }
+
+    if markdownThematicBreak(in: line) {
+      return block(stylesInline: false)
+    }
+
+    if markdownBlockPrefixLength(in: line) != nil {
+      return block()
+    }
+
+    return block()
+  }
+
+  private static func renderedMarkdownDisplayMap(
+    _ line: String,
+    state: MarkdownLineStyleState
+  ) -> MarkdownDisplayMap {
+    let baseMap = renderedMarkdownBlockDisplayMap(line, state: state)
+    guard !state.insideFence, !state.insideFrontMatter, !state.isSetextUnderline,
+      !markdownThematicBreak(in: line)
+    else {
+      return baseMap
+    }
+    return renderedInlineDisplayMap(from: baseMap)
+  }
+
+  private static func renderedMarkdownBlockDisplayMap(
+    _ line: String,
+    state: MarkdownLineStyleState
+  ) -> MarkdownDisplayMap {
+    let nsLine = line as NSString
+    let sourceLength = nsLine.length
+
+    if state.insideFrontMatter {
+      if markdownFrontMatterDelimiter(in: line) {
+        return .empty(sourceText: line)
+      }
+      return .identity(line)
+    }
+    if state.isFenceDelimiter, let fence = markdownFenceInfo(in: line) {
+      if state.insideFence {
+        return .empty(sourceText: line)
+      }
+      let infoRange = markdownFenceInfoTextRange(in: line, markerLength: fence.markerLength)
+      if infoRange.length > 0 {
+        return .map(
+          sourceText: line,
+          displayText: nsLine.substring(with: infoRange),
+          sourceStart: infoRange.location)
+      }
+      return .empty(sourceText: line)
+    }
+    if state.insideFence {
+      return .identity(line)
+    }
+    if state.isSetextUnderline || markdownThematicBreak(in: line) {
+      return .empty(sourceText: line)
+    }
+    if let heading = markdownHeadingInfo(in: line) {
+      let start = min(heading.prefixLength, sourceLength)
+      return .map(
+        sourceText: line, displayText: nsLine.substring(from: start), sourceStart: start)
+    }
+    if let prefixLength = markdownBlockPrefixLength(in: line) {
+      let start = min(prefixLength, sourceLength)
+      return .map(
+        sourceText: line, displayText: nsLine.substring(from: start), sourceStart: start)
+    }
+    return .identity(line)
+  }
+
+  private static func markdownFenceInfoTextRange(in line: String, markerLength: Int) -> NSRange {
+    let nsLine = line as NSString
+    var index = 0
+    while index < nsLine.length,
+      nsLine.character(at: index) == 32 || nsLine.character(at: index) == 9
+    {
+      index += 1
+    }
+    index = min(nsLine.length, index + markerLength)
+    while index < nsLine.length,
+      nsLine.character(at: index) == 32 || nsLine.character(at: index) == 9
+    {
+      index += 1
+    }
+    var end = nsLine.length
+    while end > index {
+      let character = nsLine.character(at: end - 1)
+      guard character == 32 || character == 9 else { break }
+      end -= 1
+    }
+    return NSRange(location: index, length: max(0, end - index))
+  }
+
+  private static func renderedInlineDisplayMap(from map: MarkdownDisplayMap)
+    -> MarkdownDisplayMap
+  {
+    var current = map
+    var protectedRanges: [NSRange] = []
+    replaceRenderedMatchesInMap(
+      expression: inlineCodeExpression,
+      replacementGroup: 1,
+      map: &current,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+    replaceRenderedMatchesInMap(
+      expression: imageExpression,
+      replacementGroup: 1,
+      map: &current,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+    replaceRenderedMatchesInMap(
+      expression: renderedLinkExpression,
+      replacementGroup: 1,
+      map: &current,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+    replaceRenderedMatchesInMap(
+      expression: boldItalicExpression,
+      replacementGroup: 1,
+      map: &current,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+    replaceRenderedMatchesInMap(
+      expression: boldExpression,
+      replacementGroup: 1,
+      map: &current,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+    replaceRenderedMatchesInMap(
+      expression: italicExpression,
+      replacementGroup: 1,
+      map: &current,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+    replaceRenderedMatchesInMap(
+      expression: strikeExpression,
+      replacementGroup: 1,
+      map: &current,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+    return current
+  }
+
+  private static func replaceRenderedMatchesInMap(
+    expression: NSRegularExpression,
+    replacementGroup: Int,
+    map: inout MarkdownDisplayMap,
+    protectedRanges: inout [NSRange],
+    protectsReplacement: Bool
+  ) {
+    let original = map.displayText
+    let nsOriginal = original as NSString
+    let matches = expression.matches(
+      in: original,
+      range: NSRange(location: 0, length: nsOriginal.length))
+    var locationDelta = 0
+    for match in matches {
+      let group = match.range(at: replacementGroup)
+      guard group.location != NSNotFound else { continue }
+      let adjustedMatch = match.range.offset(by: locationDelta)
+      guard !protectedRanges.contains(where: { rangesIntersect($0, adjustedMatch) }) else {
+        continue
+      }
+      let adjustedGroup = group.offset(by: locationDelta)
+      guard adjustedMatch.location >= 0,
+        NSMaxRange(adjustedMatch) <= map.displayLength,
+        adjustedGroup.location >= 0,
+        NSMaxRange(adjustedGroup) <= map.displayLength
+      else {
+        continue
+      }
+      let beforeLength = map.displayLength
+      map = map.replacing(match: adjustedMatch, withGroup: adjustedGroup)
+      let replacementRange = NSRange(location: adjustedMatch.location, length: adjustedGroup.length)
+      let delta = map.displayLength - beforeLength
+      locationDelta += delta
+      protectedRanges = shiftRanges(protectedRanges, after: adjustedMatch, by: delta)
+      if protectsReplacement, replacementRange.length > 0 {
+        protectedRanges.append(replacementRange)
+      }
+    }
+  }
+
+  private static func applyRenderedMarkdownInline(
+    to attributed: NSMutableAttributedString,
+    lineFonts: MarkdownFontSet,
+    typography: MarkdownTypography,
+    includeVisualAttributes: Bool
+  ) {
+    var protectedRanges: [NSRange] = []
+    replaceRenderedMatches(
+      expression: inlineCodeExpression,
+      replacementGroup: 1,
+      attributes: markdownInlineCodeAttributes(
+        font: typography.inlineCode,
+        includeVisualAttributes: includeVisualAttributes),
+      in: attributed,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+    replaceRenderedMatches(
+      expression: imageExpression,
+      replacementGroup: 1,
+      attributes: markdownAttributes(
+        font: lineFonts.regular,
+        foregroundColor: .secondaryLabelColor,
+        includeVisualAttributes: includeVisualAttributes),
+      in: attributed,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+    replaceRenderedMatches(
+      expression: renderedLinkExpression,
+      replacementGroup: 1,
+      attributes: renderedLinkAttributes(
+        font: lineFonts.regular,
+        includeVisualAttributes: includeVisualAttributes),
+      in: attributed,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+    applyRenderedDelimitedSpan(
+      expression: boldItalicExpression,
+      style: .boldItalic,
+      to: attributed,
+      lineFonts: lineFonts,
+      protectedRanges: &protectedRanges,
+      includeVisualAttributes: includeVisualAttributes)
+    applyRenderedDelimitedSpan(
+      expression: boldExpression,
+      style: .bold,
+      to: attributed,
+      lineFonts: lineFonts,
+      protectedRanges: &protectedRanges,
+      includeVisualAttributes: includeVisualAttributes)
+    applyRenderedDelimitedSpan(
+      expression: italicExpression,
+      style: .italic,
+      to: attributed,
+      lineFonts: lineFonts,
+      protectedRanges: &protectedRanges,
+      includeVisualAttributes: includeVisualAttributes)
+    applyRenderedDelimitedSpan(
+      expression: strikeExpression,
+      style: .strike,
+      to: attributed,
+      lineFonts: lineFonts,
+      protectedRanges: &protectedRanges,
+      includeVisualAttributes: includeVisualAttributes)
+  }
+
+  private static func replaceRenderedMatches(
+    expression: NSRegularExpression,
+    replacementGroup: Int,
+    attributes: [NSAttributedString.Key: Any],
+    in attributed: NSMutableAttributedString,
+    protectedRanges: inout [NSRange],
+    protectsReplacement: Bool
+  ) {
+    let original = attributed.string
+    let nsOriginal = original as NSString
+    let matches = expression.matches(
+      in: original,
+      range: NSRange(location: 0, length: nsOriginal.length))
+    var locationDelta = 0
+    for match in matches {
+      let group = match.range(at: replacementGroup)
+      guard group.location != NSNotFound else { continue }
+      let adjustedMatch = match.range.offset(by: locationDelta)
+      guard !protectedRanges.contains(where: { rangesIntersect($0, adjustedMatch) }) else {
+        continue
+      }
+      let adjustedGroup = group.offset(by: locationDelta)
+      guard adjustedGroup.location >= 0,
+        NSMaxRange(adjustedGroup) <= (attributed.string as NSString).length
+      else {
+        continue
+      }
+      let replacement = (attributed.string as NSString).substring(with: adjustedGroup)
+      let replacementLength = (replacement as NSString).length
+      attributed.replaceCharacters(in: adjustedMatch, with: replacement)
+      let replacementRange = NSRange(location: adjustedMatch.location, length: replacementLength)
+      if replacementLength > 0 {
+        attributed.addAttributes(attributes, range: replacementRange)
+      }
+      let delta = replacementLength - adjustedMatch.length
+      locationDelta += delta
+      protectedRanges = shiftRanges(protectedRanges, after: adjustedMatch, by: delta)
+      if protectsReplacement {
+        protectedRanges.append(replacementRange)
+      }
+    }
+  }
+
+  private static func applyRenderedDelimitedSpan(
+    expression: NSRegularExpression,
+    style: MarkdownDelimitedStyle,
+    to attributed: NSMutableAttributedString,
+    lineFonts: MarkdownFontSet,
+    protectedRanges: inout [NSRange],
+    includeVisualAttributes: Bool
+  ) {
+    var attributes: [NSAttributedString.Key: Any]
+    switch style {
+    case .boldItalic:
+      attributes = [.font: lineFonts.boldItalic]
+    case .bold:
+      attributes = [.font: lineFonts.bold]
+    case .italic:
+      attributes = [.font: lineFonts.italic]
+    case .strike:
+      attributes = [.font: lineFonts.regular]
+      if includeVisualAttributes {
+        attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+      }
+    }
+    replaceRenderedMatches(
+      expression: expression,
+      replacementGroup: 1,
+      attributes: attributes,
+      in: attributed,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true)
+  }
+
+  private static func shiftRanges(_ ranges: [NSRange], after replacedRange: NSRange, by delta: Int)
+    -> [NSRange]
+  {
+    guard delta != 0 else { return ranges }
+    return ranges.map { range in
+      if range.location >= NSMaxRange(replacedRange) {
+        return NSRange(location: range.location + delta, length: range.length)
+      }
+      return range
+    }
   }
 
   static func markdownLineStates(for lines: [String]) -> [MarkdownLineStyleState] {
@@ -305,12 +872,23 @@ enum TextDocumentSyntaxHighlighter {
       }
     }
 
-    var insideFence = false
+    var fenceOpeningIndex: Int?
     for index in lines.indices {
-      guard !states[index].insideFrontMatter else { continue }
-      states[index].insideFence = insideFence
-      if isMarkdownFenceLine(lines[index]) {
-        insideFence.toggle()
+      guard !states[index].insideFrontMatter, isMarkdownFenceLine(lines[index]) else {
+        continue
+      }
+      if let openingIndex = fenceOpeningIndex {
+        states[openingIndex].isFenceDelimiter = true
+        states[index].isFenceDelimiter = true
+        if openingIndex + 1 < index {
+          for fencedIndex in (openingIndex + 1)..<index {
+            guard !states[fencedIndex].insideFrontMatter else { continue }
+            states[fencedIndex].insideFence = true
+          }
+        }
+        fenceOpeningIndex = nil
+      } else {
+        fenceOpeningIndex = index
       }
     }
 
@@ -371,8 +949,7 @@ enum TextDocumentSyntaxHighlighter {
           in: textStorage,
           state: lineIndex < lineStates.count ? lineStates[lineIndex] : .plain,
           typography: typography,
-          includeVisualAttributes: includeVisualAttributes,
-          revealContext: .hidden
+          includeVisualAttributes: includeVisualAttributes
         )
       }
       let next = NSMaxRange(lineRange)
@@ -388,8 +965,7 @@ enum TextDocumentSyntaxHighlighter {
     in textStorage: NSMutableAttributedString,
     state: MarkdownLineStyleState,
     typography: MarkdownTypography,
-    includeVisualAttributes: Bool,
-    revealContext: MarkdownRevealContext
+    includeVisualAttributes: Bool
   ) {
     let length = (line as NSString).length
     guard length > 0 else { return }
@@ -404,7 +980,7 @@ enum TextDocumentSyntaxHighlighter {
       return
     }
 
-    if let fence = markdownFenceInfo(in: line) {
+    if state.isFenceDelimiter, let fence = markdownFenceInfo(in: line) {
       textStorage.addAttributes(
         markdownAttributes(
           font: typography.codeFence,
@@ -415,8 +991,7 @@ enum TextDocumentSyntaxHighlighter {
         range: NSRange(location: lineRange.location, length: fence.markerLength),
         in: textStorage,
         font: typography.body.regular,
-        includeVisualAttributes: includeVisualAttributes,
-        revealContext: revealContext)
+        includeVisualAttributes: includeVisualAttributes)
       return
     }
 
@@ -444,8 +1019,7 @@ enum TextDocumentSyntaxHighlighter {
         range: lineRange,
         in: textStorage,
         font: typography.body.regular,
-        includeVisualAttributes: includeVisualAttributes,
-        revealContext: revealContext)
+        includeVisualAttributes: includeVisualAttributes)
       return
     } else if let heading = markdownHeadingInfo(in: line) {
       lineFonts = typography.heading(level: heading.level)
@@ -459,24 +1033,21 @@ enum TextDocumentSyntaxHighlighter {
         range: NSRange(location: lineRange.location, length: heading.prefixLength),
         in: textStorage,
         font: typography.body.regular,
-        includeVisualAttributes: includeVisualAttributes,
-        revealContext: revealContext)
+        includeVisualAttributes: includeVisualAttributes)
     } else if let prefixLength = markdownBlockPrefixLength(in: line) {
       lineFonts = typography.body
       muteMarkdownSyntax(
         range: NSRange(location: lineRange.location, length: prefixLength),
         in: textStorage,
         font: typography.body.regular,
-        includeVisualAttributes: includeVisualAttributes,
-        revealContext: revealContext)
+        includeVisualAttributes: includeVisualAttributes)
     } else if markdownThematicBreak(in: line) {
       lineFonts = typography.body
       muteMarkdownSyntax(
         range: lineRange,
         in: textStorage,
         font: typography.body.regular,
-        includeVisualAttributes: includeVisualAttributes,
-        revealContext: revealContext)
+        includeVisualAttributes: includeVisualAttributes)
     } else {
       lineFonts = typography.body
     }
@@ -487,8 +1058,7 @@ enum TextDocumentSyntaxHighlighter {
       textStorage: textStorage,
       lineFonts: lineFonts,
       typography: typography,
-      includeVisualAttributes: includeVisualAttributes,
-      revealContext: revealContext)
+      includeVisualAttributes: includeVisualAttributes)
   }
 
   private enum MarkdownDelimitedStyle {
@@ -504,23 +1074,20 @@ enum TextDocumentSyntaxHighlighter {
     textStorage: NSMutableAttributedString,
     lineFonts: MarkdownFontSet,
     typography: MarkdownTypography,
-    includeVisualAttributes: Bool,
-    revealContext: MarkdownRevealContext
+    includeVisualAttributes: Bool
   ) {
     var protectedRanges = applyInlineCode(
       in: line,
       lineRange: lineRange,
       textStorage: textStorage,
       typography: typography,
-      includeVisualAttributes: includeVisualAttributes,
-      revealContext: revealContext)
+      includeVisualAttributes: includeVisualAttributes)
     protectedRanges += applyLinks(
       in: line,
       lineRange: lineRange,
       textStorage: textStorage,
       lineFonts: lineFonts,
-      includeVisualAttributes: includeVisualAttributes,
-      revealContext: revealContext)
+      includeVisualAttributes: includeVisualAttributes)
     applyDelimitedSpan(
       expression: boldItalicExpression,
       markerLength: 3,
@@ -530,8 +1097,7 @@ enum TextDocumentSyntaxHighlighter {
       lineRange: lineRange,
       lineFonts: lineFonts,
       textStorage: textStorage,
-      includeVisualAttributes: includeVisualAttributes,
-      revealContext: revealContext)
+      includeVisualAttributes: includeVisualAttributes)
     applyDelimitedSpan(
       expression: boldExpression,
       markerLength: 2,
@@ -541,8 +1107,7 @@ enum TextDocumentSyntaxHighlighter {
       lineRange: lineRange,
       lineFonts: lineFonts,
       textStorage: textStorage,
-      includeVisualAttributes: includeVisualAttributes,
-      revealContext: revealContext)
+      includeVisualAttributes: includeVisualAttributes)
     applyDelimitedSpan(
       expression: italicExpression,
       markerLength: 1,
@@ -552,8 +1117,7 @@ enum TextDocumentSyntaxHighlighter {
       lineRange: lineRange,
       lineFonts: lineFonts,
       textStorage: textStorage,
-      includeVisualAttributes: includeVisualAttributes,
-      revealContext: revealContext)
+      includeVisualAttributes: includeVisualAttributes)
     applyDelimitedSpan(
       expression: strikeExpression,
       markerLength: 2,
@@ -563,8 +1127,7 @@ enum TextDocumentSyntaxHighlighter {
       lineRange: lineRange,
       lineFonts: lineFonts,
       textStorage: textStorage,
-      includeVisualAttributes: includeVisualAttributes,
-      revealContext: revealContext)
+      includeVisualAttributes: includeVisualAttributes)
   }
 
   private static func applyInlineCode(
@@ -572,8 +1135,7 @@ enum TextDocumentSyntaxHighlighter {
     lineRange: NSRange,
     textStorage: NSMutableAttributedString,
     typography: MarkdownTypography,
-    includeVisualAttributes: Bool,
-    revealContext: MarkdownRevealContext
+    includeVisualAttributes: Bool
   ) -> [NSRange] {
     let expression = inlineCodeExpression
     let nsLine = line as NSString
@@ -590,14 +1152,12 @@ enum TextDocumentSyntaxHighlighter {
         range: NSRange(location: lineRange.location + match.range.location, length: 1),
         in: textStorage,
         font: typography.inlineCode,
-        includeVisualAttributes: includeVisualAttributes,
-        revealContext: revealContext)
+        includeVisualAttributes: includeVisualAttributes)
       muteMarkdownSyntax(
         range: NSRange(location: lineRange.location + NSMaxRange(match.range) - 1, length: 1),
         in: textStorage,
         font: typography.inlineCode,
-        includeVisualAttributes: includeVisualAttributes,
-        revealContext: revealContext)
+        includeVisualAttributes: includeVisualAttributes)
     }
     return protectedRanges
   }
@@ -607,8 +1167,7 @@ enum TextDocumentSyntaxHighlighter {
     lineRange: NSRange,
     textStorage: NSMutableAttributedString,
     lineFonts: MarkdownFontSet,
-    includeVisualAttributes: Bool,
-    revealContext: MarkdownRevealContext
+    includeVisualAttributes: Bool
   ) -> [NSRange] {
     let expression = linkExpression
     let nsLine = line as NSString
@@ -625,26 +1184,22 @@ enum TextDocumentSyntaxHighlighter {
         range: NSRange(location: lineRange.location + match.range.location, length: 1),
         in: textStorage,
         font: lineFonts.regular,
-        includeVisualAttributes: includeVisualAttributes,
-        revealContext: revealContext)
+        includeVisualAttributes: includeVisualAttributes)
       muteMarkdownSyntax(
         range: NSRange(location: NSMaxRange(label), length: 2),
         in: textStorage,
         font: lineFonts.regular,
-        includeVisualAttributes: includeVisualAttributes,
-        revealContext: revealContext)
+        includeVisualAttributes: includeVisualAttributes)
       muteMarkdownSyntax(
         range: url,
         in: textStorage,
         font: lineFonts.regular,
-        includeVisualAttributes: includeVisualAttributes,
-        revealContext: revealContext)
+        includeVisualAttributes: includeVisualAttributes)
       muteMarkdownSyntax(
         range: NSRange(location: lineRange.location + NSMaxRange(match.range) - 1, length: 1),
         in: textStorage,
         font: lineFonts.regular,
-        includeVisualAttributes: includeVisualAttributes,
-        revealContext: revealContext)
+        includeVisualAttributes: includeVisualAttributes)
     }
     return protectedRanges
   }
@@ -658,8 +1213,7 @@ enum TextDocumentSyntaxHighlighter {
     lineRange: NSRange,
     lineFonts: MarkdownFontSet,
     textStorage: NSMutableAttributedString,
-    includeVisualAttributes: Bool,
-    revealContext: MarkdownRevealContext
+    includeVisualAttributes: Bool
   ) {
     let nsLine = line as NSString
     let full = NSRange(location: 0, length: nsLine.length)
@@ -687,16 +1241,14 @@ enum TextDocumentSyntaxHighlighter {
         range: NSRange(location: lineRange.location + match.range.location, length: markerLength),
         in: textStorage,
         font: lineFonts.regular,
-        includeVisualAttributes: includeVisualAttributes,
-        revealContext: revealContext)
+        includeVisualAttributes: includeVisualAttributes)
       muteMarkdownSyntax(
         range: NSRange(
           location: lineRange.location + NSMaxRange(match.range) - markerLength,
           length: markerLength),
         in: textStorage,
         font: lineFonts.regular,
-        includeVisualAttributes: includeVisualAttributes,
-        revealContext: revealContext)
+        includeVisualAttributes: includeVisualAttributes)
     }
   }
 
@@ -704,14 +1256,12 @@ enum TextDocumentSyntaxHighlighter {
     range: NSRange,
     in textStorage: NSMutableAttributedString,
     font: NSFont,
-    includeVisualAttributes: Bool,
-    revealContext: MarkdownRevealContext
+    includeVisualAttributes: Bool
   ) {
     guard range.length > 0 else { return }
     var attributes: [NSAttributedString.Key: Any] = [.font: font]
     if includeVisualAttributes {
-      attributes[.foregroundColor] =
-        revealContext.revealsLineMarkers ? MarkdownDocumentMetrics.markerColor : NSColor.clear
+      attributes[.foregroundColor] = NSColor.clear
     }
     textStorage.addAttributes(attributes, range: range)
   }
@@ -724,6 +1274,17 @@ enum TextDocumentSyntaxHighlighter {
     var attributes: [NSAttributedString.Key: Any] = [.font: font]
     if includeVisualAttributes {
       attributes[.foregroundColor] = foregroundColor
+    }
+    return attributes
+  }
+
+  private static func renderedLinkAttributes(
+    font: NSFont,
+    includeVisualAttributes: Bool
+  ) -> [NSAttributedString.Key: Any] {
+    var attributes: [NSAttributedString.Key: Any] = [.font: font]
+    if includeVisualAttributes {
+      attributes[.foregroundColor] = NSColor.linkColor
     }
     return attributes
   }
@@ -746,14 +1307,22 @@ enum TextDocumentSyntaxHighlighter {
 
   private static func markdownHeadingInfo(in line: String) -> (level: Int, prefixLength: Int)? {
     let nsLine = line as NSString
+    var index = 0
+    while index < min(3, nsLine.length), nsLine.character(at: index) == 32 {
+      index += 1
+    }
     var level = 0
-    while level < min(6, nsLine.length), nsLine.character(at: level) == 35 {  // "#"
+    while index + level < nsLine.length, level < 6,
+      nsLine.character(at: index + level) == 35
+    {  // "#"
       level += 1
     }
-    guard level > 0, nsLine.length > level, nsLine.character(at: level) == 32 else {
+    guard level > 0, nsLine.length > index + level,
+      nsLine.character(at: index + level) == 32
+    else {
       return nil
     }
-    return (level, level + 1)
+    return (level, index + level + 1)
   }
 
   private static func markdownBlockPrefixLength(in line: String) -> Int? {
@@ -851,6 +1420,8 @@ enum TextDocumentSyntaxHighlighter {
 
   private static let inlineCodeExpression = markdownRegex(#"`([^`\n]+)`"#)
   private static let linkExpression = markdownRegex(#"(?<!!)\[([^\]\n]+)\]\((https?://[^\)\n]+)\)"#)
+  private static let renderedLinkExpression = markdownRegex(#"(?<!!)\[([^\]\n]+)\]\(([^\)\n]+)\)"#)
+  private static let imageExpression = markdownRegex(#"!\[([^\]\n]*)\]\(([^\)\n]+)\)"#)
   private static let boldItalicExpression = markdownRegex(
     #"(?<![\\*])\*\*\*([^\*\n]+)(?<!\\)\*\*\*(?!\*)"#)
   private static let boldExpression = markdownRegex(#"(?<![\\*])\*\*([^\*\n]+)(?<!\\)\*\*(?!\*)"#)

@@ -211,7 +211,7 @@ struct WorkspaceDocumentSurface: View {
   private func prepareSelectedDocument() async {
     saveErrorMessage = nil
 
-    guard let entry, WorkspaceTextDocumentSupport.canEdit(entry) else {
+    guard let entry, WorkspaceTextDocumentSupport.canOpenInTextSurface(entry) else {
       knownDocumentFingerprint = nil
       return
     }

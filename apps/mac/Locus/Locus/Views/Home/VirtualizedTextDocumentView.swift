@@ -142,6 +142,12 @@ struct LargeTextViewport: NSViewRepresentable {
     guard let documentView = scrollView.documentView as? LineRenderingTextView else {
       return
     }
+    let previousScrollOrigin = scrollView.contentView.bounds.origin
+    let preservesScrollPosition =
+      documentView.saveURL == saveURL
+      && documentView.syntax == syntax
+      && documentView.accessibilityLabel() == accessibilityLabel
+    var didSwapDocument = false
     // Keep the identifier consistent with the backend in case a swap reuses this
     // view (makeNSView sets it once; updateNSView handles a backend change).
     documentView.setAccessibilityIdentifier(backendAccessibilityIdentifier)
@@ -160,17 +166,37 @@ struct LargeTextViewport: NSViewRepresentable {
     case .editable(let buffer):
       if documentView.editableBuffer !== buffer {
         documentView.setBuffer(buffer)
+        didSwapDocument = true
       }
     case .readOnly(let file):
       if !documentView.isShowingReadOnlyDocument(file) {
         documentView.setReadOnlyDocument(file)
+        didSwapDocument = true
       }
+    }
+    if didSwapDocument, preservesScrollPosition {
+      restore(scrollView: scrollView, to: previousScrollOrigin)
     }
     // A bumped save request (from the menu/Cmd+S command) asks the viewer to save.
     if context.coordinator.lastSaveRequest != saveRequest {
       context.coordinator.lastSaveRequest = saveRequest
       documentView.requestSave()
     }
+  }
+
+  private func restore(scrollView: NSScrollView, to origin: NSPoint) {
+    guard let documentView = scrollView.documentView else { return }
+    let visible = scrollView.contentView.bounds
+    let insets = scrollView.contentInsets
+    let minX = -insets.left
+    let minY = -insets.top
+    let maxX = max(minX, documentView.frame.width - visible.width)
+    let maxY = max(minY, documentView.frame.height - visible.height)
+    scrollView.contentView.scroll(
+      to: NSPoint(
+        x: min(max(origin.x, minX), maxX),
+        y: min(max(origin.y, minY), maxY)))
+    scrollView.reflectScrolledClipView(scrollView.contentView)
   }
 
   func makeCoordinator() -> Coordinator {
