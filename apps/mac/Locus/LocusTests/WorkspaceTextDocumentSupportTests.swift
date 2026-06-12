@@ -101,11 +101,43 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertTrue(TextDocumentSyntax.code.supportsLineNumbers)
   }
 
-  func testMarkdownHeadingTypographyFitsUniformLineHeightUntilVariableRowsExist() {
-    let headingFont = MarkdownDocumentMetrics.headingFont(level: 1)
-    let headingHeight = ceil(headingFont.ascender - headingFont.descender + headingFont.leading)
+  func testMarkdownHeadingScaleIsDescendingAndDistinct() {
+    let sizes = (1...6).map { MarkdownDocumentMetrics.headingFont(level: $0).pointSize }
 
-    XCTAssertLessThanOrEqual(headingHeight, TextDocumentSyntax.markdown.lineHeight)
+    XCTAssertEqual(sizes, sizes.sorted(by: >))
+    // H1–H3 carry the sectional hierarchy and must be clearly distinct.
+    XCTAssertGreaterThanOrEqual(sizes[0] - sizes[1], 4)
+    XCTAssertGreaterThanOrEqual(sizes[1] - sizes[2], 3)
+    XCTAssertGreaterThan(sizes[0], MarkdownDocumentMetrics.bodyFontSize * 1.8)
+  }
+
+  func testMarkdownHeadingLineMetricsCarrySectionalAir() {
+    let h1 = LineRenderingTextView.headingLineMetrics(level: 1, isDocumentTop: false)
+    let font = MarkdownDocumentMetrics.headingFont(level: 1)
+
+    XCTAssertEqual(
+      h1.rowHeight, ceil(font.ascender - font.descender + font.leading), accuracy: 0.01)
+    XCTAssertGreaterThan(h1.leadingInset, h1.trailingInset)
+
+    let title = LineRenderingTextView.headingLineMetrics(level: 1, isDocumentTop: true)
+    XCTAssertEqual(
+      title.leadingInset, MarkdownDocumentMetrics.documentTopHeadingInset, accuracy: 0.01)
+    XCTAssertLessThan(title.leadingInset, h1.leadingInset)
+  }
+
+  func testMarkdownHeadingLinesCarryTighteningTracking() {
+    let lines = ["# Quarterly Review", "", "Body"]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    XCTAssertEqual(states[0].headingLevel, 1)
+
+    let rendered = TextDocumentSyntaxHighlighter.markdownMeasurementLine(
+      lines[0],
+      font: TextDocumentSyntax.markdown.font,
+      state: states[0],
+      typography: MarkdownTypography(baseFont: TextDocumentSyntax.markdown.font))
+    let kern = rendered.attribute(.kern, at: 0, effectiveRange: nil) as? CGFloat
+    XCTAssertEqual(kern ?? 0, MarkdownDocumentMetrics.headingTracking(level: 1), accuracy: 0.01)
+    XCTAssertLessThan(kern ?? 0, 0)
   }
 
   func testProseDocumentsSoftWrap() {

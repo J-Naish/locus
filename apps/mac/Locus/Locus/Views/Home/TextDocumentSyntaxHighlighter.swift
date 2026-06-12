@@ -65,9 +65,10 @@ enum MarkdownDocumentMetrics {
   /// How far the top and bottom rules breathe outward into an adjacent blank
   /// line, so the text inside the table is never pressed against its rules.
   static let tableRuleBreath: CGFloat = 4
-  /// Row height of a table delimiter row — a slim row, so the header→body gap
-  /// approaches the body line spacing instead of consuming a full text row.
-  static let tableSeparatorRowHeight: CGFloat = 6
+  /// Row height of marker-only rows (table delimiters, setext underlines) —
+  /// slim rows, so structural source lines read as spacing instead of
+  /// consuming a full text row.
+  static let slimMarkerRowHeight: CGFloat = 6
   /// Horizontal inset between the rules' ends and the first/last column's
   /// text, so the rules extend slightly past the content on both sides.
   static let tableEdgeInset: CGFloat = 10
@@ -75,19 +76,53 @@ enum MarkdownDocumentMetrics {
   static func headingFont(level: Int) -> NSFont {
     switch level {
     case 1:
-      return .systemFont(ofSize: 20, weight: .bold)
+      return .systemFont(ofSize: 28, weight: .bold)
     case 2:
-      return .systemFont(ofSize: 18, weight: .bold)
+      return .systemFont(ofSize: 22, weight: .bold)
     case 3:
-      return .systemFont(ofSize: 16, weight: .semibold)
+      return .systemFont(ofSize: 19, weight: .semibold)
     case 4:
-      return .systemFont(ofSize: 15, weight: .semibold)
+      return .systemFont(ofSize: 16, weight: .semibold)
     case 5:
       return .systemFont(ofSize: 14, weight: .semibold)
     default:
       return .systemFont(ofSize: 13, weight: .semibold)
     }
   }
+
+  /// Slight negative tracking tightens large bold headings the way the system
+  /// treats large titles; zero for body-adjacent sizes.
+  static func headingTracking(level: Int) -> CGFloat {
+    switch level {
+    case 1:
+      return -0.4
+    case 2:
+      return -0.2
+    default:
+      return 0
+    }
+  }
+
+  /// Breathing room around a heading line: generous above, tight below, so the
+  /// heading binds to the section it introduces.
+  static func headingInsets(level: Int) -> (leading: CGFloat, trailing: CGFloat) {
+    switch level {
+    case 1:
+      return (22, 6)
+    case 2:
+      return (18, 5)
+    case 3:
+      return (14, 4)
+    case 4:
+      return (10, 3)
+    default:
+      return (8, 2)
+    }
+  }
+
+  /// Leading inset for a heading on the document's first line — the title sits
+  /// at the page top instead of floating below sectional air.
+  static let documentTopHeadingInset: CGFloat = 4
 
   static var inlineCodeBackground: NSColor {
     codeBackground.withAlphaComponent(0.75)
@@ -128,6 +163,8 @@ struct MarkdownLineStyleState: Equatable, Sendable {
   var insideFence = false
   var setextHeadingLevel: Int?
   var isSetextUnderline = false
+  /// 1–6 when the line renders as a heading (ATX or setext text line).
+  var headingLevel: Int?
   var insideFrontMatter = false
   var isFenceDelimiter = false
   var isIndentedCodeBlock = false
@@ -509,6 +546,14 @@ enum TextDocumentSyntaxHighlighter {
         foregroundColor: block.foregroundColor,
         includeVisualAttributes: includeVisualAttributes),
       range: fullRange)
+    if let level = state.headingLevel {
+      let tracking = MarkdownDocumentMetrics.headingTracking(level: level)
+      if tracking != 0 {
+        // Tracking affects glyph advances, so it applies to measurement and
+        // drawing alike — never gate it on visual attributes.
+        attributed.addAttribute(.kern, value: tracking, range: fullRange)
+      }
+    }
     if state.isTableRow {
       attributed.addAttribute(
         .paragraphStyle,
@@ -1446,6 +1491,22 @@ enum TextDocumentSyntaxHighlighter {
       }
       states[index - 1].setextHeadingLevel = level
       states[index].isSetextUnderline = true
+    }
+
+    for index in lines.indices {
+      let state = states[index]
+      if let setext = state.setextHeadingLevel {
+        states[index].headingLevel = setext
+        continue
+      }
+      guard !state.insideFence, !state.insideFrontMatter, !state.isFenceDelimiter,
+        !state.isIndentedCodeBlock, !state.isTableRow, !state.isTableSeparator,
+        !state.isReferenceDefinition, !state.isSetextUnderline,
+        let heading = markdownHeadingInfo(in: markdownLineContext(in: lines[index]).body)
+      else {
+        continue
+      }
+      states[index].headingLevel = heading.level
     }
 
     return states

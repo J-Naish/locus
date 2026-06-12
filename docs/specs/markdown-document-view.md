@@ -93,15 +93,26 @@ only Markdown styling path.
 ### Layout and type scale
 
 Centered 600 pt measure with symmetric 32 pt minimum side padding (no
-number rail — see Goal); the interim compressed type scale inside the
-uniform 24 pt row (full scale arrives with Phase A variable row
-heights):
-Body 15 regular / H1 20 bold / H2 18 bold / H3 16 semibold / H4 15
-semibold / H5 14 semibold / H6 13 semibold secondary / code 13 mono /
-fence label 11 mono / blank lines 24 pt. Row text is **vertically
-centered** within its 24 pt row (a fragment's natural line height is
-often shorter than the row; the slack splits evenly top and bottom,
-never pooling at the bottom).
+number rail — see Goal). The full heading scale, Notion-ratio, on
+variable-height rows:
+
+| Element | Font | Tracking | Air above/below |
+| --- | --- | --- | --- |
+| Body | 15 regular | — | 24 pt row |
+| H1 | 28 bold | −0.4 | 22 / 6 |
+| H2 | 22 bold | −0.2 | 18 / 5 |
+| H3 | 19 semibold | — | 14 / 4 |
+| H4 | 16 semibold | — | 10 / 3 |
+| H5 | 14 semibold | — | 8 / 2 |
+| H6 | 13 semibold secondary | — | 8 / 2 |
+
+Heading rows are glyph-height rows with sectional air applied once per
+line — generous above, tight below, so a heading binds to the section it
+introduces; a heading on the document's first line suppresses its air
+(4 pt) so the title sits at the page top. Setext underline rows render
+as 6 pt slim rows, like table delimiters. Code 13 mono / fence label 11
+mono / blank lines 24 pt. Row text is **vertically centered** within its
+row (slack splits evenly, never pooling at the bottom).
 
 ### Block and inline elements
 

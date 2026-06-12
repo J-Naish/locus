@@ -53,49 +53,67 @@ struct TextViewportLayout: Equatable {
 /// (one logical line can wrap to several rows). Built from each line's wrapped-row
 /// count as a prefix sum, so lookups are `O(log n)` and the total document height
 /// is `totalVisualRows * lineHeight`. Pure and unit-testable.
+/// Per-line vertical metrics: the height each wrapped visual row occupies, plus
+/// breathing insets above the first row and below the last one (heading air).
+struct LineRowMetrics: Equatable {
+  var rowHeight: CGFloat
+  var leadingInset: CGFloat = 0
+  var trailingInset: CGFloat = 0
+
+  /// Total vertical extent of a line wrapping into `rows` visual rows.
+  func totalHeight(rows: Int) -> CGFloat {
+    leadingInset + CGFloat(max(1, rows)) * rowHeight + trailingInset
+  }
+}
+
 struct WrapIndex: Equatable {
   /// `rowOffsets[i]` is the first visual row of logical line `i`; the last element
   /// is the total visual-row count. Always has `lineCount + 1` elements.
   private let rowOffsets: [Int]
-  /// Per-line row heights, present only when at least one line diverges from the
-  /// uniform height (slim marker rows). All wrapped rows of a line share its
-  /// height. `nil` keeps the uniform O(1) arithmetic fast path.
-  private let lineRowHeights: [CGFloat]?
+  /// Per-line vertical metrics, present only when at least one line diverges
+  /// from the uniform height (slim marker rows, heading air). All wrapped rows
+  /// of a line share its row height; the insets apply once per line. `nil`
+  /// keeps the uniform O(1) arithmetic fast path.
+  private let lineMetrics: [LineRowMetrics]?
   /// Cumulative y offsets per line (`lineCount + 1` elements); present exactly
-  /// when `lineRowHeights` is.
+  /// when `lineMetrics` is.
   private let lineYOffsets: [CGFloat]?
 
   /// Builds the index from per-logical-line visual-row counts (each clamped to at
-  /// least 1, since even an empty line occupies one row). `rowHeightsPerLine`
-  /// supplies a custom row height per line; pass `nil` (or all-uniform heights)
-  /// for uniform documents.
-  init(visualRowsPerLine: [Int], rowHeightsPerLine: [CGFloat]? = nil, uniformRowHeight: CGFloat = 0)
-  {
+  /// least 1, since even an empty line occupies one row). `rowMetricsPerLine`
+  /// supplies custom vertical metrics per line; pass `nil` (or all-uniform
+  /// metrics) for uniform documents.
+  init(
+    visualRowsPerLine: [Int],
+    rowMetricsPerLine: [LineRowMetrics]? = nil,
+    uniformRowHeight: CGFloat = 0
+  ) {
     var offsets = [Int](repeating: 0, count: visualRowsPerLine.count + 1)
     for (index, rows) in visualRowsPerLine.enumerated() {
       offsets[index + 1] = offsets[index] + max(1, rows)
     }
     rowOffsets = offsets
-    if let heights = rowHeightsPerLine,
-      heights.count == visualRowsPerLine.count,
-      heights.contains(where: { $0 != uniformRowHeight })
+    let uniform = LineRowMetrics(rowHeight: uniformRowHeight)
+    if let metrics = rowMetricsPerLine,
+      metrics.count == visualRowsPerLine.count,
+      metrics.contains(where: { $0 != uniform })
     {
-      var ys = [CGFloat](repeating: 0, count: heights.count + 1)
+      var ys = [CGFloat](repeating: 0, count: metrics.count + 1)
       for (index, rows) in visualRowsPerLine.enumerated() {
-        ys[index + 1] = ys[index] + CGFloat(max(1, rows)) * heights[index]
+        ys[index + 1] = ys[index] + metrics[index].totalHeight(rows: rows)
       }
-      lineRowHeights = heights
+      lineMetrics = metrics
       lineYOffsets = ys
     } else {
-      lineRowHeights = nil
+      lineMetrics = nil
       lineYOffsets = nil
     }
   }
 
   var lineCount: Int { max(0, rowOffsets.count - 1) }
   var totalVisualRows: Int { rowOffsets.last ?? 0 }
-  /// Whether any line carries a non-uniform row height.
-  var hasCustomRowHeights: Bool { lineRowHeights != nil }
+  /// Whether any line carries non-uniform vertical metrics.
+  var hasCustomRowHeights: Bool { lineMetrics != nil }
 
   /// The first visual row of `line` (clamped to the document).
   func firstVisualRow(ofLine line: Int) -> Int {
@@ -127,15 +145,20 @@ struct WrapIndex: Equatable {
     return (low, target - rowOffsets[low])
   }
 
-  /// The row height of `line` under the given uniform fallback.
-  func rowHeight(ofLine line: Int, uniformRowHeight: CGFloat) -> CGFloat {
-    guard let heights = lineRowHeights, line >= 0, line < heights.count else {
-      return uniformRowHeight
+  /// The vertical metrics of `line` under the given uniform fallback.
+  func rowMetrics(ofLine line: Int, uniformRowHeight: CGFloat) -> LineRowMetrics {
+    guard let metrics = lineMetrics, line >= 0, line < metrics.count else {
+      return LineRowMetrics(rowHeight: uniformRowHeight)
     }
-    return heights[line]
+    return metrics[line]
   }
 
-  /// The y offset of the top of `line` under the given uniform fallback.
+  /// The row height of `line` under the given uniform fallback.
+  func rowHeight(ofLine line: Int, uniformRowHeight: CGFloat) -> CGFloat {
+    rowMetrics(ofLine: line, uniformRowHeight: uniformRowHeight).rowHeight
+  }
+
+  /// The y offset of the top of `line`'s block (including its leading inset).
   func yOffset(ofLine line: Int, uniformRowHeight: CGFloat) -> CGFloat {
     guard let ys = lineYOffsets else {
       return CGFloat(firstVisualRow(ofLine: line)) * uniformRowHeight
@@ -143,7 +166,8 @@ struct WrapIndex: Equatable {
     return ys[min(max(0, line), lineCount)]
   }
 
-  /// The y offset of the top of a global visual row.
+  /// The y offset of the top of a global visual row (below its line's leading
+  /// inset).
   func yOffset(ofVisualRow row: Int, uniformRowHeight: CGFloat) -> CGFloat {
     guard lineYOffsets != nil else { return CGFloat(row) * uniformRowHeight }
     guard lineCount > 0 else { return 0 }
@@ -152,8 +176,9 @@ struct WrapIndex: Equatable {
         + CGFloat(row - totalVisualRows) * uniformRowHeight
     }
     let (line, rowInLine) = location(ofVisualRow: row)
+    let metrics = rowMetrics(ofLine: line, uniformRowHeight: uniformRowHeight)
     return yOffset(ofLine: line, uniformRowHeight: uniformRowHeight)
-      + CGFloat(rowInLine) * rowHeight(ofLine: line, uniformRowHeight: uniformRowHeight)
+      + metrics.leadingInset + CGFloat(rowInLine) * metrics.rowHeight
   }
 
   /// Total document content height.
@@ -163,7 +188,9 @@ struct WrapIndex: Equatable {
   }
 
   /// The line and row-within-line whose vertical span contains `y` (clamped to
-  /// the document).
+  /// the document). A y inside a line's leading inset resolves to its first
+  /// row; inside the trailing inset, to its last — padding strips are never
+  /// dead zones.
   func location(forY y: CGFloat, uniformRowHeight: CGFloat) -> (line: Int, rowInLine: Int) {
     guard let ys = lineYOffsets else {
       guard uniformRowHeight > 0 else { return (0, 0) }
@@ -182,11 +209,12 @@ struct WrapIndex: Equatable {
         high = mid - 1
       }
     }
-    let height = rowHeight(ofLine: low, uniformRowHeight: uniformRowHeight)
-    guard height > 0 else { return (low, 0) }
+    let metrics = rowMetrics(ofLine: low, uniformRowHeight: uniformRowHeight)
+    guard metrics.rowHeight > 0 else { return (low, 0) }
+    let withinRows = target - ys[low] - metrics.leadingInset
     let rowInLine = min(
       visualRowCount(ofLine: low) - 1,
-      max(0, Int(((target - ys[low]) / height).rounded(.down))))
+      max(0, Int((withinRows / metrics.rowHeight).rounded(.down))))
     return (low, rowInLine)
   }
 }
@@ -872,27 +900,48 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     wrapRowCounts = counts
     wrapIndex = WrapIndex(
       visualRowsPerLine: counts,
-      rowHeightsPerLine: markdownRowHeights(states: markdownStates, lineCount: counts.count),
+      rowMetricsPerLine: markdownRowMetrics(states: markdownStates, lineCount: counts.count),
       uniformRowHeight: layout.lineHeight)
   }
 
-  /// Per-line row heights for markdown documents containing slim marker rows
-  /// (table delimiter rows), or `nil` when every line is uniform — which keeps
-  /// the O(1) uniform geometry fast path.
-  private func markdownRowHeights(
+  /// Per-line vertical metrics for markdown documents containing slim marker
+  /// rows (table delimiters, setext underlines) or headings (taller glyph rows
+  /// with sectional air above and below), or `nil` when every line is uniform —
+  /// which keeps the O(1) uniform geometry fast path.
+  private func markdownRowMetrics(
     states: [MarkdownLineStyleState]?, lineCount: Int
-  ) -> [CGFloat]? {
+  ) -> [LineRowMetrics]? {
     guard usesMarkdownDocumentLayout, let states, lineCount > 0 else { return nil }
-    var heights: [CGFloat]?
+    let uniform = LineRowMetrics(rowHeight: layout.lineHeight)
+    var metrics: [LineRowMetrics]?
+    func set(_ index: Int, _ value: LineRowMetrics) {
+      if metrics == nil {
+        metrics = [LineRowMetrics](repeating: uniform, count: lineCount)
+      }
+      metrics?[index] = value
+    }
     for index in 0..<lineCount {
       let state = index < states.count ? states[index] : .plain
-      guard state.isTableSeparator else { continue }
-      if heights == nil {
-        heights = [CGFloat](repeating: layout.lineHeight, count: lineCount)
+      if state.isTableSeparator || state.isSetextUnderline {
+        set(index, LineRowMetrics(rowHeight: MarkdownDocumentMetrics.slimMarkerRowHeight))
+      } else if let level = state.headingLevel {
+        set(index, Self.headingLineMetrics(level: level, isDocumentTop: index == 0))
       }
-      heights?[index] = MarkdownDocumentMetrics.tableSeparatorRowHeight
     }
-    return heights
+    return metrics
+  }
+
+  /// A heading line's vertical metrics: a row sized to its font plus the
+  /// level's sectional insets (suppressed above a document-top title).
+  nonisolated static func headingLineMetrics(level: Int, isDocumentTop: Bool) -> LineRowMetrics {
+    let font = MarkdownDocumentMetrics.headingFont(level: level)
+    let insets = MarkdownDocumentMetrics.headingInsets(level: level)
+    return LineRowMetrics(
+      rowHeight: ceil(font.ascender - font.descender + font.leading),
+      leadingInset: isDocumentTop
+        ? MarkdownDocumentMetrics.documentTopHeadingInset : insets.leading,
+      trailingInset: insets.trailing
+    )
   }
 
   // MARK: Background wrap build
@@ -1066,7 +1115,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       wrapRowCounts = outcome.rowCounts
       wrapIndex = WrapIndex(
         visualRowsPerLine: outcome.rowCounts,
-        rowHeightsPerLine: markdownRowHeights(
+        rowMetricsPerLine: markdownRowMetrics(
           states: outcome.markdownLineStates, lineCount: outcome.rowCounts.count),
         uniformRowHeight: layout.lineHeight)
     } else {
@@ -1419,7 +1468,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     wrapRowCounts = counts
     wrapIndex = WrapIndex(
       visualRowsPerLine: counts,
-      rowHeightsPerLine: markdownRowHeights(states: markdownStates, lineCount: counts.count),
+      rowMetricsPerLine: markdownRowMetrics(states: markdownStates, lineCount: counts.count),
       uniformRowHeight: layout.lineHeight)
   }
 
@@ -1455,10 +1504,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return (min(max(0, row), max(0, lineCount - 1)), 0)
   }
 
-  /// The row height of `line` (the uniform height unless the line carries a
-  /// custom slim height, e.g. a table delimiter row).
+  /// The row height of `line` (the uniform height unless the line carries
+  /// custom metrics, e.g. a slim table delimiter row or a heading).
   private func rowHeight(forLine line: Int) -> CGFloat {
     wrapIndex?.rowHeight(ofLine: line, uniformRowHeight: layout.lineHeight) ?? layout.lineHeight
+  }
+
+  /// The breathing inset above `line`'s first visual row (heading air).
+  private func leadingInset(forLine line: Int) -> CGFloat {
+    wrapIndex?.rowMetrics(ofLine: line, uniformRowHeight: layout.lineHeight).leadingInset ?? 0
   }
 
   /// The y offset of the top of `line`.
@@ -3755,7 +3809,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// wrapping) at its row's y position.
   private func drawVisualRows(of attributed: NSAttributedString, line: Int, textX: CGFloat) {
     let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
-    let lineY = yOffset(ofLine: line)
+    let rowsTop = yOffset(ofLine: line) + leadingInset(forLine: line)
     let height = rowHeight(forLine: line)
     let length = attributed.length
     for rowIndex in starts.indices {
@@ -3764,7 +3818,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
       let natural = rowText.size()
       let y =
-        lineY + CGFloat(rowIndex) * height
+        rowsTop + CGFloat(rowIndex) * height
         + Self.rowVerticalInset(rowHeight: height, naturalHeight: natural.height)
       rowText.draw(
         with: NSRect(x: textX, y: y, width: natural.width, height: height),
@@ -4217,7 +4271,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         continue
       }
       let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
-      let lineY = yOffset(ofLine: line)
+      let rowsTop = yOffset(ofLine: line) + leadingInset(forLine: line)
       let height = rowHeight(forLine: line)
       let length = attributed.length
       for rowIndex in starts.indices {
@@ -4234,7 +4288,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
           xEnd += newlineSelectionWidth
         }
         NSRect(
-          x: xStart, y: lineY + CGFloat(rowIndex) * height,
+          x: xStart, y: rowsTop + CGFloat(rowIndex) * height,
           width: max(0, xEnd - xStart), height: height
         ).fill()
       }

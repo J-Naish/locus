@@ -959,7 +959,7 @@ final class TextViewportLayoutTests: XCTestCase {
       view.markdownTableRuleYsForTesting(fromLine: 0, toLine: 3, visibleRows: 0..<4))
     let rowHeight = view.layout.lineHeight
 
-    let separatorHeight = MarkdownDocumentMetrics.tableSeparatorRowHeight
+    let separatorHeight = MarkdownDocumentMetrics.slimMarkerRowHeight
     XCTAssertEqual(rules.count, 3)
     XCTAssertEqual(rules[0], 0, accuracy: 0.5)
     XCTAssertEqual(rules[1], rowHeight + separatorHeight / 2, accuracy: 0.5)
@@ -985,7 +985,7 @@ final class TextViewportLayoutTests: XCTestCase {
     let rowHeight = view.layout.lineHeight
     let breath = MarkdownDocumentMetrics.tableRuleBreath
 
-    let separatorHeight = MarkdownDocumentMetrics.tableSeparatorRowHeight
+    let separatorHeight = MarkdownDocumentMetrics.slimMarkerRowHeight
     XCTAssertEqual(rules.count, 3)
     XCTAssertEqual(rules[0], rowHeight - breath, accuracy: 0.5)
     XCTAssertEqual(rules[1], rowHeight * 2 + separatorHeight / 2, accuracy: 0.5)
@@ -1005,7 +1005,7 @@ final class TextViewportLayoutTests: XCTestCase {
     view.updateLayout()
 
     let rowHeight = view.layout.lineHeight
-    let separatorHeight = MarkdownDocumentMetrics.tableSeparatorRowHeight
+    let separatorHeight = MarkdownDocumentMetrics.slimMarkerRowHeight
     // The body row starts one full header row plus one slim separator row down.
     let body = try XCTUnwrap(view.endpointYForTesting(line: 2))
     XCTAssertEqual(body, rowHeight + separatorHeight, accuracy: 0.5)
@@ -1017,7 +1017,9 @@ final class TextViewportLayoutTests: XCTestCase {
 
   func testWrapIndexUniformDocumentsKeepRowTimesHeightGeometry() {
     let index = WrapIndex(
-      visualRowsPerLine: [1, 2, 1], rowHeightsPerLine: [24, 24, 24], uniformRowHeight: 24)
+      visualRowsPerLine: [1, 2, 1],
+      rowMetricsPerLine: [LineRowMetrics](repeating: LineRowMetrics(rowHeight: 24), count: 3),
+      uniformRowHeight: 24)
 
     XCTAssertFalse(index.hasCustomRowHeights)
     for row in 0..<4 {
@@ -1030,7 +1032,14 @@ final class TextViewportLayoutTests: XCTestCase {
   func testWrapIndexCustomRowHeightsProduceCumulativeYGeometry() {
     // header (24), slim separator (6), wrapped body line (2 rows × 24), body (24).
     let index = WrapIndex(
-      visualRowsPerLine: [1, 1, 2, 1], rowHeightsPerLine: [24, 6, 24, 24], uniformRowHeight: 24)
+      visualRowsPerLine: [1, 1, 2, 1],
+      rowMetricsPerLine: [
+        LineRowMetrics(rowHeight: 24),
+        LineRowMetrics(rowHeight: 6),
+        LineRowMetrics(rowHeight: 24),
+        LineRowMetrics(rowHeight: 24),
+      ],
+      uniformRowHeight: 24)
 
     XCTAssertTrue(index.hasCustomRowHeights)
     XCTAssertEqual(index.yOffset(ofLine: 1, uniformRowHeight: 24), 24, accuracy: 0.01)
@@ -1046,6 +1055,76 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(secondRow.line, 2)
     XCTAssertEqual(secondRow.rowInLine, 1)
     XCTAssertEqual(index.location(forY: 90, uniformRowHeight: 24).line, 3)
+  }
+
+  func testWrapIndexLeadingAndTrailingInsetsShapeLineBlocks() {
+    // heading: 34pt glyph row with 22pt above / 6pt below, wrapping to 2 rows.
+    let index = WrapIndex(
+      visualRowsPerLine: [2, 1],
+      rowMetricsPerLine: [
+        LineRowMetrics(rowHeight: 34, leadingInset: 22, trailingInset: 6),
+        LineRowMetrics(rowHeight: 24),
+      ],
+      uniformRowHeight: 24)
+
+    // Line block: 22 + 2×34 + 6 = 96; body starts after it.
+    XCTAssertEqual(index.yOffset(ofLine: 1, uniformRowHeight: 24), 96, accuracy: 0.01)
+    XCTAssertEqual(index.totalHeight(uniformRowHeight: 24), 120, accuracy: 0.01)
+    // Visual rows sit below the leading inset.
+    XCTAssertEqual(index.yOffset(ofVisualRow: 0, uniformRowHeight: 24), 22, accuracy: 0.01)
+    XCTAssertEqual(index.yOffset(ofVisualRow: 1, uniformRowHeight: 24), 56, accuracy: 0.01)
+    // Clicks in the padding strips resolve to the heading, never a dead zone.
+    XCTAssertEqual(index.location(forY: 10, uniformRowHeight: 24).line, 0)
+    XCTAssertEqual(index.location(forY: 10, uniformRowHeight: 24).rowInLine, 0)
+    let trailing = index.location(forY: 93, uniformRowHeight: 24)
+    XCTAssertEqual(trailing.line, 0)
+    XCTAssertEqual(trailing.rowInLine, 1)
+  }
+
+  @MainActor
+  func testMarkdownHeadingRowsGainSectionalAirAndSetextUnderlineIsSlim() throws {
+    let view = try makeViewer(
+      """
+      # Title
+
+      ## Section
+
+      Setext
+      ===
+      Body
+      """)
+    view.setFrameSize(NSSize(width: 560, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let body = view.layout.lineHeight
+    let h1 = LineRenderingTextView.headingLineMetrics(level: 1, isDocumentTop: true)
+    let h2 = LineRenderingTextView.headingLineMetrics(level: 2, isDocumentTop: false)
+    let setextH1 = LineRenderingTextView.headingLineMetrics(level: 1, isDocumentTop: false)
+    let slim = MarkdownDocumentMetrics.slimMarkerRowHeight
+
+    // Line 0 is the document title: suppressed leading inset.
+    let titleBlock = h1.totalHeight(rows: 1)
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 1)), titleBlock, accuracy: 0.5)
+    // Mid-document H2 carries its full sectional air.
+    let sectionTop = titleBlock + body
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 3)),
+      sectionTop + h2.totalHeight(rows: 1),
+      accuracy: 0.5)
+    // The setext text line renders as an H1 block; its underline row is slim.
+    let setextTop = sectionTop + h2.totalHeight(rows: 1) + body
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 5)),
+      setextTop + setextH1.totalHeight(rows: 1),
+      accuracy: 0.5)
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 6)),
+      setextTop + setextH1.totalHeight(rows: 1) + slim,
+      accuracy: 0.5)
+    // A click inside the H2's leading air lands on the H2 line.
+    XCTAssertEqual(view.endpoint(at: NSPoint(x: 100, y: sectionTop + 4)).line, 2)
   }
 
   func testRowVerticalInsetCentersShortFragments() {
