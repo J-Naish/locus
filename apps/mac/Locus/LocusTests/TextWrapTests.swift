@@ -89,6 +89,60 @@ final class TextWrapTests: XCTestCase {
     XCTAssertEqual(LineWrap.visualRowStartOffsets(of: line, width: 0), [0])
   }
 
+  @MainActor
+  func testMarkdownWrapMeasurementUsesStyledHeadingFont() throws {
+    let heading = "# " + String(repeating: "QuarterlyReview", count: 12)
+    let viewWidth: CGFloat = 220
+    let view = LineRenderingTextView()
+    view.syntax = .markdown
+    view.frame = NSRect(x: 0, y: 0, width: viewWidth, height: 400)
+    view.setBuffer(try TextBuffer.open(bytes: Data(heading.utf8)))
+    let wrapWidth = view.markdownWrapContentWidthForTesting()
+    let typography = MarkdownTypography(baseFont: TextDocumentSyntax.markdown.font)
+    let expectedRows = LineWrap.visualRowStartOffsets(
+      of: TextDocumentSyntaxHighlighter.markdownMeasurementLine(
+        heading, font: TextDocumentSyntax.markdown.font, state: .plain, typography: typography),
+      width: wrapWidth,
+      maximumRows: 20_000
+    ).count
+
+    XCTAssertGreaterThan(expectedRows, 1)
+    XCTAssertEqual(view.visualRowCount, expectedRows)
+  }
+
+  @MainActor
+  func testMarkdownBackgroundWrapMeasurementMatchesStyledForegroundRows() async throws {
+    let heading = "# " + String(repeating: "QuarterlyReview", count: 12)
+    let body = String(repeating: "body ", count: 80)
+    let text = "\(heading)\n\(body)"
+    let viewWidth: CGFloat = 220
+    let view = LineRenderingTextView()
+    view.syntax = .markdown
+    view.frame = NSRect(x: 0, y: 0, width: viewWidth, height: 400)
+    view.wrapBuildSynchronousLineLimit = 1
+    view.setBuffer(try TextBuffer.open(bytes: Data(text.utf8)))
+    let wrapWidth = view.markdownWrapContentWidthForTesting()
+    let typography = MarkdownTypography(baseFont: TextDocumentSyntax.markdown.font)
+    let lines = text.components(separatedBy: "\n")
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let expectedRows = zip(lines, states).reduce(0) { total, pair in
+      total
+        + LineWrap.visualRowStartOffsets(
+          of: TextDocumentSyntaxHighlighter.markdownMeasurementLine(
+            pair.0,
+            font: TextDocumentSyntax.markdown.font,
+            state: pair.1,
+            typography: typography),
+          width: wrapWidth,
+          maximumRows: 20_000
+        ).count
+    }
+
+    await view.settleWrapBuildsForTesting()
+
+    XCTAssertEqual(view.visualRowCount, expectedRows)
+  }
+
   // MARK: View-level wrapping (document height)
 
   @MainActor
@@ -883,6 +937,26 @@ final class TextWrapTests: XCTestCase {
     view.deleteBackward()
 
     let reference = try makeWrappingViewer(content(of: view), width: width)
+    XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
+  }
+
+  @MainActor
+  func testMarkdownEditWrapsIdenticallyToAFullRebuild() throws {
+    let width: CGFloat = 260
+    let original = """
+      # A heading that is intentionally long enough to wrap across the centered prose column
+      paragraph body with **strong text** and a second phrase that wraps
+      """
+    let view = try makeWrappingViewer(original, width: width)
+    view.syntax = .markdown
+    view.updateLayout()
+    view.beginCaretSelection(at: .init(line: 1, columnUTF16: 0))
+
+    view.insertText("> ")
+
+    let reference = try makeWrappingViewer(content(of: view), width: width)
+    reference.syntax = .markdown
+    reference.updateLayout()
     XCTAssertEqual(view.visualRowCount, reference.visualRowCount)
   }
 

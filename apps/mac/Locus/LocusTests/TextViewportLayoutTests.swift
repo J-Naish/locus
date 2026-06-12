@@ -860,6 +860,170 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testMarkdownDeleteBackwardAtHeadingContentStartPeelsHeadingMarker() throws {
+    let view = try makeEditableViewer("# Title")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 2))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), "Title")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testMarkdownDeleteBackwardAtIndentedHeadingContentStartPeelsHeadingMarker() throws {
+    let view = try makeEditableViewer("  # Title")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 4))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), "  Title")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 2))
+  }
+
+  @MainActor
+  func testMarkdownDeleteBackwardAtTaskContentStartPeelsTaskToBullet() throws {
+    let view = try makeEditableViewer("- [ ] Update")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 6))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), "- Update")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 2))
+  }
+
+  @MainActor
+  func testMarkdownDeleteBackwardAtIndentedBulletContentStartPeelsBullet() throws {
+    let view = try makeEditableViewer("  - Item")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 4))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), "  Item")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 2))
+  }
+
+  @MainActor
+  func testMarkdownDeleteBackwardInsideFenceDoesNotPeelHeadingPrefix() throws {
+    let view = try makeEditableViewer("```\n# comment\n```")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 1, columnUTF16: 2))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), "```\n#comment\n```")
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 1))
+  }
+
+  @MainActor
+  func testMarkdownDeleteBackwardInsideFrontMatterDoesNotPeelListPrefix() throws {
+    let view = try makeEditableViewer("---\n- item\n---\nBody")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 1, columnUTF16: 2))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), "---\n-item\n---\nBody")
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 1))
+  }
+
+  @MainActor
+  func testMarkdownMarginLineNumbersAreAlwaysVisibleForVisibleLogicalLines() throws {
+    let view = try makeViewer("a\nb\nc")
+    view.syntax = .markdown
+
+    XCTAssertEqual(
+      view.markdownMarginLineNumbersForTesting(lineRange: 0..<3, visibleRows: 0..<3),
+      [0, 1, 2]
+    )
+  }
+
+  @MainActor
+  func testMarkdownMarginLineNumberAppearsOnlyOnFirstWrappedVisualRow() throws {
+    let view = try makeViewer(String(repeating: "wide ", count: 80))
+    view.setFrameSize(NSSize(width: 260, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+    XCTAssertGreaterThan(view.visualRowCount, 1)
+
+    XCTAssertEqual(
+      view.markdownMarginLineNumbersForTesting(lineRange: 0..<1, visibleRows: 0..<1),
+      [0]
+    )
+    XCTAssertEqual(
+      view.markdownMarginLineNumbersForTesting(lineRange: 0..<1, visibleRows: 1..<2),
+      []
+    )
+  }
+
+  @MainActor
+  func testMarkdownLineNumberRailStaysInsideNarrowViewport() throws {
+    let view = try makeViewer((1...1_000).map { "line \($0)" }.joined(separator: "\n"))
+    view.setFrameSize(NSSize(width: 260, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let rail = view.markdownLineNumberRailFrameForTesting(
+      textX: view.markdownTextColumnXForTesting())
+    XCTAssertGreaterThanOrEqual(rail.minX, -0.5)
+    XCTAssertLessThan(rail.maxX, view.markdownTextColumnXForTesting())
+    XCTAssertGreaterThan(view.markdownWrapContentWidthForTesting(), 0)
+  }
+
+  func testMarkdownLineNumberRailUsesThreeDigitFloor() {
+    let twoDigits = LineRenderingTextView.markdownLineNumberRailWidth(lineCount: 99)
+    let threeDigits = LineRenderingTextView.markdownLineNumberRailWidth(lineCount: 999)
+    let fourDigits = LineRenderingTextView.markdownLineNumberRailWidth(lineCount: 1_000)
+
+    XCTAssertEqual(twoDigits, threeDigits)
+    XCTAssertGreaterThan(fourDigits, threeDigits)
+  }
+
+  @MainActor
+  func testMarkdownBoldWrapsSelectionWithRawMarkers() throws {
+    let view = try makeEditableViewer("quarterly review")
+    view.syntax = .markdown
+    view.selectAll(nil)
+
+    view.toggleMarkdownEmphasis(marker: "**")
+
+    XCTAssertEqual(content(of: view), "**quarterly review**")
+    XCTAssertEqual(view.selection?.start, .init(line: 0, columnUTF16: 2))
+    XCTAssertEqual(view.selection?.end, .init(line: 0, columnUTF16: 18))
+  }
+
+  @MainActor
+  func testMarkdownItalicWrapsSelectionWithRawMarkers() throws {
+    let view = try makeEditableViewer("summary")
+    view.syntax = .markdown
+    view.selectAll(nil)
+
+    view.toggleMarkdownEmphasis(marker: "*")
+
+    XCTAssertEqual(content(of: view), "*summary*")
+    XCTAssertEqual(view.selection?.start, .init(line: 0, columnUTF16: 1))
+    XCTAssertEqual(view.selection?.end, .init(line: 0, columnUTF16: 8))
+  }
+
+  @MainActor
+  func testMarkdownItalicInsideBoldAddsMarkersWithoutUnwrappingBold() throws {
+    let view = try makeEditableViewer("**summary**")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 2))
+    view.extendSelection(to: .init(line: 0, columnUTF16: 9))
+
+    view.toggleMarkdownEmphasis(marker: "*")
+
+    XCTAssertEqual(content(of: view), "***summary***")
+    XCTAssertEqual(view.selection?.start, .init(line: 0, columnUTF16: 3))
+    XCTAssertEqual(view.selection?.end, .init(line: 0, columnUTF16: 10))
+  }
+
+  @MainActor
   func testDeleteForwardRemovesNextCharacter() throws {
     let view = try makeEditableViewer("abc")
     view.moveToDocumentEdge(end: false, extend: false)  // caret (0,0)

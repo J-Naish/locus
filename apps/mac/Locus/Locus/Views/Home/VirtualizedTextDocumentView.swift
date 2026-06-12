@@ -47,6 +47,12 @@ struct LargeTextViewport: NSViewRepresentable {
     return false
   }
 
+  private var usesClassicLineNumberGutter: Bool {
+    if syntax.supportsLineNumbers { return true }
+    if syntax == .markdown, case .readOnly = backend { return true }
+    return false
+  }
+
   /// Distinct accessibility identifiers so automation can tell the editable viewer
   /// from the read-only large-file viewer.
   private var backendAccessibilityIdentifier: String {
@@ -85,7 +91,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.setAccessibilityIdentifier(backendAccessibilityIdentifier)
     documentView.setAccessibilityLabel(accessibilityLabel)
     documentView.syntax = syntax
-    documentView.showsLineNumbers = syntax.supportsLineNumbers
+    documentView.showsLineNumbers = usesClassicLineNumberGutter
     // Set before the document so the first wrap-index build uses the right mode.
     documentView.wrapsLines = wrapsLines
     documentView.isEditable = resolvedIsEditable
@@ -141,7 +147,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.setAccessibilityIdentifier(backendAccessibilityIdentifier)
     documentView.setAccessibilityLabel(accessibilityLabel)
     documentView.syntax = syntax
-    documentView.showsLineNumbers = syntax.supportsLineNumbers
+    documentView.showsLineNumbers = usesClassicLineNumberGutter
     // Set before any document swap so the rebuilt wrap index uses the right mode.
     documentView.wrapsLines = wrapsLines
     documentView.isEditable = resolvedIsEditable

@@ -81,6 +81,22 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       WorkspaceTextDocumentSupport.syntax(for: makeEntry(name: "image.png", fileType: .image)))
   }
 
+  func testMarkdownUsesDocumentBodyTypographyAndHidesLineNumbers() {
+    XCTAssertEqual(TextDocumentSyntax.markdown.font.pointSize, 15)
+    XCTAssertFalse(TextDocumentSyntax.markdown.supportsLineNumbers)
+
+    XCTAssertTrue(TextDocumentSyntax.plainText.supportsLineNumbers)
+    XCTAssertTrue(TextDocumentSyntax.structuredText.supportsLineNumbers)
+    XCTAssertTrue(TextDocumentSyntax.code.supportsLineNumbers)
+  }
+
+  func testMarkdownHeadingTypographyFitsUniformLineHeightUntilVariableRowsExist() {
+    let headingFont = MarkdownDocumentMetrics.headingFont(level: 1)
+    let headingHeight = ceil(headingFont.ascender - headingFont.descender + headingFont.leading)
+
+    XCTAssertLessThanOrEqual(headingHeight, TextDocumentSyntax.markdown.lineHeight)
+  }
+
   func testProseDocumentsSoftWrap() {
     // Markdown and plain prose read as documents, so lines wrap to the viewport.
     XCTAssertTrue(
@@ -154,9 +170,287 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       font: TextDocumentSyntax.markdown.font
     )
 
-    XCTAssertEqual(storage.foregroundColor(at: 1), NSColor.controlAccentColor)
+    XCTAssertLessThanOrEqual(storage.foregroundColor(at: 0)?.alphaComponent ?? 1, 0.01)
     XCTAssertEqual(
-      storage.foregroundColor(in: storage.string, matching: "`value`"), NSColor.systemPurple)
+      storage.resolvedFont(at: 0)?.pointSize, TextDocumentSyntax.markdown.font.pointSize)
+    XCTAssertEqual(
+      storage.resolvedFont(at: 2)?.pointSize,
+      MarkdownDocumentMetrics.headingFont(level: 1).pointSize)
+    XCTAssertEqual(
+      storage.resolvedFont(in: storage.string, matching: "value")?.fontDescriptor.symbolicTraits
+        .contains(.monoSpace), true)
+  }
+
+  func testMarkdownDocumentStylingConcealsHeadingMarkerAndScalesTitle() throws {
+    let storage = NSTextStorage(string: "# Quarterly review")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertLessThanOrEqual(try XCTUnwrap(storage.foregroundColor(at: 0)).alphaComponent, 0.01)
+    XCTAssertEqual(
+      storage.resolvedFont(at: 0)?.pointSize, TextDocumentSyntax.markdown.font.pointSize)
+    XCTAssertEqual(
+      storage.resolvedFont(at: 2)?.pointSize,
+      MarkdownDocumentMetrics.headingFont(level: 1).pointSize)
+    XCTAssertEqual(
+      storage.resolvedFont(at: 2)?.fontDescriptor.symbolicTraits.contains(.bold), true)
+  }
+
+  func testMarkdownLineRevealShowsConcealedMarkersForEditing() throws {
+    let line = TextDocumentSyntaxHighlighter.highlightedLine(
+      "# Quarterly review",
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownRevealContext: MarkdownRevealContext(activeColumnUTF16: 2)
+    )
+
+    XCTAssertGreaterThan(try XCTUnwrap(line.foregroundColor(at: 0)).alphaComponent, 0.1)
+    XCTAssertEqual(
+      line.resolvedFont(at: 2)?.pointSize,
+      MarkdownDocumentMetrics.headingFont(level: 1).pointSize)
+  }
+
+  func testMarkdownDocumentStylingConcealsTaskMarkerButKeepsTextReadable() throws {
+    let storage = NSTextStorage(string: "- [ ] Update the summary")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertLessThanOrEqual(try XCTUnwrap(storage.foregroundColor(at: 0)).alphaComponent, 0.01)
+    XCTAssertLessThanOrEqual(try XCTUnwrap(storage.foregroundColor(at: 4)).alphaComponent, 0.01)
+    XCTAssertEqual(
+      storage.foregroundColor(in: storage.string, matching: "Update"),
+      NSColor.labelColor)
+  }
+
+  func testMarkdownDocumentStylingConcealsOrderedMarkers() throws {
+    let storage = NSTextStorage(string: "1. Review the numbers")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertLessThanOrEqual(try XCTUnwrap(storage.foregroundColor(at: 0)).alphaComponent, 0.01)
+    XCTAssertEqual(
+      storage.foregroundColor(in: storage.string, matching: "Review"),
+      NSColor.labelColor)
+  }
+
+  func testMarkdownLineStylingKeepsFenceContentMonospaced() {
+    let line = TextDocumentSyntaxHighlighter.highlightedLine(
+      "# not a heading",
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      applyRules: true,
+      markdownLineState: MarkdownLineStyleState(insideFence: true)
+    )
+
+    XCTAssertEqual(
+      line.resolvedFont(at: 0)?.fontDescriptor.symbolicTraits.contains(
+        NSFontDescriptor.SymbolicTraits.monoSpace),
+      true)
+    XCTAssertNotEqual(
+      line.resolvedFont(at: 0)?.pointSize, MarkdownDocumentMetrics.headingFont(level: 1).pointSize)
+  }
+
+  func testMarkdownBoldItalicSpanStylesContentWithoutRawFallback() {
+    let storage = NSTextStorage(string: "Use ***important*** now")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    let font = storage.resolvedFont(in: storage.string, matching: "important")
+    XCTAssertEqual(font?.fontDescriptor.symbolicTraits.contains(.bold), true)
+    XCTAssertEqual(font?.fontDescriptor.symbolicTraits.contains(.italic), true)
+    XCTAssertLessThanOrEqual(
+      storage.foregroundColor(in: storage.string, matching: "***")?.alphaComponent ?? 1, 0.01)
+  }
+
+  func testMarkdownStrikethroughStylesContentAndConcealsMarkers() {
+    let storage = NSTextStorage(string: "Mark ~~done~~ after review")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    let range = (storage.string as NSString).range(of: "done")
+    XCTAssertEqual(
+      storage.attribute(.strikethroughStyle, at: range.location, effectiveRange: nil) as? Int,
+      NSUnderlineStyle.single.rawValue)
+    XCTAssertLessThanOrEqual(
+      storage.foregroundColor(in: storage.string, matching: "~~")?.alphaComponent ?? 1, 0.01)
+  }
+
+  func testMarkdownSetextHeadingScalesPreviousLineAndConcealsUnderline() {
+    let storage = NSTextStorage(string: "Quarterly Review\n---")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertEqual(
+      storage.resolvedFont(in: storage.string, matching: "Quarterly")?.pointSize,
+      MarkdownDocumentMetrics.headingFont(level: 2).pointSize)
+    XCTAssertLessThanOrEqual(
+      storage.foregroundColor(in: storage.string, matching: "---")?.alphaComponent ?? 1, 0.01)
+  }
+
+  func testMarkdownSetextUnderlineDoesNotReclassifyAtxHeading() {
+    let storage = NSTextStorage(string: "# Quarterly Review\n---")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertEqual(
+      storage.resolvedFont(in: storage.string, matching: "Quarterly")?.pointSize,
+      MarkdownDocumentMetrics.headingFont(level: 1).pointSize)
+  }
+
+  func testMarkdownFrontMatterUsesMutedMonospacedText() {
+    let markdown = """
+      ---
+      title: Draft
+      ---
+      # Body
+      """
+    let storage = NSTextStorage(string: markdown)
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertEqual(
+      storage.resolvedFont(in: markdown, matching: "title")?.fontDescriptor.symbolicTraits
+        .contains(.monoSpace), true)
+    XCTAssertEqual(
+      storage.resolvedFont(in: markdown, matching: "Body")?.pointSize,
+      MarkdownDocumentMetrics.headingFont(level: 1).pointSize)
+  }
+
+  func testMarkdownEscapedEmphasisMarkersStayLiteral() {
+    let storage = NSTextStorage(string: #"Use \*literal* marker"#)
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertEqual(
+      storage.resolvedFont(in: storage.string, matching: "literal")?.fontDescriptor.symbolicTraits
+        .contains(.italic), false)
+  }
+
+  func testMarkdownImageSyntaxIsNotTreatedAsALink() {
+    let storage = NSTextStorage(string: "![alt](https://example.com/image.png)")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertEqual(storage.foregroundColor(in: storage.string, matching: "alt"), NSColor.labelColor)
+    XCTAssertEqual(storage.foregroundColor(at: 0), NSColor.labelColor)
+  }
+
+  func testMarkdownInlineCodeProtectsEmphasisMarkersInsideCode() {
+    let storage = NSTextStorage(string: "Use `*literal*` marker")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    let font = storage.resolvedFont(in: storage.string, matching: "literal")
+    XCTAssertEqual(font?.fontDescriptor.symbolicTraits.contains(.monoSpace), true)
+    XCTAssertEqual(font?.fontDescriptor.symbolicTraits.contains(.italic), false)
+  }
+
+  func testMarkdownLinkUrlProtectsEmphasisCharactersInsideUrl() {
+    let storage = NSTextStorage(string: "Read [doc](https://example.com/a*b*c) today")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertEqual(
+      storage.resolvedFont(in: storage.string, matching: "b")?.fontDescriptor.symbolicTraits
+        .contains(.italic),
+      false)
+  }
+
+  func testMarkdownBoldInsideHeadingKeepsHeadingScale() {
+    let storage = NSTextStorage(string: "# **Important**")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    let font = storage.resolvedFont(in: storage.string, matching: "Important")
+    XCTAssertEqual(font?.pointSize, MarkdownDocumentMetrics.headingFont(level: 1).pointSize)
+    XCTAssertEqual(font?.fontDescriptor.symbolicTraits.contains(.bold), true)
+  }
+
+  func testMarkdownParagraphHighlightPreservesFenceStateFromEarlierLines() {
+    let markdown = """
+      ```yaml
+      status: draft
+      ```
+      """
+    let storage = NSTextStorage(string: markdown)
+    let range = (markdown as NSString).range(of: "status: draft")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: markdown,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      range: range
+    )
+
+    XCTAssertEqual(
+      storage.resolvedFont(in: markdown, matching: "status")?.fontDescriptor.symbolicTraits
+        .contains(.monoSpace), true)
   }
 
   func testStructuredTextSyntaxHighlightsKeysAndValues() {
@@ -270,7 +564,9 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       font: TextDocumentSyntax.markdown.font
     )
 
-    XCTAssertEqual(storage.foregroundColor(at: 1), NSColor.controlAccentColor)
+    XCTAssertEqual(
+      storage.resolvedFont(at: 2)?.pointSize,
+      MarkdownDocumentMetrics.headingFont(level: 1).pointSize)
   }
 
   private func makeEntry(
@@ -295,7 +591,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
   }
 }
 
-extension NSTextStorage {
+extension NSAttributedString {
   fileprivate func foregroundColor(at location: Int) -> NSColor? {
     attribute(.foregroundColor, at: location, effectiveRange: nil) as? NSColor
   }
@@ -304,5 +600,15 @@ extension NSTextStorage {
     let range = (text as NSString).range(of: substring)
     XCTAssertNotEqual(range.location, NSNotFound)
     return foregroundColor(at: range.location)
+  }
+
+  fileprivate func resolvedFont(at location: Int) -> NSFont? {
+    attribute(.font, at: location, effectiveRange: nil) as? NSFont
+  }
+
+  fileprivate func resolvedFont(in text: String, matching substring: String) -> NSFont? {
+    let range = (text as NSString).range(of: substring)
+    XCTAssertNotEqual(range.location, NSNotFound)
+    return resolvedFont(at: range.location)
   }
 }
