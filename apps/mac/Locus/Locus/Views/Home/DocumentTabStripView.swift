@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum DocumentCardMetrics {
-  static let cornerRadius: CGFloat = 16
+  static let cornerRadius: CGFloat = 18
   /// Flush under the header band: the toolbar row above provides all the
   /// visual breathing room the card top needs.
   static let topInset: CGFloat = 0
