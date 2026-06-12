@@ -190,11 +190,11 @@ enum LocusUnsavedChangesPrompt {
 @MainActor
 final class LocusApplicationDelegate: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_ notification: Notification) {
-    // Re-assert the light appearance set in LocusApp.init: that early write
-    // alone occasionally lost a launch race and the first window came up
-    // dark. (The SwiftUI-level .preferredColorScheme pin is not an option —
-    // it detaches the sidebar panel from the titlebar.)
-    NSApp.appearance = NSAppearance(named: .aqua)
+    // Re-assert the active theme's appearance set in LocusApp.init: that early
+    // write alone occasionally lost a launch race and the first window came up
+    // in the system appearance. (The SwiftUI-level .preferredColorScheme pin
+    // is not an option — it detaches the sidebar panel from the titlebar.)
+    NSApp.appearance = LocusChromeColors.activeAppearance
   }
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -302,11 +302,11 @@ struct LocusApp: App {
 
   init() {
     Self.resetUITestUserDefaultsIfNeeded()
-    // Light is the product's default appearance for now. LocusChromeColors
-    // keeps dark variants so a future appearance setting only removes this.
-    // Set here, before the first scene materializes: an application-delegate
-    // launch hook raced scene bringup and occasionally launched dark.
-    NSApplication.shared.appearance = NSAppearance(named: .aqua)
+    // Pin the app to the active theme's appearance (Light by default). Set
+    // here, before the first scene materializes: an application-delegate launch
+    // hook raced scene bringup and occasionally launched in the system
+    // appearance.
+    NSApplication.shared.appearance = LocusChromeColors.activeAppearance
   }
 
   var body: some Scene {

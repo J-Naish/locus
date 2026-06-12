@@ -19,58 +19,57 @@ enum DocumentCardMetrics {
   }
 }
 
-/// The chrome surfaces a theme paints: the document card (also the editor
-/// background, so they never seam), the field around and behind it, and the
-/// active tab's fill and stroke (where a theme can carry an accent).
+/// A complete look for the app's chrome: the appearance it runs under (so the
+/// system-driven colors — sidebar labels, editor text — match), the document
+/// card (also the editor background, so they never seam), the field around and
+/// behind it, and the active tab's fill, stroke, and foreground (where a theme
+/// can carry an accent).
 struct LocusTheme {
+  let appearanceName: NSAppearance.Name
   let documentCard: NSColor
   let documentField: NSColor
   let activeTabFill: NSColor
   let activeTabStroke: NSColor
-  /// Foreground (title, close glyph) on the active tab, for contrast against a
-  /// bold fill.
   let activeTabText: NSColor
 }
 
 enum LocusChromeColors {
   static let fieldDarkeningFractionLight: CGFloat = 0.05
 
-  /// Standard palette — system editor white in light, a fixed neutral
-  /// near-black in dark (the system dark gray absorbs the desktop wallpaper
-  /// tint on a real window and reads brown). The active tab is neutral: the
-  /// card fill with a system separator stroke.
-  static let standard: LocusTheme = {
-    let card = dynamic(light: .textBackgroundColor, dark: srgb255(20, 20, 20))
-    return LocusTheme(
-      documentCard: card,
-      documentField: dynamic(light: lightFieldFromSystemWhite, dark: srgb255(8, 8, 8)),
-      activeTabFill: card,
-      activeTabStroke: .separatorColor,
-      activeTabText: .labelColor
-    )
-  }()
+  /// Light — the original neutral look: the system editor white on a faintly
+  /// darker off-white field, with a neutral active tab. The default theme.
+  static let light = LocusTheme(
+    appearanceName: .aqua,
+    documentCard: .textBackgroundColor,
+    documentField: lightFieldFromSystemWhite,
+    activeTabFill: .textBackgroundColor,
+    activeTabStroke: .separatorColor,
+    activeTabText: .labelColor
+  )
 
-  /// Paper palette — a warm cream-on-slate look with a bold clay (book-cloth)
-  /// accent. Named for the palette's own hues, not its origin. Light: a warm
-  /// ivory card on a deeper cream field. Dark: warm slate near-blacks. The
-  /// active tab is a solid clay pill with light text — the palette's signature
-  /// terracotta, dialed up to read at a glance.
+  /// Paper — a low-contrast warm cream look with a bold clay (book-cloth)
+  /// accent. The editor card and the field are the same cream family with only
+  /// a slight step between them, so the editor reads as part of the page. The
+  /// active tab is a solid clay pill with light text. Named for the palette's
+  /// own hues, not its origin.
   static let paper = LocusTheme(
-    // Both surfaces are the same warm cream family with only a slight step
-    // between them, so the editor reads as part of the page rather than a
-    // white sheet floating on tan (matching Anthropic's low-contrast warm
-    // surfaces).
-    documentCard: dynamic(
-      light: srgb255(245, 240, 228),  // warm cream paper
-      dark: srgb255(38, 38, 37)  // slate medium
-    ),
-    documentField: dynamic(
-      light: srgb255(232, 225, 210),  // soft warm cream main background
-      dark: srgb255(26, 26, 25)  // slate dark
-    ),
+    appearanceName: .aqua,
+    documentCard: srgb255(245, 240, 228),  // warm cream paper
+    documentField: srgb255(232, 225, 210),  // soft warm cream main background
     activeTabFill: clay,
     activeTabStroke: deeperClay,
     activeTabText: srgb255(250, 249, 245)  // ivory, for contrast on clay
+  )
+
+  /// Dark — a black-based slate look (fixed, so it never absorbs the desktop
+  /// wallpaper tint the system dark gray does) with the same clay accent.
+  static let dark = LocusTheme(
+    appearanceName: .darkAqua,
+    documentCard: srgb255(38, 38, 37),  // slate medium
+    documentField: srgb255(25, 25, 24),  // slate dark
+    activeTabFill: clay,
+    activeTabStroke: deeperClay,
+    activeTabText: srgb255(250, 249, 245)
   )
 
   /// Book Cloth — the palette's signature warm terracotta.
@@ -78,8 +77,9 @@ enum LocusChromeColors {
   /// A step darker, for the active tab's border definition against its fill.
   static let deeperClay = srgb255(181, 99, 74)
 
-  /// The active theme. Switch the whole app's chrome by reassigning this.
-  static let active = paper
+  /// The active theme. Switch the whole app's chrome — and its appearance — by
+  /// reassigning this.
+  static let active = light
 
   static var documentCard: NSColor { active.documentCard }
   static var documentField: NSColor { active.documentField }
@@ -87,18 +87,18 @@ enum LocusChromeColors {
   static var activeTabStroke: NSColor { active.activeTabStroke }
   static var activeTabText: NSColor { active.activeTabText }
 
-  private static func dynamic(light: NSColor, dark: NSColor) -> NSColor {
-    NSColor(name: nil) { appearance in
-      appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
-    }
+  /// The NSAppearance the active theme runs under, so the app's system-driven
+  /// colors match its chrome.
+  static var activeAppearance: NSAppearance? {
+    NSAppearance(named: active.appearanceName)
   }
 
   private static func srgb255(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat) -> NSColor {
     NSColor(srgbRed: red / 255, green: green / 255, blue: blue / 255, alpha: 1)
   }
 
-  /// The standard light field: the system editor white nudged a touch darker
-  /// so the card stays separated from it.
+  /// The light field: the system editor white nudged a touch darker so the
+  /// card stays separated from it.
   private static var lightFieldFromSystemWhite: NSColor {
     var base = NSColor.textBackgroundColor
     NSAppearance(named: .aqua)?.performAsCurrentDrawingAppearance {
