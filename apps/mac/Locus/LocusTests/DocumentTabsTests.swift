@@ -377,8 +377,11 @@ final class DocumentTabStripViewTests: XCTestCase {
     XCTAssertEqual(host.fittingSize.width, 300, accuracy: 0.5)
   }
 
-  func testStripFittingWidthHugsContentBelowCap() throws {
+  func testStripFillsTheAvailableWidthEvenWithOneShortTab() throws {
     try skipIfHeadlessHostingLayoutIsUnavailable()
+    // A single short tab no longer hugs its content: the strip spans the full
+    // available width so the header reads as one continuous band and the empty
+    // trailing area still accepts drags.
     let tab = DocumentTab(entry: makeEntry(path: "/tmp/locus-test/a.md", name: "a.md"))
     let host = NSHostingView(
       rootView: DocumentTabStripView(
@@ -393,8 +396,7 @@ final class DocumentTabStripViewTests: XCTestCase {
 
     layoutHostedView(host)
 
-    XCTAssertGreaterThan(host.fittingSize.width, 20)
-    XCTAssertLessThan(host.fittingSize.width, 250)
+    XCTAssertEqual(host.fittingSize.width, 600, accuracy: 0.5)
   }
 
   func testStripFittingWidthIsStableWhenTabBecomesActive() throws {

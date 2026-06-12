@@ -219,10 +219,15 @@ struct DocumentTabStripView: View {
         }
       }
     }
-    // NSToolbar uses the hosted view fitting width as its required minimum.
-    // Without this explicit cap, SwiftUI publishes the full ideal tab width and
-    // the toolbar sends the item into the overflow menu.
-    .frame(width: min(max(chipContentWidth, 0), max(maxWidth, 0)), alignment: .leading)
+    // Span the full available width whenever there are tabs: with few tabs the
+    // strip still fills the header band (the empty trailing area stays
+    // draggable and reads as one surface) rather than hugging the chips. An
+    // empty strip collapses to zero so the toolbar item reserves no width.
+    // NSToolbar uses the hosted view fitting width as its required minimum, so
+    // this width is also the explicit cap that keeps the item from reporting
+    // the full ideal tab width and overflowing into the "»" menu — maxWidth is
+    // the detail width less a small trailing reserve, so it always fits.
+    .frame(width: tabs.isEmpty ? 0 : max(maxWidth, 0), alignment: .leading)
     .clipShape(Rectangle().inset(by: -DocumentTabStripMetrics.chipShadowHeadroom))
     .onGeometryChange(for: CGRect.self) { geometry in
       geometry.frame(in: .global)
