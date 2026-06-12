@@ -19,36 +19,92 @@ enum DocumentCardMetrics {
   }
 }
 
+/// The chrome surfaces a theme paints: the document card (also the editor
+/// background, so they never seam), the field around and behind it, and the
+/// active tab's fill and stroke (where a theme can carry an accent).
+struct LocusTheme {
+  let documentCard: NSColor
+  let documentField: NSColor
+  let activeTabFill: NSColor
+  let activeTabStroke: NSColor
+  /// Foreground (title, close glyph) on the active tab, for contrast against a
+  /// bold fill.
+  let activeTabText: NSColor
+}
+
 enum LocusChromeColors {
-  // Light keeps the system editor white (and a field a hair darker than it).
-  // Dark uses a fixed, neutral, black-based palette rather than the system
-  // dark gray: on a real window the system color absorbs the desktop
-  // wallpaper tint and reads brown. The editor background follows documentCard
-  // (VirtualizedTextDocumentView, LineRenderingTextView.viewportBackgroundColor)
-  // so the card and the text surface never seam.
   static let fieldDarkeningFractionLight: CGFloat = 0.05
 
-  /// Dark palette: the card floats one step above the field, both near black.
-  static let darkCard = NSColor(srgbRed: 0.08, green: 0.08, blue: 0.08, alpha: 1)
-  static let darkField = NSColor(srgbRed: 0.03, green: 0.03, blue: 0.03, alpha: 1)
+  /// Standard palette — system editor white in light, a fixed neutral
+  /// near-black in dark (the system dark gray absorbs the desktop wallpaper
+  /// tint on a real window and reads brown). The active tab is neutral: the
+  /// card fill with a system separator stroke.
+  static let standard: LocusTheme = {
+    let card = dynamic(light: .textBackgroundColor, dark: srgb255(20, 20, 20))
+    return LocusTheme(
+      documentCard: card,
+      documentField: dynamic(light: lightFieldFromSystemWhite, dark: srgb255(8, 8, 8)),
+      activeTabFill: card,
+      activeTabStroke: .separatorColor,
+      activeTabText: .labelColor
+    )
+  }()
 
-  static let documentCard = NSColor(name: NSColor.Name("LocusDocumentCard")) { appearance in
-    isDarkAppearance(appearance) ? darkCard : .textBackgroundColor
+  /// Paper palette — a warm cream-on-slate look with a bold clay (book-cloth)
+  /// accent. Named for the palette's own hues, not its origin. Light: a warm
+  /// ivory card on a deeper cream field. Dark: warm slate near-blacks. The
+  /// active tab is a solid clay pill with light text — the palette's signature
+  /// terracotta, dialed up to read at a glance.
+  static let paper = LocusTheme(
+    // Both surfaces are the same warm cream family with only a slight step
+    // between them, so the editor reads as part of the page rather than a
+    // white sheet floating on tan (matching Anthropic's low-contrast warm
+    // surfaces).
+    documentCard: dynamic(
+      light: srgb255(245, 240, 228),  // warm cream paper
+      dark: srgb255(38, 38, 37)  // slate medium
+    ),
+    documentField: dynamic(
+      light: srgb255(232, 225, 210),  // soft warm cream main background
+      dark: srgb255(26, 26, 25)  // slate dark
+    ),
+    activeTabFill: clay,
+    activeTabStroke: deeperClay,
+    activeTabText: srgb255(250, 249, 245)  // ivory, for contrast on clay
+  )
+
+  /// Book Cloth — the palette's signature warm terracotta.
+  static let clay = srgb255(204, 120, 92)
+  /// A step darker, for the active tab's border definition against its fill.
+  static let deeperClay = srgb255(181, 99, 74)
+
+  /// The active theme. Switch the whole app's chrome by reassigning this.
+  static let active = paper
+
+  static var documentCard: NSColor { active.documentCard }
+  static var documentField: NSColor { active.documentField }
+  static var activeTabFill: NSColor { active.activeTabFill }
+  static var activeTabStroke: NSColor { active.activeTabStroke }
+  static var activeTabText: NSColor { active.activeTabText }
+
+  private static func dynamic(light: NSColor, dark: NSColor) -> NSColor {
+    NSColor(name: nil) { appearance in
+      appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+    }
   }
 
-  static let documentField = NSColor(name: NSColor.Name("LocusDocumentField")) { appearance in
-    if isDarkAppearance(appearance) {
-      return darkField
-    }
+  private static func srgb255(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat) -> NSColor {
+    NSColor(srgbRed: red / 255, green: green / 255, blue: blue / 255, alpha: 1)
+  }
+
+  /// The standard light field: the system editor white nudged a touch darker
+  /// so the card stays separated from it.
+  private static var lightFieldFromSystemWhite: NSColor {
     var base = NSColor.textBackgroundColor
-    appearance.performAsCurrentDrawingAppearance {
+    NSAppearance(named: .aqua)?.performAsCurrentDrawingAppearance {
       base = NSColor.textBackgroundColor.usingColorSpace(.sRGB) ?? .textBackgroundColor
     }
     return base.blended(withFraction: fieldDarkeningFractionLight, of: .black) ?? base
-  }
-
-  private static func isDarkAppearance(_ appearance: NSAppearance) -> Bool {
-    appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
   }
 }
 
@@ -446,7 +502,9 @@ private struct DocumentTabChip: View {
           // width so the chip grows to fit rather than compressing the name;
           // the strip scrolls horizontally to reach long names.
           .fixedSize(horizontal: true, vertical: false)
-          .foregroundStyle(isActive ? .primary : .secondary)
+          .foregroundStyle(
+            isActive ? Color(nsColor: LocusChromeColors.activeTabText) : .secondary
+          )
       }
       .padding(.leading, DocumentTabStripMetrics.chipLeadingPadding)
       .padding(.trailing, DocumentTabStripMetrics.chipTrailingPadding)
@@ -464,7 +522,7 @@ private struct DocumentTabChip: View {
       )
       .overlay {
         if isActive {
-          shape.strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+          shape.strokeBorder(Color(nsColor: LocusChromeColors.activeTabStroke), lineWidth: 1)
         }
       }
       .contentShape(shape)
@@ -474,7 +532,9 @@ private struct DocumentTabChip: View {
       Button(action: onClose) {
         Image(systemName: "xmark")
           .font(.system(size: DocumentTabStripMetrics.closeIconFontSize, weight: .semibold))
-          .foregroundStyle(.secondary)
+          .foregroundStyle(
+            isActive ? Color(nsColor: LocusChromeColors.activeTabText) : .secondary
+          )
       }
       .buttonStyle(.plain)
       .frame(
@@ -499,7 +559,7 @@ private struct DocumentTabChip: View {
 
   private var backgroundColor: Color {
     if isActive {
-      return Color(nsColor: LocusChromeColors.documentCard)
+      return Color(nsColor: LocusChromeColors.activeTabFill)
     }
     if isHovering {
       return Color.primary.opacity(DocumentTabStripMetrics.inactiveHoverOpacity)

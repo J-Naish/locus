@@ -472,10 +472,10 @@ final class LocusChromeColorsTests: XCTestCase {
     }
   }
 
-  // Light is unchanged: the card is still the system editor white, so the
-  // editor (which fills with documentCard) reads identical to before.
-  func testDocumentCardIsTheSystemEditorWhiteInLight() throws {
-    let card = try resolvedSRGB(LocusChromeColors.documentCard, appearanceName: .aqua)
+  // The standard theme's light card is the system editor white, so its editor
+  // (which fills with documentCard) reads identical to the pre-theme look.
+  func testStandardThemeCardIsTheSystemEditorWhiteInLight() throws {
+    let card = try resolvedSRGB(LocusChromeColors.standard.documentCard, appearanceName: .aqua)
     let editorWhite = try resolvedSRGB(.textBackgroundColor, appearanceName: .aqua)
 
     XCTAssertEqual(card.redComponent, editorWhite.redComponent, accuracy: 0.001)
@@ -483,12 +483,11 @@ final class LocusChromeColorsTests: XCTestCase {
     XCTAssertEqual(card.blueComponent, editorWhite.blueComponent, accuracy: 0.001)
   }
 
-  // Dark is a fixed, neutral, black-based card — not the system dark gray,
-  // which picks up the desktop wallpaper tint on a real window and reads
-  // brown. Pinned distinctly darker than the system color so a fallback to it
-  // (and its tint) is a test failure.
-  func testDocumentCardIsAFixedNeutralBlackInDark() throws {
-    let card = try resolvedSRGB(LocusChromeColors.documentCard, appearanceName: .darkAqua)
+  // The standard theme's dark card is a fixed, neutral, black-based color —
+  // not the system dark gray, which absorbs the desktop wallpaper tint on a
+  // real window and reads brown.
+  func testStandardThemeCardIsAFixedNeutralBlackInDark() throws {
+    let card = try resolvedSRGB(LocusChromeColors.standard.documentCard, appearanceName: .darkAqua)
     let systemDark = try resolvedSRGB(.textBackgroundColor, appearanceName: .darkAqua)
 
     XCTAssertLessThan(card.redComponent, systemDark.redComponent - 0.02)
@@ -497,12 +496,79 @@ final class LocusChromeColorsTests: XCTestCase {
     XCTAssertEqual(card.greenComponent, card.blueComponent, accuracy: 0.01)
   }
 
-  func testDocumentFieldIsAFixedNeutralBlackInDark() throws {
-    let field = try resolvedSRGB(LocusChromeColors.documentField, appearanceName: .darkAqua)
+  // The paper theme is the warm, ivory-on-slate palette: a warm off-white card
+  // (red above blue, never pure white) on a warmer, darker field in light, and
+  // a warm near-black slate in dark.
+  func testPaperThemeIsWarmInLight() throws {
+    let card = try resolvedSRGB(LocusChromeColors.paper.documentCard, appearanceName: .aqua)
+    let field = try resolvedSRGB(LocusChromeColors.paper.documentField, appearanceName: .aqua)
 
-    XCTAssertLessThan(field.redComponent, 0.15)
-    XCTAssertEqual(field.redComponent, field.greenComponent, accuracy: 0.01)
-    XCTAssertEqual(field.greenComponent, field.blueComponent, accuracy: 0.01)
+    XCTAssertGreaterThan(card.redComponent, 0.9)
+    XCTAssertLessThan(card.redComponent, 1.0)
+    XCTAssertGreaterThan(card.redComponent, card.blueComponent)  // warm
+    XCTAssertLessThan(field.redComponent, card.redComponent)  // field darker
+    XCTAssertGreaterThan(field.redComponent, field.blueComponent)  // warm
+  }
+
+  func testPaperThemeIsWarmSlateInDark() throws {
+    let card = try resolvedSRGB(LocusChromeColors.paper.documentCard, appearanceName: .darkAqua)
+    let field = try resolvedSRGB(LocusChromeColors.paper.documentField, appearanceName: .darkAqua)
+
+    XCTAssertLessThan(card.redComponent, 0.2)
+    XCTAssertGreaterThanOrEqual(card.redComponent, card.blueComponent)  // warm
+    XCTAssertLessThan(field.redComponent, card.redComponent)  // field darker
+  }
+
+  // The paper theme's active tab carries the clay (book-cloth) accent — the
+  // palette's signature warm terracotta — in both appearances.
+  func testPaperThemeActiveTabUsesAWarmClayAccent() throws {
+    for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+      let stroke = try resolvedSRGB(
+        LocusChromeColors.paper.activeTabStroke, appearanceName: appearanceName)
+
+      XCTAssertGreaterThan(stroke.redComponent, stroke.blueComponent + 0.15)  // clearly warm
+      XCTAssertGreaterThan(stroke.redComponent, 0.5)  // a mid-tone clay, not near black/white
+    }
+  }
+
+  // The active tab is a solid, saturated clay — bold enough to read as the
+  // brand accent at a glance, not a pale wash.
+  func testPaperThemeActiveTabFillIsASaturatedClay() throws {
+    let fill = try resolvedSRGB(LocusChromeColors.paper.activeTabFill, appearanceName: .aqua)
+
+    XCTAssertGreaterThan(fill.redComponent, 0.6)
+    XCTAssertGreaterThan(fill.redComponent - fill.blueComponent, 0.2)
+  }
+
+  // The active tab's text is light so it reads against the solid clay fill.
+  func testPaperThemeActiveTabTextIsLight() throws {
+    let text = try resolvedSRGB(LocusChromeColors.paper.activeTabText, appearanceName: .aqua)
+
+    XCTAssertGreaterThan(text.redComponent, 0.85)
+    XCTAssertGreaterThan(text.greenComponent, 0.85)
+    XCTAssertGreaterThan(text.blueComponent, 0.85)
+  }
+
+  // The standard theme's active tab keeps its neutral look: the fill is the
+  // card and the stroke is the system separator (no accent).
+  func testStandardThemeActiveTabIsNeutral() throws {
+    let fill = try resolvedSRGB(LocusChromeColors.standard.activeTabFill, appearanceName: .aqua)
+    let card = try resolvedSRGB(LocusChromeColors.standard.documentCard, appearanceName: .aqua)
+
+    XCTAssertEqual(fill.redComponent, card.redComponent, accuracy: 0.001)
+    XCTAssertEqual(fill.greenComponent, card.greenComponent, accuracy: 0.001)
+    XCTAssertEqual(fill.blueComponent, card.blueComponent, accuracy: 0.001)
+  }
+
+  // The paper theme is the active palette: the public chrome colors resolve to
+  // it, so the app shows the warm look.
+  func testActiveChromeResolvesToThePaperTheme() throws {
+    let card = try resolvedSRGB(LocusChromeColors.documentCard, appearanceName: .aqua)
+    let paperCard = try resolvedSRGB(LocusChromeColors.paper.documentCard, appearanceName: .aqua)
+
+    XCTAssertEqual(card.redComponent, paperCard.redComponent, accuracy: 0.001)
+    XCTAssertEqual(card.greenComponent, paperCard.greenComponent, accuracy: 0.001)
+    XCTAssertEqual(card.blueComponent, paperCard.blueComponent, accuracy: 0.001)
   }
 
   private func resolvedSRGB(
