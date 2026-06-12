@@ -244,7 +244,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Extra width past the widest line so the last character is not flush against
   /// the right edge when scrolled fully right.
   private let trailingContentMargin: CGFloat = 40
-  private let viewportBackgroundColor: NSColor = .textBackgroundColor
+  // Matches the document card (white in light, the fixed near-black in dark)
+  // so the editor surface and the card never seam.
+  private let viewportBackgroundColor: NSColor = LocusChromeColors.documentCard
 
   // Line-number gutter, drawn by this view (pinned to the left of the viewport,
   // text laid out to its right). Earlier sibling and `NSRulerView` arrangements

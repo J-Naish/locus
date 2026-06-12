@@ -472,16 +472,37 @@ final class LocusChromeColorsTests: XCTestCase {
     }
   }
 
-  func testDocumentCardMatchesEditorBackgroundColor() throws {
-    for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
-      let card = try resolvedSRGB(LocusChromeColors.documentCard, appearanceName: appearanceName)
-      let editorBackground = try resolvedSRGB(.textBackgroundColor, appearanceName: appearanceName)
+  // Light is unchanged: the card is still the system editor white, so the
+  // editor (which fills with documentCard) reads identical to before.
+  func testDocumentCardIsTheSystemEditorWhiteInLight() throws {
+    let card = try resolvedSRGB(LocusChromeColors.documentCard, appearanceName: .aqua)
+    let editorWhite = try resolvedSRGB(.textBackgroundColor, appearanceName: .aqua)
 
-      XCTAssertEqual(card.redComponent, editorBackground.redComponent, accuracy: 0.001)
-      XCTAssertEqual(card.greenComponent, editorBackground.greenComponent, accuracy: 0.001)
-      XCTAssertEqual(card.blueComponent, editorBackground.blueComponent, accuracy: 0.001)
-      XCTAssertEqual(card.alphaComponent, editorBackground.alphaComponent, accuracy: 0.001)
-    }
+    XCTAssertEqual(card.redComponent, editorWhite.redComponent, accuracy: 0.001)
+    XCTAssertEqual(card.greenComponent, editorWhite.greenComponent, accuracy: 0.001)
+    XCTAssertEqual(card.blueComponent, editorWhite.blueComponent, accuracy: 0.001)
+  }
+
+  // Dark is a fixed, neutral, black-based card — not the system dark gray,
+  // which picks up the desktop wallpaper tint on a real window and reads
+  // brown. Pinned distinctly darker than the system color so a fallback to it
+  // (and its tint) is a test failure.
+  func testDocumentCardIsAFixedNeutralBlackInDark() throws {
+    let card = try resolvedSRGB(LocusChromeColors.documentCard, appearanceName: .darkAqua)
+    let systemDark = try resolvedSRGB(.textBackgroundColor, appearanceName: .darkAqua)
+
+    XCTAssertLessThan(card.redComponent, systemDark.redComponent - 0.02)
+    XCTAssertLessThan(card.redComponent, 0.15)
+    XCTAssertEqual(card.redComponent, card.greenComponent, accuracy: 0.01)
+    XCTAssertEqual(card.greenComponent, card.blueComponent, accuracy: 0.01)
+  }
+
+  func testDocumentFieldIsAFixedNeutralBlackInDark() throws {
+    let field = try resolvedSRGB(LocusChromeColors.documentField, appearanceName: .darkAqua)
+
+    XCTAssertLessThan(field.redComponent, 0.15)
+    XCTAssertEqual(field.redComponent, field.greenComponent, accuracy: 0.01)
+    XCTAssertEqual(field.greenComponent, field.blueComponent, accuracy: 0.01)
   }
 
   private func resolvedSRGB(

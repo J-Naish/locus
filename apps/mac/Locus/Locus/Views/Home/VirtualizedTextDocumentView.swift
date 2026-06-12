@@ -61,7 +61,9 @@ struct LargeTextViewport: NSViewRepresentable {
     scrollView.autohidesScrollers = true
     scrollView.borderType = .noBorder
     scrollView.drawsBackground = true
-    scrollView.backgroundColor = .textBackgroundColor
+    // Matches the document card (white in light, the fixed near-black in dark)
+    // so the editor surface and the card never seam.
+    scrollView.backgroundColor = LocusChromeColors.documentCard
     // Breathing room above the first line inside the scroll viewport: at rest
     // the first line sits inset from the card's top edge, while scrolled
     // content draws all the way to the frame and clips at the card border

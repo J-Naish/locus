@@ -20,22 +20,35 @@ enum DocumentCardMetrics {
 }
 
 enum LocusChromeColors {
-  // On macOS 26, windowBackgroundColor, textBackgroundColor, and
-  // controlBackgroundColor resolve to the same values in both appearances.
-  // Derive the field from the editor/card color so the card stays separated.
+  // Light keeps the system editor white (and a field a hair darker than it).
+  // Dark uses a fixed, neutral, black-based palette rather than the system
+  // dark gray: on a real window the system color absorbs the desktop
+  // wallpaper tint and reads brown. The editor background follows documentCard
+  // (VirtualizedTextDocumentView, LineRenderingTextView.viewportBackgroundColor)
+  // so the card and the text surface never seam.
   static let fieldDarkeningFractionLight: CGFloat = 0.05
-  static let fieldDarkeningFractionDark: CGFloat = 0.35
 
-  static let documentCard: NSColor = .textBackgroundColor
+  /// Dark palette: the card floats one step above the field, both near black.
+  static let darkCard = NSColor(srgbRed: 0.08, green: 0.08, blue: 0.08, alpha: 1)
+  static let darkField = NSColor(srgbRed: 0.03, green: 0.03, blue: 0.03, alpha: 1)
+
+  static let documentCard = NSColor(name: NSColor.Name("LocusDocumentCard")) { appearance in
+    isDarkAppearance(appearance) ? darkCard : .textBackgroundColor
+  }
 
   static let documentField = NSColor(name: NSColor.Name("LocusDocumentField")) { appearance in
-    let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-    let fraction = isDark ? fieldDarkeningFractionDark : fieldDarkeningFractionLight
+    if isDarkAppearance(appearance) {
+      return darkField
+    }
     var base = NSColor.textBackgroundColor
     appearance.performAsCurrentDrawingAppearance {
       base = NSColor.textBackgroundColor.usingColorSpace(.sRGB) ?? .textBackgroundColor
     }
-    return base.blended(withFraction: fraction, of: .black) ?? base
+    return base.blended(withFraction: fieldDarkeningFractionLight, of: .black) ?? base
+  }
+
+  private static func isDarkAppearance(_ appearance: NSAppearance) -> Bool {
+    appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
   }
 }
 
