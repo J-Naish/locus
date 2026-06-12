@@ -1156,7 +1156,10 @@ struct WorkspaceBrowserView: View {
           detailContentWidth - DocumentTabStripMetrics.toolbarTrailingReserve
         ),
         onSelect: openDocumentTab,
-        onClose: closeDocumentTab
+        onClose: closeDocumentTab,
+        onMove: { draggedID, beforeID in
+          documentTabs.moveTab(withID: draggedID, before: beforeID)
+        }
       )
     }
     // Hides the toolbar glass and its bottom hairline in the header band so the

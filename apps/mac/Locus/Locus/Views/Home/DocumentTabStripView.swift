@@ -58,6 +58,17 @@ enum DocumentTabStripMetrics {
   /// in the bar, so nudge them down. An offset, not padding — it must not
   /// change the strip's fitting size, which the toolbar treats as a minimum.
   static let toolbarVerticalNudge: CGFloat = 2
+
+  /// Live-reorder drag: how far the press must travel before it becomes a
+  /// reorder rather than a click, and the lift styling on the dragged chip.
+  static let reorderActivationDistance: CGFloat = 4
+  static let draggedChipScale: CGFloat = 1.04
+  static let draggedChipShadowOpacity: Double = 0.18
+  static let draggedChipShadowRadius: CGFloat = 6
+  static let draggedChipShadowOffsetY: CGFloat = 2
+  /// One spring for the whole interaction: neighbors sliding aside and the
+  /// released chip settling into its slot.
+  static let reorderAnimation = Animation.spring(response: 0.3, dampingFraction: 0.8)
 }
 
 struct DocumentCardModifier: ViewModifier {
@@ -123,14 +134,26 @@ struct DocumentTabStripView: View {
   let maxWidth: CGFloat
   let onSelect: (DocumentTab) -> Void
   let onClose: (DocumentTab) -> Void
+  /// Reorder request from a chip drag: insert the dragged tab before the
+  /// second id, or at the trailing edge when it is nil.
+  let onMove: (WorkspaceEntry.ID, WorkspaceEntry.ID?) -> Void
 
   @State private var chipContentWidth: CGFloat = 0
+  @State private var chipWidths: [WorkspaceEntry.ID: CGFloat] = [:]
+  @State private var draggedTabID: WorkspaceEntry.ID?
+  @State private var dragTranslation: CGFloat = 0
+  /// Layout shift accumulated by live swaps: each time the dragged chip trades
+  /// places with a neighbor its settled slot moves by that neighbor's width
+  /// (plus spacing), so the visual offset compensates to keep the chip under
+  /// the cursor.
+  @State private var dragShift: CGFloat = 0
 
   var body: some View {
     ScrollViewReader { proxy in
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: DocumentTabStripMetrics.chipSpacing) {
           ForEach(tabs) { tab in
+            let isDragged = tab.id == draggedTabID
             DocumentTabChip(
               tab: tab,
               isActive: tab.id == activeTabID,
@@ -138,6 +161,32 @@ struct DocumentTabStripView: View {
               onClose: { onClose(tab) }
             )
             .id(tab.id)
+            .onGeometryChange(for: CGFloat.self) { geometry in
+              geometry.size.width
+            } action: { width in
+              chipWidths[tab.id] = width
+            }
+            .offset(x: isDragged ? dragTranslation - dragShift : 0)
+            .scaleEffect(isDragged ? DocumentTabStripMetrics.draggedChipScale : 1)
+            .shadow(
+              color: .black.opacity(
+                isDragged ? DocumentTabStripMetrics.draggedChipShadowOpacity : 0
+              ),
+              radius: DocumentTabStripMetrics.draggedChipShadowRadius,
+              y: DocumentTabStripMetrics.draggedChipShadowOffsetY
+            )
+            .zIndex(isDragged ? 1 : 0)
+            // The grabbed chip must not animate: on a swap its slot shift and
+            // the dragShift compensation cancel exactly only when both apply
+            // instantly, keeping the chip glued to the cursor while the
+            // neighbors spring aside. (Releasing flips isDragged off first,
+            // so the settle into the slot still animates.)
+            .transaction { transaction in
+              if isDragged {
+                transaction.animation = nil
+              }
+            }
+            .highPriorityGesture(reorderGesture(for: tab))
           }
         }
         .onGeometryChange(for: CGFloat.self) { geometry in
@@ -148,7 +197,7 @@ struct DocumentTabStripView: View {
       }
       .scrollClipDisabled()
       .onChange(of: activeTabID) { _, newID in
-        if let newID {
+        if let newID, draggedTabID == nil {
           proxy.scrollTo(newID, anchor: .center)
         }
       }
@@ -160,6 +209,68 @@ struct DocumentTabStripView: View {
     .clipShape(Rectangle().inset(by: -DocumentTabStripMetrics.chipShadowHeadroom))
     .accessibilityIdentifier("document-tab-strip")
   }
+
+  /// Live reorder, react-beautiful-dnd style: the grabbed chip follows the
+  /// cursor while its neighbors spring aside as it crosses their midpoints —
+  /// the order updates during the drag, not at drop. A plain click stays a
+  /// selection because the gesture only activates after a few points of
+  /// travel.
+  private func reorderGesture(for tab: DocumentTab) -> some Gesture {
+    // Measured in a space that does not move with the chip: in the default
+    // .local space a swap shifts the chip's own coordinate origin, the
+    // reported translation drops by the shifted distance, and the swap
+    // immediately reverses — A and B oscillate while the cursor rests near
+    // the threshold.
+    DragGesture(
+      minimumDistance: DocumentTabStripMetrics.reorderActivationDistance,
+      coordinateSpace: .global
+    )
+    .onChanged { value in
+      if draggedTabID != tab.id {
+        draggedTabID = tab.id
+        dragShift = 0
+      }
+      dragTranslation = value.translation.width
+      settleSwapIfNeeded(for: tab)
+    }
+    .onEnded { _ in
+      withAnimation(DocumentTabStripMetrics.reorderAnimation) {
+        draggedTabID = nil
+        dragTranslation = 0
+        dragShift = 0
+      }
+    }
+  }
+
+  /// Trades the dragged chip with one neighbor when its displacement crosses
+  /// that neighbor's midpoint. One swap per gesture event: the next event
+  /// re-evaluates against the freshly reordered `tabs`, so fast drags catch up
+  /// over a few events without ever acting on stale order.
+  private func settleSwapIfNeeded(for tab: DocumentTab) {
+    guard let draggedIndex = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
+
+    let displacement = dragTranslation - dragShift
+    guard
+      let step = DocumentTabReorder.swapStep(
+        widths: tabs.map { chipWidths[$0.id] ?? 0 },
+        draggedIndex: draggedIndex,
+        displacement: displacement,
+        spacing: DocumentTabStripMetrics.chipSpacing
+      )
+    else { return }
+
+    let neighbor = tabs[draggedIndex + step]
+    let neighborWidth = chipWidths[neighbor.id] ?? 0
+    withAnimation(DocumentTabStripMetrics.reorderAnimation) {
+      if step > 0 {
+        let followerIndex = draggedIndex + 2
+        onMove(tab.id, followerIndex < tabs.count ? tabs[followerIndex].id : nil)
+      } else {
+        onMove(tab.id, neighbor.id)
+      }
+    }
+    dragShift += CGFloat(step) * (neighborWidth + DocumentTabStripMetrics.chipSpacing)
+  }
 }
 
 struct DocumentTabToolbar: ToolbarContent {
@@ -168,6 +279,7 @@ struct DocumentTabToolbar: ToolbarContent {
   let maxStripWidth: CGFloat
   let onSelect: (DocumentTab) -> Void
   let onClose: (DocumentTab) -> Void
+  let onMove: (WorkspaceEntry.ID, WorkspaceEntry.ID?) -> Void
 
   @ToolbarContentBuilder
   var body: some ToolbarContent {
@@ -189,7 +301,8 @@ struct DocumentTabToolbar: ToolbarContent {
       activeTabID: activeTabID,
       maxWidth: maxStripWidth,
       onSelect: onSelect,
-      onClose: onClose
+      onClose: onClose,
+      onMove: onMove
     )
     .offset(y: DocumentTabStripMetrics.toolbarVerticalNudge)
   }

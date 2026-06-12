@@ -157,6 +157,108 @@ final class DocumentTabsTests: XCTestCase {
 
     XCTAssertEqual(state.tabs.map(\.id), ["/tmp/locus-test/b.md"])
   }
+
+  // MARK: Reordering
+
+  func testMoveTabForwardInsertsBeforeTheTarget() {
+    var state = stateWithEntries(["a.md", "b.md", "c.md"])
+
+    state.moveTab(withID: "/tmp/locus-test/a.md", before: "/tmp/locus-test/c.md")
+
+    XCTAssertEqual(
+      state.tabs.map(\.id),
+      ["/tmp/locus-test/b.md", "/tmp/locus-test/a.md", "/tmp/locus-test/c.md"]
+    )
+  }
+
+  func testMoveTabBackwardInsertsBeforeTheTarget() {
+    var state = stateWithEntries(["a.md", "b.md", "c.md"])
+
+    state.moveTab(withID: "/tmp/locus-test/c.md", before: "/tmp/locus-test/a.md")
+
+    XCTAssertEqual(
+      state.tabs.map(\.id),
+      ["/tmp/locus-test/c.md", "/tmp/locus-test/a.md", "/tmp/locus-test/b.md"]
+    )
+  }
+
+  func testMoveTabBeforeNilMovesToTheEnd() {
+    var state = stateWithEntries(["a.md", "b.md", "c.md"])
+
+    state.moveTab(withID: "/tmp/locus-test/a.md", before: nil)
+
+    XCTAssertEqual(
+      state.tabs.map(\.id),
+      ["/tmp/locus-test/b.md", "/tmp/locus-test/c.md", "/tmp/locus-test/a.md"]
+    )
+  }
+
+  func testMoveTabBeforeItselfOrItsFollowerKeepsTheOrder() {
+    var state = stateWithEntries(["a.md", "b.md", "c.md"])
+    let original = state.tabs.map(\.id)
+
+    state.moveTab(withID: "/tmp/locus-test/a.md", before: "/tmp/locus-test/a.md")
+    XCTAssertEqual(state.tabs.map(\.id), original)
+
+    state.moveTab(withID: "/tmp/locus-test/a.md", before: "/tmp/locus-test/b.md")
+    XCTAssertEqual(state.tabs.map(\.id), original)
+  }
+
+  func testMoveTabIgnoresUnknownDraggedOrTargetIDs() {
+    var state = stateWithEntries(["a.md", "b.md"])
+    let original = state.tabs.map(\.id)
+
+    state.moveTab(withID: "/tmp/locus-test/missing.md", before: "/tmp/locus-test/a.md")
+    XCTAssertEqual(state.tabs.map(\.id), original)
+
+    state.moveTab(withID: "/tmp/locus-test/a.md", before: "/tmp/locus-test/missing.md")
+    XCTAssertEqual(state.tabs.map(\.id), original)
+  }
+
+  // MARK: Live-reorder swap geometry
+
+  // Chips [100, 80, 120] wide with 6pt spacing; the dragged chip swaps with a
+  // neighbor once its displacement crosses that neighbor's midpoint, i.e.
+  // (neighborWidth + spacing) / 2.
+  func testSwapStepStaysPutBelowTheNeighborMidpoint() {
+    XCTAssertNil(
+      DocumentTabReorder.swapStep(
+        widths: [100, 80, 120], draggedIndex: 1, displacement: 62, spacing: 6))
+    XCTAssertNil(
+      DocumentTabReorder.swapStep(
+        widths: [100, 80, 120], draggedIndex: 1, displacement: -52, spacing: 6))
+  }
+
+  func testSwapStepSwapsRightPastTheNextChipMidpoint() {
+    XCTAssertEqual(
+      DocumentTabReorder.swapStep(
+        widths: [100, 80, 120], draggedIndex: 1, displacement: 64, spacing: 6),
+      1
+    )
+  }
+
+  func testSwapStepSwapsLeftPastThePreviousChipMidpoint() {
+    XCTAssertEqual(
+      DocumentTabReorder.swapStep(
+        widths: [100, 80, 120], draggedIndex: 1, displacement: -54, spacing: 6),
+      -1
+    )
+  }
+
+  func testSwapStepNeverLeavesTheStripEnds() {
+    XCTAssertNil(
+      DocumentTabReorder.swapStep(
+        widths: [100, 80, 120], draggedIndex: 0, displacement: -500, spacing: 6))
+    XCTAssertNil(
+      DocumentTabReorder.swapStep(
+        widths: [100, 80, 120], draggedIndex: 2, displacement: 500, spacing: 6))
+  }
+
+  func testSwapStepIgnoresUnmeasuredNeighbors() {
+    XCTAssertNil(
+      DocumentTabReorder.swapStep(
+        widths: [100, 80, 0], draggedIndex: 1, displacement: 500, spacing: 6))
+  }
 }
 
 @MainActor
@@ -177,7 +279,8 @@ final class DocumentTabStripViewTests: XCTestCase {
         activeTabID: tab.id,
         maxWidth: 600,
         onSelect: { _ in },
-        onClose: { _ in }
+        onClose: { _ in },
+        onMove: { _, _ in }
       )
     )
 
@@ -195,7 +298,8 @@ final class DocumentTabStripViewTests: XCTestCase {
         activeTabID: nil,
         maxWidth: 600,
         onSelect: { _ in },
-        onClose: { _ in }
+        onClose: { _ in },
+        onMove: { _, _ in }
       )
     )
 
@@ -219,7 +323,8 @@ final class DocumentTabStripViewTests: XCTestCase {
         activeTabID: tabs[0].id,
         maxWidth: 300,
         onSelect: { _ in },
-        onClose: { _ in }
+        onClose: { _ in },
+        onMove: { _, _ in }
       )
     )
 
@@ -237,7 +342,8 @@ final class DocumentTabStripViewTests: XCTestCase {
         activeTabID: tab.id,
         maxWidth: 600,
         onSelect: { _ in },
-        onClose: { _ in }
+        onClose: { _ in },
+        onMove: { _, _ in }
       )
     )
 
@@ -261,7 +367,8 @@ final class DocumentTabStripViewTests: XCTestCase {
         activeTabID: nil,
         maxWidth: 600,
         onSelect: { _ in },
-        onClose: { _ in }
+        onClose: { _ in },
+        onMove: { _, _ in }
       )
     )
     let activeHost = NSHostingView(
@@ -270,7 +377,8 @@ final class DocumentTabStripViewTests: XCTestCase {
         activeTabID: tab.id,
         maxWidth: 600,
         onSelect: { _ in },
-        onClose: { _ in }
+        onClose: { _ in },
+        onMove: { _, _ in }
       )
     )
 
