@@ -41,7 +41,6 @@ enum LocusChromeColors {
 
 enum DocumentTabStripMetrics {
   static let chipSpacing: CGFloat = 6
-  static let chipMaxWidth: CGFloat = 180
   static let chipLeadingPadding: CGFloat = 12
   static let chipTrailingPadding: CGFloat = 14
   static let chipVerticalPadding: CGFloat = 6
@@ -423,13 +422,17 @@ private struct DocumentTabChip: View {
         Text(tab.name)
           .font(.callout)
           .lineLimit(1)
-          .truncationMode(.tail)
+          // No truncation and no width cap: the full file name always shows,
+          // since the sidebar truncates it and the tab is the only place the
+          // exact name is legible. fixedSize keeps the text at its intrinsic
+          // width so the chip grows to fit rather than compressing the name;
+          // the strip scrolls horizontally to reach long names.
+          .fixedSize(horizontal: true, vertical: false)
           .foregroundStyle(isActive ? .primary : .secondary)
       }
       .padding(.leading, DocumentTabStripMetrics.chipLeadingPadding)
       .padding(.trailing, DocumentTabStripMetrics.chipTrailingPadding)
       .padding(.vertical, DocumentTabStripMetrics.chipVerticalPadding)
-      .frame(maxWidth: DocumentTabStripMetrics.chipMaxWidth)
       .background(
         shape
           .fill(backgroundColor)
