@@ -104,4 +104,27 @@ enum DocumentTabReorder {
     }
     return nil
   }
+
+  /// Scroll speed for a drag near the viewport's edges: zero in the middle,
+  /// ramping linearly within `edgeZone` of an edge up to `maxSpeed` (negative
+  /// = scroll left). Lets a dragged chip travel to tabs that are scrolled out
+  /// of view.
+  static func autoScrollSpeed(
+    pointerX: CGFloat,
+    viewportMinX: CGFloat,
+    viewportMaxX: CGFloat,
+    edgeZone: CGFloat,
+    maxSpeed: CGFloat
+  ) -> CGFloat {
+    guard edgeZone > 0 else { return 0 }
+    let leftDepth = (viewportMinX + edgeZone) - pointerX
+    if leftDepth > 0 {
+      return -maxSpeed * min(1, leftDepth / edgeZone)
+    }
+    let rightDepth = pointerX - (viewportMaxX - edgeZone)
+    if rightDepth > 0 {
+      return maxSpeed * min(1, rightDepth / edgeZone)
+    }
+    return 0
+  }
 }

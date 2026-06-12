@@ -259,6 +259,50 @@ final class DocumentTabsTests: XCTestCase {
       DocumentTabReorder.swapStep(
         widths: [100, 80, 0], draggedIndex: 1, displacement: 500, spacing: 6))
   }
+
+  // MARK: Auto-scroll edge speed
+
+  // Viewport 100...500, edge zone 28, max speed 10: the strip scrolls while
+  // the pointer drags within an edge zone, faster the deeper it goes.
+  func testAutoScrollSpeedIsZeroAwayFromTheEdges() {
+    XCTAssertEqual(
+      DocumentTabReorder.autoScrollSpeed(
+        pointerX: 300, viewportMinX: 100, viewportMaxX: 500, edgeZone: 28, maxSpeed: 10),
+      0
+    )
+  }
+
+  func testAutoScrollSpeedRampsUpInsideTheLeftZone() {
+    // Halfway into the left zone: half the maximum speed, leftward.
+    XCTAssertEqual(
+      DocumentTabReorder.autoScrollSpeed(
+        pointerX: 114, viewportMinX: 100, viewportMaxX: 500, edgeZone: 28, maxSpeed: 10),
+      -5,
+      accuracy: 0.001
+    )
+  }
+
+  func testAutoScrollSpeedRampsUpInsideTheRightZone() {
+    XCTAssertEqual(
+      DocumentTabReorder.autoScrollSpeed(
+        pointerX: 486, viewportMinX: 100, viewportMaxX: 500, edgeZone: 28, maxSpeed: 10),
+      5,
+      accuracy: 0.001
+    )
+  }
+
+  func testAutoScrollSpeedClampsBeyondTheViewport() {
+    XCTAssertEqual(
+      DocumentTabReorder.autoScrollSpeed(
+        pointerX: -50, viewportMinX: 100, viewportMaxX: 500, edgeZone: 28, maxSpeed: 10),
+      -10
+    )
+    XCTAssertEqual(
+      DocumentTabReorder.autoScrollSpeed(
+        pointerX: 900, viewportMinX: 100, viewportMaxX: 500, edgeZone: 28, maxSpeed: 10),
+      10
+    )
+  }
 }
 
 @MainActor

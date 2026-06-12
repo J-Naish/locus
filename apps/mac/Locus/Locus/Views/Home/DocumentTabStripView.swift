@@ -62,6 +62,11 @@ enum DocumentTabStripMetrics {
   /// Live-reorder drag: how far the press must travel before it becomes a
   /// reorder rather than a click, and the lift styling on the dragged chip.
   static let reorderActivationDistance: CGFloat = 4
+  /// Auto-scroll while dragging near the strip's edges, so a chip can travel
+  /// to tabs that are scrolled out of view.
+  static let autoScrollEdgeZone: CGFloat = 28
+  static let autoScrollMaxSpeedPerTick: CGFloat = 10
+  static let autoScrollTickInterval: TimeInterval = 1.0 / 60.0
   static let draggedChipScale: CGFloat = 1.04
   static let draggedChipShadowOpacity: Double = 0.18
   static let draggedChipShadowRadius: CGFloat = 6
@@ -147,6 +152,13 @@ struct DocumentTabStripView: View {
   /// (plus spacing), so the visual offset compensates to keep the chip under
   /// the cursor.
   @State private var dragShift: CGFloat = 0
+  /// Content scrolled under the resting cursor by edge auto-scroll: counts as
+  /// extra drag travel so the held chip stays put while neighbors stream by.
+  @State private var dragScrollCompensation: CGFloat = 0
+  @State private var dragPointerGlobalX: CGFloat = 0
+  @State private var stripGlobalFrame: CGRect = .zero
+  @State private var scrollOffsetX: CGFloat = 0
+  @State private var scrollPosition = ScrollPosition()
 
   var body: some View {
     ScrollViewReader { proxy in
@@ -166,7 +178,7 @@ struct DocumentTabStripView: View {
             } action: { width in
               chipWidths[tab.id] = width
             }
-            .offset(x: isDragged ? dragTranslation - dragShift : 0)
+            .offset(x: isDragged ? dragTranslation + dragScrollCompensation - dragShift : 0)
             .scaleEffect(isDragged ? DocumentTabStripMetrics.draggedChipScale : 1)
             .shadow(
               color: .black.opacity(
@@ -196,6 +208,12 @@ struct DocumentTabStripView: View {
         }
       }
       .scrollClipDisabled()
+      .scrollPosition($scrollPosition)
+      .onScrollGeometryChange(for: CGFloat.self) { geometry in
+        geometry.contentOffset.x
+      } action: { _, offset in
+        scrollOffsetX = offset
+      }
       .onChange(of: activeTabID) { _, newID in
         if let newID, draggedTabID == nil {
           proxy.scrollTo(newID, anchor: .center)
@@ -207,7 +225,51 @@ struct DocumentTabStripView: View {
     // the toolbar sends the item into the overflow menu.
     .frame(width: min(max(chipContentWidth, 0), max(maxWidth, 0)), alignment: .leading)
     .clipShape(Rectangle().inset(by: -DocumentTabStripMetrics.chipShadowHeadroom))
+    .onGeometryChange(for: CGRect.self) { geometry in
+      geometry.frame(in: .global)
+    } action: { frame in
+      stripGlobalFrame = frame
+    }
+    // The edge auto-scroll must keep running while the pointer rests inside an
+    // edge zone, which gesture events alone cannot do — they only fire on
+    // movement. The driver exists (and ticks) only during a drag.
+    .overlay {
+      if draggedTabID != nil {
+        DocumentTabAutoScrollDriver(onTick: autoScrollTick)
+          .allowsHitTesting(false)
+      }
+    }
     .accessibilityIdentifier("document-tab-strip")
+  }
+
+  /// Scrolls the strip while a drag holds near an edge, and converts the
+  /// scrolled distance into drag travel so the held chip keeps swapping past
+  /// the chips streaming under it.
+  private func autoScrollTick() {
+    guard let draggedTabID, let tab = tabs.first(where: { $0.id == draggedTabID }) else {
+      return
+    }
+    let viewportWidth = stripGlobalFrame.width
+    guard viewportWidth > 0 else { return }
+
+    let speed = DocumentTabReorder.autoScrollSpeed(
+      pointerX: dragPointerGlobalX,
+      viewportMinX: stripGlobalFrame.minX,
+      viewportMaxX: stripGlobalFrame.maxX,
+      edgeZone: DocumentTabStripMetrics.autoScrollEdgeZone,
+      maxSpeed: DocumentTabStripMetrics.autoScrollMaxSpeedPerTick
+    )
+    guard speed != 0 else { return }
+
+    let maxOffset = max(0, chipContentWidth - viewportWidth)
+    let target = min(max(scrollOffsetX + speed, 0), maxOffset)
+    let delta = target - scrollOffsetX
+    guard delta != 0 else { return }
+
+    scrollPosition.scrollTo(x: target)
+    scrollOffsetX = target
+    dragScrollCompensation += delta
+    settleSwapIfNeeded(for: tab)
   }
 
   /// Live reorder, react-beautiful-dnd style: the grabbed chip follows the
@@ -229,8 +291,10 @@ struct DocumentTabStripView: View {
       if draggedTabID != tab.id {
         draggedTabID = tab.id
         dragShift = 0
+        dragScrollCompensation = 0
       }
       dragTranslation = value.translation.width
+      dragPointerGlobalX = value.location.x
       settleSwapIfNeeded(for: tab)
     }
     .onEnded { _ in
@@ -238,6 +302,7 @@ struct DocumentTabStripView: View {
         draggedTabID = nil
         dragTranslation = 0
         dragShift = 0
+        dragScrollCompensation = 0
       }
     }
   }
@@ -249,7 +314,7 @@ struct DocumentTabStripView: View {
   private func settleSwapIfNeeded(for tab: DocumentTab) {
     guard let draggedIndex = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
 
-    let displacement = dragTranslation - dragShift
+    let displacement = dragTranslation + dragScrollCompensation - dragShift
     guard
       let step = DocumentTabReorder.swapStep(
         widths: tabs.map { chipWidths[$0.id] ?? 0 },
@@ -270,6 +335,24 @@ struct DocumentTabStripView: View {
       }
     }
     dragShift += CGFloat(step) * (neighborWidth + DocumentTabStripMetrics.chipSpacing)
+  }
+}
+
+/// Invisible 60Hz heartbeat for the drag's edge auto-scroll. Lives only while
+/// a drag is active; @State keeps the publisher alive across the parent's
+/// re-renders so the ticks stay steady.
+private struct DocumentTabAutoScrollDriver: View {
+  let onTick: () -> Void
+
+  @State private var clock = Timer.publish(
+    every: DocumentTabStripMetrics.autoScrollTickInterval, on: .main, in: .common
+  ).autoconnect()
+
+  var body: some View {
+    Color.clear
+      .onReceive(clock) { _ in
+        onTick()
+      }
   }
 }
 
