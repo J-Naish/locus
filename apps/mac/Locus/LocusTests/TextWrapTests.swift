@@ -636,6 +636,23 @@ final class TextWrapTests: XCTestCase {
         visible: NSRect(x: 0, y: 0, width: 40, height: 400), gutterEdge: 40))
   }
 
+  // The editor corrects the pointer cursor on every mouse move (I-beam over
+  // text, arrow over the gutter): entry-edge cursor rects alone go stale when
+  // the pointer arrives from the titlebar tab strip, whose SwiftUI pointer
+  // handling resets the cursor after the rect's enter event already fired.
+  @MainActor
+  func testEditorRegistersAMouseMovedTrackingAreaOverTheVisibleRect() throws {
+    let (scrollView, view) = try makeScrollViewViewer(numberedLines(60))
+    scrollView.layoutSubtreeIfNeeded()
+
+    view.updateTrackingAreas()
+
+    let area = view.trackingAreas.first { $0.options.contains(.mouseMoved) }
+    XCTAssertNotNil(area, "expected a mouseMoved tracking area")
+    XCTAssertEqual(area?.options.contains(.inVisibleRect), true)
+    XCTAssertEqual(area?.options.contains(.mouseEnteredAndExited), true)
+  }
+
   // Opening a document scrolls to the top — which, with a top content inset,
   // is above the content origin so the first line rests its inset below the
   // viewport edge (not pre-scrolled past the breathing room).

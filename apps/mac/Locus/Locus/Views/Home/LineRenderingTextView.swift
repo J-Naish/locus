@@ -1220,6 +1220,48 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     addCursorRect(textRect, cursor: .iBeam)
   }
 
+  // Cursor rects alone go stale on one path: after the pointer visits the
+  // titlebar tab strip, whose SwiftUI pointer handling resets the cursor to
+  // the arrow after the rect's enter event has already fired, the I-beam
+  // never comes back until some other tracking region re-arms the window
+  // (hovering the sidebar or the gutter does; the card's plain field does
+  // not). Correcting on every mouse move inside the editor is self-healing
+  // regardless of where the pointer came from.
+  private var mouseMoveCursorWasIBeam: Bool?
+
+  override func updateTrackingAreas() {
+    super.updateTrackingAreas()
+    if let cursorCorrectionTrackingArea {
+      removeTrackingArea(cursorCorrectionTrackingArea)
+    }
+    let area = NSTrackingArea(
+      rect: .zero,
+      options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+      owner: self,
+      userInfo: nil
+    )
+    addTrackingArea(area)
+    cursorCorrectionTrackingArea = area
+  }
+
+  private var cursorCorrectionTrackingArea: NSTrackingArea?
+
+  override func mouseMoved(with event: NSEvent) {
+    super.mouseMoved(with: event)
+    let gutterEdge = (enclosingScrollView?.contentView.bounds.origin.x ?? 0) + gutterWidth
+    let isOverText = convert(event.locationInWindow, from: nil).x >= gutterEdge
+    guard mouseMoveCursorWasIBeam != isOverText else { return }
+    mouseMoveCursorWasIBeam = isOverText
+    (isOverText ? NSCursor.iBeam : NSCursor.arrow).set()
+  }
+
+  override func mouseExited(with event: NSEvent) {
+    super.mouseExited(with: event)
+    // Whatever the pointer does outside is not ours; re-evaluate from scratch
+    // on the next move inside.
+    mouseMoveCursorWasIBeam = nil
+  }
+
   /// The I-beam region of the visible band: everything right of the pinned
   /// gutter's edge. `nil` when nothing is visible or the gutter spans the
   /// whole band.
