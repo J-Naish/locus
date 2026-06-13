@@ -2236,7 +2236,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // Finalize any in-progress composition before moving the caret.
     if hasMarkedText() { unmarkText() }
     window?.makeFirstResponder(self)
-    let endpoint = endpoint(at: point)
+    let endpoint = caretEndpoint(at: point)
     // A double-click selects the word, a triple-click the whole line, a single
     // click places the caret. Each begins a drag that then extends at the matching
     // granularity (character / word / line).
@@ -2396,6 +2396,86 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
     let columnInRow = columnUTF16(forX: textRelativeX, in: rowText)
     return TextSelection.Endpoint(line: line, columnUTF16: bounds.start + columnInRow)
+  }
+
+  /// A click target, snapped off concealed structural delimiter rows (fence
+  /// markers, frontmatter `---`, table delimiters, setext underlines) to the
+  /// nearest editable line — so a click in the empty slim band of, say, a code
+  /// block's closing fence lands at the end of the last code line rather than
+  /// on the phantom delimiter row. The raw `endpoint(at:)` is left untouched so
+  /// a drag head can still cross those rows and select their source.
+  func caretEndpoint(at point: NSPoint) -> TextSelection.Endpoint {
+    let raw = endpoint(at: point)
+    guard isConcealedDelimiterLine(raw.line) else { return raw }
+    // Which side to snap to is chosen by which half of the slim row the click
+    // is in (the row sits below any leading block air): the upper half belongs
+    // to the content above, the lower half to the content below.
+    let rowTop = yOffset(ofLine: raw.line) + leadingInset(forLine: raw.line)
+    let preferDown = point.y >= rowTop + rowHeight(forLine: raw.line) / 2
+    if preferDown, let next = nearestEditableLine(from: raw.line + 1, forward: true) {
+      return TextSelection.Endpoint(line: next, columnUTF16: 0)
+    }
+    if let previous = nearestEditableLine(from: raw.line - 1, forward: false) {
+      return TextSelection.Endpoint(line: previous, columnUTF16: lineLengthUTF16(previous))
+    }
+    if let next = nearestEditableLine(from: raw.line + 1, forward: true) {
+      return TextSelection.Endpoint(line: next, columnUTF16: 0)
+    }
+    return raw  // The whole document is concealed; leave the caret where it landed.
+  }
+
+  /// A line that renders empty as a concealed structural delimiter and so
+  /// should not be a caret target — fence open/close (except a *labeled* opener,
+  /// whose language word is real editable text), frontmatter `---`, table
+  /// delimiter rows, and setext underlines. A genuinely blank source line is
+  /// `.plain` and is NOT concealed, so it stays clickable.
+  func isConcealedDelimiterLine(_ line: Int) -> Bool {
+    guard usesMarkdownDocumentLayout, syntax == .markdown, let buffer = reader,
+      let states = markdownLineStates(for: buffer),
+      line >= 0, line < states.count
+    else {
+      return false
+    }
+    let state = states[line]
+    if state.isFenceDelimiter {
+      return !(state.isFenceOpen && state.isFenceLabel)
+    }
+    return state.isFrontMatterDelimiter || state.isTableSeparator || state.isSetextUnderline
+  }
+
+  /// Moves a navigation/edit result off a concealed delimiter line, continuing
+  /// in the move's direction (forward → next editable line START, backward →
+  /// previous editable line END), so left/right/word/Home-End/undo never park
+  /// the caret on a phantom row. Falls back to the other side when the move
+  /// direction is exhausted (e.g. a closing fence at the document edge), and
+  /// returns the endpoint unchanged when it is already editable.
+  private func steppedOffConcealedLine(_ endpoint: TextSelection.Endpoint, forward: Bool)
+    -> TextSelection.Endpoint
+  {
+    guard isConcealedDelimiterLine(endpoint.line) else { return endpoint }
+    let forwardStart = { () -> TextSelection.Endpoint? in
+      self.nearestEditableLine(from: endpoint.line + 1, forward: true)
+        .map { TextSelection.Endpoint(line: $0, columnUTF16: 0) }
+    }
+    let backwardEnd = { () -> TextSelection.Endpoint? in
+      self.nearestEditableLine(from: endpoint.line - 1, forward: false)
+        .map { TextSelection.Endpoint(line: $0, columnUTF16: self.lineLengthUTF16($0)) }
+    }
+    if forward {
+      return forwardStart() ?? backwardEnd() ?? endpoint
+    }
+    return backwardEnd() ?? forwardStart() ?? endpoint
+  }
+
+  /// The first non-concealed line at or beyond `start`, scanning `forward` or
+  /// backward; nil when only concealed lines remain in that direction.
+  private func nearestEditableLine(from start: Int, forward: Bool) -> Int? {
+    var line = start
+    while line >= 0, line < lineCount {
+      if !isConcealedDelimiterLine(line) { return line }
+      line += forward ? 1 : -1
+    }
+    return nil
   }
 
   // MARK: Selection commands
@@ -2711,10 +2791,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   func moveHorizontally(forward: Bool, extend: Bool) {
     if !extend, let current = selection, !current.isEmpty {
-      applyMovedHead(forward ? current.end : current.start, extend: false)
+      applyMovedHead(
+        steppedOffConcealedLine(forward ? current.end : current.start, forward: forward),
+        extend: false)
       return
     }
-    applyMovedHead(steppedCharacterEndpoint(from: navigationHead, forward: forward), extend: extend)
+    applyMovedHead(
+      steppedOffConcealedLine(
+        steppedCharacterEndpoint(from: navigationHead, forward: forward), forward: forward),
+      extend: extend)
   }
 
   func moveByWord(forward: Bool, extend: Bool) {
@@ -2727,13 +2812,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     } else {
       origin = navigationHead
     }
-    applyMovedHead(steppedWordEndpoint(from: origin, forward: forward), extend: extend)
+    applyMovedHead(
+      steppedOffConcealedLine(
+        steppedWordEndpoint(from: origin, forward: forward), forward: forward),
+      extend: extend)
   }
 
   func moveToLineEdge(end: Bool, extend: Bool) {
     let head = navigationHead
     applyMovedHead(
-      TextSelection.Endpoint(line: head.line, columnUTF16: end ? lineLengthUTF16(head.line) : 0),
+      steppedOffConcealedLine(
+        TextSelection.Endpoint(line: head.line, columnUTF16: end ? lineLengthUTF16(head.line) : 0),
+        forward: end),
       extend: extend)
   }
 
@@ -2749,31 +2839,48 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let goalX = verticalGoalX ?? caretX(for: head)
     // Move by one *visual* row, so wrapped lines navigate row-by-row.
     let currentRow = visualRow(of: head)
-    let targetRow = down ? min(currentRow + 1, max(0, totalVisualRows - 1)) : max(currentRow - 1, 0)
+    var targetRow = down ? min(currentRow + 1, max(0, totalVisualRows - 1)) : max(currentRow - 1, 0)
+    // Skip concealed delimiter rows so the caret never parks on a phantom line
+    // (e.g. a code block's empty closing fence); they are single slim rows, so
+    // stepping the visual row advances past the whole run.
+    while targetRow != currentRow,
+      isConcealedDelimiterLine(lineLocation(ofVisualRow: targetRow).line)
+    {
+      let next = down ? targetRow + 1 : targetRow - 1
+      guard next >= 0, next < totalVisualRows else { break }
+      targetRow = next
+    }
     let newHead: TextSelection.Endpoint
-    if targetRow == currentRow {
-      // Already at the first/last row: go to the line's start/end instead.
+    if targetRow == currentRow
+      || isConcealedDelimiterLine(lineLocation(ofVisualRow: targetRow).line)
+    {
+      // At a document edge, or only concealed rows remain in this direction: go
+      // to the current line's start/end rather than onto a concealed row.
       newHead = TextSelection.Endpoint(
         line: head.line, columnUTF16: down ? lineLengthUTF16(head.line) : 0)
     } else {
-      let (line, rowInLine) = lineLocation(ofVisualRow: targetRow)
-      if let length = hugeLength(line) {
-        let rowStart = rowInLine * hugeLineColumns
-        let rowText = hugeRowText(line: line, rowIndex: rowInLine, utf16Length: length)
-        newHead = TextSelection.Endpoint(
-          line: line, columnUTF16: min(length, rowStart + columnUTF16(forX: goalX, in: rowText)))
-      } else {
-        let attributed = attributedLine(forLine: line)
-        let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
-        let bounds = rowRange(rowInLine, starts: starts, length: attributed.length)
-        let rowText = attributed.attributedSubstring(
-          from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
-        newHead = TextSelection.Endpoint(
-          line: line, columnUTF16: bounds.start + columnUTF16(forX: goalX, in: rowText))
-      }
+      newHead = endpoint(forVisualRow: targetRow, goalX: goalX)
     }
     applyMovedHead(newHead, extend: extend, keepGoalX: true)
     verticalGoalX = goalX
+  }
+
+  /// The caret endpoint at the horizontal goal `goalX` on visual row `row`.
+  private func endpoint(forVisualRow row: Int, goalX: CGFloat) -> TextSelection.Endpoint {
+    let (line, rowInLine) = lineLocation(ofVisualRow: row)
+    if let length = hugeLength(line) {
+      let rowStart = rowInLine * hugeLineColumns
+      let rowText = hugeRowText(line: line, rowIndex: rowInLine, utf16Length: length)
+      return TextSelection.Endpoint(
+        line: line, columnUTF16: min(length, rowStart + columnUTF16(forX: goalX, in: rowText)))
+    }
+    let attributed = attributedLine(forLine: line)
+    let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
+    let bounds = rowRange(rowInLine, starts: starts, length: attributed.length)
+    let rowText = attributed.attributedSubstring(
+      from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
+    return TextSelection.Endpoint(
+      line: line, columnUTF16: bounds.start + columnUTF16(forX: goalX, in: rowText))
   }
 
   /// One composed-character step left/right, wrapping across line boundaries.
@@ -3440,7 +3547,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // band rather than keeping a stale, too-wide horizontal extent.
     maxObservedLineWidth = 0
     if let buffer = reader, let position = try? buffer.position(forUTF16: offset) {
-      selection = TextSelection(caretAt: displayEndpoint(for: position))
+      selection = TextSelection(
+        caretAt: steppedOffConcealedLine(displayEndpoint(for: position), forward: true))
     }
     updateWrapIndex(afterChange: change)
     showCaretSolid()

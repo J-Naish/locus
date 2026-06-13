@@ -1067,6 +1067,114 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testCaretClickInClosingFenceBandSnapsToLastCodeLineEnd() throws {
+    let view = try makeEditableViewer("```swift\nlet x = 1\n```\nafter")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    // A click just below the last visible code line (the closer's upper half)
+    // snaps to the end of the last code line, not onto the concealed row. The
+    // closer has no leading air, so its slim row starts at its y offset.
+    let closerY = try XCTUnwrap(view.endpointYForTesting(line: 2))
+    let point = NSPoint(x: 200, y: closerY + 1)
+    XCTAssertEqual(view.caretEndpoint(at: point), .init(line: 1, columnUTF16: 9))
+    // The raw resolver still lands on the delimiter so a drag can span it.
+    XCTAssertEqual(view.endpoint(at: point).line, 2)
+    XCTAssertTrue(view.isConcealedDelimiterLine(2))
+  }
+
+  @MainActor
+  func testCaretClickInBareOpenerBandSnapsToFirstCodeLineStart() throws {
+    let view = try makeEditableViewer("intro\n```\nlet x = 1\n```")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    // The bare opener (line 1) is concealed; a click just above the first code
+    // line (the lower half of the opener's slim row, which sits just below its
+    // leading air) snaps to the start of the first code line.
+    XCTAssertTrue(view.isConcealedDelimiterLine(1))
+    let firstCodeY = try XCTUnwrap(view.endpointYForTesting(line: 2))
+    XCTAssertEqual(
+      view.caretEndpoint(at: NSPoint(x: 200, y: firstCodeY - 1)), .init(line: 2, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testHorizontalArrowsSkipConcealedFenceRows() throws {
+    let view = try makeEditableViewer("```swift\nlet x = 1\n```\nafter")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    // Right from the end of the last code line skips the concealed closer and
+    // lands at the start of the next editable line — never on the phantom row.
+    view.beginCaretSelection(at: .init(line: 1, columnUTF16: 9))
+    view.moveHorizontally(forward: true, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 3, columnUTF16: 0))
+    // Left from there steps back over the closer to the code line's end.
+    view.moveHorizontally(forward: false, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 9))
+  }
+
+  @MainActor
+  func testRightArrowStaysPutAtClosingFenceEndOfDocument() throws {
+    let view = try makeEditableViewer("```swift\nlet x = 1\n```")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    // The closing fence is the last line; Right at the code-line end must not
+    // park on it (no editable line follows) — the caret stays at the code end.
+    view.beginCaretSelection(at: .init(line: 1, columnUTF16: 9))
+    view.moveHorizontally(forward: true, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 9))
+  }
+
+  @MainActor
+  func testCaretClickOnLabeledOpenerStaysEditable() throws {
+    let view = try makeEditableViewer("```swift\nlet x = 1\n```")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    // The labeled opener renders its language word and remains editable text.
+    XCTAssertFalse(view.isConcealedDelimiterLine(0))
+    let labelY = try XCTUnwrap(view.endpointYForTesting(line: 0))
+    XCTAssertEqual(view.caretEndpoint(at: NSPoint(x: 80, y: labelY + 2)).line, 0)
+  }
+
+  @MainActor
+  func testCaretClickOnGenuineBlankLineIsNotSkipped() throws {
+    let view = try makeEditableViewer("a\n\nb")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    XCTAssertFalse(view.isConcealedDelimiterLine(1))
+    let blankY = try XCTUnwrap(view.endpointYForTesting(line: 1))
+    XCTAssertEqual(
+      view.caretEndpoint(at: NSPoint(x: 200, y: blankY + 2)), .init(line: 1, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testArrowDownAndUpSkipConcealedFenceRows() throws {
+    let view = try makeEditableViewer("```swift\nlet x = 1\n```\nafter")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    // Down from the last code line skips the concealed closer and lands on the
+    // next editable line.
+    view.beginCaretSelection(at: .init(line: 1, columnUTF16: 0))
+    view.moveVertically(down: true, extend: false)
+    XCTAssertEqual(view.selection?.head.line, 3)
+    // Up from there skips back over the closer to the code line.
+    view.moveVertically(down: false, extend: false)
+    XCTAssertEqual(view.selection?.head.line, 1)
+  }
+
+  @MainActor
   func testMarkdownFrontmatterDelimitersAreSlimNotEmptyRows() throws {
     let view = try makeViewer("---\ntitle: Hi\nstatus: x\n---\nBody")
     view.setFrameSize(NSSize(width: 520, height: 400))
