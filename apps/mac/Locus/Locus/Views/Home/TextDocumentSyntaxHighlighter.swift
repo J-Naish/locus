@@ -444,6 +444,59 @@ struct MarkdownDisplayMap: Equatable, Sendable {
       boundaryColumns: newBoundaries,
       characterRanges: newCharacterRanges)
   }
+
+  /// Replaces `matchRange` with a `literal` string that is not a substring of
+  /// the source (an HTML entity's character, or a `<br>`'s space). Every UTF-16
+  /// unit of the literal collapses to the match's start source column and points
+  /// at the whole match's source range, so the caret can only land before or
+  /// after the literal — never inside it, and never between a surrogate pair.
+  fileprivate func replacingWithLiteral(match matchRange: NSRange, literal: String)
+    -> MarkdownDisplayMap
+  {
+    let nsDisplay = displayText as NSString
+    let displayLength = nsDisplay.length
+    guard matchRange.location >= 0, matchRange.length > 0,
+      NSMaxRange(matchRange) <= displayLength
+    else {
+      return self
+    }
+    let literalLength = (literal as NSString).length
+    let prefix = nsDisplay.substring(to: matchRange.location)
+    let suffix = nsDisplay.substring(from: NSMaxRange(matchRange))
+    let newText = prefix + literal + suffix
+
+    let matchSourceRange = bufferRange(
+      forDisplayStart: matchRange.location, end: NSMaxRange(matchRange),
+      includeWholeLineMarkers: false)
+    let startColumn = boundaryColumns[matchRange.location]
+    let endColumn = boundaryColumns[NSMaxRange(matchRange)]
+
+    var newBoundaries: [Int] = []
+    if matchRange.location > 0 {
+      newBoundaries.append(contentsOf: boundaryColumns[0..<matchRange.location])
+    }
+    newBoundaries.append(contentsOf: Array(repeating: startColumn, count: literalLength))
+    newBoundaries.append(endColumn)
+    if NSMaxRange(matchRange) < displayLength {
+      newBoundaries.append(
+        contentsOf: boundaryColumns[(NSMaxRange(matchRange) + 1)...displayLength])
+    }
+
+    var newCharacterRanges: [NSRange] = []
+    if matchRange.location > 0 {
+      newCharacterRanges.append(contentsOf: characterRanges[0..<matchRange.location])
+    }
+    newCharacterRanges.append(contentsOf: Array(repeating: matchSourceRange, count: literalLength))
+    if NSMaxRange(matchRange) < displayLength {
+      newCharacterRanges.append(contentsOf: characterRanges[NSMaxRange(matchRange)..<displayLength])
+    }
+
+    return MarkdownDisplayMap(
+      sourceText: sourceText,
+      displayText: newText,
+      boundaryColumns: newBoundaries,
+      characterRanges: newCharacterRanges)
+  }
 }
 
 enum TextDocumentSyntaxHighlighter {
@@ -906,6 +959,15 @@ enum TextDocumentSyntaxHighlighter {
       map: &current,
       protectedRanges: &protectedRanges,
       protectsReplacement: true)
+    // HTML entities decode right after inline code, so an entity inside `code`
+    // (now a protected span) stays literal; the decoded char is protected too,
+    // so escaped HTML like &lt;b&gt; is not re-interpreted as a tag.
+    replaceLiteralMatchesInMap(
+      expression: htmlEntityNamedExpression, decode: htmlNamedEntityLiteral(forMatch:),
+      map: &current, protectedRanges: &protectedRanges)
+    replaceLiteralMatchesInMap(
+      expression: htmlEntityNumericExpression, decode: htmlNumericEntityLiteral(forMatch:),
+      map: &current, protectedRanges: &protectedRanges)
     replaceRenderedMatchesInMap(
       expression: imageExpression,
       replacementGroup: 1,
@@ -930,6 +992,42 @@ enum TextDocumentSyntaxHighlighter {
       map: &current,
       protectedRanges: &protectedRanges,
       protectsReplacement: true)
+    // Inline HTML formatting tags strip to their inner text (group 1), like the
+    // markdown emphasis rules; a safe-href <a> strips to its text (group 2);
+    // <br> becomes a space. allowsContainedProtectedRanges lets a tag wrap a
+    // decoded entity, inline code, or a nested tag and still strip. (Markdown
+    // emphasis written inside a tag keeps its markers — a rare mix.)
+    // Repeat the paired-tag pass while it keeps stripping, so a nested tag
+    // (<b><i>x</i></b>) fully unwraps once the inner tag collapses. A line with
+    // no tags changes nothing on the first pass and exits immediately, so plain
+    // prose pays a single pass; the cap bounds pathological nesting.
+    var pairedPasses = 0
+    var pairedChanged = true
+    while pairedChanged, pairedPasses < htmlMaxNestingPasses {
+      let before = current.displayLength
+      for expression in htmlPairedInlineExpressions {
+        replaceRenderedMatchesInMap(
+          expression: expression,
+          replacementGroup: 1,
+          map: &current,
+          protectedRanges: &protectedRanges,
+          protectsReplacement: true,
+          allowsContainedProtectedRanges: true)
+      }
+      pairedChanged = current.displayLength != before
+      pairedPasses += 1
+    }
+    replaceRenderedMatchesInMap(
+      expression: htmlLinkExpression,
+      replacementGroup: 2,
+      map: &current,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true,
+      allowsContainedProtectedRanges: true,
+      shouldReplace: htmlLinkHasSafeHref)
+    replaceLiteralMatchesInMap(
+      expression: htmlLineBreakExpression, decode: { _ in " " },
+      map: &current, protectedRanges: &protectedRanges)
     replaceRenderedMatchesInMap(
       expression: boldItalicExpression,
       replacementGroup: 1,
@@ -967,7 +1065,8 @@ enum TextDocumentSyntaxHighlighter {
     map: inout MarkdownDisplayMap,
     protectedRanges: inout [NSRange],
     protectsReplacement: Bool,
-    allowsContainedProtectedRanges: Bool = false
+    allowsContainedProtectedRanges: Bool = false,
+    shouldReplace: ((NSTextCheckingResult, NSString) -> Bool)? = nil
   ) {
     let original = map.displayText
     let nsOriginal = original as NSString
@@ -978,6 +1077,7 @@ enum TextDocumentSyntaxHighlighter {
     for match in matches {
       let group = match.range(at: replacementGroup)
       guard group.location != NSNotFound else { continue }
+      if let shouldReplace, !shouldReplace(match, nsOriginal) { continue }
       let adjustedMatch = match.range.offset(by: locationDelta)
       let adjustedGroup = group.offset(by: locationDelta)
       guard
@@ -1035,6 +1135,15 @@ enum TextDocumentSyntaxHighlighter {
       in: attributed,
       protectedRanges: &protectedRanges,
       protectsReplacement: true)
+    let entityAttributes = markdownAttributes(
+      font: lineFonts.regular, foregroundColor: .labelColor,
+      includeVisualAttributes: includeVisualAttributes)
+    replaceLiteralMatches(
+      expression: htmlEntityNamedExpression, decode: htmlNamedEntityLiteral(forMatch:),
+      attributes: entityAttributes, in: attributed, protectedRanges: &protectedRanges)
+    replaceLiteralMatches(
+      expression: htmlEntityNumericExpression, decode: htmlNumericEntityLiteral(forMatch:),
+      attributes: entityAttributes, in: attributed, protectedRanges: &protectedRanges)
     replaceRenderedMatches(
       expression: imageExpression,
       replacementGroup: 1,
@@ -1072,6 +1181,80 @@ enum TextDocumentSyntaxHighlighter {
       in: attributed,
       protectedRanges: &protectedRanges,
       protectsReplacement: true)
+    // Inline HTML formatting tags — mirror the map pass exactly (same order and
+    // same safe-href skip), so the attributed string stays byte-identical to the
+    // display string and the caret map round-trips.
+    let regular = lineFonts.regular
+    let htmlInlineAttributes: [(NSRegularExpression, [NSAttributedString.Key: Any])] = [
+      (htmlBoldExpression, [.font: lineFonts.bold]),
+      (htmlItalicExpression, [.font: lineFonts.italic]),
+      (
+        htmlStrikeExpression,
+        markdownHTMLStrikeAttributes(
+          font: regular, includeVisualAttributes: includeVisualAttributes)
+      ),
+      (
+        htmlCodeExpression,
+        markdownInlineCodeAttributes(
+          font: typography.inlineCode, includeVisualAttributes: includeVisualAttributes)
+      ),
+      (
+        htmlKbdExpression,
+        markdownInlineCodeAttributes(
+          font: typography.inlineCode, includeVisualAttributes: includeVisualAttributes)
+      ),
+      (
+        htmlMarkExpression,
+        markdownInlineCodeAttributes(
+          font: regular, includeVisualAttributes: includeVisualAttributes)
+      ),
+      (
+        htmlUnderlineExpression,
+        markdownHTMLUnderlineAttributes(
+          font: regular, includeVisualAttributes: includeVisualAttributes)
+      ),
+      (
+        htmlSmallExpression,
+        markdownAttributes(
+          font: regular, foregroundColor: .secondaryLabelColor,
+          includeVisualAttributes: includeVisualAttributes)
+      ),
+    ]
+    // Mirror the map pass's bounded fixpoint so nested tags fully unwrap and
+    // the attributed string stays in parity with the display string.
+    var pairedPasses = 0
+    var pairedChanged = true
+    while pairedChanged, pairedPasses < htmlMaxNestingPasses {
+      let before = attributed.length
+      for (expression, attributes) in htmlInlineAttributes {
+        replaceRenderedMatches(
+          expression: expression,
+          replacementGroup: 1,
+          attributes: attributes,
+          in: attributed,
+          protectedRanges: &protectedRanges,
+          protectsReplacement: true,
+          allowsContainedProtectedRanges: true)
+      }
+      pairedChanged = attributed.length != before
+      pairedPasses += 1
+    }
+    replaceRenderedMatches(
+      expression: htmlLinkExpression,
+      replacementGroup: 2,
+      attributes: renderedLinkAttributes(
+        font: regular, includeVisualAttributes: includeVisualAttributes),
+      in: attributed,
+      protectedRanges: &protectedRanges,
+      protectsReplacement: true,
+      allowsContainedProtectedRanges: true,
+      shouldReplace: htmlLinkHasSafeHref)
+    replaceLiteralMatches(
+      expression: htmlLineBreakExpression, decode: { _ in " " },
+      attributes: markdownAttributes(
+        font: regular, foregroundColor: .labelColor,
+        includeVisualAttributes: includeVisualAttributes),
+      in: attributed, protectedRanges: &protectedRanges)
     applyRenderedDelimitedSpan(
       expression: boldItalicExpression,
       style: .boldItalic,
@@ -1110,7 +1293,8 @@ enum TextDocumentSyntaxHighlighter {
     protectedRanges: inout [NSRange],
     protectsReplacement: Bool,
     allowsContainedProtectedRanges: Bool = false,
-    preservesProtectedAttributes: Bool = false
+    preservesProtectedAttributes: Bool = false,
+    shouldReplace: ((NSTextCheckingResult, NSString) -> Bool)? = nil
   ) {
     let original = attributed.string
     let nsOriginal = original as NSString
@@ -1121,6 +1305,7 @@ enum TextDocumentSyntaxHighlighter {
     for match in matches {
       let group = match.range(at: replacementGroup)
       guard group.location != NSNotFound else { continue }
+      if let shouldReplace, !shouldReplace(match, nsOriginal) { continue }
       let adjustedMatch = match.range.offset(by: locationDelta)
       let adjustedGroup = group.offset(by: locationDelta)
       guard
@@ -1170,9 +1355,78 @@ enum TextDocumentSyntaxHighlighter {
       locationDelta += delta
       protectedRanges = remapRanges(
         protectedRanges, replacing: adjustedMatch, withGroup: adjustedGroup, by: delta)
-      if protectsReplacement {
+      if protectsReplacement, replacementRange.length > 0 {
         protectedRanges.append(replacementRange)
       }
+    }
+  }
+
+  /// Replaces each match of `expression` with the literal returned by `decode`
+  /// (nil leaves the match untouched), maintaining the display↔buffer map. Used
+  /// for HTML entities (the decoded character) and `<br>` (a space). The decoded
+  /// run is protected so escaped HTML like `&lt;b&gt;` is not re-interpreted.
+  private static func replaceLiteralMatchesInMap(
+    expression: NSRegularExpression,
+    decode: (String) -> String?,
+    map: inout MarkdownDisplayMap,
+    protectedRanges: inout [NSRange]
+  ) {
+    let nsOriginal = NSString(string: map.displayText)
+    let matches = expression.matches(
+      in: nsOriginal as String, range: NSRange(location: 0, length: nsOriginal.length))
+    var locationDelta = 0
+    for match in matches {
+      guard let literal = decode(nsOriginal.substring(with: match.range)) else { continue }
+      let adjustedMatch = match.range.offset(by: locationDelta)
+      guard adjustedMatch.location >= 0, NSMaxRange(adjustedMatch) <= map.displayLength,
+        !protectedRanges.contains(where: { rangesIntersect($0, adjustedMatch) })
+      else {
+        continue
+      }
+      let literalLength = (literal as NSString).length
+      let beforeLength = map.displayLength
+      map = map.replacingWithLiteral(match: adjustedMatch, literal: literal)
+      let delta = map.displayLength - beforeLength
+      let replacementRange = NSRange(location: adjustedMatch.location, length: literalLength)
+      protectedRanges = remapRanges(
+        protectedRanges, replacing: adjustedMatch, withGroup: adjustedMatch, by: delta)
+      locationDelta += delta
+      if literalLength > 0 { protectedRanges.append(replacementRange) }
+    }
+  }
+
+  /// The attributed-string twin of `replaceLiteralMatchesInMap`: the exact same
+  /// matches must decode (the closure is pure) so the display string and the
+  /// attributed string stay byte-identical for caret parity.
+  private static func replaceLiteralMatches(
+    expression: NSRegularExpression,
+    decode: (String) -> String?,
+    attributes: [NSAttributedString.Key: Any],
+    in attributed: NSMutableAttributedString,
+    protectedRanges: inout [NSRange]
+  ) {
+    // An immutable snapshot — NSMutableAttributedString.string is a live view
+    // that would shift the precomputed match ranges as we splice.
+    let nsOriginal = NSString(string: attributed.string)
+    let matches = expression.matches(
+      in: nsOriginal as String, range: NSRange(location: 0, length: nsOriginal.length))
+    var locationDelta = 0
+    for match in matches {
+      guard let literal = decode(nsOriginal.substring(with: match.range)) else { continue }
+      let adjustedMatch = match.range.offset(by: locationDelta)
+      guard adjustedMatch.location >= 0, NSMaxRange(adjustedMatch) <= attributed.length,
+        !protectedRanges.contains(where: { rangesIntersect($0, adjustedMatch) })
+      else {
+        continue
+      }
+      let replacement = NSAttributedString(string: literal, attributes: attributes)
+      attributed.replaceCharacters(in: adjustedMatch, with: replacement)
+      let replacementRange = NSRange(location: adjustedMatch.location, length: replacement.length)
+      let delta = replacement.length - adjustedMatch.length
+      protectedRanges = remapRanges(
+        protectedRanges, replacing: adjustedMatch, withGroup: adjustedMatch, by: delta)
+      locationDelta += delta
+      if replacement.length > 0 { protectedRanges.append(replacementRange) }
     }
   }
 
@@ -2132,6 +2386,146 @@ enum TextDocumentSyntaxHighlighter {
     return attributes
   }
 
+  // MARK: Inline HTML
+
+  private static func markdownHTMLUnderlineAttributes(font: NSFont, includeVisualAttributes: Bool)
+    -> [NSAttributedString.Key: Any]
+  {
+    var attributes: [NSAttributedString.Key: Any] = [.font: font]
+    if includeVisualAttributes {
+      attributes[.foregroundColor] = NSColor.labelColor
+      attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+    }
+    return attributes
+  }
+
+  private static func markdownHTMLStrikeAttributes(font: NSFont, includeVisualAttributes: Bool)
+    -> [NSAttributedString.Key: Any]
+  {
+    var attributes: [NSAttributedString.Key: Any] = [.font: font]
+    if includeVisualAttributes {
+      attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+    }
+    return attributes
+  }
+
+  /// The decoded character for a named HTML entity match (the whole `&name;`),
+  /// or nil for an unknown name (left literal, like a browser) or one that
+  /// decodes to an unsafe invisible/control scalar.
+  private static func htmlNamedEntityLiteral(forMatch match: String) -> String? {
+    let name = String(match.dropFirst().dropLast())  // strip & and ;
+    guard let literal = htmlNamedEntities[name],
+      literal.unicodeScalars.allSatisfy(isSafeHTMLScalar)
+    else {
+      return nil
+    }
+    return literal
+  }
+
+  /// The decoded character for a numeric entity match (`&#123;` / `&#x1F600;`),
+  /// or nil when the code point is invalid or an unsafe control/format scalar.
+  private static func htmlNumericEntityLiteral(forMatch match: String) -> String? {
+    let body = match.dropFirst(2).dropLast()  // strip "&#" and ";"
+    let value: UInt32?
+    if let first = body.first, first == "x" || first == "X" {
+      value = UInt32(body.dropFirst(), radix: 16)
+    } else {
+      value = UInt32(body, radix: 10)
+    }
+    guard let value, let scalar = Unicode.Scalar(value), isSafeHTMLScalar(scalar) else {
+      return nil
+    }
+    return String(scalar)
+  }
+
+  /// Rejects NUL, C0/C1 controls (except tab), soft hyphen, and the invisible
+  /// bidi/format/zero-width characters so a decoded entity cannot inject
+  /// invisible reordering, joiners, or control characters.
+  private static func isSafeHTMLScalar(_ scalar: Unicode.Scalar) -> Bool {
+    let value = scalar.value
+    if value == 0 { return false }
+    if value < 0x20, value != 0x09 { return false }  // C0 except tab
+    if (0x7F...0x9F).contains(value) { return false }  // DEL + C1
+    switch value {
+    case 0x00AD,  // soft hyphen
+      0x061C,  // Arabic letter mark
+      0x180E,  // Mongolian vowel separator
+      0x200B...0x200F,  // zero-width space/joiners, LRM/RLM
+      0x202A...0x202E,  // bidi embeddings/overrides
+      0x2060...0x2064,  // word joiner + invisible operators
+      0x2066...0x206F,  // bidi isolates + deprecated format controls
+      0xFEFF:  // zero-width no-break space / BOM
+      return false
+    default:
+      return true
+    }
+  }
+
+  /// A safe `<a href>` value or nil. The raw attribute value (optionally quoted)
+  /// is entity-decoded first — so `&#106;avascript:` cannot slip through — then
+  /// allowed only for http/https/mailto or a scheme-less relative reference; any
+  /// other scheme (javascript:, data:, file:, vbscript:, blob:, about:) or a
+  /// control character is rejected, leaving the whole tag literal.
+  private static func sanitizedHTMLHref(_ raw: String) -> String? {
+    var value = raw.trimmingCharacters(in: .whitespaces)
+    if value.count >= 2, let first = value.first, first == "\"" || first == "'",
+      value.last == first
+    {
+      value = String(value.dropFirst().dropLast())
+    }
+    value = decodeHTMLEntities(in: value).trimmingCharacters(in: .whitespaces)
+    guard !value.isEmpty, !value.unicodeScalars.contains(where: { !isSafeHTMLScalar($0) })
+    else {
+      return nil
+    }
+    guard let schemeEnd = value.firstIndex(of: ":") else {
+      return value  // no scheme: a relative reference, safe (inert in Phase 1)
+    }
+    // A "scheme" containing / or # before the colon is really a path (e.g. a/b:c).
+    let scheme = value[value.startIndex..<schemeEnd]
+    if scheme.contains("/") || scheme.contains("#") || scheme.contains("?") { return value }
+    return ["http", "https", "mailto"].contains(scheme.lowercased()) ? value : nil
+  }
+
+  /// Decodes named + numeric HTML entities in a small string (used to harden the
+  /// href scheme check); leaves unknown entities literal.
+  private static func decodeHTMLEntities(in text: String) -> String {
+    let nsText = text as NSString
+    let full = NSRange(location: 0, length: nsText.length)
+    var result = text
+    for match in htmlEntityNamedExpression.matches(in: text, range: full).reversed() {
+      if let literal = htmlNamedEntityLiteral(forMatch: nsText.substring(with: match.range)) {
+        result = (result as NSString).replacingCharacters(in: match.range, with: literal)
+      }
+    }
+    let nsResult = result as NSString
+    for match in htmlEntityNumericExpression.matches(
+      in: result, range: NSRange(location: 0, length: nsResult.length)
+    ).reversed() {
+      if let literal = htmlNumericEntityLiteral(forMatch: nsResult.substring(with: match.range)) {
+        result = (result as NSString).replacingCharacters(in: match.range, with: literal)
+      }
+    }
+    return result
+  }
+
+  /// Whether an `<a ...>` match (group 1 = the attribute span) carries a safe
+  /// href. The href is found by a separate anchored scan over the short
+  /// attribute substring, so the link regex stays a single linear pass.
+  private static func htmlLinkHasSafeHref(_ match: NSTextCheckingResult, _ text: NSString) -> Bool {
+    let attributesRange = match.range(at: 1)
+    guard attributesRange.location != NSNotFound else { return false }
+    let attributes = text.substring(with: attributesRange) as NSString
+    guard
+      let href = htmlHrefAttributeExpression.firstMatch(
+        in: attributes as String, range: NSRange(location: 0, length: attributes.length)),
+      href.range(at: 1).location != NSNotFound
+    else {
+      return false
+    }
+    return sanitizedHTMLHref(attributes.substring(with: href.range(at: 1))) != nil
+  }
+
   private static func rangesIntersect(_ lhs: NSRange, _ rhs: NSRange) -> Bool {
     NSIntersectionRange(lhs, rhs).length > 0
   }
@@ -2236,6 +2630,70 @@ enum TextDocumentSyntaxHighlighter {
   private static let boldExpression = markdownRegex(#"(?<![\\*])\*\*([^\*\n]+)(?<!\\)\*\*(?!\*)"#)
   private static let italicExpression = markdownRegex(#"(?<![\\*])\*([^\*\n]+)(?<!\\)\*(?!\*)"#)
   private static let strikeExpression = markdownRegex(#"(?<![\\~])~~([^~\n]+)(?<!\\)~~(?!~)"#)
+
+  // Inline HTML. Each paired tag keeps group 1 (inner text); the content class
+  // forbids `<` and newline so a single rule matches only the innermost,
+  // single-line, properly-closed tag — anything malformed degrades to literal.
+  private static let htmlEntityNamedExpression = markdownRegex(#"&([a-zA-Z][a-zA-Z0-9]{1,31});"#)
+  private static let htmlEntityNumericExpression = markdownRegex(
+    #"&#(?:[0-9]{1,7}|[xX][0-9A-Fa-f]{1,6});"#)
+  private static let htmlBoldExpression = markdownRegex(
+    #"(?i)<(?:b|strong)>([^<\n]*)</(?:b|strong)>"#)
+  private static let htmlItalicExpression = markdownRegex(
+    #"(?i)<(?:i|em|cite)>([^<\n]*)</(?:i|em|cite)>"#)
+  private static let htmlStrikeExpression = markdownRegex(
+    #"(?i)<(?:s|strike|del)>([^<\n]*)</(?:s|strike|del)>"#)
+  private static let htmlCodeExpression = markdownRegex(#"(?i)<code>([^<\n]*)</code>"#)
+  private static let htmlKbdExpression = markdownRegex(#"(?i)<kbd>([^<\n]*)</kbd>"#)
+  private static let htmlMarkExpression = markdownRegex(#"(?i)<mark>([^<\n]*)</mark>"#)
+  private static let htmlUnderlineExpression = markdownRegex(
+    #"(?i)<(?:u|ins)>([^<\n]*)</(?:u|ins)>"#)
+  private static let htmlSmallExpression = markdownRegex(#"(?i)<small>([^<\n]*)</small>"#)
+  // Group 1 = the attribute span, group 2 = link text. A single greedy
+  // attribute run terminated by `>` (no overlapping lazy+greedy pair), so an
+  // unterminated `<a ` line fails in linear time instead of backtracking. The
+  // href is extracted from the short attribute span separately.
+  private static let htmlLinkExpression = markdownRegex(
+    #"(?i)<a(\s[^<>\n]*)>([^<\n]*)</a>"#)
+  private static let htmlHrefAttributeExpression = markdownRegex(
+    #"(?i)\bhref\s*=\s*("[^"<\n]*"|'[^'<\n]*'|[^\s"'<>]+)"#)
+  private static let htmlLineBreakExpression = markdownRegex(#"(?i)<br\s*/?>"#)
+  /// The paired formatting tags whose display-map removal is identical (keep
+  /// group 1); kept in one list so both inline passes use the same order.
+  private static let htmlPairedInlineExpressions: [NSRegularExpression] = [
+    htmlBoldExpression, htmlItalicExpression, htmlStrikeExpression, htmlCodeExpression,
+    htmlKbdExpression, htmlMarkExpression, htmlUnderlineExpression, htmlSmallExpression,
+  ]
+  /// Upper bound on paired-tag fixpoint passes (one per level of tag nesting);
+  /// realistic nesting is one or two deep, and a line with no tags exits after
+  /// a single no-op pass.
+  private static let htmlMaxNestingPasses = 4
+
+  /// Common, safe-to-render named HTML entities (keyed without the `&`/`;`).
+  /// Pure text — no executable meaning. Unknown names are left literal.
+  private static let htmlNamedEntities: [String: String] = [
+    "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'", "nbsp": "\u{00A0}",
+    "copy": "©", "reg": "®", "trade": "™", "mdash": "—", "ndash": "–", "hellip": "…",
+    "lsquo": "‘", "rsquo": "’", "ldquo": "“", "rdquo": "”", "laquo": "«", "raquo": "»",
+    "times": "×", "divide": "÷", "deg": "°", "plusmn": "±", "micro": "µ", "para": "¶",
+    "sect": "§", "middot": "·", "bull": "•", "dagger": "†", "Dagger": "‡", "permil": "‰",
+    "prime": "′", "Prime": "″", "euro": "€", "pound": "£", "yen": "¥", "cent": "¢",
+    "curren": "¤", "larr": "←", "rarr": "→", "uarr": "↑", "darr": "↓", "harr": "↔",
+    "infin": "∞", "ne": "≠", "le": "≤", "ge": "≥", "asymp": "≈", "equiv": "≡",
+    "sum": "∑", "prod": "∏", "radic": "√", "part": "∂", "nabla": "∇", "int": "∫",
+    "frac12": "½", "frac14": "¼", "frac34": "¾", "sup1": "¹", "sup2": "²", "sup3": "³",
+    "ensp": "\u{2002}", "emsp": "\u{2003}", "thinsp": "\u{2009}",
+    "check": "✓", "cross": "✗", "star": "★",
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε", "theta": "θ",
+    "lambda": "λ", "mu": "μ", "pi": "π", "sigma": "σ", "phi": "φ", "omega": "ω",
+    "Alpha": "Α", "Beta": "Β", "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ",
+    "Pi": "Π", "Sigma": "Σ", "Phi": "Φ", "Omega": "Ω",
+    "agrave": "à", "aacute": "á", "acirc": "â", "atilde": "ã", "auml": "ä", "aring": "å",
+    "ccedil": "ç", "egrave": "è", "eacute": "é", "ecirc": "ê", "euml": "ë", "iacute": "í",
+    "ntilde": "ñ", "ograve": "ò", "oacute": "ó", "ocirc": "ô", "ouml": "ö", "uacute": "ú",
+    "uuml": "ü", "szlig": "ß", "Aacute": "Á", "Eacute": "É", "Uuml": "Ü", "Ouml": "Ö",
+    "Auml": "Ä",
+  ]
 
   private static func markdownRegex(_ pattern: String) -> NSRegularExpression {
     guard let expression = try? NSRegularExpression(pattern: pattern) else {

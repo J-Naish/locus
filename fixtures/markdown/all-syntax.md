@@ -91,6 +91,22 @@ Missing image:
 
 [product-brief]: ../../docs/product/brief.md
 
+## Inline HTML
+
+Formatting tags render natively: <b>bold</b>, <i>italic</i>,
+<s>struck</s>, <u>underline</u>, <code>inline code</code>, press
+<kbd>esc</kbd>, a <mark>highlight</mark>, and <small>small print</small>.
+
+Entities decode: AT&amp;T, 100&nbsp;%, &copy; 2026, &mdash; em dash,
+arrows &larr;&rarr;, and an emoji &#x1F600;.
+
+A safe link renders: <a href="https://example.com">example.com</a>.
+An unsafe one stays literal: <a href="javascript:alert(1)">do not run</a>.
+
+A line break<br>splits with a space. Unsupported tags stay literal:
+<div class="x">block HTML is not rendered</div>. Escaped tags stay
+literal too: &lt;b&gt;not bold&lt;/b&gt;.
+
 ## Blockquotes
 
 > A single blockquote should show as quoted prose.

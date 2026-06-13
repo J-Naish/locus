@@ -274,6 +274,154 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       "Review the numbers")
   }
 
+  // MARK: Inline HTML
+
+  /// Renders one prose line through the markdown highlighter (inline pass).
+  private func htmlRendered(_ line: String) -> NSAttributedString {
+    TextDocumentSyntaxHighlighter.highlightedLine(
+      line, syntax: .markdown, font: TextDocumentSyntax.markdown.font)
+  }
+
+  /// The display string a line collapses to (display-map pass).
+  private func htmlDisplayText(_ line: String) -> String {
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+    return TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+      line, font: TextDocumentSyntax.markdown.font, state: state)
+  }
+
+  func testMarkdownDecodesNamedHTMLEntities() {
+    XCTAssertEqual(
+      htmlRendered("a &amp; b &lt;tag&gt; &copy; &mdash; done").string,
+      "a & b <tag> © — done")
+    // Unknown entities stay literal, like a browser.
+    XCTAssertEqual(htmlRendered("x &bogusentity; y").string, "x &bogusentity; y")
+  }
+
+  func testMarkdownDecodesNumericAndAstralEntitiesAndRejectsUnsafe() {
+    XCTAssertEqual(htmlRendered("&#65;&#x42; &#x1F600;").string, "AB 😀")
+    // Surrogate halves and out-of-range stay literal; NUL and bidi controls too.
+    XCTAssertEqual(
+      htmlRendered("&#xD800; &#xFFFFFF; &#0; &#x202E;").string,
+      "&#xD800; &#xFFFFFF; &#0; &#x202E;")
+  }
+
+  func testMarkdownEntitiesInsideInlineCodeStayLiteral() {
+    // Inline code protects its span, so the entity is not decoded inside it.
+    XCTAssertEqual(htmlRendered("Use `a &amp; b` here").string, "Use a &amp; b here")
+  }
+
+  func testMarkdownInlineHTMLFormattingTags() {
+    XCTAssertEqual(
+      htmlRendered("a <b>bold</b> <i>it</i> <s>x</s> <u>u</u> end").string,
+      "a bold it x u end")
+    let bold = htmlRendered("a <b>bold</b>")
+    XCTAssertEqual(
+      bold.resolvedFont(in: bold.string, matching: "bold")?.fontDescriptor.symbolicTraits
+        .contains(.bold), true)
+    // Case-insensitive per HTML.
+    XCTAssertEqual(htmlRendered("<STRONG>x</STRONG>").string, "x")
+    // <code> renders as a mono chip.
+    let code = htmlRendered("press <code>esc</code>")
+    XCTAssertEqual(
+      code.resolvedFont(in: code.string, matching: "esc")?.fontDescriptor.symbolicTraits
+        .contains(.monoSpace), true)
+    // <small> dims without shrinking the font.
+    let small = htmlRendered("a <small>note</small>")
+    XCTAssertEqual(small.foregroundColor(in: small.string, matching: "note"), .secondaryLabelColor)
+  }
+
+  func testMarkdownSafeHTMLLinkRendersTextWithLinkColor() {
+    let safe = htmlRendered("go <a href=\"https://example.com\">here</a> now")
+    XCTAssertEqual(safe.string, "go here now")
+    XCTAssertEqual(safe.foregroundColor(in: safe.string, matching: "here"), .linkColor)
+  }
+
+  func testMarkdownUnsafeOrHreflessHTMLLinkStaysLiteral() {
+    // javascript:, data:, and obfuscated schemes are not styled as links and
+    // are left literal (the entity inside the rejected tag still decodes, but
+    // the link is never honoured — and never coloured/clickable).
+    XCTAssertEqual(
+      htmlRendered("<a href=\"javascript:alert(1)\">x</a>").string,
+      "<a href=\"javascript:alert(1)\">x</a>")
+    XCTAssertEqual(
+      htmlRendered("<a href=\"&#106;avascript:x\">x</a>").string,
+      "<a href=\"javascript:x\">x</a>")
+    XCTAssertNotEqual(
+      htmlRendered("<a href=\"javascript:alert(1)\">x</a>").foregroundColor(at: 0), .linkColor)
+    XCTAssertEqual(htmlRendered("<a name=\"t\">x</a>").string, "<a name=\"t\">x</a>")
+  }
+
+  func testMarkdownLineBreakTagBecomesSpace() {
+    XCTAssertEqual(htmlRendered("a<br>b").string, "a b")
+    XCTAssertEqual(htmlRendered("a<br/>b").string, "a b")
+  }
+
+  func testMarkdownEscapedHTMLStaysLiteralAndScriptNeverActive() {
+    // &lt;b&gt;x&lt;/b&gt; must show the literal tags, not bold; <script> shows literally.
+    XCTAssertEqual(htmlRendered("&lt;b&gt;x&lt;/b&gt;").string, "<b>x</b>")
+    XCTAssertEqual(htmlRendered("<script>evil()</script>").string, "<script>evil()</script>")
+  }
+
+  func testMarkdownMalformedHTMLRendersLiterallyWithoutCrashing() {
+    for line in ["<b>foo", "<b>x</i>", "<a href=", "&#;", "&", "<b></b>", "<u>"] {
+      XCTAssertEqual(htmlDisplayText(line), htmlRendered(line).string, "parity for \(line)")
+    }
+  }
+
+  func testMarkdownInlineHTMLDisplayAndAttributedStringsStayInParity() {
+    let corpus = [
+      "a &amp; b &copy;", "x &#x1F600; y", "<b>bold</b> and <i>it</i>",
+      "<code>&amp;</code>", "nested <b>**md**</b>", "<a href=\"https://x.com\">go</a>",
+      "<a href=\"javascript:x\">no</a>", "line<br>break", "<mark>hi</mark> <kbd>K</kbd>",
+    ]
+    for line in corpus {
+      XCTAssertEqual(htmlDisplayText(line), htmlRendered(line).string, "parity for: \(line)")
+    }
+  }
+
+  func testMarkdownInlineHTMLTagsWrappingEntitiesAndCodeStillStrip() {
+    // A tag whose body contains a decoded entity / inline code / nested tag
+    // must still strip to its inner content (not render the raw tag).
+    XCTAssertEqual(htmlRendered("<b>&copy;</b>").string, "©")
+    XCTAssertEqual(htmlRendered("<code>a &amp; b</code>").string, "a & b")
+    XCTAssertEqual(htmlRendered("<i>caf&eacute;</i>").string, "café")
+    XCTAssertEqual(htmlRendered("<b><i>x</i></b>").string, "x")
+    let link = htmlRendered("<a href=\"https://x.com\">&copy; 2026</a>")
+    XCTAssertEqual(link.string, "© 2026")
+    XCTAssertEqual(link.foregroundColor(in: link.string, matching: "2026"), .linkColor)
+  }
+
+  func testMarkdownUnclosedHTMLLinkIsLinearTimeNotReDoS() {
+    // A crafted unterminated <a ... line must not trigger quadratic
+    // backtracking on the (off-main) measurement path. ~20k chars, no close.
+    let line = "<a " + String(repeating: " ", count: 20_000) + "x"
+    let start = Date()
+    _ = htmlRendered(line)
+    let elapsed = Date().timeIntervalSince(start)
+    XCTAssertLessThan(elapsed, 0.5, "unterminated <a line should render in linear time")
+  }
+
+  func testMarkdownNumericEntitiesRejectInvisibleFormatControls() {
+    // U+061C (Arabic letter mark), zero-width space, BOM, soft hyphen, word
+    // joiner — all invisible/format controls — stay literal, not decoded.
+    XCTAssertEqual(
+      htmlRendered("a&#x061C;b &#x200B; &#xFEFF; &#xAD; &#x2060;").string,
+      "a&#x061C;b &#x200B; &#xFEFF; &#xAD; &#x2060;")
+  }
+
+  func testMarkdownEntityDisplayMapRoundTripsAndKeepsSurrogateIntegrity() {
+    let source = "x &#x1F600; y"
+    let map = TextDocumentSyntaxHighlighter.markdownDisplayMap(for: source, state: .plain)
+    XCTAssertEqual(map.displayText, "x 😀 y")
+    // Selecting the emoji maps back to the whole source entity, so copy returns
+    // the original markup, not the decoded glyph.
+    let emoji = map.bufferRange(forDisplayStart: 2, end: 4, includeWholeLineMarkers: false)
+    XCTAssertEqual((source as NSString).substring(with: emoji), "&#x1F600;")
+    // The caret cannot land between the two surrogate units: the interior
+    // column collapses to the entity start.
+    XCTAssertEqual(map.bufferColumn(forDisplayColumn: 3), map.bufferColumn(forDisplayColumn: 2))
+  }
+
   func testMarkdownRenderedInlineRemovesFormattingMarkers() {
     let line = TextDocumentSyntaxHighlighter.highlightedLine(
       "Use **bold** and `code` in [docs](https://example.com/a*b*c)",

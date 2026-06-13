@@ -220,10 +220,26 @@ content. Wrap width per line = measure − indent.
   as plain text — not a link, nothing pretends to be clickable that is
   not), in-paragraph images as secondary alt text (image-only lines
   render as image blocks — see Images above), escapes render the escaped
-  character with the backslash removed, a trailing `<br>` is removed
-  from the display (the line break is already real). Inline constructs
-  nest: code spans and links inside emphasis render both (code binds
-  tighter than emphasis). Other inline HTML stays literal.
+  character with the backslash removed. Inline constructs nest: code
+  spans and links inside emphasis render both (code binds tighter than
+  emphasis).
+- **Inline HTML**: a curated allowlist renders by reusing the same
+  typographic attributes as the markdown equivalents — `<b>`/`<strong>`
+  bold, `<i>`/`<em>`/`<cite>` italic, `<s>`/`<strike>`/`<del>`
+  strikethrough, `<u>`/`<ins>` underline, `<code>`/`<kbd>` and `<mark>`
+  the inline-code chip, `<small>` dimmed, and `<a href>` the link style
+  (the tag markers are removed in display space, like emphasis). **HTML
+  entities** decode to their character — named (`&amp;`, `&copy;`,
+  `&mdash;`, …) and numeric/hex (`&#169;`, `&#x1F600;`), with invalid or
+  unsafe code points left literal. `<br>` becomes a space (a forced
+  mid-line break is not expressible in the per-line wrap model). Security:
+  this is **not** a browser — no JS, no CSS, no `<script>`/`<style>`/
+  `<iframe>`; only `href` is read and only `http`/`https`/`mailto` (or a
+  relative reference) is honoured (a `javascript:`/`data:` link, or any
+  unknown/structural tag — `<div>`, `<table>`, `<details>`, …, and all
+  block HTML — stays **literal**). Escaped HTML (`&lt;b&gt;`) stays
+  literal too. Full-fidelity HTML (CSS/layout/scripts) is the job of the
+  future standalone HTML preview surface, not this engine.
 
 ### Editing contract
 
