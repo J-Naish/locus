@@ -54,9 +54,26 @@ enum MarkdownDocumentMetrics {
   static let markerColumnWidth: CGFloat = 24
   static let quoteIndentWidth: CGFloat = 17
   static let checkboxSize: CGFloat = 14
+  /// Inset from the code card's edges to the code glyphs on both sides.
   static let codeCardInset: CGFloat = 12
   static let codeBlockCornerRadius: CGFloat = 8
   static let inlineCodeCornerRadius: CGFloat = 4
+  /// Breathing room above and below a code card, detaching it from prose the
+  /// way image blocks and headings breathe (matches `imageBlockAir`).
+  static let codeBlockAir: CGFloat = 10
+  /// Tracking on the language label so a short word reads as a quiet caption
+  /// rather than body text.
+  static let codeCaptionTracking: CGFloat = 0.4
+  /// The persistent copy control in a fenced block's top-right corner.
+  static let codeCopyButtonWidth: CGFloat = 26
+  static let codeCopyButtonHeight: CGFloat = 20
+  /// Inset from the card's right edge to the control.
+  static let codeCopyButtonInset: CGFloat = 8
+  /// Inset from the card's top edge to the control — a small drop so the icon
+  /// sits just below the top rather than flush against it.
+  static let codeCopyButtonTopInset: CGFloat = 5
+  static let codeCopyButtonCornerRadius: CGFloat = 5
+  static let codeCopyIconPointSize: CGFloat = 12
   static let tableColumnGutter: CGFloat = 40
   static let tableColumnMinimumWidth: CGFloat = 48
   static let tableColumnMaximumWidth: CGFloat = 240
@@ -157,6 +174,15 @@ enum MarkdownDocumentMetrics {
   static var accentColor: NSColor { .controlAccentColor }
   static var markerColor: NSColor { .tertiaryLabelColor }
   static var tableRuleColor: NSColor { .separatorColor }
+  static var codeCopyIconColor: NSColor { .secondaryLabelColor }
+  static var codeCopyConfirmColor: NSColor { .controlAccentColor }
+  /// Comments recede to marker grey; strings are calm theme-coherent ink. Both
+  /// are language-agnostic (comment + quoted-string surface), never keywords.
+  static var codeCommentColor: NSColor { .tertiaryLabelColor }
+  static var codeStringColor: NSColor {
+    NSColor.controlAccentColor.blended(withFraction: 0.55, of: .labelColor)
+      ?? NSColor.controlAccentColor
+  }
 
   static var tableHeaderFont: NSFont {
     .systemFont(ofSize: tableHeaderFontSize, weight: .semibold)
@@ -164,6 +190,12 @@ enum MarkdownDocumentMetrics {
 
   static var imageCaptionFont: NSFont {
     .systemFont(ofSize: imageCaptionFontSize)
+  }
+
+  /// The language label above a code slab: a small muted system caption in the
+  /// same register as table headers and image captions (not the mono body).
+  static var codeLabelFont: NSFont {
+    .systemFont(ofSize: codeFenceFontSize, weight: .medium)
   }
 }
 
@@ -193,6 +225,14 @@ struct MarkdownLineStyleState: Equatable, Sendable {
   var headingLevel: Int?
   var insideFrontMatter = false
   var isFenceDelimiter = false
+  /// True for the opening fence delimiter of a block (vs the closer). The
+  /// authoritative opener/closer distinction from the pairing pass, so callers
+  /// never have to re-derive it from neighbouring lines (which fails for
+  /// back-to-back blocks or a fence right after frontmatter).
+  var isFenceOpen = false
+  /// True for an opening fence delimiter carrying a non-empty info string —
+  /// the only fence line that renders a language label (others render empty).
+  var isFenceLabel = false
   var isIndentedCodeBlock = false
   var isReferenceDefinition = false
   var isTableRow = false
@@ -581,11 +621,20 @@ enum TextDocumentSyntaxHighlighter {
         attributed.addAttribute(.kern, value: tracking, range: fullRange)
       }
     }
+    if state.isFenceDelimiter {
+      // Only a labeled opener reaches here (empty delimiters return above).
+      // Tracking widens the caption; metrics-affecting, so apply unconditionally.
+      attributed.addAttribute(
+        .kern, value: MarkdownDocumentMetrics.codeCaptionTracking, range: fullRange)
+    }
     if state.isTableRow {
       attributed.addAttribute(
         .paragraphStyle,
         value: markdownTableParagraphStyle(columns: state.tableColumns),
         range: fullRange)
+    }
+    if includeVisualAttributes, markdownLineCarriesCodeTint(state) {
+      applyMarkdownCodeTint(to: attributed)
     }
     if block.stylesInline {
       applyRenderedMarkdownInline(
@@ -595,6 +644,32 @@ enum TextDocumentSyntaxHighlighter {
         includeVisualAttributes: includeVisualAttributes)
     }
     return attributed
+  }
+
+  /// Whether `state` is a code body line that receives the calm
+  /// comment/string tint — fenced, indented, or frontmatter content, but not
+  /// the fence delimiter lines themselves (their label stays a muted caption).
+  private static func markdownLineCarriesCodeTint(_ state: MarkdownLineStyleState) -> Bool {
+    guard !state.isFenceDelimiter else { return false }
+    return state.insideFence || state.isIndentedCodeBlock || state.insideFrontMatter
+  }
+
+  /// Two language-agnostic tints over a code body line: comments recede to
+  /// marker grey, quoted strings take a calm ink. Applied comment-first so a
+  /// string wins inside its quotes. Never touches keywords — honest keyword
+  /// colour needs a per-language grammar, which is IDE territory.
+  private static func applyMarkdownCodeTint(to attributed: NSMutableAttributedString) {
+    let text = attributed.string
+    let full = NSRange(location: 0, length: (text as NSString).length)
+    guard full.length > 0 else { return }
+    for match in TextHighlightRule.codeComment.expression.matches(in: text, range: full) {
+      attributed.addAttribute(
+        .foregroundColor, value: MarkdownDocumentMetrics.codeCommentColor, range: match.range)
+    }
+    for match in TextHighlightRule.codeString.expression.matches(in: text, range: full) {
+      attributed.addAttribute(
+        .foregroundColor, value: MarkdownDocumentMetrics.codeStringColor, range: match.range)
+    }
   }
 
   private static func renderedMarkdownBlock(
@@ -642,8 +717,10 @@ enum TextDocumentSyntaxHighlighter {
     }
 
     if state.isFenceDelimiter, markdownFenceInfo(in: line) != nil {
+      // The language label reads as a muted caption (system font), in the same
+      // register as table headers and image captions — not the mono body.
       return block(
-        displayFont: typography.codeFence,
+        displayFont: MarkdownDocumentMetrics.codeLabelFont,
         foregroundColor: .secondaryLabelColor,
         stylesInline: false)
     }
@@ -737,8 +814,10 @@ enum TextDocumentSyntaxHighlighter {
       if state.insideFence {
         return .empty(sourceText: line)
       }
+      // Only the matched opener shows a label; a closer (even one written with
+      // trailing text like ```end) collapses to empty so it matches its slim row.
       let infoRange = markdownFenceInfoTextRange(in: line, markerLength: fence.markerLength)
-      if infoRange.length > 0 {
+      if state.isFenceLabel, infoRange.length > 0 {
         return .map(
           sourceText: line,
           displayText: nsLine.substring(with: infoRange),
@@ -1429,6 +1508,12 @@ enum TextDocumentSyntaxHighlighter {
       }
       if let openingIndex = fenceOpeningIndex {
         states[openingIndex].isFenceDelimiter = true
+        states[openingIndex].isFenceOpen = true
+        if let fence = markdownFenceInfo(in: lines[openingIndex]) {
+          let infoRange = markdownFenceInfoTextRange(
+            in: lines[openingIndex], markerLength: fence.markerLength)
+          states[openingIndex].isFenceLabel = infoRange.length > 0
+        }
         states[index].isFenceDelimiter = true
         if openingIndex + 1 < index {
           for fencedIndex in (openingIndex + 1)..<index {

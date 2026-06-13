@@ -184,6 +184,14 @@ reviewers:
   - aoki
 ```
 
+Fenced code block with a language label, a comment, and a string:
+
+```swift
+// Greet the reviewer by name.
+let reviewer = "Nishi"
+print("Hello, \(reviewer)")
+```
+
 Fenced code block with tildes:
 
 ~~~json

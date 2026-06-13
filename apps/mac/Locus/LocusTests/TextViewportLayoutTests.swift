@@ -918,6 +918,165 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testMarkdownCodeCardSlimsCloserAndBreathesAtBlockEdges() throws {
+    // A leading paragraph keeps the fence off the document top, so the block
+    // air above the opener is exercised (the doc-top line suppresses it).
+    let view = try makeViewer("Intro\n```swift\nlet value = 1\n```\nAfter")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let body = view.layout.lineHeight
+    let air = MarkdownDocumentMetrics.codeBlockAir
+    let slim = MarkdownDocumentMetrics.slimMarkerRowHeight
+    let header = LineRenderingTextView.codeLabelRowHeight
+
+    // The opener is a header band (label + copy control) plus the block air.
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 2))
+        - (try XCTUnwrap(view.endpointYForTesting(line: 1))),
+      air + header,
+      accuracy: 0.5)
+    // Interior body row stays the uniform height — code is already open.
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 3))
+        - (try XCTUnwrap(view.endpointYForTesting(line: 2))),
+      body,
+      accuracy: 0.5)
+    // Closer is a slim row carrying the block air below it.
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 4))
+        - (try XCTUnwrap(view.endpointYForTesting(line: 3))),
+      slim + air,
+      accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownBareFenceOpenerIsSlimWithNoReservedLabelSpace() throws {
+    let view = try makeViewer("Intro\n```\ncode line\n```\nAfter")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    // Without a language label there is no reserved header band — the opener
+    // collapses to a slim row (plus the block air), so a language-less block
+    // has no empty space at its top. The copy control floats over the corner.
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 2))
+        - (try XCTUnwrap(view.endpointYForTesting(line: 1))),
+      MarkdownDocumentMetrics.slimMarkerRowHeight + MarkdownDocumentMetrics.codeBlockAir,
+      accuracy: 0.5)
+    // ...but it still gets a copy control.
+    XCTAssertEqual(view.markdownCodeCopyTargets(inLineRange: 0..<5).map(\.startLine), [1])
+  }
+
+  @MainActor
+  func testMarkdownCodeCardFrameExcludesBlockAir() throws {
+    let view = try makeViewer("Intro\n```swift\nlet value = 1\n```")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let frame = try XCTUnwrap(
+      view.markdownCodeBlockFrameForTesting(fromLine: 1, toLine: 3, visibleRows: 0..<4))
+    // The card begins below the leading air (the air sits outside the fill).
+    XCTAssertEqual(
+      frame.minY,
+      try XCTUnwrap(view.endpointYForTesting(line: 1)) + MarkdownDocumentMetrics.codeBlockAir,
+      accuracy: 0.5)
+    // ...and ends at the closer's slim row, before the trailing air.
+    XCTAssertEqual(
+      frame.maxY,
+      try XCTUnwrap(view.endpointYForTesting(line: 3))
+        + MarkdownDocumentMetrics.slimMarkerRowHeight,
+      accuracy: 0.5)
+    XCTAssertEqual(frame.minX, view.markdownTextColumnXForTesting(), accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownDocumentTopCodeCardSitsAtPageTop() throws {
+    let view = try makeViewer("```swift\nlet value = 1\n```")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let frame = try XCTUnwrap(
+      view.markdownCodeBlockFrameForTesting(fromLine: 0, toLine: 2, visibleRows: 0..<3))
+    // No extra air above a document-top code block — it sits at the page top,
+    // matching the heading document-top convention.
+    XCTAssertEqual(frame.minY, try XCTUnwrap(view.endpointYForTesting(line: 0)), accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownFencedBlockHasCopyControlPinnedTopRight() throws {
+    let view = try makeViewer("```swift\nlet x = 1\nprint(x)\n```")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let targets = view.markdownCodeCopyTargets(inLineRange: 0..<4)
+    XCTAssertEqual(targets.count, 1)
+    let target = try XCTUnwrap(targets.first)
+    XCTAssertEqual(target.startLine, 0)
+    // Copies the body (the lines between the fences), verbatim, not the markers.
+    XCTAssertEqual(target.contentRange, 1..<3)
+    XCTAssertEqual(
+      view.markdownCopyableCodeText(contentRange: target.contentRange), "let x = 1\nprint(x)")
+    // Pinned to the card's top-right corner.
+    let cardRight =
+      view.markdownTextColumnXForTesting() + view.markdownOuterContentWidthForTesting(line: 0)
+    XCTAssertEqual(
+      target.buttonRect.maxX, cardRight - MarkdownDocumentMetrics.codeCopyButtonInset, accuracy: 0.5
+    )
+    XCTAssertEqual(target.buttonRect.width, MarkdownDocumentMetrics.codeCopyButtonWidth)
+    // Dropped a small inset below the card top (which is y = 0 at the document top).
+    XCTAssertEqual(
+      target.buttonRect.minY, MarkdownDocumentMetrics.codeCopyButtonTopInset, accuracy: 0.5)
+  }
+
+  @MainActor
+  func testAdjacentFencedBlocksEachGetCopyControlAndHeaderBand() throws {
+    // Two fenced blocks back-to-back with no separating blank line.
+    let view = try makeViewer("```swift\nlet a = 1\n```\n```python\nb = 2\n```")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let targets = view.markdownCodeCopyTargets(inLineRange: 0..<6)
+    XCTAssertEqual(targets.map(\.startLine), [0, 3])
+    XCTAssertEqual(targets.last?.contentRange, 4..<5)
+    XCTAssertEqual(view.markdownCopyableCodeText(contentRange: 4..<5), "b = 2")
+    // The second opener (line 3) is a header band, not a slim closer row.
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 4))
+        - (try XCTUnwrap(view.endpointYForTesting(line: 3))),
+      LineRenderingTextView.codeLabelRowHeight,
+      accuracy: 0.5)
+  }
+
+  @MainActor
+  func testFenceImmediatelyAfterFrontmatterGetsCopyControl() throws {
+    let view = try makeViewer("---\ntitle: Hi\n---\n```swift\nlet a = 1\n```")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let targets = view.markdownCodeCopyTargets(inLineRange: 0..<6)
+    XCTAssertEqual(targets.map(\.startLine), [3])
+    XCTAssertEqual(targets.first?.contentRange, 4..<5)
+  }
+
+  @MainActor
+  func testMarkdownIndentedCodeHasNoCopyControl() throws {
+    let view = try makeViewer("    indented code")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    XCTAssertTrue(view.markdownCodeCopyTargets(inLineRange: 0..<1).isEmpty)
+  }
+
+  @MainActor
   func testMarkdownTableChromeStaysInsideTextColumn() throws {
     let view = try makeViewer(
       """

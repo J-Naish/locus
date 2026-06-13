@@ -138,17 +138,32 @@ content. Wrap width per line = measure − indent.
   re-classified for block constructs** — `> ### Title`, `> - item`,
   `> - [ ] task` render as a heading/list/task inside the quote (one
   nesting level), indents composed.
-- **Fenced code**: card; info string as the muted 11 pt label; empty
-  delimiter rows. **The card sits flush with the text column** — its
-  left and right edges are the column's edges (composed with any
-  quote/list indent), and the code content is inset 12 pt inside it on
-  both sides. Fences require closure (unclosed fences render literally —
-  deliberate divergence so typing ``` ``` ``` never restyles the whole
-  page; frontmatter likewise, with the same flush card).
+- **Fenced code**: a **rounded card** (no border), flush with the text
+  column (composed with any quote/list indent), code inset 12 pt on both
+  sides, breathing 10 pt above and below. A *labeled* opener is a quiet
+  **header band** holding the language label (left); a bare fence
+  reserves no band — its opener collapses to a slim row so there is no
+  empty label space at the top. The closer is always a slim row. The
+  language label is a small muted *system* caption (11 pt, secondary,
+  lightly tracked), in the same register as table headers and image
+  captions, not the mono body. The body carries **calm, language-agnostic
+  highlighting**: line comments recede to marker grey and quoted strings
+  take a desaturated accent ink — comments and strings only, never
+  keywords (honest keyword colour needs a per-language grammar, which is
+  IDE territory). The **copy control** is a persistent (never
+  hover-revealed) quiet **icon** — no border — in the card's top-right
+  that copies the block's verbatim body (the lines between the fences,
+  without the markers) to the pasteboard, showing a brief checkmark
+  confirmation, and the pointer becomes a hand over it; it is the one
+  deliberate convenience affordance on the surface. Fences
+  require closure (unclosed fences render literally — deliberate
+  divergence so typing ``` ``` ``` never restyles the whole page;
+  frontmatter likewise, on the same card, without a copy control).
 - **Indented code blocks** (4+ spaces *outside* an open list context):
-  mono on the same flush card, grouped like fences. Inside a list
-  context the same indent is a continuation paragraph — this distinction
-  is what keeps `  - nested` a list item and `    code` a code block.
+  mono on the same card (no copy control, since there is no fence
+  header), grouped like fences. Inside a list context the
+  same indent is a continuation paragraph — this distinction is what
+  keeps `  - nested` a list item and `    code` a code block.
 - **Tables**: a block of pipe rows confirmed by a delimiter row renders
   as a **print-quality three-rule table** (booktab style) — no outer
   box, no vertical lines, no background fills. Structure comes from
@@ -319,11 +334,12 @@ colors).
 
 The current round (editing restoration) is sequenced in
 [markdown-rendered-view-milestone.md](markdown-rendered-view-milestone.md).
-Phase A (variable row heights, full type scale), typeset tables, and
-image blocks have shipped. Later: Phase R (optional raw editor surface),
-Phase B (Rust-core classification), polish backlog (theme slots,
+Phase A (variable row heights, full type scale), typeset tables, image
+blocks, and the code card (language label, copy control, comments/strings tint) have
+shipped. Later: Phase R (optional raw editor surface), Phase B
+(Rust-core classification), polish backlog (theme slots,
 find-in-document with mapped highlights, link editor, copy-as-rich-text,
-fence syntax highlighting, in-paragraph inline images, animated GIFs).
+in-paragraph inline images, animated GIFs).
 
 ## Performance
 

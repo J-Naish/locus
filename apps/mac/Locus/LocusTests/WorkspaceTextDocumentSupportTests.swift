@@ -394,6 +394,106 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertNil(states[5].imageSource)
   }
 
+  func testMarkdownCodeFenceLabelRendersAsTrackedMutedCaption() {
+    let lines = ["```swift", "let value = 1", "```"]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(states[0].isFenceLabel, true)
+    XCTAssertEqual(states[2].isFenceLabel, false)
+
+    let label = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[0],
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[0])
+    XCTAssertEqual(label.string, "swift")
+    XCTAssertEqual(label.resolvedFont(at: 0)?.pointSize, MarkdownDocumentMetrics.codeFenceFontSize)
+    XCTAssertEqual(
+      label.resolvedFont(at: 0)?.fontDescriptor.symbolicTraits.contains(.monoSpace), false)
+    XCTAssertEqual(label.foregroundColor(at: 0), .secondaryLabelColor)
+    let kern = label.attribute(.kern, at: 0, effectiveRange: nil) as? CGFloat
+    XCTAssertEqual(kern ?? 0, MarkdownDocumentMetrics.codeCaptionTracking, accuracy: 0.01)
+  }
+
+  func testMarkdownBareFenceHasNoLabel() {
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: ["```", "code", "```"])
+    XCTAssertEqual(states[0].isFenceLabel, false)
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        "```", font: TextDocumentSyntax.markdown.font, state: states[0]),
+      "")
+  }
+
+  func testMarkdownFencedCodeTintsCommentsAndStringsNotKeywords() {
+    let lines = ["```swift", "let name = \"Nishi\"  // greet", "```"]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let body = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[1],
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[1])
+
+    XCTAssertEqual(
+      body.foregroundColor(in: body.string, matching: "// greet"), NSColor.tertiaryLabelColor)
+    // Keywords are never coloured — code reads as typeset text, not an IDE theme.
+    XCTAssertEqual(body.foregroundColor(in: body.string, matching: "let"), NSColor.labelColor)
+    // The string takes a calm distinct ink, not a marker or label colour.
+    let stringColor = body.foregroundColor(in: body.string, matching: "\"Nishi\"")
+    XCTAssertNotEqual(stringColor, NSColor.labelColor)
+    XCTAssertNotEqual(stringColor, NSColor.tertiaryLabelColor)
+  }
+
+  func testMarkdownClosingFenceWithTrailingTextStaysEmpty() {
+    let lines = ["```swift", "let x = 1", "```end"]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    // A closer is never a label, even when written with trailing text — it
+    // collapses to empty so it matches its slim row (no glyphs in a 6pt row).
+    XCTAssertEqual(states[2].isFenceLabel, false)
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        "```end", font: TextDocumentSyntax.markdown.font, state: states[2]),
+      "")
+  }
+
+  func testMarkdownIndentedAndFrontmatterCodeShareCommentTint() {
+    let indented = TextDocumentSyntaxHighlighter.markdownLineStates(for: ["    # note", "    code"])
+    let indentedLine = TextDocumentSyntaxHighlighter.highlightedLine(
+      "    # note",
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: indented[0])
+    XCTAssertEqual(indented[0].isIndentedCodeBlock, true)
+    XCTAssertEqual(
+      indentedLine.foregroundColor(in: indentedLine.string, matching: "# note"),
+      NSColor.tertiaryLabelColor)
+
+    let frontmatter = TextDocumentSyntaxHighlighter.markdownLineStates(for: [
+      "---", "# section note", "title: Hi", "---",
+    ])
+    let frontmatterLine = TextDocumentSyntaxHighlighter.highlightedLine(
+      "# section note",
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: frontmatter[1])
+    XCTAssertEqual(frontmatter[1].insideFrontMatter, true)
+    XCTAssertEqual(
+      frontmatterLine.foregroundColor(in: frontmatterLine.string, matching: "# section note"),
+      NSColor.tertiaryLabelColor)
+  }
+
+  func testMarkdownFencedCodeTintIsLanguageAgnostic() {
+    let lines = ["```python", "def greet():  # say hi", "```"]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let body = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[1],
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[1])
+
+    XCTAssertEqual(body.foregroundColor(in: body.string, matching: "# say hi"), .tertiaryLabelColor)
+    XCTAssertEqual(body.foregroundColor(in: body.string, matching: "def"), .labelColor)
+  }
+
   func testMarkdownImageLineRendersAltTextAsCaption() {
     let line = "![Quarterly chart](images/chart.png)"
     let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
@@ -601,7 +701,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
         "```yaml",
         font: TextDocumentSyntax.markdown.font,
-        state: MarkdownLineStyleState(isFenceDelimiter: true)),
+        state: MarkdownLineStyleState(isFenceDelimiter: true, isFenceLabel: true)),
       "yaml")
     XCTAssertEqual(
       TextDocumentSyntaxHighlighter.renderedMarkdownLineText(

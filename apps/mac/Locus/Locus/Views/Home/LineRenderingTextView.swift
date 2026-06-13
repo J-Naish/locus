@@ -480,6 +480,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// every other document so plain viewers never pay for it.
   private var markdownImageStoreStorage: MarkdownImageStore?
   private var markdownImageRelayoutScheduled = false
+
+  /// The opening-fence line of the code block whose copy control was most
+  /// recently clicked — drawn with a checkmark until the confirmation lapses.
+  private var copiedCodeBlockStartLine: Int?
+  /// Bumped on each copy so a stale revert cannot clear a newer confirmation.
+  private var copiedCodeBlockToken = 0
+  private let codeCopyConfirmDuration: TimeInterval = 1.2
   /// An image-driven relayout whose rebuild went to the background; restored
   /// by `completeWrapBuild` once the new geometry is live. Cleared whenever a
   /// build is superseded (`cancelWrapBuild`) or the document is swapped.
@@ -1004,6 +1011,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       }
       metrics?[index] = value
     }
+    func codeRunLine(_ i: Int) -> Bool {
+      guard i >= 0, i < states.count else { return false }
+      return Self.markdownLineIsCodeRun(states[i])
+    }
     for index in 0..<lineCount {
       let state = index < states.count ? states[index] : .plain
       if state.isTableSeparator || state.isSetextUnderline {
@@ -1012,9 +1023,57 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         set(index, Self.headingLineMetrics(level: level, isDocumentTop: index == 0))
       } else if let image = state.imageSource {
         set(index, markdownImageLineMetrics(for: image, state: state))
+      } else if Self.markdownLineIsCodeRun(state) {
+        if let metrics = markdownCodeRunLineMetrics(
+          state: state, isFirst: !codeRunLine(index - 1), isLast: !codeRunLine(index + 1),
+          isDocumentTop: index == 0)
+        {
+          set(index, metrics)
+        }
       }
     }
     return metrics
+  }
+
+  /// Lines that belong to a code slab: fenced, indented, or frontmatter.
+  nonisolated static func markdownLineIsCodeRun(_ state: MarkdownLineStyleState) -> Bool {
+    state.isFenceDelimiter || state.insideFence || state.isIndentedCodeBlock
+      || state.insideFrontMatter
+  }
+
+  /// Per-line metrics for a code-slab line: empty fence delimiters collapse to
+  /// slim rows (so the slab never carries a full empty row at its edge), a
+  /// labeled opener gets a caption band, and the first/last line of the run
+  /// gains the block air that detaches the slab from surrounding prose. Body
+  /// rows keep the uniform row height. Returns nil when nothing diverges.
+  private func markdownCodeRunLineMetrics(
+    state: MarkdownLineStyleState, isFirst: Bool, isLast: Bool, isDocumentTop: Bool
+  ) -> LineRowMetrics? {
+    var rowHeight = layout.lineHeight
+    if state.isFenceDelimiter {
+      // A *labeled* opener gets a header band for its language caption; a bare
+      // opener (and every closer) collapses to a slim row, so a language-less
+      // block has no empty band of reserved label space at its top. The copy
+      // control floats over the top-right corner either way.
+      rowHeight =
+        state.isFenceOpen && state.isFenceLabel
+        ? Self.codeLabelRowHeight : MarkdownDocumentMetrics.slimMarkerRowHeight
+    }
+    // A code block at the very top of the document sits at the page top (the
+    // scroll inset already breathes) — no extra air above, matching headings.
+    let leading = isFirst && !isDocumentTop ? MarkdownDocumentMetrics.codeBlockAir : 0
+    let trailing = isLast ? MarkdownDocumentMetrics.codeBlockAir : 0
+    guard rowHeight != layout.lineHeight || leading != 0 || trailing != 0 else { return nil }
+    return LineRowMetrics(rowHeight: rowHeight, leadingInset: leading, trailingInset: trailing)
+  }
+
+  /// The header-band height: tall enough for the language label and at least
+  /// enough to fully contain the copy control (which centers in the band, so
+  /// it never overhangs the card top or the first code row).
+  nonisolated static var codeLabelRowHeight: CGFloat {
+    let font = MarkdownDocumentMetrics.codeLabelFont
+    let labelHeight = ceil(font.ascender - font.descender + font.leading) + 4
+    return max(labelHeight, MarkdownDocumentMetrics.codeCopyButtonHeight + 4)
   }
 
   /// An image line's vertical metrics: the image block (plus air and the gap
@@ -1779,9 +1838,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   // around the editor.
   override func resetCursorRects() {
     let gutterEdge = (enclosingScrollView?.contentView.bounds.origin.x ?? 0) + gutterWidth
-    guard let textRect = Self.iBeamCursorRect(visible: visibleRect, gutterEdge: gutterEdge)
-    else { return }
-    addCursorRect(textRect, cursor: .iBeam)
+    if let textRect = Self.iBeamCursorRect(visible: visibleRect, gutterEdge: gutterEdge) {
+      addCursorRect(textRect, cursor: .iBeam)
+    }
+    // A pointing hand over each visible copy control (added after the I-beam
+    // so it wins inside the button rect).
+    if usesMarkdownDocumentLayout, let range = visibleMarkdownLineRange() {
+      for target in markdownCodeCopyTargets(inLineRange: range) {
+        addCursorRect(target.buttonRect, cursor: .pointingHand)
+      }
+    }
   }
 
   // Cursor rects alone go stale on one path: after the pointer visits the
@@ -1791,7 +1857,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   // (hovering the sidebar or the gutter does; the card's plain field does
   // not). Correcting on every mouse move inside the editor is self-healing
   // regardless of where the pointer came from.
-  private var mouseMoveCursorWasIBeam: Bool?
+  private enum HoverCursor { case iBeam, arrow, pointingHand }
+  private var mouseMoveCursor: HoverCursor?
 
   override func updateTrackingAreas() {
     super.updateTrackingAreas()
@@ -1812,18 +1879,34 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   override func mouseMoved(with event: NSEvent) {
     super.mouseMoved(with: event)
-    let gutterEdge = (enclosingScrollView?.contentView.bounds.origin.x ?? 0) + gutterWidth
-    let isOverText = convert(event.locationInWindow, from: nil).x >= gutterEdge
-    guard mouseMoveCursorWasIBeam != isOverText else { return }
-    mouseMoveCursorWasIBeam = isOverText
-    (isOverText ? NSCursor.iBeam : NSCursor.arrow).set()
+    let point = convert(event.locationInWindow, from: nil)
+    let desired: HoverCursor
+    if codeCopyButtonContains(point) {
+      desired = .pointingHand
+    } else {
+      let gutterEdge = (enclosingScrollView?.contentView.bounds.origin.x ?? 0) + gutterWidth
+      desired = point.x >= gutterEdge ? .iBeam : .arrow
+    }
+    guard mouseMoveCursor != desired else { return }
+    mouseMoveCursor = desired
+    switch desired {
+    case .iBeam: NSCursor.iBeam.set()
+    case .arrow: NSCursor.arrow.set()
+    case .pointingHand: NSCursor.pointingHand.set()
+    }
   }
 
   override func mouseExited(with event: NSEvent) {
     super.mouseExited(with: event)
     // Whatever the pointer does outside is not ours; re-evaluate from scratch
     // on the next move inside.
-    mouseMoveCursorWasIBeam = nil
+    mouseMoveCursor = nil
+  }
+
+  /// Whether `point` (content coordinates) falls on a visible copy control.
+  private func codeCopyButtonContains(_ point: NSPoint) -> Bool {
+    guard usesMarkdownDocumentLayout, let range = visibleMarkdownLineRange() else { return false }
+    return markdownCodeCopyTargets(inLineRange: range).contains { $0.buttonRect.contains(point) }
   }
 
   /// The I-beam region of the visible band: everything right of the pinned
@@ -1871,6 +1954,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     markdownLineStateCache = nil
     cancelMarkdownLineStateBuild()
     markdownImageStoreStorage?.reset()
+    // Drop any copy confirmation so it cannot paint on a same-indexed block in
+    // the new document; the token bump defuses the pending revert.
+    copiedCodeBlockStartLine = nil
+    copiedCodeBlockToken &+= 1
     maxObservedLineWidth = 0
     selection = nil
     isSelecting = false
@@ -2135,10 +2222,17 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   override func mouseDown(with event: NSEvent) {
     guard reader != nil else { return }
+    let point = convert(event.locationInWindow, from: nil)
+    // A click on a code block's copy control copies and consumes the event,
+    // without moving the caret or starting a selection.
+    if handleMarkdownCodeCopyClick(at: point) {
+      window?.makeFirstResponder(self)
+      return
+    }
     // Finalize any in-progress composition before moving the caret.
     if hasMarkedText() { unmarkText() }
     window?.makeFirstResponder(self)
-    let endpoint = endpoint(at: convert(event.locationInWindow, from: nil))
+    let endpoint = endpoint(at: point)
     // A double-click selects the word, a triple-click the whole line, a single
     // click places the caret. Each begins a drag that then extends at the matching
     // granularity (character / word / line).
@@ -3911,6 +4005,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       widest = max(widest, drawn.size().width)
       drawVisualRows(of: drawn, line: lineIndex, textX: lineTextColumnX(forLine: lineIndex))
     }
+    // Copy controls draw above the code so a long line never occludes them.
+    if usesMarkdownDocumentLayout {
+      drawMarkdownCodeCopyControls(range: range, visibleRows: rows)
+    }
     drawCaretIfNeeded(lines: lines, range: range, textX: textX)
     if gutter > 0 {
       drawGutter(width: gutter, lineRange: range, dirtyRect: dirtyRect)
@@ -4340,6 +4438,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return nil
   }
 
+  /// Draws a code card: a rounded, faintly-toned surface, no border. The
+  /// language label and the copy control live in its header band; the copy
+  /// control itself draws later, above the code, in `drawMarkdownCodeCopyControls`.
   private func drawMarkdownCodeBlockBackground(
     fromLine startLine: Int, toLine endLine: Int, visibleRows: Range<Int>
   ) {
@@ -4351,10 +4452,153 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     MarkdownDocumentMetrics.codeBackground.setFill()
     NSBezierPath(
-      roundedRect: rect, xRadius: MarkdownDocumentMetrics.codeBlockCornerRadius,
+      roundedRect: rect,
+      xRadius: MarkdownDocumentMetrics.codeBlockCornerRadius,
       yRadius: MarkdownDocumentMetrics.codeBlockCornerRadius
     )
     .fill()
+  }
+
+  /// The copy control of one fenced code block: its block's opening-fence line,
+  /// the body lines it copies, and the on-screen rect of the button.
+  struct MarkdownCodeCopyTarget: Equatable {
+    let startLine: Int
+    let contentRange: Range<Int>
+    let buttonRect: NSRect
+  }
+
+  /// The copy controls for every fenced block whose opener falls in `range`,
+  /// each pinned to its card's top-right corner. Indented code and frontmatter
+  /// (no fence delimiters) get no control.
+  func markdownCodeCopyTargets(inLineRange range: Range<Int>) -> [MarkdownCodeCopyTarget] {
+    guard usesMarkdownDocumentLayout, let buffer = reader,
+      let states = markdownLineStates(for: buffer)
+    else {
+      return []
+    }
+    let lower = max(0, range.lowerBound)
+    let upper = min(states.count, range.upperBound)
+    guard lower < upper else { return [] }
+    var targets: [MarkdownCodeCopyTarget] = []
+    for line in lower..<upper {
+      // The authoritative opener flag, so a block stacked directly on another
+      // (or on frontmatter) is still recognized — a neighbour-line heuristic
+      // would mistake its opener for the previous block's closer.
+      guard states[line].isFenceOpen else { continue }
+      var closer = line + 1
+      while closer < states.count, !states[closer].isFenceDelimiter { closer += 1 }
+      guard closer < states.count else { continue }  // unmatched — never for closed fences
+      let cardRight = lineOuterColumnX(forLine: line) + lineOuterContentWidth(forLine: line)
+      let cardTop = yOffset(ofLine: line) + leadingInset(forLine: line)
+      let width = MarkdownDocumentMetrics.codeCopyButtonWidth
+      let height = MarkdownDocumentMetrics.codeCopyButtonHeight
+      let inset = MarkdownDocumentMetrics.codeCopyButtonInset
+      // Pinned a small inset below the card top (works for a labeled header
+      // band and for a bare fence, where it floats over the first code row).
+      let buttonRect = NSRect(
+        x: cardRight - inset - width,
+        y: cardTop + MarkdownDocumentMetrics.codeCopyButtonTopInset,
+        width: width,
+        height: height)
+      targets.append(
+        MarkdownCodeCopyTarget(
+          startLine: line, contentRange: (line + 1)..<closer, buttonRect: buttonRect))
+    }
+    return targets
+  }
+
+  private func drawMarkdownCodeCopyControls(
+    range: Range<Int>, visibleRows: Range<Int>
+  ) {
+    let visibleTop = yOffset(ofVisualRow: visibleRows.lowerBound)
+    let visibleBottom = yOffset(ofVisualRow: visibleRows.upperBound)
+    for target in markdownCodeCopyTargets(inLineRange: range) {
+      let rect = target.buttonRect
+      guard rect.maxY > visibleTop, rect.minY < visibleBottom else { continue }
+      drawMarkdownCopyButton(in: rect, copied: target.startLine == copiedCodeBlockStartLine)
+    }
+  }
+
+  private func drawMarkdownCopyButton(in rect: NSRect, copied: Bool) {
+    let aligned = backingAlignedRect(rect, options: .alignAllEdgesNearest)
+    let radius = MarkdownDocumentMetrics.codeCopyButtonCornerRadius
+    // Mask any code behind the control with the card tint, then the bare icon
+    // (no border) — a quiet glyph rather than a boxed button.
+    MarkdownDocumentMetrics.codeBackground.setFill()
+    NSBezierPath(roundedRect: aligned, xRadius: radius, yRadius: radius).fill()
+    let symbol =
+      copied
+      ? Self.codeCopySymbol(named: "checkmark", color: MarkdownDocumentMetrics.codeCopyConfirmColor)
+      : Self.codeCopySymbol(named: "doc.on.doc", color: MarkdownDocumentMetrics.codeCopyIconColor)
+    guard let symbol else { return }
+    let size = symbol.size
+    symbol.draw(
+      in: NSRect(
+        x: aligned.midX - size.width / 2,
+        y: aligned.midY - size.height / 2,
+        width: size.width,
+        height: size.height))
+  }
+
+  private static func codeCopySymbol(named name: String, color: NSColor) -> NSImage? {
+    let configuration = NSImage.SymbolConfiguration(
+      pointSize: MarkdownDocumentMetrics.codeCopyIconPointSize, weight: .medium
+    )
+    .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+    return NSImage(systemSymbolName: name, accessibilityDescription: "Copy code")?
+      .withSymbolConfiguration(configuration)
+  }
+
+  /// The verbatim source of a fenced block's body (the lines between its
+  /// delimiters), for the copy control.
+  func markdownCopyableCodeText(contentRange: Range<Int>) -> String {
+    guard let buffer = reader, !contentRange.isEmpty else { return "" }
+    return buffer.text(
+      forLineRange: contentRange.lowerBound,
+      count: contentRange.count,
+      maxBytesPerLine: maximumFetchedBytesPerLine)
+  }
+
+  /// Copies a fenced block's body to the pasteboard and shows a brief checkmark
+  /// confirmation in its control.
+  private func performCopyForCodeBlock(_ target: MarkdownCodeCopyTarget) {
+    let text = markdownCopyableCodeText(contentRange: target.contentRange)
+    // Route through ClipboardService for the same clear-then-set + failure
+    // logging as the view's other copy paths.
+    ClipboardService().copyPlainText(text)
+    copiedCodeBlockStartLine = target.startLine
+    copiedCodeBlockToken &+= 1
+    let token = copiedCodeBlockToken
+    DispatchQueue.main.asyncAfter(deadline: .now() + codeCopyConfirmDuration) { [weak self] in
+      guard let self, self.copiedCodeBlockToken == token else { return }
+      self.copiedCodeBlockStartLine = nil
+      self.invalidateVisibleArea()
+    }
+    invalidateVisibleArea()
+  }
+
+  /// The logical-line band currently on screen, for hit-testing viewport chrome.
+  private func visibleMarkdownLineRange() -> Range<Int>? {
+    let rows = visibleVisualRowRange(in: visibleRect)
+    guard !rows.isEmpty else { return nil }
+    let first = lineLocation(ofVisualRow: rows.lowerBound).line
+    let last = lineLocation(ofVisualRow: rows.upperBound - 1).line
+    return first..<(last + 1)
+  }
+
+  /// Handles a click on a code block's copy control, returning true when one
+  /// was hit (so the caller skips caret placement).
+  private func handleMarkdownCodeCopyClick(at point: NSPoint) -> Bool {
+    guard usesMarkdownDocumentLayout, let range = visibleMarkdownLineRange() else { return false }
+    guard
+      let target = markdownCodeCopyTargets(inLineRange: range).first(where: {
+        $0.buttonRect.contains(point)
+      })
+    else {
+      return false
+    }
+    performCopyForCodeBlock(target)
+    return true
   }
 
   private func drawMarkdownRule(textX: CGFloat, width: CGFloat, y: CGFloat) {
@@ -4659,11 +4903,17 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     visibleRows: Range<Int>
   ) -> NSRect? {
     let startRow = firstVisualRow(ofLine: startLine)
-    let endRow =
-      firstVisualRow(ofLine: endLine) + max(1, wrapIndex?.visualRowCount(ofLine: endLine) ?? 1)
+    let endRowCount = max(1, wrapIndex?.visualRowCount(ofLine: endLine) ?? 1)
+    let endRow = firstVisualRow(ofLine: endLine) + endRowCount
     guard endRow > visibleRows.lowerBound, startRow < visibleRows.upperBound else { return nil }
-    let y = yOffset(ofVisualRow: max(startRow, visibleRows.lowerBound)) + 2
-    let bottom = yOffset(ofVisualRow: min(endRow, visibleRows.upperBound)) - 2
+    // The slab spans the content rows only — the block air lives in the first
+    // line's leading inset and the last line's trailing inset, outside the fill.
+    let slabTop = yOffset(ofLine: startLine) + leadingInset(forLine: startLine)
+    let slabBottom =
+      yOffset(ofLine: endLine) + leadingInset(forLine: endLine)
+      + rowHeight(forLine: endLine) * CGFloat(endRowCount)
+    let y = max(slabTop, yOffset(ofVisualRow: visibleRows.lowerBound))
+    let bottom = min(slabBottom, yOffset(ofVisualRow: visibleRows.upperBound))
     guard bottom > y else { return nil }
     return NSRect(
       x: lineOuterColumnX(forLine: startLine),
