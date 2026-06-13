@@ -1067,6 +1067,33 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testMarkdownFrontmatterDelimitersAreSlimNotEmptyRows() throws {
+    let view = try makeViewer("---\ntitle: Hi\nstatus: x\n---\nBody")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let slim = MarkdownDocumentMetrics.slimMarkerRowHeight
+    let body = view.layout.lineHeight
+    let air = MarkdownDocumentMetrics.codeBlockAir
+
+    // Opening `---` (document top): a slim row, no air above, no full empty row.
+    XCTAssertEqual(try XCTUnwrap(view.endpointYForTesting(line: 1)), slim, accuracy: 0.5)
+    // Content rows keep the uniform height.
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 2))
+        - (try XCTUnwrap(view.endpointYForTesting(line: 1))),
+      body,
+      accuracy: 0.5)
+    // Closing `---`: a slim row carrying the block air below it.
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 4))
+        - (try XCTUnwrap(view.endpointYForTesting(line: 3))),
+      slim + air,
+      accuracy: 0.5)
+  }
+
+  @MainActor
   func testMarkdownIndentedCodeHasNoCopyControl() throws {
     let view = try makeViewer("    indented code")
     view.setFrameSize(NSSize(width: 520, height: 400))

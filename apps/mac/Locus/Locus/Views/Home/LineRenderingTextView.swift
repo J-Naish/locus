@@ -1058,6 +1058,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       rowHeight =
         state.isFenceOpen && state.isFenceLabel
         ? Self.codeLabelRowHeight : MarkdownDocumentMetrics.slimMarkerRowHeight
+    } else if state.isFrontMatterDelimiter {
+      // The `---` lines render empty; a slim row keeps them as quiet padding
+      // instead of a full empty row at the card's top and bottom.
+      rowHeight = MarkdownDocumentMetrics.slimMarkerRowHeight
     }
     // A code block at the very top of the document sits at the page top (the
     // scroll inset already breathes) — no extra air above, matching headings.

@@ -224,6 +224,10 @@ struct MarkdownLineStyleState: Equatable, Sendable {
   /// 1–6 when the line renders as a heading (ATX or setext text line).
   var headingLevel: Int?
   var insideFrontMatter = false
+  /// True for the opening and closing `---` lines of a frontmatter block, which
+  /// render empty and so collapse to slim rows (like fence/table delimiters)
+  /// rather than full empty rows inside the card.
+  var isFrontMatterDelimiter = false
   var isFenceDelimiter = false
   /// True for the opening fence delimiter of a block (vs the closer). The
   /// authoritative opener/closer distinction from the pairing pass, so callers
@@ -1498,6 +1502,10 @@ enum TextDocumentSyntaxHighlighter {
         for index in 0...closingIndex {
           states[index].insideFrontMatter = true
         }
+        // The opening and closing `---` lines render empty, so collapse them
+        // to slim rows rather than leaving a full empty row at the card edges.
+        states[0].isFrontMatterDelimiter = true
+        states[closingIndex].isFrontMatterDelimiter = true
       }
     }
 
