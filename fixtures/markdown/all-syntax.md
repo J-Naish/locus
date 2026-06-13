@@ -77,6 +77,18 @@ Image:
 
 ![Fixture SVG](../media/valid/locus-fixture.svg)
 
+Bitmap image:
+
+![Sample bitmap](../workspaces/file-types/sample.png)
+
+Captionless image:
+
+![](../workspaces/file-types/sample.png)
+
+Missing image:
+
+![Missing](no-such-image.png)
+
 [product-brief]: ../../docs/product/brief.md
 
 ## Blockquotes

@@ -30,6 +30,8 @@
 		1A0000010000000000000076 /* FileURLDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000077 /* FileURLDisplay.swift */; };
 		1A00000100000000000000A0 /* ImageDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000A1 /* ImageDocumentStore.swift */; };
 		1A00000100000000000000A2 /* ImageDocumentStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000A3 /* ImageDocumentStoreTests.swift */; };
+		1A0000010000000000000F50 /* MarkdownImageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F51 /* MarkdownImageStore.swift */; };
+		1A0000010000000000000F52 /* MarkdownImageStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F53 /* MarkdownImageStoreTests.swift */; };
 		1A00000100000000000000B0 /* PDFDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000B1 /* PDFDocumentStore.swift */; };
 		1A00000100000000000000B2 /* PDFDocumentStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000B3 /* PDFDocumentStoreTests.swift */; };
 		1A00000100000000000000B4 /* MediaDocumentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000B5 /* MediaDocumentStore.swift */; };
@@ -131,6 +133,8 @@
 		1A0000010000000000000077 /* FileURLDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileURLDisplay.swift; sourceTree = "<group>"; };
 		1A00000100000000000000A1 /* ImageDocumentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDocumentStore.swift; sourceTree = "<group>"; };
 		1A00000100000000000000A3 /* ImageDocumentStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDocumentStoreTests.swift; sourceTree = "<group>"; };
+		1A0000010000000000000F51 /* MarkdownImageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownImageStore.swift; sourceTree = "<group>"; };
+		1A0000010000000000000F53 /* MarkdownImageStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownImageStoreTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000B1 /* PDFDocumentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFDocumentStore.swift; sourceTree = "<group>"; };
 		1A00000100000000000000B3 /* PDFDocumentStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFDocumentStoreTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000B5 /* MediaDocumentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaDocumentStore.swift; sourceTree = "<group>"; };
@@ -240,6 +244,7 @@
 				1A00000100000000000000D5 /* GitWorkspaceStatusTests.swift */,
 				1A00000100000000000000A3 /* ImageDocumentStoreTests.swift */,
 				1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */,
+				1A0000010000000000000F53 /* MarkdownImageStoreTests.swift */,
 				1A00000100000000000000B7 /* MediaDocumentStoreTests.swift */,
 				1A00000100000000000000B3 /* PDFDocumentStoreTests.swift */,
 				1A00000100000000000000BB /* QuickLookDocumentStoreTests.swift */,
@@ -323,6 +328,7 @@
 				1A000001000000000000007F /* FileLocationBookmarkStore.swift */,
 				1A00000100000000000000D3 /* GitWorkspaceStatus.swift */,
 				1A00000100000000000000A1 /* ImageDocumentStore.swift */,
+				1A0000010000000000000F51 /* MarkdownImageStore.swift */,
 				1A00000100000000000000B5 /* MediaDocumentStore.swift */,
 				1A0000010000000000000F11 /* OpenDocumentCache.swift */,
 				1A00000100000000000000B1 /* PDFDocumentStore.swift */,
@@ -536,6 +542,7 @@
 				1A0000010000000000000003 /* HomeView.swift in Sources */,
 				1A00000100000000000000DA /* NativeSidebarToggle.swift in Sources */,
 				1A00000100000000000000A0 /* ImageDocumentStore.swift in Sources */,
+				1A0000010000000000000F50 /* MarkdownImageStore.swift in Sources */,
 				1A00000100000000000000B4 /* MediaDocumentStore.swift in Sources */,
 				1A00000100000000000000B0 /* PDFDocumentStore.swift in Sources */,
 				1A00000100000000000000B8 /* QuickLookDocumentStore.swift in Sources */,
@@ -579,6 +586,7 @@
 				1A00000100000000000000D4 /* GitWorkspaceStatusTests.swift in Sources */,
 				1A00000100000000000000A2 /* ImageDocumentStoreTests.swift in Sources */,
 				1A00000100000000000000AA /* InitialFolderURLResolverTests.swift in Sources */,
+				1A0000010000000000000F52 /* MarkdownImageStoreTests.swift in Sources */,
 				1A00000100000000000000B6 /* MediaDocumentStoreTests.swift in Sources */,
 				1A00000100000000000000B2 /* PDFDocumentStoreTests.swift in Sources */,
 				1A00000100000000000000BA /* QuickLookDocumentStoreTests.swift in Sources */,

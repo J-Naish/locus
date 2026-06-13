@@ -1127,6 +1127,135 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(view.endpoint(at: NSPoint(x: 100, y: sectionTop + 4)).line, 2)
   }
 
+  func testMarkdownImageDisplaySizeFitsWidthAndCapsHeight() {
+    XCTAssertEqual(
+      LineRenderingTextView.markdownImageDisplaySize(
+        natural: CGSize(width: 200, height: 100), contentWidth: 600),
+      CGSize(width: 200, height: 100))
+    XCTAssertEqual(
+      LineRenderingTextView.markdownImageDisplaySize(
+        natural: CGSize(width: 1200, height: 600), contentWidth: 600),
+      CGSize(width: 600, height: 300))
+    let tall = LineRenderingTextView.markdownImageDisplaySize(
+      natural: CGSize(width: 1000, height: 4000), contentWidth: 600)
+    XCTAssertEqual(tall.height, MarkdownDocumentMetrics.imageMaximumBlockHeight)
+    XCTAssertEqual(
+      tall.width, ceil(MarkdownDocumentMetrics.imageMaximumBlockHeight * 1000 / 4000))
+  }
+
+  @MainActor
+  func testMarkdownImageLineUsesPlaceholderThenFailureMetrics() async throws {
+    let folder = try makeTemporaryImageFolder()
+    let view = try makeViewer("![Missing](missing.png)\nBody")
+    view.saveURL = folder.appendingPathComponent("doc.md")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let captionRow = LineRenderingTextView.markdownImageCaptionRowHeight
+    let chrome =
+      MarkdownDocumentMetrics.imageBlockAir * 2 + MarkdownDocumentMetrics.imageCaptionGap
+      + captionRow
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 1)),
+      chrome + MarkdownDocumentMetrics.imagePlaceholderHeight,
+      accuracy: 0.5)
+
+    await view.settleMarkdownImageLoadsForTesting()
+
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 1)),
+      chrome + MarkdownDocumentMetrics.imageFailureHeight,
+      accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownImageBlockSizesToImageAndKeepsCaptionRow() async throws {
+    let folder = try makeTemporaryImageFolder()
+    try writePNG(width: 64, height: 32, to: folder.appendingPathComponent("chart.png"))
+    let view = try makeViewer("![Chart](chart.png)\nBody")
+    view.saveURL = folder.appendingPathComponent("doc.md")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    await view.settleMarkdownImageLoadsForTesting()
+
+    let frame = try XCTUnwrap(view.markdownImageBlockFrame(line: 0))
+    XCTAssertEqual(frame.minX, view.markdownTextColumnXForTesting(line: 0), accuracy: 0.5)
+    XCTAssertEqual(frame.minY, MarkdownDocumentMetrics.imageBlockAir, accuracy: 0.5)
+    XCTAssertEqual(frame.size, CGSize(width: 64, height: 32))
+    let captionRow = LineRenderingTextView.markdownImageCaptionRowHeight
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 1)),
+      MarkdownDocumentMetrics.imageBlockAir * 2 + 32
+        + MarkdownDocumentMetrics.imageCaptionGap + captionRow,
+      accuracy: 0.5)
+    // A click inside the image strip lands on the image line (its caption).
+    XCTAssertEqual(view.endpoint(at: NSPoint(x: 100, y: frame.midY)).line, 0)
+  }
+
+  @MainActor
+  func testMarkdownImageRelayoutKeepsFirstVisibleLineAnchored() async throws {
+    let folder = try makeTemporaryImageFolder()
+    let contents = (["![Missing](missing.png)"] + (0..<60).map { "Body line \($0)" })
+      .joined(separator: "\n")
+    let view = try makeViewer(contents)
+    view.saveURL = folder.appendingPathComponent("doc.md")
+    let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: 200))
+    scrollView.documentView = view
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let anchorLine = 30
+    let initialY = try XCTUnwrap(view.endpointYForTesting(line: anchorLine))
+    scrollView.contentView.scroll(to: NSPoint(x: 0, y: initialY))
+    scrollView.reflectScrolledClipView(scrollView.contentView)
+
+    // The probe fails: the block shrinks from the placeholder to the failure
+    // card, and the anchored line must keep its viewport position.
+    await view.settleMarkdownImageLoadsForTesting()
+
+    let settledY = try XCTUnwrap(view.endpointYForTesting(line: anchorLine))
+    XCTAssertNotEqual(settledY, initialY, accuracy: 0.5)
+    XCTAssertEqual(scrollView.documentVisibleRect.minY, settledY, accuracy: 1.0)
+  }
+
+  @MainActor
+  func testMarkdownImageFrameIsNilForPlainLines() throws {
+    let view = try makeViewer("Body text")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    XCTAssertNil(view.markdownImageBlockFrame(line: 0))
+  }
+
+  private func makeTemporaryImageFolder() throws -> URL {
+    let folder = FileManager.default.temporaryDirectory
+      .appendingPathComponent("TextViewportImageTests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    addTeardownBlock {
+      try? FileManager.default.removeItem(at: folder)
+    }
+    return folder
+  }
+
+  private func writePNG(width: Int, height: Int, to url: URL) throws {
+    let space = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
+    let context = try XCTUnwrap(
+      CGContext(
+        data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+        space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+    context.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    let image = try XCTUnwrap(context.makeImage())
+    let destination = try XCTUnwrap(
+      CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil))
+    CGImageDestinationAddImage(destination, image, nil)
+    XCTAssertTrue(CGImageDestinationFinalize(destination))
+  }
+
   func testRowVerticalInsetCentersShortFragments() {
     XCTAssertEqual(
       LineRenderingTextView.rowVerticalInset(rowHeight: 24, naturalHeight: 18), 3, accuracy: 0.01)

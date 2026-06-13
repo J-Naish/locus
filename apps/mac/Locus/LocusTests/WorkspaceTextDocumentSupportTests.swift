@@ -346,6 +346,90 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       "https://example.com/roadmap")
   }
 
+  func testMarkdownImageOnlyLineIsClassifiedWithSourceAndAlt() {
+    let lines = [
+      "![Quarterly chart](images/chart.png)",
+      "  ![](https://example.com/a.png)  ",
+      "Before ![Inline](inline.png)",
+      "![Trailing](trailing.png) after",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(
+      states[0].imageSource,
+      MarkdownImageSource(source: "images/chart.png", altText: "Quarterly chart"))
+    XCTAssertEqual(
+      states[1].imageSource,
+      MarkdownImageSource(source: "https://example.com/a.png", altText: ""))
+    XCTAssertNil(states[2].imageSource)
+    XCTAssertNil(states[3].imageSource)
+  }
+
+  func testMarkdownImageDestinationStripsTitleAndAngleBrackets() {
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: [
+      "![A](photo.png \"The title\")",
+      "![B](<my photo.png>)",
+      "![C](diagram.svg 'caption')",
+    ])
+
+    XCTAssertEqual(states[0].imageSource?.source, "photo.png")
+    XCTAssertEqual(states[1].imageSource?.source, "my photo.png")
+    XCTAssertEqual(states[2].imageSource?.source, "diagram.svg")
+  }
+
+  func testMarkdownImageLinesInsideCodeAndHeadingsAreNotClassified() {
+    let lines = [
+      "```",
+      "![Fenced](a.png)",
+      "```",
+      "![Setext](b.png)",
+      "===",
+      "    ![Indented](c.png)",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertNil(states[1].imageSource)
+    XCTAssertEqual(states[3].setextHeadingLevel, 1)
+    XCTAssertNil(states[3].imageSource)
+    XCTAssertNil(states[5].imageSource)
+  }
+
+  func testMarkdownImageLineRendersAltTextAsCaption() {
+    let line = "![Quarterly chart](images/chart.png)"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+    let rendered = TextDocumentSyntaxHighlighter.highlightedLine(
+      line,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: state)
+
+    XCTAssertEqual(rendered.string, "Quarterly chart")
+    XCTAssertEqual(
+      rendered.resolvedFont(at: 0)?.pointSize,
+      MarkdownDocumentMetrics.imageCaptionFontSize)
+    XCTAssertEqual(rendered.foregroundColor(at: 0), NSColor.secondaryLabelColor)
+  }
+
+  func testMarkdownQuotedImageLineKeepsQuoteDepth() {
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: ["> ![Quoted](q.png)"])
+
+    XCTAssertEqual(states[0].imageSource?.source, "q.png")
+    XCTAssertEqual(states[0].quoteDepth, 1)
+  }
+
+  func testMarkdownListItemAndOversizedImageLinesStayInline() {
+    let longDestination = "images/" + String(repeating: "a", count: 2_100) + ".png"
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: [
+      "- ![Bullet](a.png)",
+      "1. ![Ordered](b.png)",
+      "![Huge](\(longDestination))",
+    ])
+
+    XCTAssertNil(states[0].imageSource)
+    XCTAssertNil(states[1].imageSource)
+    XCTAssertNil(states[2].imageSource)
+  }
+
   func testMarkdownRenderedQuoteHeadingReclassifiesInnerBlock() {
     let line = "> ### Heading"
     let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]

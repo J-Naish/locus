@@ -404,8 +404,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   var isEditable = false
 
   /// File the buffer is saved to on Cmd+S. The viewer owns the write so it can
-  /// run it off the main thread without blocking the UI.
-  var saveURL: URL?
+  /// run it off the main thread without blocking the UI. Relative markdown
+  /// image paths resolve against its folder, so a change re-resolves them.
+  var saveURL: URL? {
+    didSet {
+      guard oldValue != saveURL, let store = markdownImageStoreStorage else { return }
+      store.baseURL = saveURL
+      store.reset()
+      scheduleMarkdownImageRelayout()
+    }
+  }
 
   /// The file's original text encoding, restored on save (so a Shift JIS / UTF-16
   /// file is not silently rewritten as UTF-8).
@@ -467,6 +475,82 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   var maximumPastedByteCount = 64 * 1024 * 1024
   private var cachedBand: (revision: UInt64, range: Range<Int>, lines: [NSAttributedString])?
   private var markdownLineStateCache: (revision: UInt64, states: [MarkdownLineStyleState])?
+
+  /// Created on first use (markdown documents containing images); nil for
+  /// every other document so plain viewers never pay for it.
+  private var markdownImageStoreStorage: MarkdownImageStore?
+  private var markdownImageRelayoutScheduled = false
+  /// An image-driven relayout whose rebuild went to the background; restored
+  /// by `completeWrapBuild` once the new geometry is live. Cleared whenever a
+  /// build is superseded (`cancelWrapBuild`) or the document is swapped.
+  private var pendingViewportAnchor: (line: Int, offset: CGFloat)?
+
+  var markdownImageStore: MarkdownImageStore {
+    if let store = markdownImageStoreStorage {
+      return store
+    }
+    let store = MarkdownImageStore(baseURL: saveURL)
+    store.onUpdate = { [weak self] geometryChanged in
+      if geometryChanged {
+        self?.scheduleMarkdownImageRelayout()
+      } else {
+        self?.invalidateVisibleArea()
+      }
+    }
+    markdownImageStoreStorage = store
+    return store
+  }
+
+  /// Coalesces image-store updates into one relayout per main-actor turn —
+  /// several images finishing their probes together rebuild geometry once.
+  private func scheduleMarkdownImageRelayout() {
+    guard !markdownImageRelayoutScheduled else { return }
+    markdownImageRelayoutScheduled = true
+    Task { @MainActor [weak self] in
+      self?.performScheduledMarkdownImageRelayout()
+    }
+  }
+
+  private func performScheduledMarkdownImageRelayout() {
+    guard markdownImageRelayoutScheduled else { return }
+    markdownImageRelayoutScheduled = false
+    guard usesMarkdownDocumentLayout else { return }
+    // Keep the first visible line anchored so images sizing in above the
+    // viewport do not shove the text the user is reading.
+    let visible = enclosingScrollView?.documentVisibleRect
+    let anchor: (line: Int, offset: CGFloat)? = visible.map { rect in
+      let location = rowLocation(forY: rect.minY)
+      return (location.line, rect.minY - yOffset(ofLine: location.line))
+    }
+    rebuildWrapIndex(recomputeLongLine: false)
+    updateLayout()
+    if wrapBuildTask != nil {
+      // The rebuild went to the background (large document); the geometry has
+      // not changed yet, so defer the restore to the build's completion.
+      pendingViewportAnchor = anchor
+    } else if let anchor {
+      restoreViewportAnchor(anchor)
+    }
+    invalidateVisibleArea()
+  }
+
+  /// Scrolls so `anchor.line` sits at the same viewport offset it had when the
+  /// anchor was captured, compensating for geometry changes above it.
+  private func restoreViewportAnchor(_ anchor: (line: Int, offset: CGFloat)) {
+    guard let scrollView = enclosingScrollView else { return }
+    let target = yOffset(ofLine: anchor.line) + anchor.offset
+    let current = scrollView.documentVisibleRect.minY
+    guard abs(target - current) > 0.5 else { return }
+    scrollView.contentView.scroll(
+      to: NSPoint(x: scrollView.contentView.bounds.origin.x, y: target))
+    scrollView.reflectScrolledClipView(scrollView.contentView)
+  }
+
+  func settleMarkdownImageLoadsForTesting() async {
+    guard let store = markdownImageStoreStorage else { return }
+    await store.settleForTesting()
+    performScheduledMarkdownImageRelayout()
+  }
   private let markdownSynchronousLineStateLimit = 4_096
   private var markdownLineStateBuildGeneration = 0
   private var markdownLineStateBuildTargetRevision: UInt64?
@@ -926,9 +1010,63 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         set(index, LineRowMetrics(rowHeight: MarkdownDocumentMetrics.slimMarkerRowHeight))
       } else if let level = state.headingLevel {
         set(index, Self.headingLineMetrics(level: level, isDocumentTop: index == 0))
+      } else if let image = state.imageSource {
+        set(index, markdownImageLineMetrics(for: image, state: state))
       }
     }
     return metrics
+  }
+
+  /// An image line's vertical metrics: the image block (plus air and the gap
+  /// to its caption) lives in the leading inset, so the line's text rows — the
+  /// alt text rendered as a small caption — sit below the image and keep every
+  /// caret, selection, and editing behavior of a normal text line.
+  private func markdownImageLineMetrics(
+    for image: MarkdownImageSource, state: MarkdownLineStyleState
+  ) -> LineRowMetrics {
+    let contentWidth = Self.markdownWrapContentWidth(baseWidth: wrapContentWidth, state: state)
+    let blockHeight = markdownImageBlockHeight(source: image.source, contentWidth: contentWidth)
+    return LineRowMetrics(
+      rowHeight: Self.markdownImageCaptionRowHeight,
+      leadingInset: MarkdownDocumentMetrics.imageBlockAir + blockHeight
+        + MarkdownDocumentMetrics.imageCaptionGap,
+      trailingInset: MarkdownDocumentMetrics.imageBlockAir)
+  }
+
+  nonisolated static var markdownImageCaptionRowHeight: CGFloat {
+    let font = MarkdownDocumentMetrics.imageCaptionFont
+    return ceil(font.ascender - font.descender + font.leading)
+  }
+
+  /// The block height for the image's current load state; querying the store
+  /// starts the probe for sources seen for the first time.
+  private func markdownImageBlockHeight(source: String, contentWidth: CGFloat) -> CGFloat {
+    switch markdownImageStore.state(for: source) {
+    case .loading:
+      return MarkdownDocumentMetrics.imagePlaceholderHeight
+    case .failed:
+      return MarkdownDocumentMetrics.imageFailureHeight
+    case .sized(let natural):
+      return Self.markdownImageDisplaySize(natural: natural, contentWidth: contentWidth).height
+    }
+  }
+
+  /// Fits an image's natural pixel size (treated as points) into the text
+  /// column: shrink to the column width, never upscale, and cap very tall
+  /// images at `imageMaximumBlockHeight` (width shrinks proportionally).
+  nonisolated static func markdownImageDisplaySize(
+    natural: CGSize, contentWidth: CGFloat
+  ) -> CGSize {
+    guard natural.width > 0, natural.height > 0, contentWidth > 0 else {
+      return CGSize(width: 0, height: MarkdownDocumentMetrics.imagePlaceholderHeight)
+    }
+    var width = min(natural.width, contentWidth)
+    var height = width * natural.height / natural.width
+    if height > MarkdownDocumentMetrics.imageMaximumBlockHeight {
+      height = MarkdownDocumentMetrics.imageMaximumBlockHeight
+      width = height * natural.width / natural.height
+    }
+    return CGSize(width: ceil(width), height: ceil(height))
   }
 
   /// A heading line's vertical metrics: a row sized to its font plus the
@@ -1076,6 +1214,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     wrapBuildTask?.cancel()
     wrapBuildTask = nil
     wrapBuildTargetWidth = -1
+    // A superseding rebuild (edit, resize, document swap) owns the viewport
+    // from here; restoring a stale image anchor would fight it.
+    pendingViewportAnchor = nil
   }
 
   /// Validates a finished build against the current state and swaps it in, or
@@ -1124,6 +1265,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       hugeLineInfo = [:]
     }
     updateLayout()
+    if let anchor = pendingViewportAnchor {
+      // An image-driven relayout deferred its anchor to this swap: the new
+      // metrics are live now, so keep the first visible line where it was.
+      pendingViewportAnchor = nil
+      restoreViewportAnchor(anchor)
+    }
     invalidateVisibleArea()
   }
 
@@ -1723,6 +1870,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     cachedBand = nil
     markdownLineStateCache = nil
     cancelMarkdownLineStateBuild()
+    markdownImageStoreStorage?.reset()
     maxObservedLineWidth = 0
     selection = nil
     isSelecting = false
@@ -3870,6 +4018,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
             height: CGFloat(endRow - startRow) * rowHeight(forLine: line))
         }
       }
+      if let imageSource = state.imageSource, visibleRows.contains(firstRow) {
+        drawMarkdownImageBlock(source: imageSource, line: line)
+      }
       guard let decoration = markdownBlockDecoration(for: rawLine, state: state) else {
         continue
       }
@@ -4216,6 +4367,100 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     path.stroke()
   }
 
+  /// Draws the image block living in an image line's leading inset: the
+  /// decoded pixels when ready, a quiet placeholder card while loading or
+  /// decoding, and a labeled card when the source cannot be loaded.
+  private func drawMarkdownImageBlock(source: MarkdownImageSource, line: Int) {
+    guard var frame = markdownImageBlockFrame(line: line) else { return }
+    // The store can learn a size one turn before the coalesced relayout lands;
+    // keep the drawn block inside the inset the wrap index actually allocated
+    // so a freshly-sized image never overdraws the caption and lines below.
+    let allocatedHeight =
+      leadingInset(forLine: line) - MarkdownDocumentMetrics.imageBlockAir
+      - MarkdownDocumentMetrics.imageCaptionGap
+    if frame.height > allocatedHeight, allocatedHeight > 0 {
+      let scale = allocatedHeight / frame.height
+      frame.size = NSSize(width: frame.width * scale, height: allocatedHeight)
+    }
+    switch markdownImageStore.state(for: source.source) {
+    case .loading:
+      drawMarkdownImagePlaceholder(in: frame)
+    case .failed:
+      drawMarkdownImageFailureCard(in: frame, source: source)
+    case .sized:
+      let scale = window?.backingScaleFactor ?? 2
+      let pixelSize = ceil(max(frame.width, frame.height) * scale)
+      guard
+        let image = markdownImageStore.decodedImage(
+          for: source.source, maxPixelSize: pixelSize),
+        let context = NSGraphicsContext.current?.cgContext
+      else {
+        drawMarkdownImagePlaceholder(in: frame)
+        return
+      }
+      let aligned = backingAlignedRect(frame, options: .alignAllEdgesNearest)
+      context.saveGState()
+      NSBezierPath(
+        roundedRect: aligned,
+        xRadius: MarkdownDocumentMetrics.imageCornerRadius,
+        yRadius: MarkdownDocumentMetrics.imageCornerRadius
+      ).addClip()
+      // CGContext.draw assumes a bottom-left origin; flip within the rect so
+      // the image renders upright in this flipped view.
+      context.translateBy(x: aligned.minX, y: aligned.maxY)
+      context.scaleBy(x: 1, y: -1)
+      context.interpolationQuality = .high
+      context.draw(image, in: CGRect(origin: .zero, size: aligned.size))
+      context.restoreGState()
+    }
+  }
+
+  private func drawMarkdownImagePlaceholder(in frame: NSRect) {
+    MarkdownDocumentMetrics.codeBackground.setFill()
+    NSBezierPath(
+      roundedRect: frame,
+      xRadius: MarkdownDocumentMetrics.imageCornerRadius,
+      yRadius: MarkdownDocumentMetrics.imageCornerRadius
+    ).fill()
+  }
+
+  /// Strips Unicode directional formatting characters so attacker-authored
+  /// alt text or paths cannot visually reorder the failure message.
+  private static func sanitizedImageLabel(_ label: String) -> String {
+    String(
+      String.UnicodeScalarView(
+        label.unicodeScalars.filter { scalar in
+          switch scalar.value {
+          case 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069:
+            return false
+          default:
+            return true
+          }
+        }))
+  }
+
+  private func drawMarkdownImageFailureCard(in frame: NSRect, source: MarkdownImageSource) {
+    drawMarkdownImagePlaceholder(in: frame)
+    let label = Self.sanitizedImageLabel(
+      source.altText.isEmpty ? source.source : source.altText)
+    let text = NSAttributedString(
+      string: "Image unavailable · \(label)",
+      attributes: [
+        .font: MarkdownDocumentMetrics.imageCaptionFont,
+        .foregroundColor: NSColor.tertiaryLabelColor,
+      ])
+    let inset = MarkdownDocumentMetrics.codeCardInset
+    let size = text.size()
+    let origin = NSPoint(
+      x: frame.minX + inset,
+      y: frame.midY - size.height / 2)
+    text.draw(
+      with: NSRect(
+        origin: origin,
+        size: NSSize(width: max(0, frame.width - inset * 2), height: size.height)),
+      options: [.usesLineFragmentOrigin])
+  }
+
   private func isMarkdownThematicBreak(_ trimmed: String) -> Bool {
     guard trimmed.count >= 3 else { return false }
     let characters = Set(trimmed)
@@ -4426,6 +4671,35 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       width: lineOuterContentWidth(forLine: startLine),
       height: bottom - y
     )
+  }
+
+  /// The image block's frame inside an image line's leading inset, or nil for
+  /// lines that are not image-only lines. Width and height follow the load
+  /// state: full column width for the placeholder and failure cards, the
+  /// fitted display size once the natural size is known. Internal so tests
+  /// can assert on it; the draw path is its production consumer.
+  func markdownImageBlockFrame(line: Int) -> NSRect? {
+    guard usesMarkdownDocumentLayout, let buffer = reader,
+      line >= 0, line < lineCount,
+      let image = markdownLineState(forLine: line, in: buffer).imageSource
+    else {
+      return nil
+    }
+    let x = lineTextColumnX(forLine: line)
+    let y = yOffset(ofLine: line) + MarkdownDocumentMetrics.imageBlockAir
+    let contentWidth = lineWrapContentWidth(forLine: line)
+    switch markdownImageStore.state(for: image.source) {
+    case .loading:
+      return NSRect(
+        x: x, y: y, width: contentWidth,
+        height: MarkdownDocumentMetrics.imagePlaceholderHeight)
+    case .failed:
+      return NSRect(
+        x: x, y: y, width: contentWidth, height: MarkdownDocumentMetrics.imageFailureHeight)
+    case .sized(let natural):
+      let size = Self.markdownImageDisplaySize(natural: natural, contentWidth: contentWidth)
+      return NSRect(x: x, y: y, width: size.width, height: size.height)
+    }
   }
 
   func markdownTableFrameForTesting(

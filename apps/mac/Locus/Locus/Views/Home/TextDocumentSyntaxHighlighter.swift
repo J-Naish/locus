@@ -72,6 +72,21 @@ enum MarkdownDocumentMetrics {
   /// Horizontal inset between the rules' ends and the first/last column's
   /// text, so the rules extend slightly past the content on both sides.
   static let tableEdgeInset: CGFloat = 10
+  /// Breathing room above an image block and below its caption row.
+  static let imageBlockAir: CGFloat = 10
+  /// Gap between an image and its caption (the alt text) below it.
+  static let imageCaptionGap: CGFloat = 6
+  /// Block height while the image's natural size is still being probed.
+  static let imagePlaceholderHeight: CGFloat = 120
+  /// Height of the quiet card shown when an image cannot be loaded.
+  static let imageFailureHeight: CGFloat = 48
+  /// Tall images scale down to this height so one screenshot never fills
+  /// several screens; width shrinks proportionally.
+  static let imageMaximumBlockHeight: CGFloat = 560
+  /// Slight rounding keeps image blocks calm against the page background.
+  static let imageCornerRadius: CGFloat = 4
+  /// The alt text renders as a small muted caption below the image.
+  static let imageCaptionFontSize: CGFloat = 12
 
   static func headingFont(level: Int) -> NSFont {
     switch level {
@@ -146,6 +161,10 @@ enum MarkdownDocumentMetrics {
   static var tableHeaderFont: NSFont {
     .systemFont(ofSize: tableHeaderFontSize, weight: .semibold)
   }
+
+  static var imageCaptionFont: NSFont {
+    .systemFont(ofSize: imageCaptionFontSize)
+  }
 }
 
 enum MarkdownTableColumnAlignment: Equatable, Sendable {
@@ -157,6 +176,13 @@ enum MarkdownTableColumnAlignment: Equatable, Sendable {
 struct MarkdownTableColumn: Equatable, Sendable {
   var width: CGFloat
   var alignment: MarkdownTableColumnAlignment
+}
+
+/// The destination and alt text of a line whose only content is one image,
+/// e.g. `![alt](images/chart.png)` — such lines render as image blocks.
+struct MarkdownImageSource: Equatable, Hashable, Sendable {
+  var source: String
+  var altText: String
 }
 
 struct MarkdownLineStyleState: Equatable, Sendable {
@@ -175,6 +201,7 @@ struct MarkdownLineStyleState: Equatable, Sendable {
   var tableColumns: [MarkdownTableColumn] = []
   var quoteDepth = 0
   var listDepth = 0
+  var imageSource: MarkdownImageSource?
 
   static let plain = MarkdownLineStyleState()
 }
@@ -635,6 +662,19 @@ enum TextDocumentSyntaxHighlighter {
 
     if state.isSetextUnderline {
       return block(stylesInline: false)
+    }
+
+    if state.imageSource != nil {
+      // The line's visible text is the alt text, rendered as a small muted
+      // caption below the image block. The caption font set keeps the inline
+      // image pass (which restyles the alt text) at caption size too.
+      let caption = MarkdownDocumentMetrics.imageCaptionFont
+      let captionSet = MarkdownFontSet(
+        regular: caption, bold: caption, italic: caption, boldItalic: caption)
+      return block(
+        fonts: captionSet,
+        displayFont: caption,
+        foregroundColor: .secondaryLabelColor)
     }
 
     if let heading = markdownHeadingInfo(in: context.body) {
@@ -1509,7 +1549,62 @@ enum TextDocumentSyntaxHighlighter {
       states[index].headingLevel = heading.level
     }
 
+    for index in lines.indices {
+      let state = states[index]
+      guard !state.insideFence, !state.insideFrontMatter, !state.isFenceDelimiter,
+        !state.isIndentedCodeBlock, !state.isTableRow, !state.isTableSeparator,
+        !state.isReferenceDefinition, !state.isSetextUnderline,
+        state.setextHeadingLevel == nil, state.headingLevel == nil
+      else {
+        continue
+      }
+      states[index].imageSource = markdownImageOnlyLine(
+        in: markdownLineContext(in: lines[index]).body)
+    }
+
     return states
+  }
+
+  /// Longest body that may classify as an image-only line. Far above any real
+  /// `![alt](path-or-url)`, and far below the engine's huge-line clipping
+  /// threshold — a clipped huge line (e.g. an unsupported base64 data URI)
+  /// must never carry image-block metrics its grid-drawn rows cannot honor.
+  private static let imageOnlyLineMaximumLength = 2_048
+
+  /// The image source when the line's whole body is a single `![alt](…)`
+  /// image; nil otherwise. Such lines render as image blocks.
+  private static func markdownImageOnlyLine(in body: String) -> MarkdownImageSource? {
+    let trimmed = body.trimmingCharacters(in: .whitespaces)
+    guard !trimmed.isEmpty else { return nil }
+    let nsTrimmed = trimmed as NSString
+    guard nsTrimmed.length <= imageOnlyLineMaximumLength else { return nil }
+    let range = NSRange(location: 0, length: nsTrimmed.length)
+    guard let match = imageExpression.firstMatch(in: trimmed, range: range),
+      match.range == range,
+      let source = markdownImageDestination(in: nsTrimmed.substring(with: match.range(at: 2)))
+    else {
+      return nil
+    }
+    return MarkdownImageSource(
+      source: source,
+      altText: nsTrimmed.substring(with: match.range(at: 1)))
+  }
+
+  /// Extracts the destination from an image target, dropping an optional
+  /// quoted title (`a.png "title"`) and surrounding angle brackets (`<a b.png>`).
+  private static func markdownImageDestination(in target: String) -> String? {
+    var destination = target.trimmingCharacters(in: .whitespaces)
+    if let match = imageTitleExpression.firstMatch(
+      in: destination,
+      range: NSRange(location: 0, length: (destination as NSString).length))
+    {
+      destination = (destination as NSString).substring(with: match.range(at: 1))
+    }
+    if destination.hasPrefix("<"), destination.hasSuffix(">"), destination.count >= 2 {
+      destination = String(destination.dropFirst().dropLast())
+    }
+    destination = destination.trimmingCharacters(in: .whitespaces)
+    return destination.isEmpty ? nil : destination
   }
 
   static func highlightedParagraphRange(for editedRange: NSRange, in text: String) -> NSRange {
@@ -2042,6 +2137,7 @@ enum TextDocumentSyntaxHighlighter {
   private static let autolinkExpression = markdownRegex(#"<(https?://[^>\s]+)>"#)
   private static let escapeExpression = markdownRegex(#"\\([\\`*_{}\[\]()#+\-.!>~|])"#)
   private static let imageExpression = markdownRegex(#"!\[([^\]\n]*)\]\(([^\)\n]+)\)"#)
+  private static let imageTitleExpression = markdownRegex(#"^(.+?)\s+("[^"]*"|'[^']*')$"#)
   private static let boldItalicExpression = markdownRegex(
     #"(?<![\\*])\*\*\*([^\*\n]+)(?<!\\)\*\*\*(?!\*)"#)
   private static let boldExpression = markdownRegex(#"(?<![\\*])\*\*([^\*\n]+)(?<!\\)\*\*(?!\*)"#)

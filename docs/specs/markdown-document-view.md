@@ -41,7 +41,8 @@ is [markdown-rendered-view-milestone.md](markdown-rendered-view-milestone.md).
   [ux-direction.md](../product/ux-direction.md)).
 - A raw-source mode in this view (a separate raw editor surface may come
   later as Phase R; it is no longer a prerequisite for editing).
-- Typeset tables, inline image loading, math, footnotes (deferred).
+- Math, footnotes, in-paragraph inline image loading (deferred; an
+  image-only line renders as an image block — see Images).
 - Rich-text pasteboard flavors (copy is raw Markdown; see contract).
 
 ## Architecture summary
@@ -173,6 +174,27 @@ content. Wrap width per line = measure − indent.
   than ~8 rows.)
 - **Frontmatter / thematic breaks**: unchanged (muted mono card; drawn
   rule on an empty row).
+- **Images**: a line whose only content is one image (`![alt](src)`,
+  optional title and angle brackets accepted) renders as an image block.
+  The image lives in the line's leading inset, fitted to the text column
+  (never upscaled past its natural size; very tall images cap at 560 pt,
+  width shrinking proportionally), above the alt text rendered as a
+  small muted caption — a normal text row, so caret, selection, editing,
+  and span-integrity deletion are unchanged, and editing the caption
+  edits the alt text. Natural sizes are probed header-only off the main
+  thread (rows settle before any pixel decode); pixels decode
+  downsampled on demand when the block first scrolls into view, and the
+  viewport stays anchored when sizes arrive above it. Relative paths
+  resolve against the document's folder; `https://` sources load
+  remotely (no cookies sent, responses cached); plain `http://` and
+  unknown schemes fail quietly. Formats are whatever ImageIO decodes
+  (PNG, JPEG, GIF first frame, TIFF, BMP, HEIC, WebP, AVIF, …) plus SVG
+  and PDF through NSImage as best effort. While loading, a quiet card
+  holds the space; a source that cannot load shows a quiet labeled card.
+  An image inside a paragraph or a list item still renders as secondary
+  alt text. Untrusted-input bounds: remote responses stream against a
+  size cap, headers declaring absurd pixel counts are rejected before
+  decode, and over-long image lines never classify as blocks.
 - **Inline**: bold/italic/bold-italic/strike (asterisk and underscore
   forms), inline code chips, links (label in accent; Cmd+click opens
   `http`/`https`), **reference links** `[text][label]` resolved through
@@ -181,7 +203,8 @@ content. Wrap width per line = measure − indent.
   `<https://…>` (URL as the visible label, brackets removed; clickable
   per the scheme rule) and email autolinks (brackets removed, rendered
   as plain text — not a link, nothing pretends to be clickable that is
-  not), images as secondary alt text, escapes render the escaped
+  not), in-paragraph images as secondary alt text (image-only lines
+  render as image blocks — see Images above), escapes render the escaped
   character with the backslash removed, a trailing `<br>` is removed
   from the display (the line break is already real). Inline constructs
   nest: code spans and links inside emphasis render both (code binds
@@ -296,10 +319,11 @@ colors).
 
 The current round (editing restoration) is sequenced in
 [markdown-rendered-view-milestone.md](markdown-rendered-view-milestone.md).
-Later: Phase A (variable row heights, full type scale), Phase R (optional
-raw editor surface), Phase B (Rust-core classification), polish backlog
-(theme slots, find-in-document with mapped highlights, link editor,
-copy-as-rich-text, fence syntax highlighting, tables, inline images).
+Phase A (variable row heights, full type scale), typeset tables, and
+image blocks have shipped. Later: Phase R (optional raw editor surface),
+Phase B (Rust-core classification), polish backlog (theme slots,
+find-in-document with mapped highlights, link editor, copy-as-rich-text,
+fence syntax highlighting, in-paragraph inline images, animated GIFs).
 
 ## Performance
 
