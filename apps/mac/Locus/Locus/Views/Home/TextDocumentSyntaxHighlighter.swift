@@ -819,7 +819,7 @@ enum TextDocumentSyntaxHighlighter {
         foregroundColor: heading.level == 6 ? .secondaryLabelColor : .labelColor)
     }
 
-    if markdownThematicBreak(in: context.body) {
+    if markdownLineIsHorizontalRule(context.body) {
       return block(stylesInline: false)
     }
 
@@ -838,7 +838,7 @@ enum TextDocumentSyntaxHighlighter {
     let context = markdownLineContext(in: line)
     guard !state.insideFence, !state.insideFrontMatter, !state.isSetextUnderline,
       !state.isIndentedCodeBlock, !state.isReferenceDefinition, !state.isTableSeparator,
-      !markdownThematicBreak(in: context.body)
+      !markdownLineIsHorizontalRule(context.body)
     else {
       return baseMap
     }
@@ -894,7 +894,7 @@ enum TextDocumentSyntaxHighlighter {
         displayText: nsLine.substring(from: sourceStart),
         sourceStart: sourceStart)
     }
-    if state.isSetextUnderline || markdownThematicBreak(in: line) {
+    if state.isSetextUnderline || markdownLineIsHorizontalRule(context.body) {
       return .empty(sourceText: line)
     }
     if let heading = markdownHeadingInfo(in: context.body) {
@@ -959,6 +959,14 @@ enum TextDocumentSyntaxHighlighter {
       map: &current,
       protectedRanges: &protectedRanges,
       protectsReplacement: true)
+    // A single-line <img> collapses to its alt caption — after inline-code
+    // protection, so a code example like `<img …>` keeps its literal tag, but
+    // before entity decoding, so entities inside the tag's own attributes cannot
+    // leave protected ranges that would block the tag from collapsing. The alt
+    // run is protected, so it is not re-interpreted as markup.
+    replaceLiteralMatchesInMap(
+      expression: htmlImageExpression, decode: htmlImageAltLiteral(forMatch:),
+      map: &current, protectedRanges: &protectedRanges)
     // HTML entities decode right after inline code, so an entity inside `code`
     // (now a protected span) stays literal; the decoded char is protected too,
     // so escaped HTML like &lt;b&gt; is not re-interpreted as a tag.
@@ -1135,6 +1143,18 @@ enum TextDocumentSyntaxHighlighter {
       in: attributed,
       protectedRanges: &protectedRanges,
       protectsReplacement: true)
+    // Mirror the map pass: collapse a single-line <img> to its alt caption after
+    // inline-code protection (so `<img …>` in a code example stays literal) but
+    // before entity decoding, styled like a markdown image's alt (muted, line
+    // font). Same decode closure, so the attributed string stays byte-identical
+    // to the display string.
+    replaceLiteralMatches(
+      expression: htmlImageExpression, decode: htmlImageAltLiteral(forMatch:),
+      attributes: markdownAttributes(
+        font: lineFonts.regular,
+        foregroundColor: .secondaryLabelColor,
+        includeVisualAttributes: includeVisualAttributes),
+      in: attributed, protectedRanges: &protectedRanges)
     let entityAttributes = markdownAttributes(
       font: lineFonts.regular, foregroundColor: .labelColor,
       includeVisualAttributes: includeVisualAttributes)
@@ -1918,23 +1938,37 @@ enum TextDocumentSyntaxHighlighter {
   /// must never carry image-block metrics its grid-drawn rows cannot honor.
   private static let imageOnlyLineMaximumLength = 2_048
 
-  /// The image source when the line's whole body is a single `![alt](…)`
-  /// image; nil otherwise. Such lines render as image blocks.
+  /// The image source when the line's whole body is a single image — either a
+  /// markdown `![alt](…)` or an HTML `<img src=… alt=…>`; nil otherwise. Such
+  /// lines render as image blocks.
   private static func markdownImageOnlyLine(in body: String) -> MarkdownImageSource? {
     let trimmed = body.trimmingCharacters(in: .whitespaces)
     guard !trimmed.isEmpty else { return nil }
     let nsTrimmed = trimmed as NSString
     guard nsTrimmed.length <= imageOnlyLineMaximumLength else { return nil }
     let range = NSRange(location: 0, length: nsTrimmed.length)
-    guard let match = imageExpression.firstMatch(in: trimmed, range: range),
+    if let match = imageExpression.firstMatch(in: trimmed, range: range),
       match.range == range,
       let source = markdownImageDestination(in: nsTrimmed.substring(with: match.range(at: 2)))
+    {
+      return MarkdownImageSource(
+        source: source,
+        altText: nsTrimmed.substring(with: match.range(at: 1)))
+    }
+    return htmlImageOnlyLine(trimmed: trimmed, nsTrimmed: nsTrimmed, range: range)
+  }
+
+  /// The image source when the trimmed body is a single, safe HTML `<img>` tag.
+  private static func htmlImageOnlyLine(
+    trimmed: String, nsTrimmed: NSString, range: NSRange
+  ) -> MarkdownImageSource? {
+    guard let match = htmlImageExpression.firstMatch(in: trimmed, range: range),
+      match.range == range,
+      let source = htmlImageSource(in: trimmed)
     else {
       return nil
     }
-    return MarkdownImageSource(
-      source: source,
-      altText: nsTrimmed.substring(with: match.range(at: 1)))
+    return MarkdownImageSource(source: source, altText: htmlImageAlt(in: trimmed) ?? "")
   }
 
   /// Extracts the destination from an image target, dropping an optional
@@ -2088,7 +2122,7 @@ enum TextDocumentSyntaxHighlighter {
         in: textStorage,
         font: typography.body.regular,
         includeVisualAttributes: includeVisualAttributes)
-    } else if markdownThematicBreak(in: line) {
+    } else if markdownLineIsHorizontalRule(line) {
       lineFonts = typography.body
       muteMarkdownSyntax(
         range: lineRange,
@@ -2509,21 +2543,135 @@ enum TextDocumentSyntaxHighlighter {
     return result
   }
 
-  /// Whether an `<a ...>` match (group 1 = the attribute span) carries a safe
-  /// href. The href is found by a separate anchored scan over the short
-  /// attribute substring, so the link regex stays a single linear pass.
+  /// Whether an `<a …>` match carries a safe href. The href is read with the
+  /// quote-aware tag scanner over the whole match (the scanner stops at the
+  /// opening tag's `>`), so an `href=` appearing inside another attribute's
+  /// quoted value is never mistaken for the real href.
   private static func htmlLinkHasSafeHref(_ match: NSTextCheckingResult, _ text: NSString) -> Bool {
-    let attributesRange = match.range(at: 1)
-    guard attributesRange.location != NSNotFound else { return false }
-    let attributes = text.substring(with: attributesRange) as NSString
-    guard
-      let href = htmlHrefAttributeExpression.firstMatch(
-        in: attributes as String, range: NSRange(location: 0, length: attributes.length)),
-      href.range(at: 1).location != NSNotFound
-    else {
+    guard let href = htmlTagAttribute("href", in: text.substring(with: match.range)) else {
       return false
     }
-    return sanitizedHTMLHref(attributes.substring(with: href.range(at: 1))) != nil
+    return sanitizedHTMLHref(href) != nil
+  }
+
+  /// The caption an `<img>` tag collapses to in the inline pass: its alt text
+  /// (possibly empty) when the tag is well-formed and carries a usable, safe
+  /// src — otherwise nil so a srcless, unsafe, or malformed `<img>` stays
+  /// literal rather than vanishing. Used as the `decode` closure for both inline
+  /// passes, so they stay byte-identical.
+  private static func htmlImageAltLiteral(forMatch match: String) -> String? {
+    guard htmlTagHasBalancedQuotes(match), htmlImageSource(in: match) != nil else { return nil }
+    return htmlImageAlt(in: match) ?? ""
+  }
+
+  /// The safe, resolved source of an `<img>` tag, or nil. The src attribute is
+  /// read with the quote-aware scanner, entity-decoded, then limited to https
+  /// remotes or scheme-less local paths — every explicit scheme except https is
+  /// rejected.
+  private static func htmlImageSource(in tag: String) -> String? {
+    guard let raw = htmlTagAttribute("src", in: tag) else { return nil }
+    return sanitizedHTMLImageSource(raw)
+  }
+
+  /// The unquoted, entity-decoded alt attribute of an `<img>` tag, or nil.
+  private static func htmlImageAlt(in tag: String) -> String? {
+    guard let raw = htmlTagAttribute("alt", in: tag) else { return nil }
+    let decoded = decodeHTMLEntities(in: raw).trimmingCharacters(in: .whitespaces)
+    return decoded.isEmpty ? nil : decoded
+  }
+
+  /// The raw (still entity-encoded) value of the first `name` attribute
+  /// (case-insensitive) in a single HTML tag, honoring quoted spans — so an
+  /// attribute keyword appearing *inside* another attribute's quoted value
+  /// (e.g. `src=` within `alt="… src=…"`) is never read as a real attribute.
+  /// nil when the attribute is absent, valueless, or its quote is unterminated.
+  /// Callers decode and validate. Linear in the tag length.
+  private static func htmlTagAttribute(_ name: String, in tag: String) -> String? {
+    let scalars = Array(tag.unicodeScalars)
+    let count = scalars.count
+    func isSpace(_ index: Int) -> Bool {
+      scalars[index] == " " || scalars[index] == "\t"
+    }
+    var index = 0
+    // Skip the leading "<" and the tag name.
+    guard index < count, scalars[index] == "<" else { return nil }
+    index += 1
+    while index < count, !isSpace(index), scalars[index] != ">", scalars[index] != "/" {
+      index += 1
+    }
+    while index < count {
+      while index < count, isSpace(index) || scalars[index] == "/" { index += 1 }
+      guard index < count, scalars[index] != ">" else { break }
+      let nameStart = index
+      while index < count, !isSpace(index), scalars[index] != "=", scalars[index] != ">",
+        scalars[index] != "/"
+      {
+        index += 1
+      }
+      let attributeName = String(String.UnicodeScalarView(scalars[nameStart..<index]))
+      var cursor = index
+      while cursor < count, isSpace(cursor) { cursor += 1 }
+      var value: String?
+      if cursor < count, scalars[cursor] == "=" {
+        index = cursor + 1
+        while index < count, isSpace(index) { index += 1 }
+        if index < count, scalars[index] == "\"" || scalars[index] == "'" {
+          let quote = scalars[index]
+          index += 1
+          let valueStart = index
+          while index < count, scalars[index] != quote { index += 1 }
+          if index < count {  // closing quote found
+            value = String(String.UnicodeScalarView(scalars[valueStart..<index]))
+            index += 1
+          } else {
+            value = nil  // unterminated quote: malformed, treat as no value
+          }
+        } else {
+          let valueStart = index
+          while index < count, !isSpace(index), scalars[index] != ">" { index += 1 }
+          value = String(String.UnicodeScalarView(scalars[valueStart..<index]))
+        }
+      }
+      if attributeName.lowercased() == name, let value { return value }
+    }
+    return nil
+  }
+
+  /// Whether a single HTML tag's quotes are balanced — i.e. the closing `>` is
+  /// not inside a quoted attribute value. The tag regexes match a single
+  /// `[^<>\n]*` run, so a `>` inside a quoted value truncates the match and
+  /// leaves an unbalanced quote; such a malformed tag stays literal.
+  private static func htmlTagHasBalancedQuotes(_ tag: String) -> Bool {
+    var insideSingle = false
+    var insideDouble = false
+    for scalar in tag.unicodeScalars {
+      if scalar == "\"", !insideSingle {
+        insideDouble.toggle()
+      } else if scalar == "'", !insideDouble {
+        insideSingle.toggle()
+      }
+    }
+    return !insideSingle && !insideDouble
+  }
+
+  /// A safe image source: a scheme-less relative/absolute local path, or an
+  /// https URL. The value is entity-decoded first (so `&amp;` in a URL and
+  /// `&#106;avascript` obfuscation are normalised), then every explicit scheme
+  /// except https (javascript:, data:, file:, vbscript:, blob:, about:, http:)
+  /// is rejected, and a control/format scalar leaves the tag literal. The image
+  /// store performs the actual resolution and only fetches https remotely.
+  private static func sanitizedHTMLImageSource(_ raw: String) -> String? {
+    let value = decodeHTMLEntities(in: raw).trimmingCharacters(in: .whitespaces)
+    guard !value.isEmpty, !value.unicodeScalars.contains(where: { !isSafeHTMLScalar($0) })
+    else {
+      return nil
+    }
+    guard let schemeEnd = value.firstIndex(of: ":") else {
+      return value  // no scheme: a relative or absolute local path
+    }
+    let scheme = value[value.startIndex..<schemeEnd]
+    if scheme.contains("/") || scheme.contains("#") || scheme.contains("?") { return value }
+    return scheme.lowercased() == "https" ? value : nil
   }
 
   private static func rangesIntersect(_ lhs: NSRange, _ rhs: NSRange) -> Bool {
@@ -2601,7 +2749,7 @@ enum TextDocumentSyntaxHighlighter {
       return false
     }
     if markdownFenceInfo(in: body) != nil { return false }
-    if markdownThematicBreak(in: body) { return false }
+    if markdownLineIsHorizontalRule(body) { return false }
     return true
   }
 
@@ -2610,6 +2758,24 @@ enum TextDocumentSyntaxHighlighter {
     guard trimmed.count >= 3 else { return false }
     let scalars = Set(trimmed)
     return scalars.count == 1 && ["-", "*", "_"].contains(scalars.first ?? " ")
+  }
+
+  /// Whether the whole (trimmed) line is a single HTML `<hr>` tag.
+  private static func markdownHTMLHorizontalRule(in line: String) -> Bool {
+    let trimmed = line.trimmingCharacters(in: .whitespaces)
+    let ns = trimmed as NSString
+    let range = NSRange(location: 0, length: ns.length)
+    guard let match = htmlHorizontalRuleExpression.firstMatch(in: trimmed, range: range) else {
+      return false
+    }
+    return match.range == range
+  }
+
+  /// Whether a line renders as a horizontal rule — a markdown thematic break
+  /// (`---`/`***`/`___`) or a whole-line HTML `<hr>`. Shared with the text view
+  /// so the highlighter and the renderer draw the rule on exactly the same lines.
+  static func markdownLineIsHorizontalRule(_ line: String) -> Bool {
+    markdownThematicBreak(in: line) || markdownHTMLHorizontalRule(in: line)
   }
 
   private static func isBulletMarker(_ value: unichar) -> Bool {
@@ -2652,12 +2818,20 @@ enum TextDocumentSyntaxHighlighter {
   // Group 1 = the attribute span, group 2 = link text. A single greedy
   // attribute run terminated by `>` (no overlapping lazy+greedy pair), so an
   // unterminated `<a ` line fails in linear time instead of backtracking. The
-  // href is extracted from the short attribute span separately.
+  // href is read from the matched tag by the quote-aware scanner.
   private static let htmlLinkExpression = markdownRegex(
     #"(?i)<a(\s[^<>\n]*)>([^<\n]*)</a>"#)
-  private static let htmlHrefAttributeExpression = markdownRegex(
-    #"(?i)\bhref\s*=\s*("[^"<\n]*"|'[^'<\n]*'|[^\s"'<>]+)"#)
   private static let htmlLineBreakExpression = markdownRegex(#"(?i)<br\s*/?>"#)
+  // Single-line block HTML. `<img>` maps to the image-block renderer (its src is
+  // resolved like a markdown image; its alt becomes the caption), and a
+  // whole-line `<hr>` maps to the thematic-break rule. The `\b` after the name
+  // rejects `<image>`/`<header>`, and `[^<>\n]*` is a single greedy run
+  // terminated by `>`, so a malformed/unterminated tag fails in linear time.
+  // Attribute values are read from the matched tag by the quote-aware scanner
+  // (htmlTagAttribute), not a regex, so a keyword inside another attribute's
+  // quoted value is never mistaken for a real attribute.
+  private static let htmlImageExpression = markdownRegex(#"(?i)<img\b[^<>\n]*>"#)
+  private static let htmlHorizontalRuleExpression = markdownRegex(#"(?i)<hr\b[^<>\n]*>"#)
   /// The paired formatting tags whose display-map removal is identical (keep
   /// group 1); kept in one list so both inline passes use the same order.
   private static let htmlPairedInlineExpressions: [NSRegularExpression] = [

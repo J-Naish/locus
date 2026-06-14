@@ -4518,7 +4518,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if state.isFenceDelimiter, TextDocumentSyntaxHighlighter.isMarkdownFenceLine(body) {
       return .fence
     }
-    if isMarkdownThematicBreak(trimmed) {
+    if TextDocumentSyntaxHighlighter.markdownLineIsHorizontalRule(trimmed) {
       return .rule
     }
     if index + 1 < nsLine.length, Self.isMarkdownBulletMarker(nsLine.character(at: index)),
@@ -4815,12 +4815,6 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         origin: origin,
         size: NSSize(width: max(0, frame.width - inset * 2), height: size.height)),
       options: [.usesLineFragmentOrigin])
-  }
-
-  private func isMarkdownThematicBreak(_ trimmed: String) -> Bool {
-    guard trimmed.count >= 3 else { return false }
-    let characters = Set(trimmed)
-    return characters.count == 1 && ["-", "*", "_"].contains(characters.first ?? " ")
   }
 
   private func markdownQuoteBody(in line: String) -> String {

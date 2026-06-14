@@ -243,7 +243,17 @@ ___
 
 Inline HTML: <kbd>Cmd</kbd> + <kbd>B</kbd>
 
-Block HTML:
+Single-line block HTML renders natively. An `<img>` becomes an image block:
+
+<img src="../workspaces/file-types/sample.png" alt="HTML image block">
+
+An `<hr>` becomes a horizontal rule:
+
+<hr>
+
+An unsafe image source stays literal: <img src="javascript:alert(1)">.
+
+Multi-line block HTML stays literal:
 
 <details>
 <summary>Review note</summary>

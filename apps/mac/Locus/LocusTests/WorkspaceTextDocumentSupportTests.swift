@@ -422,6 +422,215 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertEqual(map.bufferColumn(forDisplayColumn: 3), map.bufferColumn(forDisplayColumn: 2))
   }
 
+  func testHTMLImageOnlyLineIsClassifiedWithSourceAndAlt() {
+    let lines = [
+      "<img src=\"images/chart.png\" alt=\"Quarterly chart\">",
+      "<img src='diagram.svg'/>",
+      "<IMG SRC=\"https://example.com/a.png\" />",
+      "Before <img src=\"inline.png\"> after",
+      "<img alt=\"no source\">",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(
+      states[0].imageSource,
+      MarkdownImageSource(source: "images/chart.png", altText: "Quarterly chart"))
+    XCTAssertEqual(states[1].imageSource, MarkdownImageSource(source: "diagram.svg", altText: ""))
+    XCTAssertEqual(
+      states[2].imageSource,
+      MarkdownImageSource(source: "https://example.com/a.png", altText: ""))
+    XCTAssertNil(states[3].imageSource, "an inline <img> in prose is not an image block")
+    XCTAssertNil(states[4].imageSource, "an <img> without a src is not an image block")
+  }
+
+  func testHTMLImageSourceEntityDecodesAndRejectsUnsafeSchemes() {
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: [
+      "<img src=\"https://x.com/a.png?u=1&amp;v=2\">",
+      "<img src=\"javascript:alert(1)\">",
+      "<img src=\"data:image/png;base64,AAAA\" alt=\"x\">",
+      "<img src=\"&#106;avascript:alert(1)\">",
+    ])
+
+    XCTAssertEqual(states[0].imageSource?.source, "https://x.com/a.png?u=1&v=2")
+    XCTAssertNil(states[1].imageSource, "javascript: src is rejected")
+    XCTAssertNil(states[2].imageSource, "data: src is rejected")
+    XCTAssertNil(states[3].imageSource, "entity-obfuscated javascript: src is rejected")
+    // A rejected <img> renders as literal text, not a stripped/blank line.
+    XCTAssertEqual(
+      htmlDisplayText("<img src=\"javascript:alert(1)\">"),
+      "<img src=\"javascript:alert(1)\">")
+  }
+
+  func testHTMLImageLineRendersAltTextAsCaption() {
+    let line = "<img src=\"images/chart.png\" alt=\"Quarterly chart\">"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+    let rendered = TextDocumentSyntaxHighlighter.highlightedLine(
+      line, syntax: .markdown, font: TextDocumentSyntax.markdown.font, markdownLineState: state)
+
+    XCTAssertEqual(rendered.string, "Quarterly chart")
+    XCTAssertEqual(
+      rendered.resolvedFont(at: 0)?.pointSize, MarkdownDocumentMetrics.imageCaptionFontSize)
+    XCTAssertEqual(rendered.foregroundColor(at: 0), NSColor.secondaryLabelColor)
+  }
+
+  func testHTMLCaptionlessImageLineCollapsesToEmpty() {
+    let line = "<img src=\"images/chart.png\">"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        line, font: TextDocumentSyntax.markdown.font, state: state),
+      "")
+  }
+
+  func testHTMLInlineImageInProseCollapsesToAltText() {
+    XCTAssertEqual(
+      htmlRendered("See <img src=\"i.png\" alt=\"Figure 1\"> here.").string,
+      "See Figure 1 here.")
+  }
+
+  func testHTMLImageDisplayMapCollapsesTagToCaptionUnit() {
+    let source = "<img src=\"x.png\" alt=\"Cap\">"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [source])[0]
+    let map = TextDocumentSyntaxHighlighter.markdownDisplayMap(for: source, state: state)
+
+    XCTAssertEqual(map.displayText, "Cap")
+    // Selecting the caption maps back to the whole <img> tag, so copy returns the
+    // original markup, and the caret cannot land inside the collapsed tag.
+    let whole = map.bufferRange(forDisplayStart: 0, end: 3, includeWholeLineMarkers: false)
+    XCTAssertEqual((source as NSString).substring(with: whole), source)
+    XCTAssertEqual(map.bufferColumn(forDisplayColumn: 1), map.bufferColumn(forDisplayColumn: 0))
+  }
+
+  func testHTMLImageInsideCodeFenceStaysLiteral() {
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: [
+      "```", "<img src=\"a.png\">", "```",
+    ])
+    XCTAssertEqual(states[1].insideFence, true)
+    XCTAssertNil(states[1].imageSource)
+  }
+
+  func testHTMLHorizontalRuleCollapsesToEmptyLikeThematicBreak() {
+    for rule in ["<hr>", "<hr/>", "<hr />", "<HR>", "<hr class=\"sep\">", "  <hr>  "] {
+      XCTAssertEqual(htmlDisplayText(rule), "", "<hr> should render empty: \(rule)")
+    }
+  }
+
+  func testHTMLHorizontalRuleRequiresWholeLineAndStaysLiteralOtherwise() {
+    // A mid-line <hr>, or something that is not actually an hr tag, stays literal.
+    XCTAssertEqual(htmlDisplayText("text <hr> more"), "text <hr> more")
+    XCTAssertEqual(htmlDisplayText("<hr2>"), "<hr2>")
+    XCTAssertEqual(htmlDisplayText("<header>"), "<header>")
+  }
+
+  func testHTMLHorizontalRuleInsideCodeFenceStaysLiteral() {
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: ["```", "<hr>", "```"])
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        "<hr>", font: TextDocumentSyntax.markdown.font, state: states[1]),
+      "<hr>")
+  }
+
+  func testHTMLBlockImageAndRuleStayInDisplayParity() {
+    let corpus = [
+      "<img src=\"a.png\" alt=\"A\">", "<img src=\"https://x.com/a.png\">",
+      "<img src=\"x.png\">", "See <img src=\"i.png\" alt=\"Fig\"> now",
+      "<hr>", "<hr/>", "<hr class=\"x\">",
+    ]
+    for line in corpus {
+      let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+      let display = TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        line, font: TextDocumentSyntax.markdown.font, state: state)
+      let attributed = TextDocumentSyntaxHighlighter.highlightedLine(
+        line, syntax: .markdown, font: TextDocumentSyntax.markdown.font, markdownLineState: state
+      ).string
+      XCTAssertEqual(display, attributed, "parity for: \(line)")
+    }
+  }
+
+  func testHTMLUnterminatedImageAndRuleAreLinearTime() {
+    let imgLine = "<img " + String(repeating: " ", count: 20_000) + "x"
+    let hrLine = "<hr " + String(repeating: " ", count: 20_000) + "x"
+    let start = Date()
+    _ = htmlRendered(imgLine)
+    _ = htmlDisplayText(hrLine)
+    let elapsed = Date().timeIntervalSince(start)
+    XCTAssertLessThan(elapsed, 0.5, "unterminated <img/<hr lines should render in linear time")
+  }
+
+  func testHTMLHorizontalRuleMutesLikeThematicBreakOnApplyPath() {
+    // The legacy NSTextStorage apply() path is a fifth rule site: a whole-line
+    // <hr> must be muted exactly like ---/***/___, not styled as plain body.
+    func appliedColor(_ text: String) -> NSColor? {
+      let storage = NSTextStorage(string: text)
+      TextDocumentSyntaxHighlighter.apply(
+        to: storage, text: storage.string, syntax: .markdown,
+        font: TextDocumentSyntax.markdown.font)
+      return storage.foregroundColor(at: 0)
+    }
+    XCTAssertEqual(appliedColor("<hr>"), appliedColor("---"))
+    XCTAssertNotEqual(appliedColor("<hr>"), appliedColor("plain text"))
+  }
+
+  func testHTMLImageWithGreaterThanInAttributeStaysFullyLiteral() {
+    // A literal `>` inside a quoted attribute truncates the deliberately simple,
+    // linear-time tag match, leaving unbalanced quotes. The balanced-quotes gate
+    // then treats the tag as malformed and leaves the WHOLE line literal (rather
+    // than partially collapsing it), preserving the linear-time guarantee.
+    let line = "<img src=\"a.png\" alt=\"x > y\"> done"
+    XCTAssertNil(
+      TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0].imageSource,
+      "a > inside an attribute must not yield a live image block")
+    XCTAssertEqual(htmlDisplayText(line), line, "malformed tag stays fully literal")
+    XCTAssertEqual(htmlRendered(line).string, htmlDisplayText(line), "parity for: \(line)")
+  }
+
+  func testHTMLImageIgnoresAttributeKeywordsInsideQuotedValues() {
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: [
+      // A `src=` living inside the alt value is not a real source: no live image.
+      "<img alt=\"caption src=https://evil.test/x.png\">",
+      // The real src/alt win; the `alt=` inside the title value is ignored.
+      "<img title=\"alt=Fake\" src=\"real.png\" alt=\"Real\">",
+    ])
+    XCTAssertNil(
+      states[0].imageSource, "src= inside another attribute's value is not a real source")
+    XCTAssertEqual(
+      states[1].imageSource, MarkdownImageSource(source: "real.png", altText: "Real"))
+  }
+
+  func testHTMLImageInsideInlineCodeStaysLiteral() {
+    // A code example containing an <img> tag must show the literal tag, not
+    // collapse to its alt — inline code is protected before the <img> rule runs.
+    let line = "Example: `<img src=\"x.png\" alt=\"Cap\">`"
+    XCTAssertEqual(htmlRendered(line).string, "Example: <img src=\"x.png\" alt=\"Cap\">")
+    XCTAssertEqual(htmlDisplayText(line), htmlRendered(line).string, "parity for: \(line)")
+  }
+
+  func testHTMLLinkIgnoresHrefKeywordInsideQuotedValue() {
+    // The real (unsafe) href wins over a safe-looking href= inside another
+    // attribute's value, so the link is not falsely treated as safe.
+    let safeDecoy = htmlRendered("<a title=\"href=https://ok.test\" href=\"javascript:x\">go</a>")
+    XCTAssertNotEqual(
+      safeDecoy.foregroundColor(in: safeDecoy.string, matching: "go"), .linkColor,
+      "an unsafe real href must not render as a link even with a safe decoy href=")
+    // A genuinely safe href still renders as a link.
+    let safe = htmlRendered("<a href=\"https://ok.test\">go</a>")
+    XCTAssertEqual(safe.foregroundColor(in: safe.string, matching: "go"), .linkColor)
+  }
+
+  func testHTMLQuotedHorizontalRuleAndThematicBreakCollapseConsistently() {
+    // A rule inside a blockquote collapses its text to empty (matching the view,
+    // which draws the rule); it must not show literal <hr>/--- under the rule.
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: ["> <hr>", "> ---"])
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        "> <hr>", font: TextDocumentSyntax.markdown.font, state: states[0]),
+      "")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        "> ---", font: TextDocumentSyntax.markdown.font, state: states[1]),
+      "")
+  }
+
   func testMarkdownRenderedInlineRemovesFormattingMarkers() {
     let line = TextDocumentSyntaxHighlighter.highlightedLine(
       "Use **bold** and `code` in [docs](https://example.com/a*b*c)",

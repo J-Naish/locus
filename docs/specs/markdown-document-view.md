@@ -188,9 +188,11 @@ content. Wrap width per line = measure − indent.
   literal. (Tunable later: ultralight row hairlines for tables longer
   than ~8 rows.)
 - **Frontmatter / thematic breaks**: unchanged (muted mono card; drawn
-  rule on an empty row).
+  rule on an empty row). A whole-line HTML `<hr>` (`<hr>`, `<hr/>`,
+  `<hr class="…">`) renders as the same drawn rule.
 - **Images**: a line whose only content is one image (`![alt](src)`,
-  optional title and angle brackets accepted) renders as an image block.
+  optional title and angle brackets accepted, or a whole-line HTML
+  `<img src="…" alt="…">`) renders as an image block.
   The image lives in the line's leading inset, fitted to the text column
   (never upscaled past its natural size; very tall images cap at 560 pt,
   width shrinking proportionally), above the alt text rendered as a
@@ -209,7 +211,13 @@ content. Wrap width per line = measure − indent.
   An image inside a paragraph or a list item still renders as secondary
   alt text. Untrusted-input bounds: remote responses stream against a
   size cap, headers declaring absurd pixel counts are rejected before
-  decode, and over-long image lines never classify as blocks.
+  decode, and over-long image lines never classify as blocks. An HTML
+  `<img>` block shares this renderer: its `src` is unquoted, entity-
+  decoded, and limited to `https://` or a scheme-less local path (every
+  other scheme — `javascript:`, `data:`, `file:`, … — leaves the tag
+  literal), and its `alt` becomes the caption. Unlike a markdown image's
+  alt, the HTML `<img>` caption collapses to a single unit (the whole tag
+  is one buffer span), so it is not separately editable.
 - **Inline**: bold/italic/bold-italic/strike (asterisk and underscore
   forms), inline code chips, links (label in accent; Cmd+click opens
   `http`/`https`), **reference links** `[text][label]` resolved through
@@ -237,9 +245,13 @@ content. Wrap width per line = measure − indent.
   `<iframe>`; only `href` is read and only `http`/`https`/`mailto` (or a
   relative reference) is honoured (a `javascript:`/`data:` link, or any
   unknown/structural tag — `<div>`, `<table>`, `<details>`, …, and all
-  block HTML — stays **literal**). Escaped HTML (`&lt;b&gt;`) stays
-  literal too. Full-fidelity HTML (CSS/layout/scripts) is the job of the
-  future standalone HTML preview surface, not this engine.
+  multi-line block HTML — stays **literal**). Escaped HTML (`&lt;b&gt;`)
+  stays literal too. Two **single-line block** tags are the exception:
+  a whole-line `<img>` renders as an image block and a whole-line `<hr>`
+  as a rule (see Images and Frontmatter / thematic breaks above); an
+  inline `<img>` mid-paragraph collapses to its alt text, like an inline
+  markdown image. Full-fidelity HTML (CSS/layout/scripts) is the job of
+  the future standalone HTML preview surface, not this engine.
 
 ### Editing contract
 

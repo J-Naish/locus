@@ -58,11 +58,18 @@ the behaviour is honest. Escaped HTML (`&lt;b&gt;`) decodes to literal
 `<b>` text and is not re-interpreted as a tag (decoded entity output is
 protected from the tag rules).
 
-Security: no JavaScript, no CSS, no `<style>`/`<script>` interpretation,
-no attribute read except `href`, and no remote fetch. The map and
-attribute passes apply the identical, pure, deterministic rule sequence,
-so they run safely on the off-main measurement worker and keep the
-display↔buffer caret map in parity.
+Security: no JavaScript, no CSS, no `<style>`/`<script>` interpretation.
+Only `href` (links), `src`, and `alt` (`<img>`) are read, and they are
+read with a quote-aware tag scanner — never a loose regex — so an
+attribute keyword sitting inside another attribute's quoted value (e.g.
+`src=` inside `alt="… src=https://evil/x.png"`) is not mistaken for a
+real attribute and cannot trigger a fetch. The only network access is the
+existing image store fetching an `https://` `<img>`/`![]()` source (no
+cookies, response size- and pixel-capped); `http`, `data:`, `file:`, and
+every other scheme stay literal. The map and attribute passes apply the
+identical, pure, deterministic rule sequence, so they run safely on the
+off-main measurement worker and keep the display↔buffer caret map in
+parity.
 
 ## Consequences
 
@@ -73,8 +80,27 @@ display↔buffer caret map in parity.
 - Inline HTML spans are light-editable like emphasis (markers preserved
   in the buffer); there is no HTML serialization or toggle, consistent
   with the user's acceptance of read-only-ish HTML.
+- Single-line **block** HTML followed (same engine, same security model):
+  a whole-line `<img>` reuses the markdown image-block renderer (its
+  `src` unquoted, entity-decoded, and limited to `https://` or a
+  scheme-less local path; its `alt` the caption) and a whole-line `<hr>`
+  reuses the thematic-break rule. An inline `<img>` mid-paragraph
+  collapses to its alt, like an inline markdown image. Multi-line block
+  HTML (`<details>`, `<table>`, `<div>`, …) stays literal — that fidelity
+  remains the future standalone HTML preview surface's job.
+- The tag regexes match a single `[^<>\n]*` run, so a literal `>` inside
+  an attribute value (`<img alt="a > b">`) truncates the match and the
+  line degrades to literal text. This is accepted: it keeps matching
+  linear-time (no quoted-attribute backtracking) and is consistent with
+  the literal-degrade policy for anything the allowlist cannot parse.
+- Local image sources (markdown `![](…)` and HTML `<img>` alike) resolve
+  any user-readable path, including `../` and absolute paths, and probe
+  it header-only. This is bounded — only existence and pixel dimensions
+  are ever surfaced, nothing is read into the document or sent over the
+  network — and intended, since cross-folder asset references (`../assets/
+  logo.png`) are a normal local-document pattern. Confining sources to the
+  document folder is a possible future hardening, tracked separately.
 - Deferred follow-ups: `<sub>`/`<sup>` (baseline offset can perturb wrap
   measurement), `<small>` true font-shrink (same reason; dimmed for
-  now), single-line `<img>`/`<hr>` mapping to the existing image/rule
-  renderers, opening links (for both Markdown and HTML at once), and any
+  now), opening links (for both Markdown and HTML at once), and any
   multi-line block HTML.
