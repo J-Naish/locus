@@ -282,9 +282,14 @@ struct WorkspaceBrowserView: View {
       workspaceTreeMonitor.stopMonitoring()
       clearWorkspaceUndoActions()
     }
-    .focusedSceneValue(\.workspaceNavigationCommands, workspaceNavigationCommands)
-    .focusedSceneValue(\.workspaceDeletionCommand, workspaceDeletionCommand)
-    .focusedSceneValue(\.workspaceSidebarVisibilityCommand, workspaceSidebarVisibilityCommand)
+    .modifier(
+      WorkspaceBrowserCommandValues(
+        navigationCommands: workspaceNavigationCommands,
+        documentCloseCommand: documentCloseCommand,
+        deletionCommand: workspaceDeletionCommand,
+        sidebarCommand: workspaceSidebarVisibilityCommand
+      )
+    )
     .alert("Couldn't Undo Change", isPresented: $isWorkspaceUndoErrorPresented) {
       Button("OK", role: .cancel) {}
     } message: {
@@ -386,6 +391,13 @@ struct WorkspaceBrowserView: View {
 
         _ = deleteEntries(entries)
       }
+    )
+  }
+
+  private var documentCloseCommand: DocumentCloseCommand {
+    DocumentCloseCommand(
+      canClose: openDocumentEntry != nil,
+      close: closeActiveDocument
     )
   }
 
@@ -1106,6 +1118,20 @@ struct WorkspaceBrowserView: View {
     }
   }
 
+  private func closeActiveDocument() {
+    guard let openDocumentEntry else {
+      return
+    }
+
+    guard let activeTab = documentTabs.tabs.first(where: { $0.id == openDocumentEntry.id }) else {
+      self.openDocumentEntry = nil
+      selectedEntryID = nil
+      return
+    }
+
+    closeDocumentTab(activeTab)
+  }
+
   private var sidebarIsVisibleForToolbar: Bool {
     switch columnVisibility {
     case .detailOnly:
@@ -1226,6 +1252,21 @@ struct WorkspaceBrowserSearchResults {
       recentFiles: visibleRecentFiles,
       recentFolders: visibleRecentFolders
     )
+  }
+}
+
+private struct WorkspaceBrowserCommandValues: ViewModifier {
+  let navigationCommands: WorkspaceNavigationCommands
+  let documentCloseCommand: DocumentCloseCommand
+  let deletionCommand: WorkspaceDeletionCommand
+  let sidebarCommand: WorkspaceSidebarVisibilityCommand
+
+  func body(content: Content) -> some View {
+    content
+      .focusedSceneValue(\.workspaceNavigationCommands, navigationCommands)
+      .focusedSceneValue(\.documentCloseCommand, documentCloseCommand)
+      .focusedSceneValue(\.workspaceDeletionCommand, deletionCommand)
+      .focusedSceneValue(\.workspaceSidebarVisibilityCommand, sidebarCommand)
   }
 }
 

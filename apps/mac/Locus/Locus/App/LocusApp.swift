@@ -38,6 +38,11 @@ struct DocumentSaveCommand {
   let save: () -> Void
 }
 
+struct DocumentCloseCommand {
+  let canClose: Bool
+  let close: () -> Void
+}
+
 struct WorkspaceDeletionCommand {
   let canDelete: Bool
   let delete: () -> Void
@@ -64,6 +69,10 @@ private struct DocumentSaveCommandKey: FocusedValueKey {
   typealias Value = DocumentSaveCommand
 }
 
+private struct DocumentCloseCommandKey: FocusedValueKey {
+  typealias Value = DocumentCloseCommand
+}
+
 private struct WorkspaceDeletionCommandKey: FocusedValueKey {
   typealias Value = WorkspaceDeletionCommand
 }
@@ -81,6 +90,11 @@ extension FocusedValues {
   var documentSaveCommand: DocumentSaveCommand? {
     get { self[DocumentSaveCommandKey.self] }
     set { self[DocumentSaveCommandKey.self] = newValue }
+  }
+
+  var documentCloseCommand: DocumentCloseCommand? {
+    get { self[DocumentCloseCommandKey.self] }
+    set { self[DocumentCloseCommandKey.self] = newValue }
   }
 
   var workspaceDeletionCommand: WorkspaceDeletionCommand? {
@@ -130,6 +144,23 @@ private struct DocumentSaveCommandMenu: Commands {
       Divider()
 
       Toggle("Auto Save", isOn: $isAutoSaveEnabled)
+    }
+  }
+}
+
+private struct DocumentCloseCommandMenu: Commands {
+  @FocusedValue(\.documentCloseCommand) private var closeCommand
+
+  var body: some Commands {
+    CommandGroup(after: .newItem) {
+      Button(closeCommand?.canClose == true ? "Close File" : "Close Window") {
+        if closeCommand?.canClose == true {
+          closeCommand?.close()
+        } else {
+          NSApp.keyWindow?.performClose(nil)
+        }
+      }
+      .keyboardShortcut("w", modifiers: [.command])
     }
   }
 }
@@ -341,6 +372,7 @@ struct LocusApp: App {
       height: LocusWindowMetrics.defaultHeight
     )
     .commands {
+      DocumentCloseCommandMenu()
       DocumentSaveCommandMenu()
       WorkspaceDeletionCommandMenu()
       WorkspaceSidebarVisibilityCommandMenu()

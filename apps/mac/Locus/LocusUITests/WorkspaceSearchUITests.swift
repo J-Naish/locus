@@ -36,6 +36,39 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testCommandWClosesOpenFileWithoutClosingWindow() throws {
+    let app = try launchAppWithBasicWorkspace()
+
+    let projectBriefRow = workspaceSidebarLabel(named: "Project Brief.md", in: app)
+    XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
+    projectBriefRow.click()
+
+    let editor = app.textViews["document-large-text-viewer"]
+    XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+    editor.click()
+
+    app.typeKey("w", modifierFlags: [.command])
+
+    XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 2), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Select a File"].waitForExistence(timeout: 5), app.debugDescription)
+  }
+
+  @MainActor
+  func testCommandWClosesWindowWhenNoFileIsOpen() throws {
+    let app = try launchAppWithBasicWorkspace()
+
+    let window = app.windows.firstMatch
+    XCTAssertTrue(window.waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertTrue(
+      app.staticTexts["Select a File"].waitForExistence(timeout: 5), app.debugDescription)
+
+    app.typeKey("w", modifierFlags: [.command])
+
+    XCTAssertTrue(window.waitForNonExistence(timeout: 5), app.debugDescription)
+  }
+
+  @MainActor
   func testDoubleClickDirectoryRowNavigatesIntoFolder() throws {
     let app = try launchAppWithBasicWorkspace()
 
