@@ -93,13 +93,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     app.typeKey("v", modifierFlags: [.command])
     XCTAssertTrue(waitForEditorContents(updatedText, in: app, timeout: 5), app.debugDescription)
 
-    app.menuBars.menuBarItems["File"].click()
-    let saveMenuItem = app.menuBars.menuItems["Save"]
-    XCTAssertTrue(saveMenuItem.waitForExistence(timeout: 2), app.debugDescription)
-    XCTAssertTrue(saveMenuItem.isEnabled, app.debugDescription)
-    saveMenuItem.click()
-
-    XCTAssertTrue(waitForFileContents(updatedText, at: targetURL), app.debugDescription)
+    XCTAssertTrue(waitForFileContents(updatedText, at: targetURL, timeout: 5), app.debugDescription)
   }
 
   @MainActor
@@ -880,6 +874,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
     let projectBriefURL = workspaceURL.appending(path: "Project Brief.md")
     let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+    disableAutoSave(in: app)
 
     let projectBriefRow = app.outlines.firstMatch.cells
       .containing(NSPredicate(format: "value == %@", "Project Brief.md"))
@@ -908,6 +903,35 @@ final class WorkspaceSearchUITests: XCTestCase {
     saveMenuItem.click()
 
     XCTAssertTrue(waitForFileContents(updatedText, at: projectBriefURL), app.debugDescription)
+  }
+
+  @MainActor
+  func testMarkdownFileAutoSavesByDefault() throws {
+    let workspaceURL = try temporaryWorkspaceCopy(ofFixtureNamed: "basic")
+    let projectBriefURL = workspaceURL.appending(path: "Project Brief.md")
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    let projectBriefRow = app.outlines.firstMatch.cells
+      .containing(NSPredicate(format: "value == %@", "Project Brief.md"))
+      .firstMatch
+    XCTAssertTrue(projectBriefRow.waitForExistence(timeout: 5), app.debugDescription)
+    projectBriefRow.click()
+
+    let editor = app.textViews["document-large-text-viewer"]
+    XCTAssertTrue(editor.waitForExistence(timeout: 5), app.debugDescription)
+    editor.click()
+
+    let updatedText = "# Auto Saved Brief\n\nLocus writes this without manual Save.\n"
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(updatedText, forType: .string)
+    app.typeKey("a", modifierFlags: [.command])
+    app.typeKey("v", modifierFlags: [.command])
+
+    XCTAssertTrue(waitForEditorContents(updatedText, in: app, timeout: 5), app.debugDescription)
+    XCTAssertTrue(
+      waitForFileContents(updatedText, at: projectBriefURL, timeout: 5),
+      app.debugDescription
+    )
   }
 
   @MainActor
@@ -1141,6 +1165,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     // value intentionally never materializes the whole document). Edits stay in
     // memory — there is no save here — so the fixture on disk is untouched.
     let app = try launchApp(workspacePath: fixtureWorkspacePath("basic"))
+    disableAutoSave(in: app)
 
     let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
     XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
@@ -1172,6 +1197,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     // Verifies Cmd+Z reaches the viewer (rather than the Edit menu's undo
     // manager): type a marker, confirm it appears, undo, confirm it is gone.
     let app = try launchApp(workspacePath: fixtureWorkspacePath("basic"))
+    disableAutoSave(in: app)
 
     let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
     XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
@@ -1224,6 +1250,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     try Data("Meeting notes".utf8).write(to: fileURL)
 
     let app = try launchApp(workspacePath: workspace.path)
+    disableAutoSave(in: app)
 
     let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
     XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
@@ -1258,6 +1285,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     try Data("ORIGINAL".utf8).write(to: fileURL)
 
     let app = try launchApp(workspacePath: workspace.path)
+    disableAutoSave(in: app)
 
     let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
     XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
@@ -1318,6 +1346,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     try Data("OTHER".utf8).write(to: bURL)
 
     let app = try launchApp(workspacePath: workspace.path)
+    disableAutoSave(in: app)
     let viewer = app.textViews["document-large-text-viewer"]
 
     func open(_ name: String) {
@@ -1406,6 +1435,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     try Data("ORIGINAL".utf8).write(to: fileURL)
 
     let app = try launchApp(workspacePath: workspace.path)
+    disableAutoSave(in: app)
 
     let row = workspaceSidebarLabel(named: "Notes.txt", in: app)
     XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
@@ -1446,7 +1476,8 @@ final class WorkspaceSearchUITests: XCTestCase {
     trackUserDefaultsKeys(
       recentFilesKey,
       recentFoldersKey,
-      "workspace.sidebar.recentFoldersExpanded"
+      "workspace.sidebar.recentFoldersExpanded",
+      "workspace.textEditing.autoSaveEnabled"
     )
 
     let app = XCUIApplication()
@@ -1504,6 +1535,27 @@ final class WorkspaceSearchUITests: XCTestCase {
       UserDefaults.standard.removeObject(forKey: key)
       appDefaults?.removeObject(forKey: key)
     }
+  }
+
+  @MainActor
+  private func disableAutoSave(
+    in app: XCUIApplication,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) {
+    let fileMenu = app.menuBars.menuBarItems["File"]
+    XCTAssertTrue(
+      fileMenu.waitForExistence(timeout: 5), app.debugDescription, file: file, line: line)
+    fileMenu.click()
+
+    let autoSaveItem = app.menuBars.menuItems["Auto Save"]
+    XCTAssertTrue(
+      autoSaveItem.waitForExistence(timeout: 2),
+      app.debugDescription,
+      file: file,
+      line: line
+    )
+    autoSaveItem.click()
   }
 
   @MainActor

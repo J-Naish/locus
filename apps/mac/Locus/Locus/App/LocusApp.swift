@@ -49,8 +49,10 @@ struct WorkspaceSidebarVisibilityCommand {
 
 enum LocusPersistedDefaults {
   static let recentFoldersExpanded = "workspace.sidebar.recentFoldersExpanded"
+  static let textEditingAutoSaveEnabled = "workspace.textEditing.autoSaveEnabled"
   static let uiTestResetKeys = [
-    recentFoldersExpanded
+    recentFoldersExpanded,
+    textEditingAutoSaveEnabled,
   ]
 }
 
@@ -114,6 +116,8 @@ private struct WorkspaceNavigationCommandMenu: Commands {
 
 private struct DocumentSaveCommandMenu: Commands {
   @FocusedValue(\.documentSaveCommand) private var saveCommand
+  @AppStorage(LocusPersistedDefaults.textEditingAutoSaveEnabled)
+  private var isAutoSaveEnabled = true
 
   var body: some Commands {
     CommandGroup(replacing: .saveItem) {
@@ -122,6 +126,10 @@ private struct DocumentSaveCommandMenu: Commands {
       }
       .keyboardShortcut("s", modifiers: [.command])
       .disabled(saveCommand?.canSave != true)
+
+      Divider()
+
+      Toggle("Auto Save", isOn: $isAutoSaveEnabled)
     }
   }
 }

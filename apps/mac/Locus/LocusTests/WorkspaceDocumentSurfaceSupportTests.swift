@@ -154,6 +154,46 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
     XCTAssertEqual(backend(nil, true), .editable)
   }
 
+  func testAutoSavePolicyRequiresEnabledWritableDirtyDocumentWithoutConflict() {
+    XCTAssertTrue(
+      DocumentAutoSavePolicy.shouldRequestAutoSave(
+        isEnabled: true,
+        canSave: true,
+        hasConflict: false
+      )
+    )
+
+    XCTAssertFalse(
+      DocumentAutoSavePolicy.shouldRequestAutoSave(
+        isEnabled: false,
+        canSave: true,
+        hasConflict: false
+      )
+    )
+    XCTAssertFalse(
+      DocumentAutoSavePolicy.shouldRequestAutoSave(
+        isEnabled: true,
+        canSave: false,
+        hasConflict: false
+      )
+    )
+    XCTAssertFalse(
+      DocumentAutoSavePolicy.shouldRequestAutoSave(
+        isEnabled: true,
+        canSave: true,
+        hasConflict: true
+      )
+    )
+    XCTAssertFalse(
+      DocumentAutoSavePolicy.shouldRequestAutoSave(
+        isEnabled: true,
+        canSave: true,
+        hasConflict: false,
+        diskMatchesKnownState: false
+      )
+    )
+  }
+
   // MARK: Inactive-document reconciliation
 
   func testReconciliationKeepsBufferWhenDiskIsUnchanged() {

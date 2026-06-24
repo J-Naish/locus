@@ -172,3 +172,16 @@ enum WorkspaceDocumentSurfaceSupport {
     return hasUnsavedEdits ? .conflict : .reloadFromDisk
   }
 }
+
+enum DocumentAutoSavePolicy {
+  static let debounceDelay: Duration = .milliseconds(700)
+
+  static func shouldRequestAutoSave(
+    isEnabled: Bool,
+    canSave: Bool,
+    hasConflict: Bool,
+    diskMatchesKnownState: Bool = true
+  ) -> Bool {
+    isEnabled && canSave && !hasConflict && diskMatchesKnownState
+  }
+}

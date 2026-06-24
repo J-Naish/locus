@@ -30,11 +30,14 @@ struct WorkspaceDocumentSurface: View {
   /// write, so the menu/Cmd+S command routes through this token rather than saving
   /// here.
   @State private var documentSaveRequest = 0
+  @State private var autoSaveTask: Task<Void, Never>?
   /// Effective read-only state of the selected document, resolved once per
   /// selection (URL.locusIsReadOnly) rather than for every entry during listing.
   /// Seeded from the core's mode-bit `readonly` so the common case is correct
   /// immediately, then refined for read-only volumes, ACLs, and immutable flags.
   @State private var selectedDocumentReadOnly = false
+  @AppStorage(LocusPersistedDefaults.textEditingAutoSaveEnabled)
+  private var isAutoSaveEnabled = true
   @StateObject private var documentChangeMonitor = DocumentChangeMonitor()
   /// Retains opened buffers across file switches so unsaved edits survive
   /// navigating away and back (persists for the surface's lifetime).
@@ -107,6 +110,7 @@ struct WorkspaceDocumentSurface: View {
       startDocumentMonitoringIfNeeded(for: entry)
     }
     .onChange(of: entry?.id) {
+      cancelAutoSave()
       isEditorFocused = false
       knownDocumentFingerprint = nil
       documentDirty = false
@@ -120,7 +124,15 @@ struct WorkspaceDocumentSurface: View {
     .onChange(of: isEditorFocused) {
       onTextInputFocusChange(isEditorFocused)
     }
+    .onChange(of: isAutoSaveEnabled) {
+      if isAutoSaveEnabled {
+        scheduleAutoSaveIfNeeded()
+      } else {
+        cancelAutoSave()
+      }
+    }
     .onDisappear {
+      cancelAutoSave()
       documentChangeMonitor.stopMonitoring()
       onTextInputFocusChange(false)
     }
@@ -277,6 +289,7 @@ struct WorkspaceDocumentSurface: View {
   /// by bumping a token it observes.
   @MainActor
   private func saveSelectedDocument() {
+    cancelAutoSave()
     guard !isSaveDisabled else {
       return
     }
@@ -307,6 +320,9 @@ struct WorkspaceDocumentSurface: View {
       // An edit just landed on disk; let the host refresh Git status so the
       // sidebar reflects the new "modified" state without another trigger.
       onDocumentSaved()
+      // If the user kept typing while the write was in flight, the buffer can
+      // still be dirty. Re-arm Auto Save for that newer content.
+      scheduleAutoSaveIfNeeded()
     case .failure(let error):
       saveErrorMessage = error.localizedDescription
     }
@@ -318,10 +334,12 @@ struct WorkspaceDocumentSurface: View {
   /// reload/save resolves it.
   @MainActor
   private func handleDocumentDirtyChange(_ isDirty: Bool) {
-    guard documentDirty != isDirty else {
-      return
-    }
     documentDirty = isDirty
+    if isDirty {
+      scheduleAutoSaveIfNeeded()
+    } else {
+      cancelAutoSave()
+    }
   }
 
   /// Resolves an external-change conflict by discarding in-memory edits and
@@ -329,6 +347,7 @@ struct WorkspaceDocumentSurface: View {
   /// conflict was detected, so the reopen does not immediately re-conflict.
   @MainActor
   private func reloadDocumentDiscardingEdits() {
+    cancelAutoSave()
     documentConflict = false
     documentDirty = false
     // Drop the retained (edited) buffer so the reopen reads fresh disk content.
@@ -344,6 +363,87 @@ struct WorkspaceDocumentSurface: View {
     documentConflict = false
     if let entry {
       openDocuments.setPendingConflict(false, forKey: entry.url.locusStandardizedPath)
+    }
+  }
+
+  @MainActor
+  private func scheduleAutoSaveIfNeeded() {
+    guard
+      DocumentAutoSavePolicy.shouldRequestAutoSave(
+        isEnabled: isAutoSaveEnabled,
+        canSave: !isSaveDisabled,
+        hasConflict: documentConflict)
+    else {
+      cancelAutoSave()
+      return
+    }
+
+    autoSaveTask?.cancel()
+    autoSaveTask = Task { @MainActor in
+      guard (try? await Task.sleep(for: DocumentAutoSavePolicy.debounceDelay)) != nil else {
+        return
+      }
+      guard !Task.isCancelled else {
+        return
+      }
+      autoSaveTask = nil
+      await autoSaveSelectedDocumentIfDiskIsCurrent()
+    }
+  }
+
+  @MainActor
+  private func cancelAutoSave() {
+    autoSaveTask?.cancel()
+    autoSaveTask = nil
+  }
+
+  @MainActor
+  private func autoSaveSelectedDocumentIfDiskIsCurrent() async {
+    guard let entry else {
+      return
+    }
+
+    let key = entry.url.locusStandardizedPath
+    let expectedFingerprint = knownDocumentFingerprint ?? openDocuments.fingerprint(forKey: key)
+    let currentFingerprint = await DocumentFileFingerprint.load(at: entry.url)
+    guard self.entry?.id == entry.id else {
+      return
+    }
+
+    guard
+      DocumentAutoSavePolicy.shouldRequestAutoSave(
+        isEnabled: isAutoSaveEnabled,
+        canSave: !isSaveDisabled,
+        hasConflict: documentConflict,
+        diskMatchesKnownState: currentFingerprint == expectedFingerprint)
+    else {
+      if currentFingerprint != expectedFingerprint {
+        reconcileExternalChangeDiscoveredBeforeAutoSave(currentFingerprint, for: entry)
+      } else {
+        cancelAutoSave()
+      }
+      return
+    }
+
+    saveSelectedDocument()
+  }
+
+  @MainActor
+  private func reconcileExternalChangeDiscoveredBeforeAutoSave(
+    _ fingerprint: DocumentFileFingerprint?, for entry: WorkspaceEntry
+  ) {
+    knownDocumentFingerprint = fingerprint
+    openDocuments.setFingerprint(fingerprint, forKey: entry.url.locusStandardizedPath)
+
+    if WorkspaceTextDocumentSupport.canEdit(entry), documentDirty {
+      openDocuments.setPendingConflict(true, forKey: entry.url.locusStandardizedPath)
+      documentConflict = true
+      cancelAutoSave()
+    } else {
+      documentConflict = false
+      openDocuments.setPendingConflict(false, forKey: entry.url.locusStandardizedPath)
+      openDocuments.drop(forKey: entry.url.locusStandardizedPath)
+      documentReloadGeneration &+= 1
     }
   }
 
@@ -378,6 +478,7 @@ extension WorkspaceDocumentSurface {
       // Surface a conflict so the user chooses to reload or keep their changes.
       openDocuments.setPendingConflict(true, forKey: entry.url.locusStandardizedPath)
       documentConflict = true
+      cancelAutoSave()
     } else {
       // Clean text, or a non-editable preview (image/PDF/media): reopen to show the
       // new content. This also reconciles to disk, resolving any earlier conflict
