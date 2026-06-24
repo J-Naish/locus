@@ -10,7 +10,7 @@ DEST    := platform=macOS,arch=arm64
 
 .DEFAULT_GOAL := help
 
-.PHONY: help run run-release build build-release test unit perf core-test core-lint clean
+.PHONY: help run run-release build build-release install test unit perf core-test core-lint clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -27,6 +27,9 @@ build: ## Build (Debug) without launching
 
 build-release: ## Build (Release) without launching
 	scripts/mac/run-app.sh --release --no-open
+
+install: ## Build (Release) and install Locus.app to /Applications
+	scripts/mac/install-app.sh
 
 test: core-test ## Run Rust core tests and the full macOS test suite (unit + UI)
 	xcodebuild test -project $(PROJECT) -scheme $(SCHEME) -destination '$(DEST)'
