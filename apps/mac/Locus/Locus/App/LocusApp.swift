@@ -462,7 +462,7 @@ struct LocusApp: App {
 
   init() {
     Self.resetUITestUserDefaultsIfNeeded()
-    // Pin the app to the active theme's appearance (Light by default). Set
+    // Pin the app to the active theme's appearance. Set
     // here, before the first scene materializes: an application-delegate launch
     // hook raced scene bringup and occasionally launched in the system
     // appearance.
@@ -477,8 +477,8 @@ struct LocusApp: App {
         initialFolderResolution: Self.initialFolderResolution,
         homeDirectoryURL: Self.homeDirectoryURL
       )
-      // Light is pinned at the AppKit level only (see init and the app
-      // delegate): .preferredColorScheme(.light) here detached the sidebar
+      // The theme appearance is pinned at the AppKit level only (see init and
+      // the delegate): .preferredColorScheme(.light) here detached the sidebar
       // panel from the titlebar, floating the traffic lights and the sidebar
       // toggle above it.
     }

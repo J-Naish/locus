@@ -497,7 +497,7 @@ final class LocusChromeColorsTests: XCTestCase {
   // Every theme keeps its field a visible step darker than its card (resolved
   // under that theme's own appearance), and opaque.
   func testEveryThemeFieldIsDarkerThanItsCardAndOpaque() throws {
-    for theme in [LocusChromeColors.light, LocusChromeColors.paper, LocusChromeColors.dark] {
+    for theme in LocusChromeColors.registeredThemes {
       let card = try resolvedSRGB(theme.documentCard, appearanceName: theme.appearanceName)
       let field = try resolvedSRGB(theme.documentField, appearanceName: theme.appearanceName)
 
@@ -517,6 +517,22 @@ final class LocusChromeColorsTests: XCTestCase {
     XCTAssertEqual(card.redComponent, editorWhite.redComponent, accuracy: 0.001)  // system white
     XCTAssertEqual(field.redComponent, field.blueComponent, accuracy: 0.01)  // neutral
     XCTAssertEqual(activeFill.redComponent, card.redComponent, accuracy: 0.001)  // neutral pill
+  }
+
+  // Glass is a separate registered theme, not a mutation of Light: it keeps the
+  // original light palette but renders the field as a window-level glass surface.
+  func testGlassThemeIsRegisteredSeparatelyFromOriginalLightTheme() throws {
+    let ids = LocusChromeColors.registeredThemes.map(\.id)
+    let card = try resolvedSRGB(LocusChromeColors.glass.documentCard, appearanceName: .aqua)
+    let lightCard = try resolvedSRGB(LocusChromeColors.light.documentCard, appearanceName: .aqua)
+    let field = try resolvedSRGB(LocusChromeColors.glass.documentField, appearanceName: .aqua)
+    let lightField = try resolvedSRGB(LocusChromeColors.light.documentField, appearanceName: .aqua)
+
+    XCTAssertEqual(ids, ["light", "glass", "paper", "dark"])
+    XCTAssertEqual(card.redComponent, lightCard.redComponent, accuracy: 0.001)
+    XCTAssertEqual(field.redComponent, lightField.redComponent, accuracy: 0.001)
+    XCTAssertEqual(LocusChromeColors.light.fieldBackgroundStyle, .solid)
+    XCTAssertEqual(LocusChromeColors.glass.fieldBackgroundStyle, .glass)
   }
 
   // Paper — a warm cream card (red above blue, never pure white) on a warmer,
@@ -548,13 +564,15 @@ final class LocusChromeColorsTests: XCTestCase {
     XCTAssertGreaterThan(stroke.redComponent, stroke.blueComponent + 0.15)  // clay accent
   }
 
-  // Light is the default: the public chrome colors resolve to it, and the
-  // active appearance is aqua.
+  // Light is the default active theme: Glass is registered for opt-in use, but
+  // the app starts in the original solid-background look.
   func testActiveThemeIsLightByDefault() throws {
     let card = try resolvedSRGB(LocusChromeColors.documentCard, appearanceName: .aqua)
     let lightCard = try resolvedSRGB(LocusChromeColors.light.documentCard, appearanceName: .aqua)
 
     XCTAssertEqual(card.redComponent, lightCard.redComponent, accuracy: 0.001)
+    XCTAssertEqual(LocusChromeColors.active.id, "light")
+    XCTAssertEqual(LocusChromeColors.fieldBackgroundStyle, .solid)
     XCTAssertEqual(LocusChromeColors.activeAppearance?.name, NSAppearance.Name.aqua)
   }
 
@@ -573,7 +591,7 @@ final class LocusChromeColorsTests: XCTestCase {
 
 @MainActor
 final class DocumentCardModifierTests: XCTestCase {
-  func testDocumentCardModifierMasksHostedAppKitViewCornersAndShowsContent() throws {
+  func testDocumentCardModifierClipsHostedAppKitViewCornersAndShowsContent() throws {
     let host = NSHostingView(
       rootView: RedAppKitView()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -605,9 +623,9 @@ final class DocumentCardModifierTests: XCTestCase {
     // The hosted red content shows through the card interior...
     XCTAssertGreaterThan(center.redComponent, 0.8)
     XCTAssertLessThan(center.greenComponent, 0.3)
-    // ...while the top-left corner notch is covered by the field-colored cap
-    // (an opaque light gray), not the red content.
-    XCTAssertGreaterThan(corner.greenComponent, 0.8)
+    // ...while the top-left corner notch is clipped away so the window-level
+    // field can show through without sampling a second material/glass layer.
+    XCTAssertLessThan(corner.alphaComponent, 0.5)
   }
 
   // The card floats inside the window like the sidebar panel does: gaps on
@@ -640,14 +658,14 @@ final class DocumentCardModifierTests: XCTestCase {
     // The bottom gap matches the sidebar's gutter: transparent padding below
     // the card.
     XCTAssertLessThan(try sample(100, 197).alphaComponent, 0.5)
-    // The bottom-left corner is rounded again: its notch shows the
-    // field-colored cap, not the red card content.
-    XCTAssertGreaterThan(
+    // The bottom-left corner is rounded again: its notch is clipped away, not
+    // painted with a field-colored cap that can diverge from the window glass.
+    XCTAssertLessThan(
       try sample(
         Int(DocumentCardMetrics.horizontalInset) + 1,
         198 - Int(DocumentCardMetrics.bottomInset)
-      ).greenComponent,
-      0.8
+      ).alphaComponent,
+      0.5
     )
     // The side gap keeps the field visible left of the card.
     XCTAssertLessThan(try sample(4, 100).alphaComponent, 0.5)

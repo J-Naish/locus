@@ -1834,12 +1834,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   // and `updateLayout` invalidate these rects so the boundary stays aligned as
   // the document scrolls horizontally or the gutter width changes.
   //
-  // Fragile foundation, measured 2026-06-12: a SwiftUI `.clipShape` wrapped
-  // around this editor suppresses these cursor rects — they register with
-  // correct window geometry, yet the arrow wins until the clip is removed.
-  // The document card therefore paints its rounded corners instead of
-  // clipping (see DocumentCardModifier); do not reintroduce a clip container
-  // around the editor.
+  // Fragile foundation, measured 2026-06-12: a SwiftUI `.clipShape` around this
+  // editor used to suppress these cursor rects — they registered with correct
+  // window geometry, yet the arrow won until the clip was removed. The document
+  // card now clips again so the glass field can show through its rounded
+  // corners; keep this cursor contract under manual review when changing the
+  // card chrome.
   override func resetCursorRects() {
     let gutterEdge = (enclosingScrollView?.contentView.bounds.origin.x ?? 0) + gutterWidth
     if let textRect = Self.iBeamCursorRect(visible: visibleRect, gutterEdge: gutterEdge) {
@@ -1854,15 +1854,23 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
   }
 
-  // Cursor rects alone go stale on one path: after the pointer visits the
+  // Cursor rects alone go stale on two paths: after the pointer visits the
   // titlebar tab strip, whose SwiftUI pointer handling resets the cursor to
-  // the arrow after the rect's enter event has already fired, the I-beam
-  // never comes back until some other tracking region re-arms the window
-  // (hovering the sidebar or the gutter does; the card's plain field does
-  // not). Correcting on every mouse move inside the editor is self-healing
-  // regardless of where the pointer came from.
-  private enum HoverCursor { case iBeam, arrow, pointingHand }
-  private var mouseMoveCursor: HoverCursor?
+  // the arrow after the rect's enter event has already fired, and under the
+  // SwiftUI card clip used to make the glass field show through rounded
+  // corners. Correcting on every mouse move/cursor update inside the editor is
+  // self-healing regardless of where the pointer came from.
+  private enum HoverCursor {
+    case iBeam, arrow, pointingHand
+
+    var nsCursor: NSCursor {
+      switch self {
+      case .iBeam: .iBeam
+      case .arrow: .arrow
+      case .pointingHand: .pointingHand
+      }
+    }
+  }
 
   override func updateTrackingAreas() {
     super.updateTrackingAreas()
@@ -1871,7 +1879,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     let area = NSTrackingArea(
       rect: .zero,
-      options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+      options: [
+        .mouseMoved, .mouseEnteredAndExited, .cursorUpdate, .activeInKeyWindow, .inVisibleRect,
+      ],
       owner: self,
       userInfo: nil
     )
@@ -1881,30 +1891,35 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   private var cursorCorrectionTrackingArea: NSTrackingArea?
 
-  override func mouseMoved(with event: NSEvent) {
-    super.mouseMoved(with: event)
-    let point = convert(event.locationInWindow, from: nil)
-    let desired: HoverCursor
-    if codeCopyButtonContains(point) {
-      desired = .pointingHand
-    } else {
-      let gutterEdge = (enclosingScrollView?.contentView.bounds.origin.x ?? 0) + gutterWidth
-      desired = point.x >= gutterEdge ? .iBeam : .arrow
-    }
-    guard mouseMoveCursor != desired else { return }
-    mouseMoveCursor = desired
-    switch desired {
-    case .iBeam: NSCursor.iBeam.set()
-    case .arrow: NSCursor.arrow.set()
-    case .pointingHand: NSCursor.pointingHand.set()
-    }
+  override func mouseEntered(with event: NSEvent) {
+    super.mouseEntered(with: event)
+    applyHoverCursor(for: event)
   }
 
-  override func mouseExited(with event: NSEvent) {
-    super.mouseExited(with: event)
-    // Whatever the pointer does outside is not ours; re-evaluate from scratch
-    // on the next move inside.
-    mouseMoveCursor = nil
+  override func mouseMoved(with event: NSEvent) {
+    super.mouseMoved(with: event)
+    applyHoverCursor(for: event)
+  }
+
+  override func cursorUpdate(with event: NSEvent) {
+    super.cursorUpdate(with: event)
+    applyHoverCursor(for: event)
+  }
+
+  private func applyHoverCursor(for event: NSEvent) {
+    let desired = hoverCursor(at: convert(event.locationInWindow, from: nil))
+    // Always set, even if `desired` matches the last value. SwiftUI/AppKit
+    // ancestors can reset the cursor between move/update events while our local
+    // desired state is unchanged.
+    desired.nsCursor.set()
+  }
+
+  private func hoverCursor(at point: NSPoint) -> HoverCursor {
+    if codeCopyButtonContains(point) {
+      return .pointingHand
+    }
+    let gutterEdge = (enclosingScrollView?.contentView.bounds.origin.x ?? 0) + gutterWidth
+    return point.x >= gutterEdge ? .iBeam : .arrow
   }
 
   /// Whether `point` (content coordinates) falls on a visible copy control.

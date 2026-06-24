@@ -279,13 +279,9 @@ struct WorkspaceSidebarView: View {
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
-    // Opaque field behind the whole sidebar column, up through the titlebar
-    // band: replaces the system vibrancy material, which let the desktop
-    // wallpaper tint the column.
-    .background(
-      Color(nsColor: LocusChromeColors.documentField)
-        .ignoresSafeArea(.container, edges: .top)
-    )
+    // Let the single window-level field background show through so the sidebar
+    // and document area stay on one continuous glass surface.
+    .background(Color.clear)
     .onAppear {
       publishVisibleEntries()
     }

@@ -211,12 +211,8 @@ struct WorkspaceBrowserView: View {
       workspaceDetail
     }
     // The window background shows through the ~8pt gutter around the floating
-    // sidebar glass panel (and anywhere no content paints). It must be the
-    // field color so the sidebar's backdrop reads as the same surface as the
-    // rest of the window; the glass pass adds only its own subtle edge shadow.
-    .containerBackground(
-      Color(nsColor: LocusChromeColors.documentField), for: .window
-    )
+    // sidebar panel and any unpainted chrome around the document card.
+    .modifier(LocusWindowFieldBackgroundModifier())
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onChange(of: searchQuery) {
       refreshSearchResults()
@@ -1171,12 +1167,9 @@ struct WorkspaceBrowserView: View {
       }
     }
     .modifier(DocumentCardModifier())
-    // The field paints up through the titlebar band so the header and the area
-    // around the card read as one continuous surface.
-    .background(
-      Color(nsColor: LocusChromeColors.documentField)
-        .ignoresSafeArea(.container, edges: .top)
-    )
+    // Let the single window-level field background show through so the sidebar
+    // and document area sample one continuous glass surface.
+    .background(Color.clear)
     .onGeometryChange(for: CGFloat.self) { geometry in
       geometry.size.width
     } action: { width in

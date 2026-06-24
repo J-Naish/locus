@@ -25,9 +25,17 @@ enum DocumentCardMetrics {
 /// behind it, and the active tab's fill, stroke, and foreground (where a theme
 /// can carry an accent).
 struct LocusTheme {
+  enum FieldBackgroundStyle: Equatable {
+    case solid
+    case glass
+  }
+
+  let id: String
+  let displayName: String
   let appearanceName: NSAppearance.Name
   let documentCard: NSColor
   let documentField: NSColor
+  let fieldBackgroundStyle: FieldBackgroundStyle
   let activeTabFill: NSColor
   let activeTabStroke: NSColor
   let activeTabText: NSColor
@@ -37,11 +45,29 @@ enum LocusChromeColors {
   static let fieldDarkeningFractionLight: CGFloat = 0.05
 
   /// Light — the original neutral look: the system editor white on a faintly
-  /// darker off-white field, with a neutral active tab. The default theme.
+  /// darker off-white field, with a neutral active tab.
   static let light = LocusTheme(
+    id: "light",
+    displayName: "Light",
     appearanceName: .aqua,
     documentCard: .textBackgroundColor,
     documentField: lightFieldFromSystemWhite,
+    fieldBackgroundStyle: .solid,
+    activeTabFill: .textBackgroundColor,
+    activeTabStroke: .separatorColor,
+    activeTabText: .labelColor
+  )
+
+  /// Glass — the original light palette on a single window-level Liquid Glass
+  /// field. Kept as a separate theme so the neutral Light theme remains a true
+  /// solid-background option.
+  static let glass = LocusTheme(
+    id: "glass",
+    displayName: "Glass",
+    appearanceName: .aqua,
+    documentCard: .textBackgroundColor,
+    documentField: lightFieldFromSystemWhite,
+    fieldBackgroundStyle: .glass,
     activeTabFill: .textBackgroundColor,
     activeTabStroke: .separatorColor,
     activeTabText: .labelColor
@@ -53,9 +79,12 @@ enum LocusChromeColors {
   /// active tab is a solid clay pill with light text. Named for the palette's
   /// own hues, not its origin.
   static let paper = LocusTheme(
+    id: "paper",
+    displayName: "Paper",
     appearanceName: .aqua,
     documentCard: srgb255(245, 240, 228),  // warm cream paper
     documentField: srgb255(232, 225, 210),  // soft warm cream main background
+    fieldBackgroundStyle: .solid,
     activeTabFill: clay,
     activeTabStroke: deeperClay,
     activeTabText: srgb255(250, 249, 245)  // ivory, for contrast on clay
@@ -64,13 +93,18 @@ enum LocusChromeColors {
   /// Dark — a black-based slate look (fixed, so it never absorbs the desktop
   /// wallpaper tint the system dark gray does) with the same clay accent.
   static let dark = LocusTheme(
+    id: "dark",
+    displayName: "Dark",
     appearanceName: .darkAqua,
     documentCard: srgb255(38, 38, 37),  // slate medium
     documentField: srgb255(25, 25, 24),  // slate dark
+    fieldBackgroundStyle: .solid,
     activeTabFill: clay,
     activeTabStroke: deeperClay,
     activeTabText: srgb255(250, 249, 245)
   )
+
+  static let registeredThemes = [light, glass, paper, dark]
 
   /// Book Cloth — the palette's signature warm terracotta.
   static let clay = srgb255(204, 120, 92)
@@ -83,6 +117,9 @@ enum LocusChromeColors {
 
   static var documentCard: NSColor { active.documentCard }
   static var documentField: NSColor { active.documentField }
+  static var fieldBackgroundStyle: LocusTheme.FieldBackgroundStyle {
+    active.fieldBackgroundStyle
+  }
   static var activeTabFill: NSColor { active.activeTabFill }
   static var activeTabStroke: NSColor { active.activeTabStroke }
   static var activeTabText: NSColor { active.activeTabText }
@@ -105,6 +142,38 @@ enum LocusChromeColors {
       base = NSColor.textBackgroundColor.usingColorSpace(.sRGB) ?? .textBackgroundColor
     }
     return base.blended(withFraction: fieldDarkeningFractionLight, of: .black) ?? base
+  }
+}
+
+struct LocusDocumentFieldBackground: View {
+  var body: some View {
+    let tint = Color(nsColor: LocusChromeColors.documentField)
+
+    switch LocusChromeColors.fieldBackgroundStyle {
+    case .solid:
+      tint
+    case .glass:
+      if #available(macOS 26.0, *) {
+        Rectangle()
+          .fill(tint.opacity(0.48))
+          .glassEffect(
+            .regular.tint(tint.opacity(0.18)),
+            in: .rect
+          )
+      } else {
+        Rectangle()
+          .fill(.regularMaterial)
+          .overlay(tint.opacity(0.48))
+      }
+    }
+  }
+}
+
+struct LocusWindowFieldBackgroundModifier: ViewModifier {
+  func body(content: Content) -> some View {
+    content.containerBackground(for: .window) {
+      LocusDocumentFieldBackground()
+    }
   }
 }
 
@@ -169,21 +238,11 @@ struct DocumentCardModifier: ViewModifier {
 
     return
       content
-      // The rounded corners are painted on, not clipped: a SwiftUI clip
-      // container around the AppKit editor suppresses its pointer cursor
-      // (measured — both legacy cursor rects and the editor's own cursorUpdate
-      // tracking areas register correctly yet the arrow wins while .clipShape
-      // is present, and recover as soon as it is removed). Field-colored caps
-      // over the square corners are visually identical to clipping here,
-      // because everything outside the card's border is the field.
-      .overlay(
-        RoundedCornerCaps()
-          .fill(
-            Color(nsColor: LocusChromeColors.documentField),
-            style: FillStyle(eoFill: true)
-          )
-          .allowsHitTesting(false)
-      )
+      // With a material/glass field, painted corner caps sample a different
+      // background than the window and show as artifacts. Clip only the card
+      // surface so the window-level field remains visible in the rounded
+      // notches, while the shadowed background can still draw outside the card.
+      .clipShape(shape)
       .background(
         shape
           .fill(Color(nsColor: LocusChromeColors.documentCard))
@@ -205,18 +264,6 @@ struct DocumentCardModifier: ViewModifier {
       .padding(.top, DocumentCardMetrics.topInset)
       .padding(.horizontal, DocumentCardMetrics.horizontalInset)
       .padding(.bottom, DocumentCardMetrics.bottomInset)
-  }
-}
-
-/// The region between a rectangle and the inscribed card shape — the notches
-/// at the rounded top corners. Filled with `FillStyle(eoFill: true)` it covers
-/// exactly what `clipShape` would have masked.
-private struct RoundedCornerCaps: Shape {
-  func path(in rect: CGRect) -> Path {
-    var path = Path()
-    path.addRect(rect)
-    path.addPath(DocumentCardMetrics.shape.path(in: rect))
-    return path
   }
 }
 
