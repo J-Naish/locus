@@ -121,6 +121,13 @@ mv "$TEMP_PATH" "$INSTALL_PATH"
 
 codesign --verify --deep --strict --verbose=2 "$INSTALL_PATH"
 
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [ -x "$LSREGISTER" ]; then
+  echo
+  echo "== Register with LaunchServices =="
+  "$LSREGISTER" -f -R -trusted "$INSTALL_PATH"
+fi
+
 echo
 echo "installed: $INSTALL_PATH"
 echo "archive: $LOCUS_RELEASE_OUTPUT_DIR/Locus-macOS.zip"

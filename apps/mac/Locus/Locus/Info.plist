@@ -11,7 +11,50 @@
   <array>
     <dict>
       <key>CFBundleTypeName</key>
+      <string>Locus Workspace Folders</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.folder</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
       <string>Locus Text Documents</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>txt</string>
+        <string>text</string>
+        <string>md</string>
+        <string>markdown</string>
+        <string>mdown</string>
+        <string>mkd</string>
+        <string>mkdn</string>
+        <string>html</string>
+        <string>htm</string>
+        <string>css</string>
+        <string>js</string>
+        <string>ts</string>
+        <string>jsx</string>
+        <string>tsx</string>
+        <string>swift</string>
+        <string>rs</string>
+        <string>py</string>
+        <string>rb</string>
+        <string>go</string>
+        <string>java</string>
+        <string>c</string>
+        <string>cc</string>
+        <string>cpp</string>
+        <string>h</string>
+        <string>hpp</string>
+        <string>sh</string>
+        <string>zsh</string>
+        <string>bash</string>
+      </array>
       <key>CFBundleTypeRole</key>
       <string>Editor</string>
       <key>LSHandlerRank</key>
@@ -21,16 +64,82 @@
         <string>public.text</string>
         <string>public.plain-text</string>
         <string>public.utf8-plain-text</string>
+        <string>public.source-code</string>
+        <string>public.script</string>
+        <string>public.shell-script</string>
         <string>net.daringfireball.markdown</string>
+        <string>public.html</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Locus Configuration and Data Documents</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>json</string>
+        <string>jsonc</string>
+        <string>jsonl</string>
+        <string>ndjson</string>
+        <string>yaml</string>
+        <string>yml</string>
+        <string>toml</string>
+        <string>xml</string>
+        <string>plist</string>
+        <string>csv</string>
+        <string>tsv</string>
+        <string>env</string>
+        <string>ini</string>
+        <string>conf</string>
+        <string>config</string>
+        <string>properties</string>
+        <string>editorconfig</string>
+        <string>gitignore</string>
+        <string>dockerignore</string>
+        <string>ignore</string>
+      </array>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
         <string>public.json</string>
         <string>public.xml</string>
+        <string>com.apple.property-list</string>
         <string>public.yaml</string>
+        <string>org.yaml.yaml</string>
         <string>org.toml-lang.toml</string>
+        <string>com.microsoft.vscode.jsonc</string>
+        <string>org.jsonlines.jsonl</string>
+        <string>public.comma-separated-values-text</string>
+        <string>public.tab-separated-values-text</string>
+        <string>public.delimited-values-text</string>
       </array>
     </dict>
     <dict>
       <key>CFBundleTypeName</key>
       <string>Locus Preview Documents</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>pdf</string>
+        <string>png</string>
+        <string>jpg</string>
+        <string>jpeg</string>
+        <string>heic</string>
+        <string>gif</string>
+        <string>webp</string>
+        <string>tiff</string>
+        <string>tif</string>
+        <string>bmp</string>
+        <string>svg</string>
+        <string>mp4</string>
+        <string>mov</string>
+        <string>m4v</string>
+        <string>mp3</string>
+        <string>m4a</string>
+        <string>wav</string>
+        <string>aiff</string>
+      </array>
       <key>CFBundleTypeRole</key>
       <string>Viewer</string>
       <key>LSHandlerRank</key>
@@ -41,6 +150,38 @@
         <string>com.adobe.pdf</string>
         <string>public.movie</string>
         <string>public.audio</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Locus Quick Look Documents</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>doc</string>
+        <string>docx</string>
+        <string>xls</string>
+        <string>xlsx</string>
+        <string>ppt</string>
+        <string>pptx</string>
+        <string>pages</string>
+        <string>numbers</string>
+        <string>key</string>
+      </array>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>org.openxmlformats.wordprocessingml.document</string>
+        <string>org.openxmlformats.spreadsheetml.sheet</string>
+        <string>org.openxmlformats.presentationml.presentation</string>
+        <string>com.microsoft.word.doc</string>
+        <string>com.microsoft.excel.xls</string>
+        <string>com.microsoft.powerpoint.ppt</string>
+        <string>com.apple.iwork.pages.pages</string>
+        <string>com.apple.iwork.numbers.numbers</string>
+        <string>com.apple.iwork.keynote.key</string>
       </array>
     </dict>
   </array>
@@ -73,7 +214,58 @@
     <dict>
       <key>UTTypeConformsTo</key>
       <array>
-        <string>public.text</string>
+        <string>public.plain-text</string>
+      </array>
+      <key>UTTypeDescription</key>
+      <string>Markdown Document</string>
+      <key>UTTypeIdentifier</key>
+      <string>net.daringfireball.markdown</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>md</string>
+          <string>markdown</string>
+          <string>mdown</string>
+          <string>mkd</string>
+          <string>mkdn</string>
+        </array>
+        <key>public.mime-type</key>
+        <array>
+          <string>text/markdown</string>
+          <string>text/x-markdown</string>
+        </array>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.plain-text</string>
+      </array>
+      <key>UTTypeDescription</key>
+      <string>YAML Document</string>
+      <key>UTTypeIdentifier</key>
+      <string>org.yaml.yaml</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>yaml</string>
+          <string>yml</string>
+        </array>
+        <key>public.mime-type</key>
+        <array>
+          <string>application/yaml</string>
+          <string>application/x-yaml</string>
+          <string>text/yaml</string>
+          <string>text/x-yaml</string>
+        </array>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.plain-text</string>
       </array>
       <key>UTTypeDescription</key>
       <string>TOML Document</string>
@@ -86,7 +278,54 @@
           <string>toml</string>
         </array>
         <key>public.mime-type</key>
-        <string>application/toml</string>
+        <array>
+          <string>application/toml</string>
+          <string>text/toml</string>
+        </array>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.plain-text</string>
+      </array>
+      <key>UTTypeDescription</key>
+      <string>JSON with Comments Document</string>
+      <key>UTTypeIdentifier</key>
+      <string>com.microsoft.vscode.jsonc</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>jsonc</string>
+        </array>
+        <key>public.mime-type</key>
+        <array>
+          <string>application/jsonc</string>
+        </array>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.plain-text</string>
+      </array>
+      <key>UTTypeDescription</key>
+      <string>JSON Lines Document</string>
+      <key>UTTypeIdentifier</key>
+      <string>org.jsonlines.jsonl</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>jsonl</string>
+          <string>ndjson</string>
+        </array>
+        <key>public.mime-type</key>
+        <array>
+          <string>application/jsonl</string>
+          <string>application/x-ndjson</string>
+        </array>
       </dict>
     </dict>
   </array>
