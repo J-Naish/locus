@@ -185,6 +185,20 @@ struct HomeView: View {
     .task {
       refreshFileLocationShortcuts()
       loadInitialFolderIfNeeded()
+      openPendingWorkspaceFolderRequests()
+    }
+    .onReceive(
+      NotificationCenter.default.publisher(for: WorkspaceFolderOpenRequestNotification.name)
+    ) { notification in
+      guard
+        let requestID = notification.userInfo?[WorkspaceFolderOpenRequestNotification.requestIDKey]
+          as? UUID,
+        let request = WorkspaceFolderOpenRequestCenter.shared.consumeRequest(id: requestID)
+      else {
+        return
+      }
+
+      openWorkspaceFolderRequest(request)
     }
     .fileImporter(
       isPresented: $isFolderImporterPresented,
@@ -525,8 +539,7 @@ struct HomeView: View {
       if request.recordRecent,
         RecentFolderRecordPolicy.allowsRecording(folderURL, homeDirectoryURL: homeDirectoryURL)
       {
-        recentFolderStore.record(folderURL)
-        refreshRecentFolders()
+        recordRecentFolder(folderURL)
       }
       if let openedEntryID = entryID(in: snapshot.entries, matching: request.selectedURL),
         let openedEntry = snapshot.entries.first(where: { $0.id == openedEntryID }),
@@ -600,13 +613,38 @@ struct HomeView: View {
       return
     }
 
-    recentFolderStore.record(folderURL)
-    refreshRecentFolders()
+    recordRecentFolder(folderURL)
   }
 
   @MainActor
   private func openRecentFolder(_ folder: RecentFolder) {
     navigateToWorkspaceFolder(folder.url, rootChange: .set(folder.url), intent: .openLocation)
+  }
+
+  @MainActor
+  private func openPendingWorkspaceFolderRequests() {
+    for request in WorkspaceFolderOpenRequestCenter.shared.consumePendingRequests() {
+      openWorkspaceFolderRequest(request)
+    }
+  }
+
+  @MainActor
+  private func openWorkspaceFolderRequest(_ request: WorkspaceFolderOpenRequest) {
+    navigateToWorkspaceFolder(
+      request.folderURL,
+      rootChange: .set(request.folderURL),
+      intent: .openLocation
+    )
+  }
+
+  @MainActor
+  private func recordRecentFolder(_ folderURL: URL) {
+    guard recentFolderStore.record(folderURL) else {
+      return
+    }
+
+    WorkspaceRecentDocumentRegistration.register(folderURL)
+    refreshRecentFolders()
   }
 
   @MainActor

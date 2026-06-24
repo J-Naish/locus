@@ -1,6 +1,94 @@
 import AppKit
 import SwiftUI
 
+enum WorkspaceFolderOpenRequestNotification {
+  static let name = Notification.Name("LocusWorkspaceFolderOpenRequest")
+  static let folderURLKey = "folderURL"
+  static let requestIDKey = "requestID"
+}
+
+struct WorkspaceFolderOpenRequest: Identifiable, Equatable {
+  let id: UUID
+  let folderURL: URL
+}
+
+@MainActor
+final class WorkspaceFolderOpenRequestCenter {
+  static let shared = WorkspaceFolderOpenRequestCenter()
+
+  private var pendingRequests: [WorkspaceFolderOpenRequest] = []
+
+  func requestOpen(_ folderURL: URL, postsNotification: Bool = true) {
+    let request = WorkspaceFolderOpenRequest(
+      id: UUID(),
+      folderURL: folderURL.standardizedFileURL
+    )
+    pendingRequests.append(request)
+    guard postsNotification else {
+      return
+    }
+
+    NotificationCenter.default.post(
+      name: WorkspaceFolderOpenRequestNotification.name,
+      object: self,
+      userInfo: [
+        WorkspaceFolderOpenRequestNotification.requestIDKey: request.id,
+        WorkspaceFolderOpenRequestNotification.folderURLKey: request.folderURL,
+      ]
+    )
+  }
+
+  func consumeRequest(id: UUID) -> WorkspaceFolderOpenRequest? {
+    guard let index = pendingRequests.firstIndex(where: { $0.id == id }) else {
+      return nil
+    }
+    return pendingRequests.remove(at: index)
+  }
+
+  func consumePendingRequests() -> [WorkspaceFolderOpenRequest] {
+    defer { pendingRequests.removeAll() }
+    return pendingRequests
+  }
+}
+
+@MainActor
+enum WorkspaceRecentDocumentRegistration {
+  static func register(_ folderURL: URL) {
+    #if DEBUG
+      guard ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] != "1" else {
+        return
+      }
+    #endif
+
+    NSDocumentController.shared.noteNewRecentDocumentURL(folderURL.standardizedFileURL)
+  }
+
+  static func synchronize(_ recentFolders: [RecentFolder]) {
+    for url in registrationOrder(for: recentFolders) {
+      register(url)
+    }
+  }
+
+  static func registrationOrder(for recentFolders: [RecentFolder]) -> [URL] {
+    recentFolders.reversed().map(\.url)
+  }
+}
+
+enum WorkspaceOpenFileResolution {
+  static func firstFolderURL(in filenames: [String]) -> URL? {
+    filenames
+      .map { URL(filePath: $0, directoryHint: .isDirectory).standardizedFileURL }
+      .first(where: isExistingDirectory(_:))
+  }
+
+  static func isExistingDirectory(_ folderURL: URL) -> Bool {
+    let path = folderURL.path(percentEncoded: false)
+    var isDirectory: ObjCBool = false
+    return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+      && isDirectory.boolValue
+  }
+}
+
 enum LocusWindowMetrics {
   // Default to a comfortable two-pane workspace without making that size mandatory.
   static let defaultWidth: CGFloat = 1184
@@ -234,6 +322,7 @@ final class LocusApplicationDelegate: NSObject, NSApplicationDelegate {
     // in the system appearance. (The SwiftUI-level .preferredColorScheme pin
     // is not an option — it detaches the sidebar panel from the titlebar.)
     NSApp.appearance = LocusChromeColors.activeAppearance
+    WorkspaceRecentDocumentRegistration.synchronize(recentFoldersForOpenRecent())
   }
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -242,6 +331,38 @@ final class LocusApplicationDelegate: NSObject, NSApplicationDelegate {
     }
     return LocusUnsavedChangesPrompt.confirmDiscardForApplicationTermination()
       ? .terminateNow : .terminateCancel
+  }
+
+  func application(_ sender: NSApplication, openFile filename: String) -> Bool {
+    requestOpenFolderIfPossible(URL(filePath: filename, directoryHint: .isDirectory))
+  }
+
+  func application(_ sender: NSApplication, openFiles filenames: [String]) {
+    guard let folderURL = WorkspaceOpenFileResolution.firstFolderURL(in: filenames) else {
+      sender.reply(toOpenOrPrint: .failure)
+      return
+    }
+
+    sender.reply(toOpenOrPrint: requestOpenFolderIfPossible(folderURL) ? .success : .failure)
+  }
+
+  private func recentFoldersForOpenRecent() -> [RecentFolder] {
+    LocusApp.recentFolderStore.recentFolders().filter { folder in
+      !WorkspaceHomeVisibility.isHiddenHomeURL(
+        folder.url,
+        homeDirectoryURL: LocusApp.homeDirectoryURL
+      )
+    }
+  }
+
+  private func requestOpenFolderIfPossible(_ folderURL: URL) -> Bool {
+    guard WorkspaceOpenFileResolution.isExistingDirectory(folderURL) else {
+      return false
+    }
+
+    NSApp.activate(ignoringOtherApps: true)
+    WorkspaceFolderOpenRequestCenter.shared.requestOpen(folderURL)
+    return true
   }
 }
 
@@ -380,7 +501,7 @@ struct LocusApp: App {
     }
   }
 
-  @MainActor private static let recentFolderStore: RecentFolderStore = {
+  @MainActor fileprivate static let recentFolderStore: RecentFolderStore = {
     #if DEBUG
       guard ProcessInfo.processInfo.environment["LOCUS_UI_TESTING"] == "1" else {
         return RecentFolderStore()
@@ -438,7 +559,7 @@ struct LocusApp: App {
     InitialFolderURLResolver.resolution(homeDirectoryURL: homeDirectoryURL)
   }
 
-  private static let homeDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+  fileprivate static let homeDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
 
   private static var uiTestRecentFoldersKey: String {
     LaunchArgumentValues.value(
