@@ -1106,6 +1106,15 @@ struct WorkspaceBrowserView: View {
     }
   }
 
+  private var sidebarIsVisibleForToolbar: Bool {
+    switch columnVisibility {
+    case .detailOnly:
+      return false
+    default:
+      return true
+    }
+  }
+
   private var workspaceDetail: some View {
     Group {
       if snapshot.entries.isEmpty {
@@ -1151,9 +1160,9 @@ struct WorkspaceBrowserView: View {
       DocumentTabToolbar(
         tabs: documentTabs.tabs,
         activeTabID: openDocumentEntry?.id,
-        maxStripWidth: max(
-          0,
-          detailContentWidth - DocumentTabStripMetrics.toolbarTrailingReserve
+        maxStripWidth: DocumentTabStripMetrics.toolbarStripWidth(
+          forDetailWidth: detailContentWidth,
+          sidebarIsVisible: sidebarIsVisibleForToolbar
         ),
         onSelect: openDocumentTab,
         onClose: closeDocumentTab,

@@ -434,6 +434,49 @@ final class DocumentTabStripViewTests: XCTestCase {
     XCTAssertEqual(inactiveHost.fittingSize.width, activeHost.fittingSize.width, accuracy: 0.5)
   }
 
+  func testToolbarStripWidthUsesSmallReserveWhenSidebarIsVisible() {
+    let detailWidth = LocusWindowMetrics.minimumWidth
+
+    let stripWidth = DocumentTabStripMetrics.toolbarStripWidth(
+      forDetailWidth: detailWidth,
+      sidebarIsVisible: true
+    )
+
+    XCTAssertEqual(
+      stripWidth,
+      detailWidth - DocumentTabStripMetrics.toolbarVisibleSidebarReserve,
+      accuracy: 0.5
+    )
+  }
+
+  func testToolbarStripWidthReservesTitlebarChromeWhenSidebarIsHidden() {
+    let detailWidth = LocusWindowMetrics.minimumWidth
+
+    let stripWidth = DocumentTabStripMetrics.toolbarStripWidth(
+      forDetailWidth: detailWidth,
+      sidebarIsVisible: false
+    )
+
+    XCTAssertEqual(
+      stripWidth,
+      detailWidth - DocumentTabStripMetrics.toolbarHiddenSidebarReserve,
+      accuracy: 0.5
+    )
+    XCTAssertLessThan(
+      stripWidth,
+      detailWidth - DocumentTabStripMetrics.toolbarVisibleSidebarReserve
+    )
+  }
+
+  func testToolbarStripWidthClampsToZeroWhenTheColumnIsTooNarrow() {
+    let stripWidth = DocumentTabStripMetrics.toolbarStripWidth(
+      forDetailWidth: DocumentTabStripMetrics.toolbarHiddenSidebarReserve - 1,
+      sidebarIsVisible: false
+    )
+
+    XCTAssertEqual(stripWidth, 0, accuracy: 0.5)
+  }
+
   private func skipIfHeadlessHostingLayoutIsUnavailable() throws {
     let host = NSHostingView(rootView: Text("x"))
     host.layoutSubtreeIfNeeded()

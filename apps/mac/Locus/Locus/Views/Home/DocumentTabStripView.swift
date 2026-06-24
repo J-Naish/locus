@@ -121,7 +121,17 @@ enum DocumentTabStripMetrics {
   static let activeChipShadowRadius: CGFloat = 3
   static let activeChipShadowOffsetY: CGFloat = 1
   static let chipShadowHeadroom: CGFloat = 4
-  static let toolbarTrailingReserve: CGFloat = 24
+  /// Reserve for the toolbar's own trailing overflow room while the sidebar is
+  /// visible. The traffic lights and native sidebar toggle live over the
+  /// sidebar surface in this state, so the tab strip can use almost the whole
+  /// detail column.
+  static let toolbarVisibleSidebarReserve: CGFloat = 24
+  /// Reserve for titlebar chrome when the sidebar is hidden. The detail column
+  /// then grows to nearly the full window width, but the toolbar item still
+  /// cannot occupy the traffic-light/sidebar-toggle area at the leading edge.
+  /// Keeping this budget out of the strip's fitting width prevents NSToolbar
+  /// from moving the item into its overflow menu during close/open transitions.
+  static let toolbarHiddenSidebarReserve: CGFloat = 160
   /// Optical centering within the unified toolbar: the chips sit a touch high
   /// in the bar, so nudge them down. An offset, not padding — it must not
   /// change the strip's fitting size, which the toolbar treats as a minimum.
@@ -142,6 +152,15 @@ enum DocumentTabStripMetrics {
   /// One spring for the whole interaction: neighbors sliding aside and the
   /// released chip settling into its slot.
   static let reorderAnimation = Animation.spring(response: 0.3, dampingFraction: 0.8)
+
+  static func toolbarStripWidth(
+    forDetailWidth detailWidth: CGFloat,
+    sidebarIsVisible: Bool
+  ) -> CGFloat {
+    let reserve =
+      sidebarIsVisible ? toolbarVisibleSidebarReserve : toolbarHiddenSidebarReserve
+    return max(0, detailWidth - reserve)
+  }
 }
 
 struct DocumentCardModifier: ViewModifier {
@@ -295,7 +314,7 @@ struct DocumentTabStripView: View {
     // NSToolbar uses the hosted view fitting width as its required minimum, so
     // this width is also the explicit cap that keeps the item from reporting
     // the full ideal tab width and overflowing into the "»" menu — maxWidth is
-    // the detail width less a small trailing reserve, so it always fits.
+    // the detail width less the state-appropriate toolbar reserve.
     .frame(width: tabs.isEmpty ? 0 : max(maxWidth, 0), alignment: .leading)
     .clipShape(Rectangle().inset(by: -DocumentTabStripMetrics.chipShadowHeadroom))
     .onGeometryChange(for: CGRect.self) { geometry in
