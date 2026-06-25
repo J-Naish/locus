@@ -18,6 +18,7 @@
 		1A00000100000000000000E2 /* TextBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000E3 /* TextBuffer.swift */; };
 		1A00000100000000000000E6 /* VirtualizedTextDocumentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000E7 /* VirtualizedTextDocumentView.swift */; };
 		1A0000010000000000000F30 /* LineRenderingTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F31 /* LineRenderingTextView.swift */; };
+		1A0000010000000000000F70 /* TextViewportModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F71 /* TextViewportModels.swift */; };
 		1A0000010000000000000F10 /* OpenDocumentCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F11 /* OpenDocumentCache.swift */; };
 		1A00000100000000000000EA /* GutterMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000EB /* GutterMetrics.swift */; };
 		1A0000010000000000000078 /* EmptyWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000079 /* EmptyWorkspaceView.swift */; };
@@ -117,6 +118,7 @@
 		1A00000100000000000000E3 /* TextBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextBuffer.swift; sourceTree = "<group>"; };
 		1A00000100000000000000E7 /* VirtualizedTextDocumentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualizedTextDocumentView.swift; sourceTree = "<group>"; };
 		1A0000010000000000000F31 /* LineRenderingTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LineRenderingTextView.swift; sourceTree = "<group>"; };
+		1A0000010000000000000F71 /* TextViewportModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextViewportModels.swift; sourceTree = "<group>"; };
 		1A0000010000000000000F11 /* OpenDocumentCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenDocumentCache.swift; sourceTree = "<group>"; };
 		1A00000100000000000000EB /* GutterMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GutterMetrics.swift; sourceTree = "<group>"; };
 		1A0000010000000000000079 /* EmptyWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyWorkspaceView.swift; sourceTree = "<group>"; };
@@ -366,6 +368,7 @@
 				1A0000010000000000000099 /* WorkspaceDocumentSurface.swift */,
 				1A00000100000000000000E7 /* VirtualizedTextDocumentView.swift */,
 				1A0000010000000000000F31 /* LineRenderingTextView.swift */,
+				1A0000010000000000000F71 /* TextViewportModels.swift */,
 				1A00000100000000000000EB /* GutterMetrics.swift */,
 				1A00000100000000000000CB /* WorkspaceEntryPresentation.swift */,
 				1A0000010000000000000065 /* WorkspaceEntryOpenAction.swift */,
@@ -561,9 +564,10 @@
 				1A0000010000000000000F04 /* TextEncoding.swift in Sources */,
 				1A000001000000000000008A /* WorkspaceDirectoryMonitor.swift in Sources */,
 				1A0000010000000000000098 /* WorkspaceDocumentSurface.swift in Sources */,
-				1A00000100000000000000E6 /* VirtualizedTextDocumentView.swift in Sources */,
-				1A0000010000000000000F30 /* LineRenderingTextView.swift in Sources */,
-				1A0000010000000000000F32 /* WorkspaceBrowserView.swift in Sources */,
+					1A00000100000000000000E6 /* VirtualizedTextDocumentView.swift in Sources */,
+					1A0000010000000000000F30 /* LineRenderingTextView.swift in Sources */,
+					1A0000010000000000000F70 /* TextViewportModels.swift in Sources */,
+					1A0000010000000000000F32 /* WorkspaceBrowserView.swift in Sources */,
 				1A0000010000000000000F42 /* DocumentTabStripView.swift in Sources */,
 				1A0000010000000000000F40 /* DocumentTabs.swift in Sources */,
 				1A0000010000000000000F10 /* OpenDocumentCache.swift in Sources */,
