@@ -203,7 +203,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
         for: makeEntry(name: ".customignore", fileType: .unknown)))
   }
 
-  func testMarkdownSyntaxHighlightsHeadingsAndInlineCode() {
+  func testMarkdownSourceFallbackStylesHeadingsAndInlineCode() {
     let storage = NSTextStorage(string: "# Title\nUse `value` here")
 
     TextDocumentSyntaxHighlighter.apply(
@@ -224,7 +224,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
         .contains(.monoSpace), true)
   }
 
-  func testMarkdownDocumentStylingConcealsHeadingMarkerAndScalesTitle() throws {
+  func testMarkdownSourceFallbackConcealsHeadingMarkerAndScalesTitle() throws {
     let storage = NSTextStorage(string: "# Quarterly review")
 
     TextDocumentSyntaxHighlighter.apply(
@@ -1082,7 +1082,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       "```yaml")
   }
 
-  func testMarkdownDocumentStylingConcealsTaskMarkerButKeepsTextReadable() throws {
+  func testMarkdownSourceFallbackConcealsTaskMarkerButKeepsTextReadable() throws {
     let storage = NSTextStorage(string: "- [ ] Update the summary")
 
     TextDocumentSyntaxHighlighter.apply(
@@ -1099,7 +1099,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       NSColor.labelColor)
   }
 
-  func testMarkdownDocumentStylingConcealsOrderedMarkers() throws {
+  func testMarkdownSourceFallbackConcealsOrderedMarkers() throws {
     let storage = NSTextStorage(string: "1. Review the numbers")
 
     TextDocumentSyntaxHighlighter.apply(
@@ -1149,7 +1149,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       storage.foregroundColor(in: storage.string, matching: "***")?.alphaComponent ?? 1, 0.01)
   }
 
-  func testMarkdownStrikethroughStylesContentAndConcealsMarkers() {
+  func testMarkdownSourceFallbackStrikethroughStylesContentAndConcealsMarkers() {
     let storage = NSTextStorage(string: "Mark ~~done~~ after review")
 
     TextDocumentSyntaxHighlighter.apply(
@@ -1167,7 +1167,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       storage.foregroundColor(in: storage.string, matching: "~~")?.alphaComponent ?? 1, 0.01)
   }
 
-  func testMarkdownSetextHeadingScalesPreviousLineAndConcealsUnderline() {
+  func testMarkdownSourceFallbackSetextHeadingScalesPreviousLineAndConcealsUnderline() {
     let storage = NSTextStorage(string: "Quarterly Review\n---")
 
     TextDocumentSyntaxHighlighter.apply(
@@ -1238,7 +1238,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
         .contains(.italic), false)
   }
 
-  func testMarkdownImageSyntaxIsNotTreatedAsALink() {
+  func testMarkdownSourceFallbackImageSyntaxIsNotTreatedAsALink() {
     let storage = NSTextStorage(string: "![alt](https://example.com/image.png)")
 
     TextDocumentSyntaxHighlighter.apply(

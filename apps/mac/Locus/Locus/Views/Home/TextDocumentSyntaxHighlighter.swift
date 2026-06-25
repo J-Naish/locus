@@ -554,7 +554,11 @@ enum TextDocumentSyntaxHighlighter {
 
     switch syntax {
     case .markdown:
-      highlightMarkdownDocument(
+      // Source fallback only. The document-like Markdown editor renders through
+      // `highlightedLine` / `markdownMeasurementLine`, where display text can be
+      // shorter than source text. This in-place path keeps source length fixed
+      // for read-only/plain fallback surfaces.
+      styleMarkdownSourceDocument(
         text,
         in: textStorage,
         range: highlightedRange,
@@ -648,6 +652,8 @@ enum TextDocumentSyntaxHighlighter {
     let quotePrefixLength: Int
     let body: String
   }
+
+  // MARK: - Markdown rendered document path
 
   private static func renderedMarkdownLine(
     _ line: String,
@@ -2002,7 +2008,9 @@ enum TextDocumentSyntaxHighlighter {
     ]
   }
 
-  private static func highlightMarkdownDocument(
+  // MARK: - Markdown source fallback path
+
+  private static func styleMarkdownSourceDocument(
     _ text: String,
     in textStorage: NSMutableAttributedString,
     range: NSRange,
@@ -2024,7 +2032,7 @@ enum TextDocumentSyntaxHighlighter {
       let line = nsText.substring(with: contentRange)
       let intersects = NSIntersectionRange(contentRange, range)
       if intersects.length > 0 {
-        styleMarkdownLine(
+        styleMarkdownSourceLine(
           line,
           lineRange: contentRange,
           in: textStorage,
@@ -2040,7 +2048,7 @@ enum TextDocumentSyntaxHighlighter {
     }
   }
 
-  private static func styleMarkdownLine(
+  private static func styleMarkdownSourceLine(
     _ line: String,
     lineRange: NSRange,
     in textStorage: NSMutableAttributedString,
@@ -2068,7 +2076,7 @@ enum TextDocumentSyntaxHighlighter {
           foregroundColor: .secondaryLabelColor,
           includeVisualAttributes: includeVisualAttributes),
         range: lineRange)
-      muteMarkdownSyntax(
+      muteMarkdownSourceSyntax(
         range: NSRange(location: lineRange.location, length: fence.markerLength),
         in: textStorage,
         font: typography.body.regular,
@@ -2096,7 +2104,7 @@ enum TextDocumentSyntaxHighlighter {
           includeVisualAttributes: includeVisualAttributes),
         range: lineRange)
     } else if state.isSetextUnderline {
-      muteMarkdownSyntax(
+      muteMarkdownSourceSyntax(
         range: lineRange,
         in: textStorage,
         font: typography.body.regular,
@@ -2110,21 +2118,21 @@ enum TextDocumentSyntaxHighlighter {
           foregroundColor: heading.level == 6 ? .secondaryLabelColor : .labelColor,
           includeVisualAttributes: includeVisualAttributes),
         range: lineRange)
-      muteMarkdownSyntax(
+      muteMarkdownSourceSyntax(
         range: NSRange(location: lineRange.location, length: heading.prefixLength),
         in: textStorage,
         font: typography.body.regular,
         includeVisualAttributes: includeVisualAttributes)
     } else if let prefixLength = markdownBlockPrefixLength(in: line) {
       lineFonts = typography.body
-      muteMarkdownSyntax(
+      muteMarkdownSourceSyntax(
         range: NSRange(location: lineRange.location, length: prefixLength),
         in: textStorage,
         font: typography.body.regular,
         includeVisualAttributes: includeVisualAttributes)
     } else if markdownLineIsHorizontalRule(line) {
       lineFonts = typography.body
-      muteMarkdownSyntax(
+      muteMarkdownSourceSyntax(
         range: lineRange,
         in: textStorage,
         font: typography.body.regular,
@@ -2133,7 +2141,7 @@ enum TextDocumentSyntaxHighlighter {
       lineFonts = typography.body
     }
 
-    highlightMarkdownInline(
+    styleMarkdownSourceInline(
       in: line,
       lineRange: lineRange,
       textStorage: textStorage,
@@ -2149,7 +2157,7 @@ enum TextDocumentSyntaxHighlighter {
     case strike
   }
 
-  private static func highlightMarkdownInline(
+  private static func styleMarkdownSourceInline(
     in line: String,
     lineRange: NSRange,
     textStorage: NSMutableAttributedString,
@@ -2157,19 +2165,19 @@ enum TextDocumentSyntaxHighlighter {
     typography: MarkdownTypography,
     includeVisualAttributes: Bool
   ) {
-    var protectedRanges = applyInlineCode(
+    var protectedRanges = styleMarkdownSourceInlineCode(
       in: line,
       lineRange: lineRange,
       textStorage: textStorage,
       typography: typography,
       includeVisualAttributes: includeVisualAttributes)
-    protectedRanges += applyLinks(
+    protectedRanges += styleMarkdownSourceLinks(
       in: line,
       lineRange: lineRange,
       textStorage: textStorage,
       lineFonts: lineFonts,
       includeVisualAttributes: includeVisualAttributes)
-    applyDelimitedSpan(
+    styleMarkdownSourceDelimitedSpan(
       expression: boldItalicExpression,
       markerLength: 3,
       style: .boldItalic,
@@ -2179,7 +2187,7 @@ enum TextDocumentSyntaxHighlighter {
       lineFonts: lineFonts,
       textStorage: textStorage,
       includeVisualAttributes: includeVisualAttributes)
-    applyDelimitedSpan(
+    styleMarkdownSourceDelimitedSpan(
       expression: boldExpression,
       markerLength: 2,
       style: .bold,
@@ -2189,7 +2197,7 @@ enum TextDocumentSyntaxHighlighter {
       lineFonts: lineFonts,
       textStorage: textStorage,
       includeVisualAttributes: includeVisualAttributes)
-    applyDelimitedSpan(
+    styleMarkdownSourceDelimitedSpan(
       expression: italicExpression,
       markerLength: 1,
       style: .italic,
@@ -2199,7 +2207,7 @@ enum TextDocumentSyntaxHighlighter {
       lineFonts: lineFonts,
       textStorage: textStorage,
       includeVisualAttributes: includeVisualAttributes)
-    applyDelimitedSpan(
+    styleMarkdownSourceDelimitedSpan(
       expression: strikeExpression,
       markerLength: 2,
       style: .strike,
@@ -2211,7 +2219,7 @@ enum TextDocumentSyntaxHighlighter {
       includeVisualAttributes: includeVisualAttributes)
   }
 
-  private static func applyInlineCode(
+  private static func styleMarkdownSourceInlineCode(
     in line: String,
     lineRange: NSRange,
     textStorage: NSMutableAttributedString,
@@ -2229,12 +2237,12 @@ enum TextDocumentSyntaxHighlighter {
         markdownInlineCodeAttributes(
           font: typography.inlineCode, includeVisualAttributes: includeVisualAttributes),
         range: content)
-      muteMarkdownSyntax(
+      muteMarkdownSourceSyntax(
         range: NSRange(location: lineRange.location + match.range.location, length: 1),
         in: textStorage,
         font: typography.inlineCode,
         includeVisualAttributes: includeVisualAttributes)
-      muteMarkdownSyntax(
+      muteMarkdownSourceSyntax(
         range: NSRange(location: lineRange.location + NSMaxRange(match.range) - 1, length: 1),
         in: textStorage,
         font: typography.inlineCode,
@@ -2243,7 +2251,7 @@ enum TextDocumentSyntaxHighlighter {
     return protectedRanges
   }
 
-  private static func applyLinks(
+  private static func styleMarkdownSourceLinks(
     in line: String,
     lineRange: NSRange,
     textStorage: NSMutableAttributedString,
@@ -2261,22 +2269,22 @@ enum TextDocumentSyntaxHighlighter {
       if includeVisualAttributes {
         textStorage.addAttributes([.foregroundColor: NSColor.linkColor], range: label)
       }
-      muteMarkdownSyntax(
+      muteMarkdownSourceSyntax(
         range: NSRange(location: lineRange.location + match.range.location, length: 1),
         in: textStorage,
         font: lineFonts.regular,
         includeVisualAttributes: includeVisualAttributes)
-      muteMarkdownSyntax(
+      muteMarkdownSourceSyntax(
         range: NSRange(location: NSMaxRange(label), length: 2),
         in: textStorage,
         font: lineFonts.regular,
         includeVisualAttributes: includeVisualAttributes)
-      muteMarkdownSyntax(
+      muteMarkdownSourceSyntax(
         range: url,
         in: textStorage,
         font: lineFonts.regular,
         includeVisualAttributes: includeVisualAttributes)
-      muteMarkdownSyntax(
+      muteMarkdownSourceSyntax(
         range: NSRange(location: lineRange.location + NSMaxRange(match.range) - 1, length: 1),
         in: textStorage,
         font: lineFonts.regular,
@@ -2285,7 +2293,7 @@ enum TextDocumentSyntaxHighlighter {
     return protectedRanges
   }
 
-  private static func applyDelimitedSpan(
+  private static func styleMarkdownSourceDelimitedSpan(
     expression: NSRegularExpression,
     markerLength: Int,
     style: MarkdownDelimitedStyle,
@@ -2318,12 +2326,12 @@ enum TextDocumentSyntaxHighlighter {
         }
       }
       textStorage.addAttributes(attributes, range: content)
-      muteMarkdownSyntax(
+      muteMarkdownSourceSyntax(
         range: NSRange(location: lineRange.location + match.range.location, length: markerLength),
         in: textStorage,
         font: lineFonts.regular,
         includeVisualAttributes: includeVisualAttributes)
-      muteMarkdownSyntax(
+      muteMarkdownSourceSyntax(
         range: NSRange(
           location: lineRange.location + NSMaxRange(match.range) - markerLength,
           length: markerLength),
@@ -2333,7 +2341,7 @@ enum TextDocumentSyntaxHighlighter {
     }
   }
 
-  private static func muteMarkdownSyntax(
+  private static func muteMarkdownSourceSyntax(
     range: NSRange,
     in textStorage: NSMutableAttributedString,
     font: NSFont,
