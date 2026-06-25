@@ -200,7 +200,7 @@ enum DocumentTabStripMetrics {
   /// cannot occupy the traffic-light/sidebar-toggle area at the leading edge.
   /// Keeping this budget out of the strip's fitting width prevents NSToolbar
   /// from moving the item into its overflow menu during close/open transitions.
-  static let toolbarHiddenSidebarReserve: CGFloat = 160
+  static let toolbarHiddenSidebarReserve: CGFloat = 260
   /// Optical centering within the unified toolbar: the chips sit a touch high
   /// in the bar, so nudge them down. An offset, not padding — it must not
   /// change the strip's fitting size, which the toolbar treats as a minimum.
@@ -224,11 +224,12 @@ enum DocumentTabStripMetrics {
 
   static func toolbarStripWidth(
     forDetailWidth detailWidth: CGFloat,
-    sidebarIsVisible: Bool
+    browserWidth: CGFloat
   ) -> CGFloat {
-    let reserve =
-      sidebarIsVisible ? toolbarVisibleSidebarReserve : toolbarHiddenSidebarReserve
-    return max(0, detailWidth - reserve)
+    let detailBound = max(0, detailWidth - toolbarVisibleSidebarReserve)
+    let windowWidth = browserWidth > 0 ? browserWidth : detailWidth
+    let titlebarBound = max(0, windowWidth - toolbarHiddenSidebarReserve)
+    return min(detailBound, titlebarBound)
   }
 }
 
@@ -499,6 +500,7 @@ struct DocumentTabToolbar: ToolbarContent {
   let tabs: [DocumentTab]
   let activeTabID: WorkspaceEntry.ID?
   let maxStripWidth: CGFloat
+  let refreshToken: Int
   let onSelect: (DocumentTab) -> Void
   let onClose: (DocumentTab) -> Void
   let onMove: (WorkspaceEntry.ID, WorkspaceEntry.ID?) -> Void
@@ -506,15 +508,19 @@ struct DocumentTabToolbar: ToolbarContent {
   @ToolbarContentBuilder
   var body: some ToolbarContent {
     if #available(macOS 26.0, *) {
-      ToolbarItem(placement: .navigation) {
+      ToolbarItem(id: toolbarItemID, placement: .navigation) {
         strip
       }
       .sharedBackgroundVisibility(.hidden)
     } else {
-      ToolbarItem(placement: .navigation) {
+      ToolbarItem(id: toolbarItemID, placement: .navigation) {
         strip
       }
     }
+  }
+
+  private var toolbarItemID: String {
+    "document-tabs-\(refreshToken)"
   }
 
   private var strip: some View {

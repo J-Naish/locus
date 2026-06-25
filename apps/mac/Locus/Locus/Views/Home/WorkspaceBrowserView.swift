@@ -43,6 +43,10 @@ struct WorkspaceBrowserView: View {
     static let debounceDuration: Duration = .milliseconds(250)
   }
 
+  private enum TabToolbarRefresh {
+    static let debounceDuration: Duration = .milliseconds(220)
+  }
+
   private enum WorkspaceDropOperation: Equatable {
     case move
     case copy
@@ -106,7 +110,11 @@ struct WorkspaceBrowserView: View {
   @State private var sidebarSelectionState: WorkspaceSidebarSelectionState
   @State private var openDocumentEntry: WorkspaceEntry?
   @State private var isDocumentTextInputFocused = false
+  @State private var browserContentWidth: CGFloat = 0
   @State private var detailContentWidth: CGFloat = 0
+  @State private var tabToolbarWidth: CGFloat = 0
+  @State private var tabToolbarRefreshRequestGeneration: UInt64 = 0
+  @State private var tabToolbarRefreshToken = 0
   @State private var columnVisibility: NavigationSplitViewVisibility = .all
   @State private var gitStatusesByPath: [String: GitWorkspaceChangeKind] = [:]
   @State private var gitStatusRefreshGeneration: UInt64 = 0
@@ -214,6 +222,11 @@ struct WorkspaceBrowserView: View {
     // sidebar panel and any unpainted chrome around the document card.
     .modifier(LocusWindowFieldBackgroundModifier())
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .onGeometryChange(for: CGFloat.self) { geometry in
+      geometry.size.width
+    } action: { width in
+      updateBrowserContentWidth(width)
+    }
     .onChange(of: searchQuery) {
       refreshSearchResults()
     }
@@ -257,6 +270,9 @@ struct WorkspaceBrowserView: View {
     }
     .task(id: gitMetadataMonitorKey) {
       await refreshGitMetadataMonitoring()
+    }
+    .task(id: tabToolbarRefreshRequestGeneration) {
+      await refreshTabToolbarAfterDelay()
     }
     .task(id: folderURL.locusStandardizedPath) {
       startWorkspaceTreeMonitoring()
@@ -405,6 +421,64 @@ struct WorkspaceBrowserView: View {
 
   private func toggleSidebarVisibility() {
     NativeSidebarToggle.toggle()
+    requestTabToolbarRefresh()
+  }
+
+  private func updateBrowserContentWidth(_ width: CGFloat) {
+    guard abs(browserContentWidth - width) > 0.5 else { return }
+    browserContentWidth = width
+    initializeTabToolbarWidthIfNeeded()
+    requestTabToolbarRefresh()
+  }
+
+  private func updateDetailContentWidth(_ width: CGFloat) {
+    guard abs(detailContentWidth - width) > 0.5 else { return }
+    detailContentWidth = width
+    initializeTabToolbarWidthIfNeeded()
+    requestTabToolbarRefresh()
+  }
+
+  private func requestTabToolbarRefresh() {
+    tabToolbarRefreshRequestGeneration &+= 1
+  }
+
+  private var resolvedTabToolbarWidth: CGFloat {
+    DocumentTabStripMetrics.toolbarStripWidth(
+      forDetailWidth: detailContentWidth,
+      browserWidth: browserContentWidth
+    )
+  }
+
+  private func initializeTabToolbarWidthIfNeeded() {
+    guard tabToolbarWidth == 0 else { return }
+
+    let width = resolvedTabToolbarWidth
+    if width > 0 {
+      tabToolbarWidth = width
+    }
+  }
+
+  @MainActor
+  private func refreshTabToolbarAfterDelay() async {
+    guard tabToolbarRefreshRequestGeneration > 0 else { return }
+
+    do {
+      try await Task.sleep(for: TabToolbarRefresh.debounceDuration)
+    } catch {
+      return
+    }
+
+    guard !Task.isCancelled else { return }
+    let width = resolvedTabToolbarWidth
+    let widthChanged = abs(tabToolbarWidth - width) > 0.5
+    if widthChanged {
+      tabToolbarWidth = width
+      // NSToolbar can keep a navigation item in overflow after sidebar
+      // animations. Re-key the toolbar item only after the width has settled;
+      // the tab strip view itself keeps its identity so horizontal scroll and
+      // drag state are not reset by ordinary width changes.
+      tabToolbarRefreshToken &+= 1
+    }
   }
 
   private var deletableHighlightedEntries: [WorkspaceEntry] {
@@ -1128,15 +1202,6 @@ struct WorkspaceBrowserView: View {
     closeDocumentTab(activeTab)
   }
 
-  private var sidebarIsVisibleForToolbar: Bool {
-    switch columnVisibility {
-    case .detailOnly:
-      return false
-    default:
-      return true
-    }
-  }
-
   private var workspaceDetail: some View {
     Group {
       if snapshot.entries.isEmpty {
@@ -1173,16 +1238,14 @@ struct WorkspaceBrowserView: View {
     .onGeometryChange(for: CGFloat.self) { geometry in
       geometry.size.width
     } action: { width in
-      detailContentWidth = width
+      updateDetailContentWidth(width)
     }
     .toolbar {
       DocumentTabToolbar(
         tabs: documentTabs.tabs,
         activeTabID: openDocumentEntry?.id,
-        maxStripWidth: DocumentTabStripMetrics.toolbarStripWidth(
-          forDetailWidth: detailContentWidth,
-          sidebarIsVisible: sidebarIsVisibleForToolbar
-        ),
+        maxStripWidth: tabToolbarWidth,
+        refreshToken: tabToolbarRefreshToken,
         onSelect: openDocumentTab,
         onClose: closeDocumentTab,
         onMove: { draggedID, beforeID in

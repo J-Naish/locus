@@ -434,12 +434,13 @@ final class DocumentTabStripViewTests: XCTestCase {
     XCTAssertEqual(inactiveHost.fittingSize.width, activeHost.fittingSize.width, accuracy: 0.5)
   }
 
-  func testToolbarStripWidthUsesSmallReserveWhenSidebarIsVisible() {
-    let detailWidth = LocusWindowMetrics.minimumWidth
+  func testToolbarStripWidthUsesDetailBoundWhenSidebarIsVisible() {
+    let browserWidth: CGFloat = 1_000
+    let detailWidth: CGFloat = 700
 
     let stripWidth = DocumentTabStripMetrics.toolbarStripWidth(
       forDetailWidth: detailWidth,
-      sidebarIsVisible: true
+      browserWidth: browserWidth
     )
 
     XCTAssertEqual(
@@ -449,17 +450,18 @@ final class DocumentTabStripViewTests: XCTestCase {
     )
   }
 
-  func testToolbarStripWidthReservesTitlebarChromeWhenSidebarIsHidden() {
-    let detailWidth = LocusWindowMetrics.minimumWidth
+  func testToolbarStripWidthUsesTitlebarBoundWhenSidebarIsHidden() {
+    let browserWidth: CGFloat = 1_000
+    let detailWidth: CGFloat = 980
 
     let stripWidth = DocumentTabStripMetrics.toolbarStripWidth(
       forDetailWidth: detailWidth,
-      sidebarIsVisible: false
+      browserWidth: browserWidth
     )
 
     XCTAssertEqual(
       stripWidth,
-      detailWidth - DocumentTabStripMetrics.toolbarHiddenSidebarReserve,
+      browserWidth - DocumentTabStripMetrics.toolbarHiddenSidebarReserve,
       accuracy: 0.5
     )
     XCTAssertLessThan(
@@ -471,10 +473,25 @@ final class DocumentTabStripViewTests: XCTestCase {
   func testToolbarStripWidthClampsToZeroWhenTheColumnIsTooNarrow() {
     let stripWidth = DocumentTabStripMetrics.toolbarStripWidth(
       forDetailWidth: DocumentTabStripMetrics.toolbarHiddenSidebarReserve - 1,
-      sidebarIsVisible: false
+      browserWidth: DocumentTabStripMetrics.toolbarHiddenSidebarReserve - 1
     )
 
     XCTAssertEqual(stripWidth, 0, accuracy: 0.5)
+  }
+
+  func testToolbarStripWidthFallsBackToDetailWidthBeforeWindowMeasurement() {
+    let detailWidth: CGFloat = 800
+
+    let stripWidth = DocumentTabStripMetrics.toolbarStripWidth(
+      forDetailWidth: detailWidth,
+      browserWidth: 0
+    )
+
+    XCTAssertEqual(
+      stripWidth,
+      detailWidth - DocumentTabStripMetrics.toolbarHiddenSidebarReserve,
+      accuracy: 0.5
+    )
   }
 
   private func skipIfHeadlessHostingLayoutIsUnavailable() throws {
