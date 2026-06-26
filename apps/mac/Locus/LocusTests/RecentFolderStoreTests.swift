@@ -186,28 +186,42 @@ final class RecentFolderStoreTests: XCTestCase {
     XCTAssertEqual(WorkspaceFolderOpenRequestCenter.shared.consumePendingRequests(), [])
   }
 
-  func testApplicationDelegateQueuesFolderOpenFileRequests() throws {
+  func testFolderOpenRequestRoutingQueuesFolderRequestsWithoutNotification() throws {
     let folderURL = try makeFolder(named: "DockRecent")
-    let delegate = LocusApplicationDelegate()
 
     XCTAssertTrue(
-      delegate.application(
-        NSApplication.shared,
-        openFile: folderURL.path(percentEncoded: false)
+      WorkspaceFolderOpenRequestRouting.requestOpenFolderIfPossible(
+        folderURL,
+        postsNotification: false
       ))
 
-    _ = WorkspaceFolderOpenRequestCenter.shared.consumePendingRequests()
+    let pending = WorkspaceFolderOpenRequestCenter.shared.consumePendingRequests()
+    XCTAssertEqual(pending.count, 1)
+    XCTAssertEqual(pending[0].folderURL, folderURL.standardizedFileURL)
   }
 
-  func testApplicationDelegateRejectsNonFolderOpenFileRequests() throws {
+  func testFolderOpenRequestRoutingQueuesFolderOpenURLRequestsWithoutNotification() throws {
+    let folderURL = try makeFolder(named: "DockRecentURL")
+
+    XCTAssertTrue(
+      WorkspaceFolderOpenRequestRouting.requestOpenFolderIfPossible(
+        folderURL,
+        postsNotification: false
+      ))
+
+    let pending = WorkspaceFolderOpenRequestCenter.shared.consumePendingRequests()
+    XCTAssertEqual(pending.count, 1)
+    XCTAssertEqual(pending[0].folderURL, folderURL.standardizedFileURL)
+  }
+
+  func testFolderOpenRequestRoutingRejectsNonFolderRequests() throws {
     let fileURL = temporaryDirectory.appending(path: "Notes.md", directoryHint: .notDirectory)
     try Data("notes".utf8).write(to: fileURL)
-    let delegate = LocusApplicationDelegate()
 
     XCTAssertFalse(
-      delegate.application(
-        NSApplication.shared,
-        openFile: fileURL.path(percentEncoded: false)
+      WorkspaceFolderOpenRequestRouting.requestOpenFolderIfPossible(
+        fileURL,
+        postsNotification: false
       ))
     XCTAssertEqual(WorkspaceFolderOpenRequestCenter.shared.consumePendingRequests(), [])
   }
@@ -225,6 +239,24 @@ final class RecentFolderStoreTests: XCTestCase {
         missingURL.path(percentEncoded: false),
         firstFolderURL.path(percentEncoded: false),
         secondFolderURL.path(percentEncoded: false),
+      ]),
+      firstFolderURL.standardizedFileURL
+    )
+  }
+
+  func testOpenFileResolutionChoosesFirstExistingFolderFromURLs() throws {
+    let fileURL = temporaryDirectory.appending(path: "Notes.md", directoryHint: .notDirectory)
+    try Data("notes".utf8).write(to: fileURL)
+    let missingURL = temporaryDirectory.appending(path: "Missing", directoryHint: .isDirectory)
+    let firstFolderURL = try makeFolder(named: "FirstURL")
+    let secondFolderURL = try makeFolder(named: "SecondURL")
+
+    XCTAssertEqual(
+      WorkspaceOpenFileResolution.firstFolderURL(in: [
+        fileURL,
+        missingURL,
+        firstFolderURL,
+        secondFolderURL,
       ]),
       firstFolderURL.standardizedFileURL
     )

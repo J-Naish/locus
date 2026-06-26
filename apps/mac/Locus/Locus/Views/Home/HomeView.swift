@@ -82,6 +82,7 @@ struct HomeView: View {
   @State private var recentFiles: [RecentFile] = []
   @State private var recentFolders: [RecentFolder] = []
   @State private var documentTabs = DocumentTabsState()
+  @State private var lastExternalWorkspaceOpen: ExternalWorkspaceOpen?
   // Folder loads can overlap when the directory monitor reloads or users
   // choose another folder.
   // quickly; only the latest generation is allowed to update visible state.
@@ -102,6 +103,18 @@ struct HomeView: View {
   private let recentFolderStore: RecentFolderStore
   private let initialFolderResolution: InitialFolderResolution
   private let homeDirectoryURL: URL
+
+  private struct ExternalWorkspaceOpen {
+    static let duplicateWindow: TimeInterval = 1
+
+    let path: String
+    let requestedAt: Date
+
+    func matches(_ folderURL: URL, now: Date) -> Bool {
+      path == folderURL.locusStandardizedPath
+        && now.timeIntervalSince(requestedAt) < Self.duplicateWindow
+    }
+  }
 
   init(
     coreBridge: CoreBridge = CoreBridge(),
@@ -186,6 +199,9 @@ struct HomeView: View {
       refreshFileLocationShortcuts()
       loadInitialFolderIfNeeded()
       openPendingWorkspaceFolderRequests()
+    }
+    .onOpenURL { url in
+      openWorkspaceFolderURL(url)
     }
     .onReceive(
       NotificationCenter.default.publisher(for: WorkspaceFolderOpenRequestNotification.name)
@@ -629,10 +645,34 @@ struct HomeView: View {
   }
 
   @MainActor
+  private func openWorkspaceFolderURL(_ url: URL) {
+    guard let folderURL = WorkspaceOpenFileResolution.firstFolderURL(in: [url]) else {
+      return
+    }
+
+    openExternalWorkspaceFolder(folderURL)
+  }
+
+  @MainActor
   private func openWorkspaceFolderRequest(_ request: WorkspaceFolderOpenRequest) {
+    openExternalWorkspaceFolder(request.folderURL)
+  }
+
+  @MainActor
+  private func openExternalWorkspaceFolder(_ folderURL: URL) {
+    let now = Date()
+    guard lastExternalWorkspaceOpen?.matches(folderURL, now: now) != true else {
+      return
+    }
+
+    lastExternalWorkspaceOpen = ExternalWorkspaceOpen(
+      path: folderURL.locusStandardizedPath,
+      requestedAt: now
+    )
+    didStartInitialFolderLoad = true
     navigateToWorkspaceFolder(
-      request.folderURL,
-      rootChange: .set(request.folderURL),
+      folderURL,
+      rootChange: .set(folderURL),
       intent: .openLocation
     )
   }

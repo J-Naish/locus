@@ -76,8 +76,14 @@ enum WorkspaceRecentDocumentRegistration {
 
 enum WorkspaceOpenFileResolution {
   static func firstFolderURL(in filenames: [String]) -> URL? {
-    filenames
-      .map { URL(filePath: $0, directoryHint: .isDirectory).standardizedFileURL }
+    firstFolderURL(
+      in: filenames.map { URL(filePath: $0, directoryHint: .isDirectory) }
+    )
+  }
+
+  static func firstFolderURL(in urls: [URL]) -> URL? {
+    urls
+      .map(\.standardizedFileURL)
       .first(where: isExistingDirectory(_:))
   }
 
@@ -86,6 +92,24 @@ enum WorkspaceOpenFileResolution {
     var isDirectory: ObjCBool = false
     return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
       && isDirectory.boolValue
+  }
+}
+
+@MainActor
+enum WorkspaceFolderOpenRequestRouting {
+  static func requestOpenFolderIfPossible(
+    _ folderURL: URL,
+    postsNotification: Bool = true
+  ) -> Bool {
+    guard WorkspaceOpenFileResolution.isExistingDirectory(folderURL) else {
+      return false
+    }
+
+    WorkspaceFolderOpenRequestCenter.shared.requestOpen(
+      folderURL,
+      postsNotification: postsNotification
+    )
+    return true
   }
 }
 
@@ -333,17 +357,12 @@ final class LocusApplicationDelegate: NSObject, NSApplicationDelegate {
       ? .terminateNow : .terminateCancel
   }
 
-  func application(_ sender: NSApplication, openFile filename: String) -> Bool {
-    requestOpenFolderIfPossible(URL(filePath: filename, directoryHint: .isDirectory))
-  }
-
-  func application(_ sender: NSApplication, openFiles filenames: [String]) {
-    guard let folderURL = WorkspaceOpenFileResolution.firstFolderURL(in: filenames) else {
-      sender.reply(toOpenOrPrint: .failure)
+  func application(_ application: NSApplication, open urls: [URL]) {
+    guard let folderURL = WorkspaceOpenFileResolution.firstFolderURL(in: urls) else {
       return
     }
 
-    sender.reply(toOpenOrPrint: requestOpenFolderIfPossible(folderURL) ? .success : .failure)
+    _ = requestOpenFolderIfPossible(folderURL)
   }
 
   private func recentFoldersForOpenRecent() -> [RecentFolder] {
@@ -356,12 +375,11 @@ final class LocusApplicationDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func requestOpenFolderIfPossible(_ folderURL: URL) -> Bool {
-    guard WorkspaceOpenFileResolution.isExistingDirectory(folderURL) else {
+    guard WorkspaceFolderOpenRequestRouting.requestOpenFolderIfPossible(folderURL) else {
       return false
     }
 
     NSApp.activate(ignoringOtherApps: true)
-    WorkspaceFolderOpenRequestCenter.shared.requestOpen(folderURL)
     return true
   }
 }
