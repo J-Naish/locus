@@ -856,6 +856,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // toward a completion the generation check would drop anyway.
     wrapBuildTask?.cancel()
     markdownLineStateBuildTask?.cancel()
+    NotificationCenter.default.removeObserver(self)
   }
 
   /// Inputs captured on the main actor at schedule time, crossed once into the
@@ -1471,6 +1472,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   init() {
     super.init(frame: .zero)
+    registerActiveFocusObservers()
   }
 
   @available(*, unavailable)
@@ -1821,9 +1823,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   override func becomeFirstResponder() -> Bool {
     let didBecome = super.becomeFirstResponder()
     if didBecome {
-      if isEditable {
-        startCaretBlinking()
-      }
+      updateCaretBlinkTimerForFocusState(assumingFirstResponder: true)
       invalidateVisibleArea()
       onFocusChange?(true)
     }
@@ -1846,26 +1846,98 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
     // Stop the timer when detached so it does not keep the view alive.
-    if window == nil { stopCaretBlinking() }
+    if window == nil {
+      stopCaretBlinking()
+    } else {
+      updateCaretBlinkTimerForFocusState()
+    }
   }
 
   // MARK: Caret blink
 
-  /// Whether the plain insertion caret should be blinking right now: focused, not
-  /// composing (the marked-text caret stays solid), and a collapsed selection.
+  /// Whether the app and window are active enough for a first responder caret to
+  /// communicate real keyboard focus. AppKit keeps `firstResponder` when Locus
+  /// moves behind another app, so first-responder status alone is not a visible
+  /// focus contract.
+  private var isActiveKeyWindow: Bool {
+    NSApp.isActive && window?.isKeyWindow == true
+  }
+
+  private var hasActiveKeyboardFocus: Bool {
+    hasActiveKeyboardFocus(assumingFirstResponder: false)
+  }
+
+  private func hasActiveKeyboardFocus(assumingFirstResponder: Bool) -> Bool {
+    (assumingFirstResponder || window?.firstResponder === self) && isActiveKeyWindow
+  }
+
+  /// Whether the plain insertion caret should be blinking right now: focused in
+  /// the active key window, not composing (the marked-text caret stays solid),
+  /// and a collapsed selection.
   /// Pure for testability.
   nonisolated static func caretShouldBlink(
-    isFirstResponder: Bool, isComposing: Bool, selectionIsEmpty: Bool
+    isFirstResponder: Bool, isActiveKeyWindow: Bool, isComposing: Bool,
+    selectionIsEmpty: Bool
   ) -> Bool {
-    isFirstResponder && !isComposing && selectionIsEmpty
+    isFirstResponder && isActiveKeyWindow && !isComposing && selectionIsEmpty
   }
 
   private var showsBlinkingCaret: Bool {
     guard isEditable else { return false }
     return Self.caretShouldBlink(
       isFirstResponder: window?.firstResponder === self,
+      isActiveKeyWindow: isActiveKeyWindow,
       isComposing: composition != nil,
       selectionIsEmpty: selection?.isEmpty == true)
+  }
+
+  private func registerActiveFocusObservers() {
+    let center = NotificationCenter.default
+    center.addObserver(
+      self,
+      selector: #selector(applicationActiveFocusStateDidChange(_:)),
+      name: NSApplication.didBecomeActiveNotification,
+      object: nil)
+    center.addObserver(
+      self,
+      selector: #selector(applicationActiveFocusStateDidChange(_:)),
+      name: NSApplication.didResignActiveNotification,
+      object: nil)
+    center.addObserver(
+      self,
+      selector: #selector(windowActiveFocusStateDidChange(_:)),
+      name: NSWindow.didBecomeKeyNotification,
+      object: nil)
+    center.addObserver(
+      self,
+      selector: #selector(windowActiveFocusStateDidChange(_:)),
+      name: NSWindow.didResignKeyNotification,
+      object: nil)
+  }
+
+  @objc private func applicationActiveFocusStateDidChange(_ notification: Notification) {
+    activeFocusStateDidChange()
+  }
+
+  @objc private func windowActiveFocusStateDidChange(_ notification: Notification) {
+    guard let notificationWindow = notification.object as? NSWindow, notificationWindow === window
+    else { return }
+    activeFocusStateDidChange()
+  }
+
+  private func activeFocusStateDidChange() {
+    updateCaretBlinkTimerForFocusState()
+    invalidateVisibleArea()
+  }
+
+  private func updateCaretBlinkTimerForFocusState(assumingFirstResponder: Bool = false) {
+    guard isEditable, hasActiveKeyboardFocus(assumingFirstResponder: assumingFirstResponder) else {
+      stopCaretBlinking()
+      return
+    }
+    if caretBlinkTimer == nil {
+      startCaretBlinking()
+    }
   }
 
   /// (Re)starts the blink in the solid phase. Uses target/action (not a closure) to
@@ -4534,7 +4606,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     _ selection: TextSelection, lines: [NSAttributedString], range: Range<Int>, textX: CGFloat,
     visibleRows: Range<Int>
   ) {
-    let focused = window?.firstResponder === self
+    let focused = hasActiveKeyboardFocus
     (focused ? NSColor.selectedTextBackgroundColor : .unemphasizedSelectedTextBackgroundColor)
       .setFill()
     for line in range {
@@ -4615,7 +4687,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Draws the caret at the (empty) selection head while focused and visible, or
   /// within the marked text while composing.
   private func drawCaretIfNeeded(lines: [NSAttributedString], range: Range<Int>, textX: CGFloat) {
-    guard isEditable, window?.firstResponder === self else { return }
+    guard isEditable, hasActiveKeyboardFocus else { return }
     if let composition {
       drawCompositionCaret(composition, lines: lines, range: range, textX: textX)
       return

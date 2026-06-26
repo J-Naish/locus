@@ -237,21 +237,30 @@ final class TextViewportLayoutTests: XCTestCase {
 
   // MARK: Caret blink
 
-  func testCaretBlinksOnlyWhenFocusedWithCollapsedSelection() {
-    // Blinks with a caret (focused, collapsed, not composing); never blinks when
-    // unfocused, composing, or while a range is selected.
+  func testCaretBlinksOnlyWhenFocusedInActiveKeyWindowWithCollapsedSelection() {
+    // Blinks with a caret only while this view owns the keyboard focus in the
+    // active key window. A first responder in an inactive app must not keep a
+    // visible "focus is here" caret behind another app.
     XCTAssertTrue(
       LineRenderingTextView.caretShouldBlink(
-        isFirstResponder: true, isComposing: false, selectionIsEmpty: true))
+        isFirstResponder: true, isActiveKeyWindow: true, isComposing: false,
+        selectionIsEmpty: true))
     XCTAssertFalse(
       LineRenderingTextView.caretShouldBlink(
-        isFirstResponder: false, isComposing: false, selectionIsEmpty: true))
+        isFirstResponder: false, isActiveKeyWindow: true, isComposing: false,
+        selectionIsEmpty: true))
     XCTAssertFalse(
       LineRenderingTextView.caretShouldBlink(
-        isFirstResponder: true, isComposing: true, selectionIsEmpty: true))
+        isFirstResponder: true, isActiveKeyWindow: false, isComposing: false,
+        selectionIsEmpty: true))
     XCTAssertFalse(
       LineRenderingTextView.caretShouldBlink(
-        isFirstResponder: true, isComposing: false, selectionIsEmpty: false))
+        isFirstResponder: true, isActiveKeyWindow: true, isComposing: true,
+        selectionIsEmpty: true))
+    XCTAssertFalse(
+      LineRenderingTextView.caretShouldBlink(
+        isFirstResponder: true, isActiveKeyWindow: true, isComposing: false,
+        selectionIsEmpty: false))
   }
 
   @MainActor
