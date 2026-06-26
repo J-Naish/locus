@@ -797,7 +797,7 @@ enum TextDocumentSyntaxHighlighter {
       return block(
         fonts: fonts,
         displayFont: fonts.regular,
-        foregroundColor: level == 6 ? .secondaryLabelColor : .labelColor)
+        foregroundColor: .labelColor)
     }
 
     if state.isSetextUnderline {
@@ -822,7 +822,7 @@ enum TextDocumentSyntaxHighlighter {
       return block(
         fonts: fonts,
         displayFont: fonts.regular,
-        foregroundColor: heading.level == 6 ? .secondaryLabelColor : .labelColor)
+        foregroundColor: .labelColor)
     }
 
     if markdownLineIsHorizontalRule(context.body) {
@@ -2100,7 +2100,7 @@ enum TextDocumentSyntaxHighlighter {
       textStorage.addAttributes(
         markdownAttributes(
           font: lineFonts.regular,
-          foregroundColor: level == 6 ? .secondaryLabelColor : .labelColor,
+          foregroundColor: .labelColor,
           includeVisualAttributes: includeVisualAttributes),
         range: lineRange)
     } else if state.isSetextUnderline {
@@ -2115,7 +2115,7 @@ enum TextDocumentSyntaxHighlighter {
       textStorage.addAttributes(
         markdownAttributes(
           font: lineFonts.regular,
-          foregroundColor: heading.level == 6 ? .secondaryLabelColor : .labelColor,
+          foregroundColor: .labelColor,
           includeVisualAttributes: includeVisualAttributes),
         range: lineRange)
       muteMarkdownSourceSyntax(

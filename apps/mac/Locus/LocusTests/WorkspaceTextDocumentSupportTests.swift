@@ -140,6 +140,34 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertLessThan(kern ?? 0, 0)
   }
 
+  func testMarkdownH6UsesSameTextColorAsOtherHeadings() {
+    let line = "###### Small Section"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+    let rendered = TextDocumentSyntaxHighlighter.highlightedLine(
+      line,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      applyRules: true,
+      markdownLineState: state)
+
+    XCTAssertEqual(rendered.foregroundColor(at: 0), NSColor.labelColor)
+  }
+
+  func testMarkdownSourceFallbackH6UsesHeadingTextColor() {
+    let storage = NSTextStorage(string: "###### Small Section")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertEqual(
+      storage.foregroundColor(in: storage.string, matching: "Small"),
+      NSColor.labelColor)
+  }
+
   func testProseDocumentsSoftWrap() {
     // Markdown and plain prose read as documents, so lines wrap to the viewport.
     XCTAssertTrue(
