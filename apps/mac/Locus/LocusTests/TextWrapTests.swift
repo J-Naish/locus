@@ -99,9 +99,10 @@ final class TextWrapTests: XCTestCase {
     view.setBuffer(try TextBuffer.open(bytes: Data(heading.utf8)))
     let wrapWidth = view.markdownWrapContentWidthForTesting()
     let typography = MarkdownTypography(baseFont: TextDocumentSyntax.markdown.font)
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [heading])[0]
     let expectedRows = LineWrap.visualRowStartOffsets(
       of: TextDocumentSyntaxHighlighter.markdownMeasurementLine(
-        heading, font: TextDocumentSyntax.markdown.font, state: .plain, typography: typography),
+        heading, font: TextDocumentSyntax.markdown.font, state: state, typography: typography),
       width: wrapWidth,
       maximumRows: 20_000
     ).count

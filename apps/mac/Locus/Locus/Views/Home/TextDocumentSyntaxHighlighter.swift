@@ -108,17 +108,17 @@ enum MarkdownDocumentMetrics {
   static func headingFont(level: Int) -> NSFont {
     switch level {
     case 1:
-      return .systemFont(ofSize: 28, weight: .bold)
+      return .systemFont(ofSize: 30, weight: .bold)
     case 2:
-      return .systemFont(ofSize: 22, weight: .bold)
+      return .systemFont(ofSize: 24, weight: .bold)
     case 3:
-      return .systemFont(ofSize: 19, weight: .semibold)
+      return .systemFont(ofSize: 21, weight: .semibold)
     case 4:
-      return .systemFont(ofSize: 16, weight: .semibold)
+      return .systemFont(ofSize: 18, weight: .semibold)
     case 5:
-      return .systemFont(ofSize: 14, weight: .semibold)
+      return .systemFont(ofSize: 16, weight: .semibold)
     default:
-      return .systemFont(ofSize: 13, weight: .semibold)
+      return .systemFont(ofSize: 15, weight: .semibold)
     }
   }
 
