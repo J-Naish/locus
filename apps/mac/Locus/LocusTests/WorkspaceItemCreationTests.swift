@@ -115,6 +115,44 @@ final class WorkspaceItemCreationTests: XCTestCase {
     }
   }
 
+  func testFileCreationPlaceholderIsInsertedAtFirstFilePosition() {
+    let entries = [
+      makeEntry(name: "Alpha", kind: .directory),
+      makeEntry(name: "Linked Folder", kind: .symlinkToDirectory),
+      makeEntry(name: "Notes.md", kind: .file),
+      makeEntry(name: "Archive", kind: .other),
+    ]
+
+    XCTAssertEqual(
+      WorkspaceItemCreationPlacement.insertionIndex(for: .file, in: entries),
+      2
+    )
+  }
+
+  func testFileCreationPlaceholderIsAppendedWhenFolderHasNoFiles() {
+    let entries = [
+      makeEntry(name: "Alpha", kind: .directory),
+      makeEntry(name: "Linked Folder", kind: .symlinkToDirectory),
+    ]
+
+    XCTAssertEqual(
+      WorkspaceItemCreationPlacement.insertionIndex(for: .file, in: entries),
+      2
+    )
+  }
+
+  func testFolderCreationPlaceholderStaysAtStartOfFolderGroup() {
+    let entries = [
+      makeEntry(name: "Alpha", kind: .directory),
+      makeEntry(name: "Notes.md", kind: .file),
+    ]
+
+    XCTAssertEqual(
+      WorkspaceItemCreationPlacement.insertionIndex(for: .folder, in: entries),
+      0
+    )
+  }
+
   private func temporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appending(
       path: "locus-item-creation-tests-\(UUID().uuidString)",
@@ -125,5 +163,19 @@ final class WorkspaceItemCreationTests: XCTestCase {
       try? FileManager.default.removeItem(at: url)
     }
     return url
+  }
+
+  private func makeEntry(name: String, kind: WorkspaceEntryKind) -> WorkspaceEntry {
+    let url = URL(filePath: "/tmp/locus-item-creation-tests/\(name)")
+    return WorkspaceEntry(
+      id: url.path(percentEncoded: false),
+      url: url,
+      name: name,
+      kind: kind,
+      fileType: .unknown,
+      sizeBytes: nil,
+      modified: nil,
+      isReadOnly: false
+    )
   }
 }

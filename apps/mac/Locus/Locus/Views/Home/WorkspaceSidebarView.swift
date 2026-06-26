@@ -304,10 +304,13 @@ struct WorkspaceSidebarView: View {
   private func currentRows() -> [WorkspaceSidebarRow] {
     var result = [WorkspaceSidebarRow(entry: rootEntry, depth: 0)]
     if isRootExpanded {
-      if let creationKind, creationParent?.id == rootEntry.id {
-        result.append(.creation(creationKind, depth: 1))
-      }
-      result.append(contentsOf: rows(for: entries, depth: 1))
+      result.append(
+        contentsOf: rows(
+          for: entries,
+          depth: 1,
+          pendingCreationKind: creationParent?.id == rootEntry.id ? creationKind : nil
+        )
+      )
     }
     return result
   }
@@ -377,39 +380,75 @@ struct WorkspaceSidebarView: View {
     dropItems(urls, entry.url)
   }
 
-  private func rows(for entries: [WorkspaceEntry], depth: Int) -> [WorkspaceSidebarRow] {
-    entries.flatMap { entry -> [WorkspaceSidebarRow] in
-      var result = [WorkspaceSidebarRow(entry: entry, depth: depth)]
+  private func rows(
+    for entries: [WorkspaceEntry],
+    depth: Int,
+    pendingCreationKind: WorkspaceItemCreationKind? = nil
+  ) -> [WorkspaceSidebarRow] {
+    var result: [WorkspaceSidebarRow] = []
+    let pendingCreationInsertionIndex = pendingCreationKind.map {
+      WorkspaceItemCreationPlacement.insertionIndex(for: $0, in: entries)
+    }
+
+    func insertCreationIfNeeded(at index: Int) {
+      guard let pendingCreationKind, pendingCreationInsertionIndex == index else {
+        return
+      }
+
+      result.append(.creation(pendingCreationKind, depth: depth))
+    }
+
+    func appendChildCreation(_ kind: WorkspaceItemCreationKind?) {
+      guard let kind else {
+        return
+      }
+
+      result.append(.creation(kind, depth: depth + 1))
+    }
+
+    for (index, entry) in entries.enumerated() {
+      insertCreationIfNeeded(at: index)
+
+      result.append(WorkspaceSidebarRow(entry: entry, depth: depth))
 
       guard entry.kind.isDirectoryLike, expandedFolderIDs.contains(entry.id) else {
-        return result
+        continue
       }
 
-      if let creationKind, creationParent?.id == entry.id {
-        result.append(.creation(creationKind, depth: depth + 1))
-      }
+      let childCreationKind = creationParent?.id == entry.id ? self.creationKind : nil
 
       switch childStates[entry.id] {
       case .loading:
+        appendChildCreation(childCreationKind)
         result.append(.status(.loading(parentID: entry.id), depth: depth + 1))
       case .loaded(let snapshot):
         if snapshot.entries.isEmpty {
+          appendChildCreation(childCreationKind)
           result.append(.status(.empty(parentID: entry.id), depth: depth + 1))
         } else {
-          result.append(contentsOf: rows(for: snapshot.entries, depth: depth + 1))
+          result.append(
+            contentsOf: rows(
+              for: snapshot.entries,
+              depth: depth + 1,
+              pendingCreationKind: childCreationKind
+            )
+          )
         }
 
         if !snapshot.partialErrors.isEmpty {
           result.append(.status(.partialErrors(parentID: entry.id), depth: depth + 1))
         }
       case .failed:
+        appendChildCreation(childCreationKind)
         result.append(.status(.failed(parentID: entry.id), depth: depth + 1))
       case .pending, nil:
+        appendChildCreation(childCreationKind)
         break
       }
-
-      return result
     }
+
+    insertCreationIfNeeded(at: entries.endIndex)
+    return result
   }
 
   private func validEntryIDs(in entries: [WorkspaceEntry]) -> Set<WorkspaceEntry.ID> {

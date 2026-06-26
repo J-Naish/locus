@@ -130,3 +130,24 @@ enum WorkspaceItemCreation {
     return trimmedName
   }
 }
+
+enum WorkspaceItemCreationPlacement {
+  static func insertionIndex(
+    for kind: WorkspaceItemCreationKind,
+    in entries: [WorkspaceEntry]
+  ) -> Int {
+    entries.firstIndex { shouldInsert(kind, before: $0) } ?? entries.endIndex
+  }
+
+  static func shouldInsert(
+    _ kind: WorkspaceItemCreationKind,
+    before entry: WorkspaceEntry
+  ) -> Bool {
+    switch kind {
+    case .folder:
+      return true
+    case .file:
+      return !entry.kind.isDirectoryLike
+    }
+  }
+}
