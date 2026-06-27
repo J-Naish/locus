@@ -1642,6 +1642,45 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testMarkdownSourceModeShowsRawMarkers() throws {
+    let view = try makeViewer("# Title")
+    view.syntax = .markdown
+
+    XCTAssertEqual(view.attributedLineStringForTesting(line: 0), "Title")
+
+    view.markdownViewMode = .source
+
+    XCTAssertEqual(view.attributedLineStringForTesting(line: 0), "# Title")
+  }
+
+  @MainActor
+  func testMarkdownViewModeTogglePreservesCaretRawOffset() throws {
+    let view = try makeEditableViewer("# Title")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 2))
+
+    view.markdownViewMode = .source
+
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 4))
+
+    view.markdownViewMode = .rendered
+
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 2))
+  }
+
+  @MainActor
+  func testMarkdownViewModeToggleClampsSourceLineEndToRenderedLineEnd() throws {
+    let view = try makeEditableViewer("# Title")
+    view.syntax = .markdown
+    view.markdownViewMode = .source
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 7))
+
+    view.markdownViewMode = .rendered
+
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 5))
+  }
+
+  @MainActor
   func testMarkdownCopyWholeRenderedBoldLineIncludesRawMarkers() throws {
     let view = try makeViewer("**bold**")
     view.syntax = .markdown

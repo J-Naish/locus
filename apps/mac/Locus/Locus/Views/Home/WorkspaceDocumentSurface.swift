@@ -26,6 +26,7 @@ struct WorkspaceDocumentSurface: View {
   /// Set when an external change arrives while the editor is dirty: the buffer is
   /// kept (not reloaded) and a conflict banner is shown.
   @State private var documentConflict = false
+  @State private var markdownViewMode: MarkdownViewMode = .rendered
   /// Bumped to ask the editor to save. The editor owns the buffer and its off-main
   /// write, so the menu/Cmd+S command routes through this token rather than saving
   /// here.
@@ -179,20 +180,29 @@ struct WorkspaceDocumentSurface: View {
         .accessibilityIdentifier("document-conflict-banner")
       }
 
-      VirtualizedTextDocumentView(
-        url: entry.url,
-        accessibilityLabel: "\(entry.name) text",
-        syntax: WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText,
-        wrapsLines: WorkspaceTextDocumentSupport.wrapsLines(for: entry),
-        isEditable: !selectedDocumentReadOnly,
-        recognizedTextType: WorkspaceTextDocumentSupport.isRecognizedTextType(entry),
-        reloadToken: documentReloadGeneration,
-        saveRequest: documentSaveRequest,
-        onSaveCompletion: { result in handleDocumentSaveResult(result, for: entry) },
-        onDirtyChange: { isDirty in handleDocumentDirtyChange(isDirty) },
-        onFocusChange: { isFocused in isEditorFocused = isFocused },
-        documentCache: openDocuments
-      )
+      let syntax = WorkspaceTextDocumentSupport.syntax(for: entry) ?? .plainText
+      ZStack(alignment: .topTrailing) {
+        VirtualizedTextDocumentView(
+          url: entry.url,
+          accessibilityLabel: "\(entry.name) text",
+          syntax: syntax,
+          markdownViewMode: markdownViewMode,
+          wrapsLines: WorkspaceTextDocumentSupport.wrapsLines(for: entry),
+          isEditable: !selectedDocumentReadOnly,
+          recognizedTextType: WorkspaceTextDocumentSupport.isRecognizedTextType(entry),
+          reloadToken: documentReloadGeneration,
+          saveRequest: documentSaveRequest,
+          onSaveCompletion: { result in handleDocumentSaveResult(result, for: entry) },
+          onDirtyChange: { isDirty in handleDocumentDirtyChange(isDirty) },
+          onFocusChange: { isFocused in isEditorFocused = isFocused },
+          documentCache: openDocuments
+        )
+        if syntax == .markdown {
+          MarkdownViewModeToggleButton(mode: $markdownViewMode)
+            .padding(.top, 10)
+            .padding(.trailing, 12)
+        }
+      }
     }
   }
 
@@ -506,6 +516,39 @@ private struct EmptyDocumentSurface: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .accessibilityIdentifier("document-empty-surface")
+  }
+}
+
+private struct MarkdownViewModeToggleButton: View {
+  @Binding var mode: MarkdownViewMode
+
+  var body: some View {
+    Button {
+      mode = mode.toggled
+    } label: {
+      Image(systemName: mode.toggleSystemImageName)
+        .font(.system(size: 13, weight: .semibold))
+        .foregroundStyle(.secondary)
+        .frame(width: 28, height: 28)
+        .contentShape(Circle())
+    }
+    .buttonStyle(.plain)
+    .background(
+      Circle()
+        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.68))
+    )
+    .overlay {
+      Circle()
+        .stroke(Color(nsColor: .separatorColor).opacity(0.38), lineWidth: 1)
+    }
+    .shadow(
+      color: Color.black.opacity(0.04),
+      radius: 2,
+      y: 1
+    )
+    .help(mode.toggleAccessibilityLabel)
+    .accessibilityLabel(Text(mode.toggleAccessibilityLabel))
+    .accessibilityIdentifier("markdown-view-mode-toggle")
   }
 }
 

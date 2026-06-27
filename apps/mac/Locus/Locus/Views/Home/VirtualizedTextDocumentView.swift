@@ -12,6 +12,38 @@ enum TextViewportBackend {
   case readOnly(LargeFile)
 }
 
+enum MarkdownViewMode: Equatable {
+  case rendered
+  case source
+
+  var toggled: MarkdownViewMode {
+    switch self {
+    case .rendered:
+      return .source
+    case .source:
+      return .rendered
+    }
+  }
+
+  var toggleSystemImageName: String {
+    switch self {
+    case .rendered:
+      return "chevron.left.forwardslash.chevron.right"
+    case .source:
+      return "text.alignleft"
+    }
+  }
+
+  var toggleAccessibilityLabel: String {
+    switch self {
+    case .rendered:
+      return "Show Markdown Source"
+    case .source:
+      return "Show Rendered View"
+    }
+  }
+}
+
 enum LargeTextViewportMetrics {
   /// Breathing room between the viewport's top edge and the first text line,
   /// applied as a scroll-view content inset so scrolled content still clips
@@ -30,6 +62,7 @@ struct LargeTextViewport: NSViewRepresentable {
   let backend: TextViewportBackend
   let accessibilityLabel: String
   let syntax: TextDocumentSyntax
+  var markdownViewMode: MarkdownViewMode = .rendered
   /// Whether long lines soft-wrap to the viewport (prose) or scroll horizontally
   /// (structured/code/data). Decided per document by the host.
   let wrapsLines: Bool
@@ -97,6 +130,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.setAccessibilityLabel(accessibilityLabel)
     scrollView.contentInsets.top = LargeTextViewportMetrics.topContentInset(for: syntax)
     documentView.syntax = syntax
+    documentView.markdownViewMode = markdownViewMode
     documentView.showsLineNumbers = usesClassicLineNumberGutter
     // Set before the document so the first wrap-index build uses the right mode.
     documentView.wrapsLines = wrapsLines
@@ -152,6 +186,7 @@ struct LargeTextViewport: NSViewRepresentable {
     let preservesScrollPosition =
       documentView.saveURL == saveURL
       && documentView.syntax == syntax
+      && documentView.markdownViewMode == markdownViewMode
       && documentView.accessibilityLabel() == accessibilityLabel
     var didSwapDocument = false
     // Keep the identifier consistent with the backend in case a swap reuses this
@@ -159,6 +194,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.setAccessibilityIdentifier(backendAccessibilityIdentifier)
     documentView.setAccessibilityLabel(accessibilityLabel)
     documentView.syntax = syntax
+    documentView.markdownViewMode = markdownViewMode
     documentView.showsLineNumbers = usesClassicLineNumberGutter
     // Set before any document swap so the rebuilt wrap index uses the right mode.
     documentView.wrapsLines = wrapsLines
@@ -241,6 +277,7 @@ struct VirtualizedTextDocumentView: View {
   let url: URL
   let accessibilityLabel: String
   let syntax: TextDocumentSyntax
+  var markdownViewMode: MarkdownViewMode = .rendered
   /// Whether long lines soft-wrap to the viewport (prose) or scroll horizontally
   /// (structured/code/data). Decided per document by the host.
   let wrapsLines: Bool
@@ -294,6 +331,7 @@ struct VirtualizedTextDocumentView: View {
           backend: .editable(buffer),
           accessibilityLabel: accessibilityLabel,
           syntax: syntax,
+          markdownViewMode: markdownViewMode,
           wrapsLines: wrapsLines,
           isEditable: isEditable,
           saveURL: url,
@@ -308,6 +346,7 @@ struct VirtualizedTextDocumentView: View {
           backend: .readOnly(file),
           accessibilityLabel: accessibilityLabel,
           syntax: syntax,
+          markdownViewMode: markdownViewMode,
           wrapsLines: wrapsLines,
           onFocusChange: onFocusChange
         )

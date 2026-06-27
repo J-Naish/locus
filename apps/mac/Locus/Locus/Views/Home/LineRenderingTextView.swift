@@ -72,6 +72,45 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
   }
 
+  private struct RawSelectionOffsets {
+    let anchor: Int
+    let head: Int
+  }
+
+  private var pendingMarkdownViewModeSelection: RawSelectionOffsets?
+  private var pendingMarkdownViewModeViewportAnchor: (line: Int, offset: CGFloat)?
+
+  var markdownViewMode: MarkdownViewMode = .rendered {
+    willSet {
+      guard newValue != markdownViewMode else { return }
+      pendingMarkdownViewModeSelection = selection.flatMap(rawSelectionOffsets)
+      pendingMarkdownViewModeViewportAnchor = viewportAnchor()
+    }
+
+    didSet {
+      guard markdownViewMode != oldValue else { return }
+      let rawSelection = pendingMarkdownViewModeSelection
+      let anchor = pendingMarkdownViewModeViewportAnchor
+      pendingMarkdownViewModeSelection = nil
+      pendingMarkdownViewModeViewportAnchor = nil
+      cachedBand = nil
+      markdownLineStateCache = nil
+      cancelMarkdownLineStateBuild()
+      maxObservedLineWidth = 0
+      rebuildWrapIndex(recomputeLongLine: true)
+      updateLayout()
+      if let rawSelection {
+        restoreSelection(from: rawSelection)
+      } else {
+        clampSelectionToBounds()
+      }
+      if let anchor {
+        restoreViewportAnchor(anchor)
+      }
+      invalidateVisibleArea()
+    }
+  }
+
   /// Whether the viewer accepts edits. Read-only entries keep this false; the
   /// host enables it for writable text. Editing is routed to the Rust buffer.
   var isEditable = false
@@ -197,11 +236,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     guard usesMarkdownDocumentLayout else { return }
     // Keep the first visible line anchored so images sizing in above the
     // viewport do not shove the text the user is reading.
-    let visible = enclosingScrollView?.documentVisibleRect
-    let anchor: (line: Int, offset: CGFloat)? = visible.map { rect in
-      let location = rowLocation(forY: rect.minY)
-      return (location.line, rect.minY - yOffset(ofLine: location.line))
-    }
+    let anchor = viewportAnchor()
     rebuildWrapIndex(recomputeLongLine: false)
     updateLayout()
     if wrapBuildTask != nil {
@@ -216,6 +251,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Scrolls so `anchor.line` sits at the same viewport offset it had when the
   /// anchor was captured, compensating for geometry changes above it.
+  private func viewportAnchor() -> (line: Int, offset: CGFloat)? {
+    guard let visible = enclosingScrollView?.documentVisibleRect else { return nil }
+    let location = rowLocation(forY: visible.minY)
+    return (location.line, visible.minY - yOffset(ofLine: location.line))
+  }
+
   private func restoreViewportAnchor(_ anchor: (line: Int, offset: CGFloat)) {
     guard let scrollView = enclosingScrollView else { return }
     let target = yOffset(ofLine: anchor.line) + anchor.offset
@@ -349,7 +390,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Markdown gets a document measure instead of an editor gutter-width measure.
   /// The large-file read-only path intentionally stays on the plain fast renderer.
   private var usesMarkdownDocumentLayout: Bool {
-    syntax == .markdown && editableBuffer != nil
+    syntax == .markdown && markdownViewMode == .rendered && editableBuffer != nil
   }
 
   /// Whether the document is currently soft-wrapping rather than scrolling
@@ -3260,6 +3301,27 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return (min(start, end), max(start, end))
   }
 
+  private func rawSelectionOffsets(for selection: TextSelection) -> RawSelectionOffsets? {
+    guard let anchor = utf16Offset(of: selection.anchor),
+      let head = utf16Offset(of: selection.head)
+    else {
+      return nil
+    }
+    return RawSelectionOffsets(anchor: anchor, head: head)
+  }
+
+  private func restoreSelection(from offsets: RawSelectionOffsets) {
+    guard let buffer = reader,
+      let anchor = try? buffer.position(forUTF16: offsets.anchor),
+      let head = try? buffer.position(forUTF16: offsets.head)
+    else {
+      clampSelectionToBounds()
+      return
+    }
+    selection = TextSelection(
+      anchor: displayEndpoint(for: anchor), head: displayEndpoint(for: head))
+  }
+
   private func setSelection(globalStart: Int, globalEnd: Int) {
     guard let buffer = reader,
       let start = try? buffer.position(forUTF16: globalStart),
@@ -4888,6 +4950,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   func markdownOuterColumnXForTesting(line: Int) -> CGFloat {
     lineOuterColumnX(forLine: line)
+  }
+
+  func attributedLineStringForTesting(line: Int) -> String {
+    attributedLine(forLine: line).string
   }
 
   func markdownCodeBlockFrameForTesting(
