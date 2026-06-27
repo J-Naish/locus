@@ -29,9 +29,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// stays on ``editableBuffer`` and is gated by `isEditable`.
   private var reader: (any TextDocumentReading)? { editableBuffer ?? readOnlyDocument }
   var layout: TextViewportLayout {
-    TextViewportLayout(lineHeight: syntax.lineHeight)
+    TextViewportLayout(lineHeight: displaySyntax.lineHeight)
   }
-  private var font: NSFont { syntax.font }
+  private var font: NSFont { displaySyntax.font }
+  private var displaySyntax: TextDocumentSyntax {
+    TextViewportPresentation.displaySyntax(for: syntax, markdownViewMode: markdownViewMode)
+  }
   private var markdownTypography: MarkdownTypography {
     MarkdownTypography(baseFont: TextDocumentSyntax.markdown.font)
   }
@@ -3878,9 +3881,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     let attributed = NSMutableAttributedString(string: visible)
     let fullRange = NSRange(location: 0, length: length)
+    let effectiveSyntax = displaySyntax
     TextDocumentSyntaxHighlighter.apply(
-      to: attributed, text: visible, syntax: syntax, font: font, range: fullRange,
-      applyRules: syntax == .markdown ? false : applyRules)
+      to: attributed, text: visible, syntax: effectiveSyntax, font: font, range: fullRange,
+      applyRules: effectiveSyntax == .markdown ? false : applyRules)
     return attributed
   }
 

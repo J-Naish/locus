@@ -50,6 +50,26 @@ enum MarkdownViewModeToggleMetrics {
   static let trailingPadding: CGFloat = 12
 }
 
+enum TextViewportPresentation {
+  static func displaySyntax(
+    for syntax: TextDocumentSyntax,
+    markdownViewMode: MarkdownViewMode
+  ) -> TextDocumentSyntax {
+    syntax == .markdown && markdownViewMode == .source ? .plainText : syntax
+  }
+
+  static func usesClassicLineNumberGutter(
+    for syntax: TextDocumentSyntax,
+    markdownViewMode: MarkdownViewMode,
+    backendIsReadOnly: Bool
+  ) -> Bool {
+    if displaySyntax(for: syntax, markdownViewMode: markdownViewMode).supportsLineNumbers {
+      return true
+    }
+    return syntax == .markdown && backendIsReadOnly
+  }
+}
+
 enum LargeTextViewportMetrics {
   /// Breathing room between the viewport's top edge and the first text line,
   /// applied as a scroll-view content inset so scrolled content still clips
@@ -59,8 +79,12 @@ enum LargeTextViewportMetrics {
   static let topContentInset: CGFloat = 10
   static let markdownTopContentInset: CGFloat = topContentInset + 12
 
-  static func topContentInset(for syntax: TextDocumentSyntax) -> CGFloat {
-    syntax == .markdown ? markdownTopContentInset : topContentInset
+  static func topContentInset(
+    for syntax: TextDocumentSyntax,
+    markdownViewMode: MarkdownViewMode = .rendered
+  ) -> CGFloat {
+    TextViewportPresentation.displaySyntax(for: syntax, markdownViewMode: markdownViewMode)
+      == .markdown ? markdownTopContentInset : topContentInset
   }
 }
 
@@ -93,9 +117,16 @@ struct LargeTextViewport: NSViewRepresentable {
   }
 
   private var usesClassicLineNumberGutter: Bool {
-    if syntax.supportsLineNumbers { return true }
-    if syntax == .markdown, case .readOnly = backend { return true }
-    return false
+    let backendIsReadOnly: Bool
+    if case .readOnly = backend {
+      backendIsReadOnly = true
+    } else {
+      backendIsReadOnly = false
+    }
+    return TextViewportPresentation.usesClassicLineNumberGutter(
+      for: syntax,
+      markdownViewMode: markdownViewMode,
+      backendIsReadOnly: backendIsReadOnly)
   }
 
   /// Distinct accessibility identifiers so automation can tell the editable viewer
@@ -121,7 +152,8 @@ struct LargeTextViewport: NSViewRepresentable {
     // (outer padding would clip at the inset line instead).
     scrollView.automaticallyAdjustsContentInsets = false
     scrollView.contentInsets = NSEdgeInsets(
-      top: LargeTextViewportMetrics.topContentInset(for: syntax),
+      top: LargeTextViewportMetrics.topContentInset(
+        for: syntax, markdownViewMode: markdownViewMode),
       left: 0,
       bottom: 0,
       right: 0
@@ -135,7 +167,8 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.saveTracker = .shared
     documentView.setAccessibilityIdentifier(backendAccessibilityIdentifier)
     documentView.setAccessibilityLabel(accessibilityLabel)
-    scrollView.contentInsets.top = LargeTextViewportMetrics.topContentInset(for: syntax)
+    scrollView.contentInsets.top = LargeTextViewportMetrics.topContentInset(
+      for: syntax, markdownViewMode: markdownViewMode)
     documentView.syntax = syntax
     documentView.markdownViewMode = markdownViewMode
     documentView.showsMarkdownViewModeToggleCursorRect = showsMarkdownViewModeToggleCursorRect
@@ -201,6 +234,8 @@ struct LargeTextViewport: NSViewRepresentable {
     // view (makeNSView sets it once; updateNSView handles a backend change).
     documentView.setAccessibilityIdentifier(backendAccessibilityIdentifier)
     documentView.setAccessibilityLabel(accessibilityLabel)
+    scrollView.contentInsets.top = LargeTextViewportMetrics.topContentInset(
+      for: syntax, markdownViewMode: markdownViewMode)
     documentView.syntax = syntax
     documentView.markdownViewMode = markdownViewMode
     documentView.showsMarkdownViewModeToggleCursorRect = showsMarkdownViewModeToggleCursorRect

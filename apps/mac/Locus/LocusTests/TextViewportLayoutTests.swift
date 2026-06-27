@@ -78,6 +78,21 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(
       LargeTextViewportMetrics.topContentInset(for: .markdown),
       LargeTextViewportMetrics.topContentInset + 12)
+    XCTAssertEqual(
+      LargeTextViewportMetrics.topContentInset(for: .markdown, markdownViewMode: .source),
+      LargeTextViewportMetrics.topContentInset)
+  }
+
+  func testMarkdownSourceModeUsesPlainTextPresentation() {
+    XCTAssertEqual(
+      TextViewportPresentation.displaySyntax(for: .markdown, markdownViewMode: .source),
+      .plainText)
+    XCTAssertTrue(
+      TextViewportPresentation.usesClassicLineNumberGutter(
+        for: .markdown, markdownViewMode: .source, backendIsReadOnly: false))
+    XCTAssertFalse(
+      TextViewportPresentation.usesClassicLineNumberGutter(
+        for: .markdown, markdownViewMode: .rendered, backendIsReadOnly: false))
   }
 
   func testYOffsetIsLineTimesHeight() {
@@ -1651,6 +1666,7 @@ final class TextViewportLayoutTests: XCTestCase {
     view.markdownViewMode = .source
 
     XCTAssertEqual(view.attributedLineStringForTesting(line: 0), "# Title")
+    XCTAssertEqual(view.layout.lineHeight, TextDocumentSyntax.plainText.lineHeight)
   }
 
   @MainActor
