@@ -71,6 +71,15 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(layout.frameHeight(visualRows: 0, viewportHeight: 400), 400)
   }
 
+  func testMarkdownViewportTopInsetAddsTwelvePoints() {
+    XCTAssertEqual(
+      LargeTextViewportMetrics.topContentInset(for: .plainText),
+      LargeTextViewportMetrics.topContentInset)
+    XCTAssertEqual(
+      LargeTextViewportMetrics.topContentInset(for: .markdown),
+      LargeTextViewportMetrics.topContentInset + 12)
+  }
+
   func testYOffsetIsLineTimesHeight() {
     XCTAssertEqual(layout.yOffset(forLine: 0), 0)
     XCTAssertEqual(layout.yOffset(forLine: 7), 70)

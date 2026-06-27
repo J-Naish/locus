@@ -19,6 +19,11 @@ enum LargeTextViewportMetrics {
   /// past the scroll-past-end frame and push the last line out of view at
   /// maximum scroll.
   static let topContentInset: CGFloat = 10
+  static let markdownTopContentInset: CGFloat = topContentInset + 12
+
+  static func topContentInset(for syntax: TextDocumentSyntax) -> CGFloat {
+    syntax == .markdown ? markdownTopContentInset : topContentInset
+  }
 }
 
 struct LargeTextViewport: NSViewRepresentable {
@@ -76,7 +81,7 @@ struct LargeTextViewport: NSViewRepresentable {
     // (outer padding would clip at the inset line instead).
     scrollView.automaticallyAdjustsContentInsets = false
     scrollView.contentInsets = NSEdgeInsets(
-      top: LargeTextViewportMetrics.topContentInset,
+      top: LargeTextViewportMetrics.topContentInset(for: syntax),
       left: 0,
       bottom: 0,
       right: 0
@@ -90,6 +95,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.saveTracker = .shared
     documentView.setAccessibilityIdentifier(backendAccessibilityIdentifier)
     documentView.setAccessibilityLabel(accessibilityLabel)
+    scrollView.contentInsets.top = LargeTextViewportMetrics.topContentInset(for: syntax)
     documentView.syntax = syntax
     documentView.showsLineNumbers = usesClassicLineNumberGutter
     // Set before the document so the first wrap-index build uses the right mode.
