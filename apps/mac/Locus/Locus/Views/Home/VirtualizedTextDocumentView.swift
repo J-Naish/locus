@@ -44,6 +44,12 @@ enum MarkdownViewMode: Equatable {
   }
 }
 
+enum MarkdownViewModeToggleMetrics {
+  static let size: CGFloat = 28
+  static let topPadding: CGFloat = 10
+  static let trailingPadding: CGFloat = 12
+}
+
 enum LargeTextViewportMetrics {
   /// Breathing room between the viewport's top edge and the first text line,
   /// applied as a scroll-view content inset so scrolled content still clips
@@ -63,6 +69,7 @@ struct LargeTextViewport: NSViewRepresentable {
   let accessibilityLabel: String
   let syntax: TextDocumentSyntax
   var markdownViewMode: MarkdownViewMode = .rendered
+  var showsMarkdownViewModeToggleCursorRect = false
   /// Whether long lines soft-wrap to the viewport (prose) or scroll horizontally
   /// (structured/code/data). Decided per document by the host.
   let wrapsLines: Bool
@@ -131,6 +138,7 @@ struct LargeTextViewport: NSViewRepresentable {
     scrollView.contentInsets.top = LargeTextViewportMetrics.topContentInset(for: syntax)
     documentView.syntax = syntax
     documentView.markdownViewMode = markdownViewMode
+    documentView.showsMarkdownViewModeToggleCursorRect = showsMarkdownViewModeToggleCursorRect
     documentView.showsLineNumbers = usesClassicLineNumberGutter
     // Set before the document so the first wrap-index build uses the right mode.
     documentView.wrapsLines = wrapsLines
@@ -195,6 +203,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.setAccessibilityLabel(accessibilityLabel)
     documentView.syntax = syntax
     documentView.markdownViewMode = markdownViewMode
+    documentView.showsMarkdownViewModeToggleCursorRect = showsMarkdownViewModeToggleCursorRect
     documentView.showsLineNumbers = usesClassicLineNumberGutter
     // Set before any document swap so the rebuilt wrap index uses the right mode.
     documentView.wrapsLines = wrapsLines
@@ -278,6 +287,7 @@ struct VirtualizedTextDocumentView: View {
   let accessibilityLabel: String
   let syntax: TextDocumentSyntax
   var markdownViewMode: MarkdownViewMode = .rendered
+  var showsMarkdownViewModeToggleCursorRect = false
   /// Whether long lines soft-wrap to the viewport (prose) or scroll horizontally
   /// (structured/code/data). Decided per document by the host.
   let wrapsLines: Bool
@@ -332,6 +342,7 @@ struct VirtualizedTextDocumentView: View {
           accessibilityLabel: accessibilityLabel,
           syntax: syntax,
           markdownViewMode: markdownViewMode,
+          showsMarkdownViewModeToggleCursorRect: showsMarkdownViewModeToggleCursorRect,
           wrapsLines: wrapsLines,
           isEditable: isEditable,
           saveURL: url,
@@ -347,6 +358,7 @@ struct VirtualizedTextDocumentView: View {
           accessibilityLabel: accessibilityLabel,
           syntax: syntax,
           markdownViewMode: markdownViewMode,
+          showsMarkdownViewModeToggleCursorRect: showsMarkdownViewModeToggleCursorRect,
           wrapsLines: wrapsLines,
           onFocusChange: onFocusChange
         )

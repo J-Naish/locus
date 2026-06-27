@@ -1680,6 +1680,24 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 5))
   }
 
+  func testMarkdownViewModeToggleCursorRectTracksVisibleTopTrailingCorner() {
+    let visible = NSRect(x: 120, y: 340, width: 640, height: 480)
+
+    let rect = LineRenderingTextView.markdownViewModeToggleCursorRectForTesting(in: visible)
+
+    XCTAssertEqual(
+      rect.minX,
+      visible.maxX - MarkdownViewModeToggleMetrics.trailingPadding
+        - MarkdownViewModeToggleMetrics.size,
+      accuracy: 0.5)
+    XCTAssertEqual(
+      rect.minY,
+      visible.minY + MarkdownViewModeToggleMetrics.topPadding,
+      accuracy: 0.5)
+    XCTAssertEqual(rect.width, MarkdownViewModeToggleMetrics.size, accuracy: 0.5)
+    XCTAssertEqual(rect.height, MarkdownViewModeToggleMetrics.size, accuracy: 0.5)
+  }
+
   @MainActor
   func testMarkdownCopyWholeRenderedBoldLineIncludesRawMarkers() throws {
     let view = try makeViewer("**bold**")

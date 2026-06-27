@@ -111,6 +111,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
   }
 
+  var showsMarkdownViewModeToggleCursorRect = false {
+    didSet {
+      guard showsMarkdownViewModeToggleCursorRect != oldValue else { return }
+      window?.invalidateCursorRects(for: self)
+    }
+  }
+
   /// Whether the viewer accepts edits. Read-only entries keep this false; the
   /// host enables it for writable text. Editing is routed to the Rust buffer.
   var isEditable = false
@@ -1594,6 +1601,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         addCursorRect(target.buttonRect, cursor: .pointingHand)
       }
     }
+    if let toggleRect = markdownViewModeToggleCursorRect() {
+      addCursorRect(toggleRect, cursor: .pointingHand)
+    }
   }
 
   // Cursor rects alone go stale on two paths: after the pointer visits the
@@ -1657,11 +1667,32 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private func hoverCursor(at point: NSPoint) -> HoverCursor {
+    if markdownViewModeToggleContains(point) {
+      return .pointingHand
+    }
     if codeCopyButtonContains(point) {
       return .pointingHand
     }
     let gutterEdge = (enclosingScrollView?.contentView.bounds.origin.x ?? 0) + gutterWidth
     return point.x >= gutterEdge ? .iBeam : .arrow
+  }
+
+  private func markdownViewModeToggleContains(_ point: NSPoint) -> Bool {
+    markdownViewModeToggleCursorRect()?.contains(point) ?? false
+  }
+
+  private func markdownViewModeToggleCursorRect() -> NSRect? {
+    guard showsMarkdownViewModeToggleCursorRect else { return nil }
+    return Self.markdownViewModeToggleCursorRect(in: visibleRect)
+  }
+
+  private static func markdownViewModeToggleCursorRect(in visible: NSRect) -> NSRect {
+    return NSRect(
+      x: visible.maxX - MarkdownViewModeToggleMetrics.trailingPadding
+        - MarkdownViewModeToggleMetrics.size,
+      y: visible.minY + MarkdownViewModeToggleMetrics.topPadding,
+      width: MarkdownViewModeToggleMetrics.size,
+      height: MarkdownViewModeToggleMetrics.size)
   }
 
   /// Whether `point` (content coordinates) falls on a visible copy control.
@@ -4954,6 +4985,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   func attributedLineStringForTesting(line: Int) -> String {
     attributedLine(forLine: line).string
+  }
+
+  static func markdownViewModeToggleCursorRectForTesting(in visible: NSRect) -> NSRect {
+    markdownViewModeToggleCursorRect(in: visible)
   }
 
   func markdownCodeBlockFrameForTesting(

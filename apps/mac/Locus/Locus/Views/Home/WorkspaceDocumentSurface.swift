@@ -187,6 +187,7 @@ struct WorkspaceDocumentSurface: View {
           accessibilityLabel: "\(entry.name) text",
           syntax: syntax,
           markdownViewMode: markdownViewMode,
+          showsMarkdownViewModeToggleCursorRect: syntax == .markdown,
           wrapsLines: WorkspaceTextDocumentSupport.wrapsLines(for: entry),
           isEditable: !selectedDocumentReadOnly,
           recognizedTextType: WorkspaceTextDocumentSupport.isRecognizedTextType(entry),
@@ -199,8 +200,8 @@ struct WorkspaceDocumentSurface: View {
         )
         if syntax == .markdown {
           MarkdownViewModeToggleButton(mode: $markdownViewMode)
-            .padding(.top, 10)
-            .padding(.trailing, 12)
+            .padding(.top, MarkdownViewModeToggleMetrics.topPadding)
+            .padding(.trailing, MarkdownViewModeToggleMetrics.trailingPadding)
         }
       }
     }
@@ -529,7 +530,10 @@ private struct MarkdownViewModeToggleButton: View {
       Image(systemName: mode.toggleSystemImageName)
         .font(.system(size: 13, weight: .semibold))
         .foregroundStyle(.secondary)
-        .frame(width: 28, height: 28)
+        .frame(
+          width: MarkdownViewModeToggleMetrics.size,
+          height: MarkdownViewModeToggleMetrics.size
+        )
         .contentShape(Circle())
     }
     .buttonStyle(.plain)
