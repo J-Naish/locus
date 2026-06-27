@@ -104,6 +104,15 @@ enum MarkdownDocumentMetrics {
   static let imageCornerRadius: CGFloat = 4
   /// The alt text renders as a small muted caption below the image.
   static let imageCaptionFontSize: CGFloat = 12
+  static let frontMatterHorizontalInset: CGFloat = 34
+  static let frontMatterKeyColumnWidth: CGFloat = 150
+  static let frontMatterVerticalPadding: CGFloat = 18
+  static let frontMatterRowHeight: CGFloat = 34
+  static let frontMatterCornerRadius: CGFloat = 10
+  static let frontMatterChipHorizontalPadding: CGFloat = 10
+  static let frontMatterChipHeight: CGFloat = 24
+  static let frontMatterChipCornerRadius: CGFloat = 7
+  static let frontMatterChipDisplaySeparator = "        "
 
   static func headingFont(level: Int) -> NSFont {
     switch level {
@@ -170,6 +179,26 @@ enum MarkdownDocumentMetrics {
     return card.blended(withFraction: 0.05, of: .black) ?? NSColor.controlBackgroundColor
   }
 
+  static var frontMatterBackground: NSColor {
+    let card = LocusChromeColors.documentCard.usingColorSpace(.sRGB) ?? .textBackgroundColor
+    let appearance = NSAppearance.currentDrawing()
+    let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    if dark {
+      return card.blended(withFraction: 0.12, of: .white) ?? NSColor.controlBackgroundColor
+    }
+    return card.blended(withFraction: 0.025, of: .black) ?? NSColor.controlBackgroundColor
+  }
+
+  static var frontMatterChipBackground: NSColor {
+    let base = frontMatterBackground.usingColorSpace(.sRGB) ?? frontMatterBackground
+    let appearance = NSAppearance.currentDrawing()
+    let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    if dark {
+      return base.blended(withFraction: 0.10, of: .white) ?? base
+    }
+    return base.blended(withFraction: 0.04, of: .black) ?? base
+  }
+
   static var ruleColor: NSColor { .separatorColor }
   static var accentColor: NSColor { .controlAccentColor }
   static var markerColor: NSColor { .tertiaryLabelColor }
@@ -190,6 +219,22 @@ enum MarkdownDocumentMetrics {
 
   static var imageCaptionFont: NSFont {
     .systemFont(ofSize: imageCaptionFontSize)
+  }
+
+  static var frontMatterKeyFont: NSFont {
+    .systemFont(ofSize: bodyFontSize, weight: .medium)
+  }
+
+  static var frontMatterValueFont: NSFont {
+    .systemFont(ofSize: bodyFontSize, weight: .regular)
+  }
+
+  static var frontMatterEmphasizedValueFont: NSFont {
+    .systemFont(ofSize: bodyFontSize, weight: .semibold)
+  }
+
+  static var frontMatterChipFont: NSFont {
+    .systemFont(ofSize: 13, weight: .medium)
   }
 
   /// The language label above a code slab: a small muted system caption in the
@@ -217,6 +262,28 @@ struct MarkdownImageSource: Equatable, Hashable, Sendable {
   var altText: String
 }
 
+struct MarkdownFrontMatterValue: Equatable, Sendable {
+  var text: String
+  var sourceRange: NSRange
+}
+
+struct MarkdownFrontMatterField: Equatable, Sendable {
+  var key: String
+  var keyRange: NSRange
+  var values: [MarkdownFrontMatterValue]
+  var rendersValuesAsChips: Bool
+
+  var displayValueText: String {
+    values.map(\.text).joined(
+      separator: rendersValuesAsChips ? MarkdownDocumentMetrics.frontMatterChipDisplaySeparator : ""
+    )
+  }
+
+  var displayText: String {
+    key + "\t" + displayValueText
+  }
+}
+
 struct MarkdownLineStyleState: Equatable, Sendable {
   var insideFence = false
   var setextHeadingLevel: Int?
@@ -228,6 +295,11 @@ struct MarkdownLineStyleState: Equatable, Sendable {
   /// render empty and so collapse to slim rows (like fence/table delimiters)
   /// rather than full empty rows inside the card.
   var isFrontMatterDelimiter = false
+  /// Parsed metadata field for frontmatter rows that should be visible.
+  var frontMatterField: MarkdownFrontMatterField?
+  /// A YAML sequence item inside frontmatter. It renders aligned with the value
+  /// column, but maps back to the real `- value` source range so it stays editable.
+  var frontMatterSequenceValue: MarkdownFrontMatterValue?
   var isFenceDelimiter = false
   /// True for the opening fence delimiter of a block (vs the closer). The
   /// authoritative opener/closer distinction from the pairing pass, so callers
@@ -690,6 +762,18 @@ enum TextDocumentSyntaxHighlighter {
       attributed.addAttribute(
         .kern, value: MarkdownDocumentMetrics.codeCaptionTracking, range: fullRange)
     }
+    if state.insideFrontMatter, state.frontMatterSequenceValue != nil {
+      applyMarkdownFrontMatterSequenceAttributes(
+        to: attributed,
+        includeVisualAttributes: includeVisualAttributes)
+    } else if state.insideFrontMatter,
+      let field = state.frontMatterField ?? markdownFrontMatterField(in: line)
+    {
+      applyMarkdownFrontMatterAttributes(
+        to: attributed,
+        field: field,
+        includeVisualAttributes: includeVisualAttributes)
+    }
     if state.isTableRow {
       attributed.addAttribute(
         .paragraphStyle,
@@ -714,7 +798,7 @@ enum TextDocumentSyntaxHighlighter {
   /// the fence delimiter lines themselves (their label stays a muted caption).
   private static func markdownLineCarriesCodeTint(_ state: MarkdownLineStyleState) -> Bool {
     guard !state.isFenceDelimiter else { return false }
-    return state.insideFence || state.isIndentedCodeBlock || state.insideFrontMatter
+    return state.insideFence || state.isIndentedCodeBlock
   }
 
   /// Two language-agnostic tints over a code body line: comments recede to
@@ -759,8 +843,20 @@ enum TextDocumentSyntaxHighlighter {
     let context = markdownLineContext(in: line)
 
     if state.insideFrontMatter {
+      if state.frontMatterSequenceValue != nil {
+        return block(
+          displayFont: MarkdownDocumentMetrics.frontMatterValueFont,
+          foregroundColor: .labelColor,
+          stylesInline: false)
+      }
+      if markdownFrontMatterField(in: line) != nil {
+        return block(
+          displayFont: MarkdownDocumentMetrics.frontMatterValueFont,
+          foregroundColor: .labelColor,
+          stylesInline: false)
+      }
       return block(
-        displayFont: typography.codeBlock,
+        displayFont: MarkdownDocumentMetrics.frontMatterValueFont,
         foregroundColor: .secondaryLabelColor,
         stylesInline: false)
     }
@@ -871,6 +967,12 @@ enum TextDocumentSyntaxHighlighter {
       if markdownFrontMatterDelimiter(in: line) {
         return .empty(sourceText: line)
       }
+      if let value = state.frontMatterSequenceValue {
+        return markdownFrontMatterSequenceDisplayMap(for: value, sourceText: line)
+      }
+      if let field = state.frontMatterField ?? markdownFrontMatterField(in: line) {
+        return markdownFrontMatterDisplayMap(for: field, sourceText: line)
+      }
       return .identity(line)
     }
     if state.isFenceDelimiter, let fence = markdownFenceInfo(in: line) {
@@ -946,6 +1048,226 @@ enum TextDocumentSyntaxHighlighter {
       end -= 1
     }
     return NSRange(location: index, length: max(0, end - index))
+  }
+
+  static func markdownFrontMatterField(in line: String) -> MarkdownFrontMatterField? {
+    let nsLine = line as NSString
+    let length = nsLine.length
+    guard let colon = (0..<length).first(where: { nsLine.character(at: $0) == 58 }) else {
+      return nil
+    }
+
+    let keyRange = trimmedRange(in: nsLine, range: NSRange(location: 0, length: colon))
+    guard keyRange.length > 0 else { return nil }
+    let key = nsLine.substring(with: keyRange)
+    let valueRange = trimmedRange(
+      in: nsLine,
+      range: NSRange(location: min(length, colon + 1), length: max(0, length - colon - 1)))
+    guard valueRange.length > 0 else {
+      return MarkdownFrontMatterField(
+        key: key,
+        keyRange: keyRange,
+        values: [
+          MarkdownFrontMatterValue(text: "", sourceRange: NSRange(location: colon, length: 0))
+        ],
+        rendersValuesAsChips: false)
+    }
+
+    if let bracketValues = markdownFrontMatterBracketValues(in: nsLine, valueRange: valueRange) {
+      return MarkdownFrontMatterField(
+        key: key, keyRange: keyRange, values: bracketValues, rendersValuesAsChips: true)
+    }
+
+    if key == "allowed-tools",
+      let listValues = markdownFrontMatterCommaValues(in: nsLine, valueRange: valueRange),
+      listValues.count > 1
+    {
+      return MarkdownFrontMatterField(
+        key: key, keyRange: keyRange, values: listValues, rendersValuesAsChips: true)
+    }
+
+    let scalar = strippedFrontMatterScalar(in: nsLine, valueRange: valueRange)
+    return MarkdownFrontMatterField(
+      key: key,
+      keyRange: keyRange,
+      values: [scalar],
+      rendersValuesAsChips: false)
+  }
+
+  private static func markdownFrontMatterDisplayMap(
+    for field: MarkdownFrontMatterField,
+    sourceText: String
+  ) -> MarkdownDisplayMap {
+    var display = ""
+    var boundaries: [Int] = [field.keyRange.location]
+    var ranges: [NSRange] = []
+
+    func appendMapped(_ text: String, sourceRange: NSRange) {
+      let length = (text as NSString).length
+      for index in 0..<length {
+        display += (text as NSString).substring(with: NSRange(location: index, length: 1))
+        let sourceLocation = min(NSMaxRange(sourceRange), sourceRange.location + index)
+        ranges.append(NSRange(location: sourceLocation, length: min(1, sourceRange.length)))
+        boundaries.append(min(NSMaxRange(sourceRange), sourceLocation + 1))
+      }
+    }
+
+    func appendLiteral(_ text: String, sourceColumn: Int) {
+      let length = (text as NSString).length
+      for index in 0..<length {
+        display += (text as NSString).substring(with: NSRange(location: index, length: 1))
+        ranges.append(NSRange(location: sourceColumn, length: 0))
+        boundaries.append(sourceColumn)
+      }
+    }
+
+    appendMapped(field.key, sourceRange: field.keyRange)
+    appendLiteral("\t", sourceColumn: NSMaxRange(field.keyRange))
+    for (index, value) in field.values.enumerated() {
+      if index > 0 {
+        appendLiteral(
+          field.rendersValuesAsChips
+            ? MarkdownDocumentMetrics.frontMatterChipDisplaySeparator : "",
+          sourceColumn: value.sourceRange.location)
+      }
+      appendMapped(value.text, sourceRange: value.sourceRange)
+    }
+
+    return MarkdownDisplayMap(
+      sourceText: sourceText,
+      displayText: display,
+      boundaryColumns: boundaries,
+      characterRanges: ranges)
+  }
+
+  private static func markdownFrontMatterSequenceDisplayMap(
+    for value: MarkdownFrontMatterValue,
+    sourceText: String
+  ) -> MarkdownDisplayMap {
+    var display = ""
+    var boundaries: [Int] = [value.sourceRange.location]
+    var ranges: [NSRange] = []
+
+    func appendMapped(_ text: String, sourceRange: NSRange) {
+      let length = (text as NSString).length
+      for index in 0..<length {
+        display += (text as NSString).substring(with: NSRange(location: index, length: 1))
+        let sourceLocation = min(NSMaxRange(sourceRange), sourceRange.location + index)
+        ranges.append(NSRange(location: sourceLocation, length: min(1, sourceRange.length)))
+        boundaries.append(min(NSMaxRange(sourceRange), sourceLocation + 1))
+      }
+    }
+
+    display += "\t"
+    ranges.append(NSRange(location: value.sourceRange.location, length: 0))
+    boundaries.append(value.sourceRange.location)
+    appendMapped(value.text, sourceRange: value.sourceRange)
+
+    return MarkdownDisplayMap(
+      sourceText: sourceText,
+      displayText: display,
+      boundaryColumns: boundaries,
+      characterRanges: ranges)
+  }
+
+  private static func markdownFrontMatterBracketValues(
+    in nsLine: NSString,
+    valueRange: NSRange
+  ) -> [MarkdownFrontMatterValue]? {
+    guard valueRange.length >= 2,
+      nsLine.character(at: valueRange.location) == 91,
+      nsLine.character(at: NSMaxRange(valueRange) - 1) == 93
+    else {
+      return nil
+    }
+    let inner = NSRange(location: valueRange.location + 1, length: valueRange.length - 2)
+    return markdownFrontMatterCommaValues(in: nsLine, valueRange: inner) ?? []
+  }
+
+  private static func markdownFrontMatterCommaValues(
+    in nsLine: NSString,
+    valueRange: NSRange
+  ) -> [MarkdownFrontMatterValue]? {
+    var values: [MarkdownFrontMatterValue] = []
+    var start = valueRange.location
+    let end = NSMaxRange(valueRange)
+    var index = start
+    var quote: unichar?
+    while index <= end {
+      let atEnd = index == end
+      let character = atEnd ? 0 : nsLine.character(at: index)
+      if !atEnd, character == 34 || character == 39 {
+        if quote == character {
+          quote = nil
+        } else if quote == nil {
+          quote = character
+        }
+      }
+      if atEnd || (character == 44 && quote == nil) {
+        let rawRange = NSRange(location: start, length: max(0, index - start))
+        let trimmed = trimmedRange(in: nsLine, range: rawRange)
+        if trimmed.length > 0 {
+          values.append(strippedFrontMatterScalar(in: nsLine, valueRange: trimmed))
+        }
+        start = min(end, index + 1)
+      }
+      index += 1
+    }
+    return values.isEmpty ? nil : values
+  }
+
+  private static func markdownFrontMatterSequenceValue(in line: String) -> MarkdownFrontMatterValue?
+  {
+    let nsLine = line as NSString
+    let lineRange = NSRange(location: 0, length: nsLine.length)
+    let trimmed = trimmedRange(in: nsLine, range: lineRange)
+    guard trimmed.length >= 2,
+      nsLine.character(at: trimmed.location) == 45,
+      nsLine.character(at: trimmed.location + 1) == 32
+    else {
+      return nil
+    }
+    let valueRange = trimmedRange(
+      in: nsLine,
+      range: NSRange(
+        location: trimmed.location + 2,
+        length: max(0, NSMaxRange(trimmed) - trimmed.location - 2)))
+    guard valueRange.length > 0 else { return nil }
+    return strippedFrontMatterScalar(in: nsLine, valueRange: valueRange)
+  }
+
+  private static func strippedFrontMatterScalar(
+    in nsLine: NSString,
+    valueRange: NSRange
+  ) -> MarkdownFrontMatterValue {
+    guard valueRange.length >= 2 else {
+      return MarkdownFrontMatterValue(
+        text: nsLine.substring(with: valueRange), sourceRange: valueRange)
+    }
+    let first = nsLine.character(at: valueRange.location)
+    let last = nsLine.character(at: NSMaxRange(valueRange) - 1)
+    if (first == 34 && last == 34) || (first == 39 && last == 39) {
+      let inner = NSRange(location: valueRange.location + 1, length: valueRange.length - 2)
+      return MarkdownFrontMatterValue(text: nsLine.substring(with: inner), sourceRange: inner)
+    }
+    return MarkdownFrontMatterValue(
+      text: nsLine.substring(with: valueRange), sourceRange: valueRange)
+  }
+
+  private static func trimmedRange(in nsLine: NSString, range: NSRange) -> NSRange {
+    var start = max(0, range.location)
+    var end = min(nsLine.length, NSMaxRange(range))
+    while start < end {
+      let character = nsLine.character(at: start)
+      guard character == 32 || character == 9 else { break }
+      start += 1
+    }
+    while end > start {
+      let character = nsLine.character(at: end - 1)
+      guard character == 32 || character == 9 else { break }
+      end -= 1
+    }
+    return NSRange(location: start, length: max(0, end - start))
   }
 
   private static func renderedInlineDisplayMap(from map: MarkdownDisplayMap)
@@ -1786,6 +2108,7 @@ enum TextDocumentSyntaxHighlighter {
         // to slim rows rather than leaving a full empty row at the card edges.
         states[0].isFrontMatterDelimiter = true
         states[closingIndex].isFrontMatterDelimiter = true
+        annotateMarkdownFrontMatterFields(in: lines, states: &states, closingIndex: closingIndex)
       }
     }
 
@@ -1936,6 +2259,23 @@ enum TextDocumentSyntaxHighlighter {
     }
 
     return states
+  }
+
+  private static func annotateMarkdownFrontMatterFields(
+    in lines: [String],
+    states: inout [MarkdownLineStyleState],
+    closingIndex: Int
+  ) {
+    guard closingIndex > 1 else { return }
+    var index = 1
+    while index < closingIndex {
+      if let value = markdownFrontMatterSequenceValue(in: lines[index]) {
+        states[index].frontMatterSequenceValue = value
+      } else if let field = markdownFrontMatterField(in: lines[index]) {
+        states[index].frontMatterField = field
+      }
+      index += 1
+    }
   }
 
   /// Longest body that may classify as an image-only line. Far above any real
@@ -2365,6 +2705,92 @@ enum TextDocumentSyntaxHighlighter {
       attributes[.foregroundColor] = foregroundColor
     }
     return attributes
+  }
+
+  private static func applyMarkdownFrontMatterAttributes(
+    to attributed: NSMutableAttributedString,
+    field: MarkdownFrontMatterField,
+    includeVisualAttributes: Bool
+  ) {
+    let keyLength = (field.key as NSString).length
+    let fullRange = NSRange(location: 0, length: attributed.length)
+    guard keyLength > 0, attributed.length >= keyLength else { return }
+
+    attributed.addAttribute(
+      .paragraphStyle,
+      value: markdownFrontMatterParagraphStyle(rendersValuesAsChips: field.rendersValuesAsChips),
+      range: fullRange)
+    attributed.addAttribute(
+      .font, value: MarkdownDocumentMetrics.frontMatterKeyFont,
+      range: NSRange(location: 0, length: keyLength))
+    if includeVisualAttributes {
+      attributed.addAttribute(
+        .foregroundColor,
+        value: NSColor.tertiaryLabelColor,
+        range: NSRange(location: 0, length: keyLength))
+    }
+
+    let valueStart = min(attributed.length, keyLength + 1)
+    guard valueStart < attributed.length else { return }
+    var offset = valueStart
+    let chipSeparatorLength = (MarkdownDocumentMetrics.frontMatterChipDisplaySeparator as NSString)
+      .length
+    for (index, value) in field.values.enumerated() {
+      if index > 0, field.rendersValuesAsChips {
+        let separatorRange = NSRange(location: offset, length: chipSeparatorLength)
+        if NSMaxRange(separatorRange) <= attributed.length {
+          attributed.addAttribute(
+            .font, value: MarkdownDocumentMetrics.frontMatterChipFont, range: separatorRange)
+        }
+        offset += chipSeparatorLength
+      }
+      let length = (value.text as NSString).length
+      guard length > 0, offset + length <= attributed.length else { continue }
+      let range = NSRange(location: offset, length: length)
+      let font =
+        field.rendersValuesAsChips
+        ? MarkdownDocumentMetrics.frontMatterChipFont
+        : (field.key == "name"
+          ? MarkdownDocumentMetrics.frontMatterEmphasizedValueFont
+          : MarkdownDocumentMetrics.frontMatterValueFont)
+      attributed.addAttribute(.font, value: font, range: range)
+      if includeVisualAttributes {
+        attributed.addAttribute(.foregroundColor, value: NSColor.labelColor, range: range)
+      }
+      offset += length
+    }
+  }
+
+  private static func applyMarkdownFrontMatterSequenceAttributes(
+    to attributed: NSMutableAttributedString,
+    includeVisualAttributes: Bool
+  ) {
+    let fullRange = NSRange(location: 0, length: attributed.length)
+    guard fullRange.length > 0 else { return }
+    attributed.addAttribute(
+      .paragraphStyle,
+      value: markdownFrontMatterParagraphStyle(rendersValuesAsChips: true),
+      range: fullRange)
+    attributed.addAttribute(
+      .font,
+      value: MarkdownDocumentMetrics.frontMatterChipFont,
+      range: fullRange)
+    if includeVisualAttributes {
+      attributed.addAttribute(.foregroundColor, value: NSColor.labelColor, range: fullRange)
+    }
+  }
+
+  private static func markdownFrontMatterParagraphStyle(
+    rendersValuesAsChips: Bool
+  ) -> NSParagraphStyle {
+    let style = NSMutableParagraphStyle()
+    let valueColumn =
+      MarkdownDocumentMetrics.frontMatterKeyColumnWidth
+      + (rendersValuesAsChips ? MarkdownDocumentMetrics.frontMatterChipHorizontalPadding : 0)
+    style.defaultTabInterval = 0
+    style.tabStops = [NSTextTab(textAlignment: .left, location: valueColumn)]
+    style.headIndent = valueColumn
+    return style
   }
 
   private static func markdownTableParagraphStyle(columns: [MarkdownTableColumn])

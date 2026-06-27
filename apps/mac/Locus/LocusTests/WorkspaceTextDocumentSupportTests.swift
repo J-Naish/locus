@@ -840,7 +840,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       "")
   }
 
-  func testMarkdownIndentedAndFrontmatterCodeShareCommentTint() {
+  func testMarkdownIndentedCodeKeepsCommentTintButFrontmatterUsesMetadataStyling() throws {
     let indented = TextDocumentSyntaxHighlighter.markdownLineStates(for: ["    # note", "    code"])
     let indentedLine = TextDocumentSyntaxHighlighter.highlightedLine(
       "    # note",
@@ -853,17 +853,24 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       NSColor.tertiaryLabelColor)
 
     let frontmatter = TextDocumentSyntaxHighlighter.markdownLineStates(for: [
-      "---", "# section note", "title: Hi", "---",
+      "---", "title: Hi", "---",
     ])
     let frontmatterLine = TextDocumentSyntaxHighlighter.highlightedLine(
-      "# section note",
+      "title: Hi",
       syntax: .markdown,
       font: TextDocumentSyntax.markdown.font,
       markdownLineState: frontmatter[1])
     XCTAssertEqual(frontmatter[1].insideFrontMatter, true)
+    XCTAssertEqual(frontmatterLine.string, "title\tHi")
     XCTAssertEqual(
-      frontmatterLine.foregroundColor(in: frontmatterLine.string, matching: "# section note"),
+      frontmatterLine.foregroundColor(in: frontmatterLine.string, matching: "title"),
       NSColor.tertiaryLabelColor)
+    XCTAssertEqual(
+      frontmatterLine.foregroundColor(in: frontmatterLine.string, matching: "Hi"),
+      NSColor.labelColor)
+    XCTAssertFalse(
+      try XCTUnwrap(frontmatterLine.resolvedFont(in: frontmatterLine.string, matching: "title"))
+        .fontDescriptor.symbolicTraits.contains(.monoSpace))
   }
 
   func testMarkdownFencedCodeTintIsLanguageAgnostic() {
@@ -1227,28 +1234,105 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       MarkdownDocumentMetrics.headingFont(level: 1).pointSize)
   }
 
-  func testMarkdownFrontMatterUsesMutedMonospacedText() {
+  func testMarkdownFrontMatterRendersAsMetadataRows() {
     let markdown = """
       ---
-      title: Draft
+      name: pdf
+      description: Comprehensive PDF toolkit
+      allowed-tools: [Read, Write, Bash]
       ---
       # Body
       """
-    let storage = NSTextStorage(string: markdown)
+    let lines = markdown.components(separatedBy: "\n")
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let name = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[1], syntax: .markdown, font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[1])
+    let tools = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[3], syntax: .markdown, font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[3])
 
-    TextDocumentSyntaxHighlighter.apply(
-      to: storage,
-      text: storage.string,
-      syntax: .markdown,
-      font: TextDocumentSyntax.markdown.font
-    )
+    XCTAssertEqual(name.string, "name\tpdf")
+    XCTAssertEqual(
+      tools.string,
+      "allowed-tools\tRead\(MarkdownDocumentMetrics.frontMatterChipDisplaySeparator)Write"
+        + "\(MarkdownDocumentMetrics.frontMatterChipDisplaySeparator)Bash")
+    let nameStyle = name.paragraphStyle(at: 0)
+    let toolsStyle = tools.paragraphStyle(at: 0)
+    XCTAssertEqual(
+      try XCTUnwrap(nameStyle?.tabStops.first?.location),
+      MarkdownDocumentMetrics.frontMatterKeyColumnWidth,
+      accuracy: 0.5)
+    XCTAssertEqual(
+      try XCTUnwrap(toolsStyle?.tabStops.first?.location),
+      MarkdownDocumentMetrics.frontMatterKeyColumnWidth
+        + MarkdownDocumentMetrics.frontMatterChipHorizontalPadding,
+      accuracy: 0.5)
+    XCTAssertFalse(
+      try XCTUnwrap(name.resolvedFont(in: name.string, matching: "name"))
+        .fontDescriptor.symbolicTraits.contains(.monoSpace))
+    XCTAssertEqual(
+      name.foregroundColor(in: name.string, matching: "name"), NSColor.tertiaryLabelColor)
+    XCTAssertEqual(name.foregroundColor(in: name.string, matching: "pdf"), NSColor.labelColor)
 
     XCTAssertEqual(
-      storage.resolvedFont(in: markdown, matching: "title")?.fontDescriptor.symbolicTraits
-        .contains(.monoSpace), true)
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[0], font: TextDocumentSyntax.markdown.font, state: states[0]), "")
     XCTAssertEqual(
-      storage.resolvedFont(in: markdown, matching: "Body")?.pointSize,
+      TextDocumentSyntaxHighlighter.highlightedLine(
+        "# Body", syntax: .markdown, font: TextDocumentSyntax.markdown.font,
+        markdownLineState: states[5]
+      ).resolvedFont(at: 0)?.pointSize,
       MarkdownDocumentMetrics.headingFont(level: 1).pointSize)
+  }
+
+  func testMarkdownFrontMatterSequenceValuesRemainEditableRows() {
+    let lines = [
+      "---",
+      "reviewers:",
+      "  - dario",
+      "  - role: reviewer",
+      "  - musk",
+      "---",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let reviewers = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[1], syntax: .markdown, font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[1])
+    let dario = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[2], syntax: .markdown, font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[2])
+    let role = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[3], syntax: .markdown, font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[3])
+
+    XCTAssertEqual(reviewers.string, "reviewers\t")
+    XCTAssertEqual(dario.string, "\tdario")
+    XCTAssertEqual(role.string, "\trole: reviewer")
+    XCTAssertEqual(
+      try XCTUnwrap(dario.paragraphStyle(at: 0)?.tabStops.first?.location),
+      MarkdownDocumentMetrics.frontMatterKeyColumnWidth
+        + MarkdownDocumentMetrics.frontMatterChipHorizontalPadding,
+      accuracy: 0.5)
+    XCTAssertEqual(
+      try XCTUnwrap(dario.resolvedFont(in: dario.string, matching: "dario")).pointSize,
+      MarkdownDocumentMetrics.frontMatterChipFont.pointSize,
+      accuracy: 0.5)
+    XCTAssertEqual(states[1].frontMatterField?.rendersValuesAsChips, false)
+    XCTAssertEqual(states[2].frontMatterSequenceValue?.text, "dario")
+    XCTAssertEqual(
+      states[2].frontMatterSequenceValue?.sourceRange,
+      NSRange(location: 4, length: 5))
+    XCTAssertNil(states[3].frontMatterField)
+    XCTAssertEqual(states[3].frontMatterSequenceValue?.text, "role: reviewer")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[2], font: TextDocumentSyntax.markdown.font, state: states[2]), "\tdario")
+
+    let map = TextDocumentSyntaxHighlighter.markdownDisplayMap(for: lines[2], state: states[2])
+    XCTAssertEqual(
+      map.bufferRange(forDisplayStart: 1, end: 6, includeWholeLineMarkers: false),
+      NSRange(location: 4, length: 5))
   }
 
   func testMarkdownEscapedEmphasisMarkersStayLiteral() {
@@ -1505,5 +1589,9 @@ extension NSAttributedString {
     let range = (text as NSString).range(of: substring)
     XCTAssertNotEqual(range.location, NSNotFound)
     return resolvedFont(at: range.location)
+  }
+
+  fileprivate func paragraphStyle(at location: Int) -> NSParagraphStyle? {
+    attribute(.paragraphStyle, at: location, effectiveRange: nil) as? NSParagraphStyle
   }
 }

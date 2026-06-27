@@ -496,9 +496,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private nonisolated static func markdownInnerInset(for state: MarkdownLineStyleState) -> CGFloat {
-    if state.insideFence || state.isFenceDelimiter || state.insideFrontMatter
-      || state.isIndentedCodeBlock
-    {
+    if state.insideFrontMatter {
+      return MarkdownDocumentMetrics.frontMatterHorizontalInset
+    }
+    if state.insideFence || state.isFenceDelimiter || state.isIndentedCodeBlock {
       return MarkdownDocumentMetrics.codeCardInset
     }
     if state.isTableRow {
@@ -696,6 +697,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         set(index, Self.headingLineMetrics(level: level, isDocumentTop: index == 0))
       } else if let image = state.imageSource {
         set(index, markdownImageLineMetrics(for: image, state: state))
+      } else if Self.markdownLineIsFrontMatterRun(state) {
+        if let metrics = markdownFrontMatterLineMetrics(
+          state: state,
+          isFirst: !Self.markdownLineIsFrontMatterRun(index > 0 ? states[index - 1] : .plain),
+          isLast: !Self.markdownLineIsFrontMatterRun(
+            index + 1 < states.count ? states[index + 1] : .plain),
+          isDocumentTop: index == 0)
+        {
+          set(index, metrics)
+        }
       } else if Self.markdownLineIsCodeRun(state) {
         if let metrics = markdownCodeRunLineMetrics(
           state: state, isFirst: !codeRunLine(index - 1), isLast: !codeRunLine(index + 1),
@@ -708,10 +719,25 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return metrics
   }
 
-  /// Lines that belong to a code slab: fenced, indented, or frontmatter.
+  /// Lines that belong to a code slab: fenced or indented code.
   nonisolated static func markdownLineIsCodeRun(_ state: MarkdownLineStyleState) -> Bool {
     state.isFenceDelimiter || state.insideFence || state.isIndentedCodeBlock
-      || state.insideFrontMatter
+  }
+
+  nonisolated static func markdownLineIsFrontMatterRun(_ state: MarkdownLineStyleState) -> Bool {
+    state.insideFrontMatter
+  }
+
+  private func markdownFrontMatterLineMetrics(
+    state: MarkdownLineStyleState, isFirst: Bool, isLast: Bool, isDocumentTop: Bool
+  ) -> LineRowMetrics? {
+    let rowHeight =
+      state.isFrontMatterDelimiter
+      ? MarkdownDocumentMetrics.frontMatterVerticalPadding
+      : MarkdownDocumentMetrics.frontMatterRowHeight
+    let leading = isFirst && !isDocumentTop ? MarkdownDocumentMetrics.codeBlockAir : 0
+    let trailing = isLast ? MarkdownDocumentMetrics.codeBlockAir : 0
+    return LineRowMetrics(rowHeight: rowHeight, leadingInset: leading, trailingInset: trailing)
   }
 
   /// Per-line metrics for a code-slab line: empty fence delimiters collapse to
@@ -3966,6 +3992,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let rawLines = markdownRawLines(for: range, buffer: buffer)
     drawMarkdownTableBackgrounds(
       rawLines: rawLines, range: range, visibleRows: visibleRows, buffer: buffer)
+    drawMarkdownFrontMatterBackgrounds(
+      rawLines: rawLines, range: range, visibleRows: visibleRows, buffer: buffer)
     drawMarkdownFenceBackgrounds(
       rawLines: rawLines, range: range, visibleRows: visibleRows)
     for (offset, rawLine) in rawLines.enumerated() {
@@ -3977,6 +4005,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       let firstRow = firstVisualRow(ofLine: line)
       let rowCount = max(1, wrapIndex?.visualRowCount(ofLine: line) ?? 1)
       let lineTextX = lineTextColumnX(forLine: line)
+      let lineY = yOffset(ofLine: line)
       if state.quoteDepth > 0 {
         let startRow = max(firstRow, visibleRows.lowerBound)
         let endRow = min(firstRow + rowCount, visibleRows.upperBound)
@@ -3991,10 +4020,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       if let imageSource = state.imageSource, visibleRows.contains(firstRow) {
         drawMarkdownImageBlock(source: imageSource, line: line)
       }
+      if state.insideFrontMatter, visibleRows.contains(firstRow) {
+        drawMarkdownFrontMatterChips(
+          field: state.frontMatterField,
+          sequenceValue: state.frontMatterSequenceValue,
+          line: line,
+          y: lineY)
+      }
       guard let decoration = markdownBlockDecoration(for: rawLine, state: state) else {
         continue
       }
-      let lineY = yOffset(ofLine: line)
       switch decoration {
       case .bullet:
         guard visibleRows.contains(firstRow) else { continue }
@@ -4049,9 +4084,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         line >= 0 && line < (states?.count ?? 0)
         ? states?[line] ?? .plain
         : .plain
-      if state.isFenceDelimiter || state.insideFence || state.insideFrontMatter
-        || state.isIndentedCodeBlock
-      {
+      if state.isFenceDelimiter || state.insideFence || state.isIndentedCodeBlock {
         if runStart == nil {
           runStart = line
         }
@@ -4063,6 +4096,34 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     if let start = runStart {
       drawMarkdownCodeBlockBackground(
+        fromLine: start, toLine: max(start, range.upperBound - 1), visibleRows: visibleRows)
+    }
+  }
+
+  private func drawMarkdownFrontMatterBackgrounds(
+    rawLines: [String], range: Range<Int>, visibleRows: Range<Int>,
+    buffer: any TextDocumentReading
+  ) {
+    let states = markdownLineStates(for: buffer)
+    var runStart: Int?
+    for (offset, _) in rawLines.enumerated() {
+      let line = range.lowerBound + offset
+      let state =
+        line >= 0 && line < (states?.count ?? 0)
+        ? states?[line] ?? .plain
+        : .plain
+      if state.insideFrontMatter {
+        if runStart == nil {
+          runStart = line
+        }
+      } else if let start = runStart {
+        drawMarkdownFrontMatterBackground(
+          fromLine: start, toLine: max(start, line - 1), visibleRows: visibleRows)
+        runStart = nil
+      }
+    }
+    if let start = runStart {
+      drawMarkdownFrontMatterBackground(
         fromLine: start, toLine: max(start, range.upperBound - 1), visibleRows: visibleRows)
     }
   }
@@ -4329,6 +4390,72 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       yRadius: MarkdownDocumentMetrics.codeBlockCornerRadius
     )
     .fill()
+  }
+
+  private func drawMarkdownFrontMatterBackground(
+    fromLine startLine: Int, toLine endLine: Int, visibleRows: Range<Int>
+  ) {
+    guard
+      let rect = markdownFrontMatterFrameForTesting(
+        fromLine: startLine, toLine: endLine, visibleRows: visibleRows)
+    else {
+      return
+    }
+    MarkdownDocumentMetrics.frontMatterBackground.setFill()
+    let path = NSBezierPath(
+      roundedRect: rect,
+      xRadius: MarkdownDocumentMetrics.frontMatterCornerRadius,
+      yRadius: MarkdownDocumentMetrics.frontMatterCornerRadius)
+    path.fill()
+  }
+
+  private func drawMarkdownFrontMatterChips(
+    field: MarkdownFrontMatterField?,
+    sequenceValue: MarkdownFrontMatterValue?,
+    line: Int,
+    y: CGFloat
+  ) {
+    let values: [MarkdownFrontMatterValue]
+    if let field, field.rendersValuesAsChips, !field.values.isEmpty {
+      values = field.values
+    } else if let sequenceValue {
+      values = [sequenceValue]
+    } else {
+      return
+    }
+
+    var x =
+      lineTextColumnX(forLine: line)
+      + MarkdownDocumentMetrics.frontMatterKeyColumnWidth
+      + MarkdownDocumentMetrics.frontMatterChipHorizontalPadding
+    let rowTop = y + leadingInset(forLine: line)
+    let chipHeight = MarkdownDocumentMetrics.frontMatterChipHeight
+    let chipY = rowTop + max(0, (rowHeight(forLine: line) - chipHeight) / 2)
+    let attributes: [NSAttributedString.Key: Any] = [
+      .font: MarkdownDocumentMetrics.frontMatterChipFont
+    ]
+    let separatorWidth = NSAttributedString(
+      string: MarkdownDocumentMetrics.frontMatterChipDisplaySeparator,
+      attributes: attributes
+    ).size().width
+    for value in values {
+      let text = NSAttributedString(string: value.text, attributes: attributes)
+      let textWidth = ceil(text.size().width)
+      let width = textWidth + 2 * MarkdownDocumentMetrics.frontMatterChipHorizontalPadding
+      let rect = NSRect(
+        x: x - MarkdownDocumentMetrics.frontMatterChipHorizontalPadding,
+        y: chipY,
+        width: width,
+        height: chipHeight)
+      MarkdownDocumentMetrics.frontMatterChipBackground.setFill()
+      NSBezierPath(
+        roundedRect: backingAlignedRect(rect, options: .alignAllEdgesNearest),
+        xRadius: MarkdownDocumentMetrics.frontMatterChipCornerRadius,
+        yRadius: MarkdownDocumentMetrics.frontMatterChipCornerRadius
+      )
+      .fill()
+      x += textWidth + separatorWidth
+    }
   }
 
   /// The copy control of one fenced code block: its block's opening-fence line,
@@ -4787,6 +4914,29 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       width: lineOuterContentWidth(forLine: startLine),
       height: bottom - y
     )
+  }
+
+  func markdownFrontMatterFrameForTesting(
+    fromLine startLine: Int,
+    toLine endLine: Int,
+    visibleRows: Range<Int>
+  ) -> NSRect? {
+    let startRow = firstVisualRow(ofLine: startLine)
+    let endRowCount = max(1, wrapIndex?.visualRowCount(ofLine: endLine) ?? 1)
+    let endRow = firstVisualRow(ofLine: endLine) + endRowCount
+    guard endRow > visibleRows.lowerBound, startRow < visibleRows.upperBound else { return nil }
+    let slabTop = yOffset(ofLine: startLine) + leadingInset(forLine: startLine)
+    let slabBottom =
+      yOffset(ofLine: endLine) + leadingInset(forLine: endLine)
+      + rowHeight(forLine: endLine) * CGFloat(endRowCount)
+    let y = max(slabTop, yOffset(ofVisualRow: visibleRows.lowerBound))
+    let bottom = min(slabBottom, yOffset(ofVisualRow: visibleRows.upperBound))
+    guard bottom > y else { return nil }
+    return NSRect(
+      x: lineOuterColumnX(forLine: startLine),
+      y: y,
+      width: lineOuterContentWidth(forLine: startLine),
+      height: bottom - y)
   }
 
   /// The image block's frame inside an image line's leading inset, or nil for

@@ -1003,6 +1003,59 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testMarkdownFrontMatterUsesMetadataCardMetrics() throws {
+    let view = try makeViewer("---\nname: pdf\nallowed-tools: [Read, Write, Bash]\n---\n# Body")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let frame = try XCTUnwrap(
+      view.markdownFrontMatterFrameForTesting(fromLine: 0, toLine: 3, visibleRows: 0..<5))
+
+    XCTAssertEqual(frame.minY, try XCTUnwrap(view.endpointYForTesting(line: 0)), accuracy: 0.5)
+    XCTAssertEqual(frame.minX, view.markdownTextColumnXForTesting(), accuracy: 0.5)
+    let line0Y = try XCTUnwrap(view.endpointYForTesting(line: 0))
+    let line1Y = try XCTUnwrap(view.endpointYForTesting(line: 1))
+    let line2Y = try XCTUnwrap(view.endpointYForTesting(line: 2))
+    XCTAssertEqual(
+      line1Y - line0Y,
+      MarkdownDocumentMetrics.frontMatterVerticalPadding,
+      accuracy: 0.5)
+    XCTAssertEqual(
+      line2Y - line1Y,
+      MarkdownDocumentMetrics.frontMatterRowHeight,
+      accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownFrontMatterSequenceRowsStayVisibleForEditing() throws {
+    let view = try makeViewer(
+      "---\ntitle: Markdown Syntax Coverage\nreviewers:\n  - dario\n  - altman\n  - musk\ntags:\n  - markdown\n  - rendering\n---\n# Body"
+    )
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let reviewersY = try XCTUnwrap(view.endpointYForTesting(line: 2))
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 3)),
+      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight,
+      accuracy: 0.5)
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 4)),
+      reviewersY + 2 * MarkdownDocumentMetrics.frontMatterRowHeight,
+      accuracy: 0.5)
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 5)),
+      reviewersY + 3 * MarkdownDocumentMetrics.frontMatterRowHeight,
+      accuracy: 0.5)
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 6)),
+      reviewersY + 4 * MarkdownDocumentMetrics.frontMatterRowHeight,
+      accuracy: 0.5)
+  }
+
+  @MainActor
   func testMarkdownDocumentTopCodeCardSitsAtPageTop() throws {
     let view = try makeViewer("```swift\nlet value = 1\n```")
     view.setFrameSize(NSSize(width: 520, height: 400))
@@ -1184,29 +1237,30 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
-  func testMarkdownFrontmatterDelimitersAreSlimNotEmptyRows() throws {
+  func testMarkdownFrontmatterDelimitersBecomeMetadataCardPaddingRows() throws {
     let view = try makeViewer("---\ntitle: Hi\nstatus: x\n---\nBody")
     view.setFrameSize(NSSize(width: 520, height: 400))
     view.syntax = .markdown
     view.updateLayout()
 
-    let slim = MarkdownDocumentMetrics.slimMarkerRowHeight
-    let body = view.layout.lineHeight
+    let verticalPadding = MarkdownDocumentMetrics.frontMatterVerticalPadding
+    let rowHeight = MarkdownDocumentMetrics.frontMatterRowHeight
     let air = MarkdownDocumentMetrics.codeBlockAir
 
-    // Opening `---` (document top): a slim row, no air above, no full empty row.
-    XCTAssertEqual(try XCTUnwrap(view.endpointYForTesting(line: 1)), slim, accuracy: 0.5)
-    // Content rows keep the uniform height.
+    // Opening `---` becomes the top padding of the metadata card, not a visible
+    // marker row.
+    XCTAssertEqual(try XCTUnwrap(view.endpointYForTesting(line: 1)), verticalPadding, accuracy: 0.5)
+    // Metadata rows use the card's own relaxed row height.
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 2))
         - (try XCTUnwrap(view.endpointYForTesting(line: 1))),
-      body,
+      rowHeight,
       accuracy: 0.5)
-    // Closing `---`: a slim row carrying the block air below it.
+    // Closing `---` becomes the bottom padding and carries the block air below it.
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 4))
         - (try XCTUnwrap(view.endpointYForTesting(line: 3))),
-      slim + air,
+      verticalPadding + air,
       accuracy: 0.5)
   }
 
