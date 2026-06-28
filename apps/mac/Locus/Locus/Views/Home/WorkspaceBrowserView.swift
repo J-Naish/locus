@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // WorkspaceBrowserSearchResults is tested in WorkspaceEntrySearchTests.swift
@@ -1202,6 +1203,95 @@ struct WorkspaceBrowserView: View {
     closeDocumentTab(activeTab)
   }
 
+  private func openLinkedFile(_ url: URL) {
+    let standardized = url.standardizedFileURL
+    if openLinkedPath(standardized) {
+      return
+    }
+
+    let currentFolderURL = folderURL
+    Task {
+      await openLinkedPathFromParentDirectory(
+        standardized, currentFolderURL: currentFolderURL)
+    }
+  }
+
+  @MainActor
+  private func openLinkedPathFromParentDirectory(
+    _ url: URL,
+    currentFolderURL: URL
+  ) async {
+    do {
+      let parentSnapshot = try await actions.loadFolderChildren(url.deletingLastPathComponent())
+      guard folderURL.locusStandardizedPath == currentFolderURL.locusStandardizedPath else {
+        return
+      }
+      if openLinkedPath(url, loadedParentEntries: parentSnapshot.entries) {
+        return
+      }
+      if openSynthesizedLinkedPath(url) {
+        return
+      }
+    } catch {
+      guard folderURL.locusStandardizedPath == currentFolderURL.locusStandardizedPath else {
+        return
+      }
+      if openSynthesizedLinkedPath(url) {
+        return
+      }
+    }
+
+    NSWorkspace.shared.activateFileViewerSelecting([url])
+  }
+
+  @MainActor
+  @discardableResult
+  private func openLinkedPath(
+    _ url: URL,
+    loadedParentEntries: [WorkspaceEntry] = []
+  ) -> Bool {
+    guard
+      let entry = WorkspaceLinkedPathEntryResolver.entry(
+        matching: url,
+        visibleEntries: sidebarVisibleEntries,
+        loadedParentEntries: loadedParentEntries),
+      let action = WorkspaceEntryOpenActionResolver.action(for: [entry])
+    else {
+      return false
+    }
+
+    switch action {
+    case .openInPlace:
+      openDocumentEntry = entry
+      selectedEntryID = entry.id
+      sidebarSelectionState.highlightSidebarEntry(entry.id)
+    case .browseFolder:
+      actions.performOpenAction(action)
+    }
+    return true
+  }
+
+  @MainActor
+  @discardableResult
+  private func openSynthesizedLinkedPath(_ url: URL) -> Bool {
+    guard
+      let entry = WorkspaceLinkedPathEntryResolver.syntheticEntry(for: url),
+      let action = WorkspaceEntryOpenActionResolver.action(for: [entry])
+    else {
+      return false
+    }
+
+    switch action {
+    case .openInPlace:
+      openDocumentEntry = entry
+      selectedEntryID = entry.id
+      sidebarSelectionState.highlightSidebarEntry(entry.id)
+    case .browseFolder:
+      actions.performOpenAction(action)
+    }
+    return true
+  }
+
   private var workspaceDetail: some View {
     Group {
       if snapshot.entries.isEmpty {
@@ -1227,6 +1317,9 @@ struct WorkspaceBrowserView: View {
             // that completes after navigating away credits the folder the
             // document was saved in, not wherever the user browsed to.
             actions.recordWorkspaceEngagement(folderURL)
+          },
+          onOpenLinkedFile: { url in
+            openLinkedFile(url)
           }
         )
       }

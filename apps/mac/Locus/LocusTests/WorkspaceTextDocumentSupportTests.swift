@@ -731,6 +731,55 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       "https://example.com/roadmap")
   }
 
+  func testMarkdownRenderedLinkTargetsExposeDisplayedRangesAndDestinations() {
+    let line =
+      #"**Lead** See [Brief](docs/brief.md) and <https://example.com/roadmap> plus <a href="docs/skill.md">Skill</a>"#
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+    let rendered = TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+      line, font: TextDocumentSyntax.markdown.font, state: state)
+    let targets = TextDocumentSyntaxHighlighter.markdownLinkTargets(for: line, state: state)
+
+    XCTAssertEqual(rendered, "Lead See Brief and https://example.com/roadmap plus Skill")
+    XCTAssertEqual(
+      targets,
+      [
+        MarkdownLinkTarget(
+          displayRange: (rendered as NSString).range(of: "Brief"),
+          destination: "docs/brief.md"),
+        MarkdownLinkTarget(
+          displayRange: (rendered as NSString).range(of: "https://example.com/roadmap"),
+          destination: "https://example.com/roadmap"),
+        MarkdownLinkTarget(
+          displayRange: (rendered as NSString).range(of: "Skill"),
+          destination: "docs/skill.md"),
+      ])
+  }
+
+  func testMarkdownLinkNavigationResolvesExternalAndFileDestinations() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appending(path: "locus-link-test-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let docs = directory.appending(path: "docs", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
+    let base = directory.appending(path: "guide.md", directoryHint: .notDirectory)
+    let linked = docs.appending(path: "brief.md", directoryHint: .notDirectory)
+    try Data("guide".utf8).write(to: base)
+    try Data("brief".utf8).write(to: linked)
+
+    XCTAssertEqual(
+      MarkdownLinkNavigation.openRequest(for: "https://example.com/roadmap", baseFileURL: base),
+      .external(URL(string: "https://example.com/roadmap")!))
+    XCTAssertEqual(
+      MarkdownLinkNavigation.openRequest(for: "docs/brief.md#intro", baseFileURL: base),
+      .file(linked.standardizedFileURL))
+    XCTAssertEqual(
+      MarkdownLinkNavigation.openRequest(for: "<docs/brief.md>", baseFileURL: base),
+      .file(linked.standardizedFileURL))
+    XCTAssertNil(MarkdownLinkNavigation.openRequest(for: "javascript:alert(1)", baseFileURL: base))
+    XCTAssertNil(MarkdownLinkNavigation.openRequest(for: "docs/missing.md", baseFileURL: base))
+  }
+
   func testMarkdownImageOnlyLineIsClassifiedWithSourceAndAlt() {
     let lines = [
       "![Quarterly chart](images/chart.png)",

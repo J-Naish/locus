@@ -470,6 +470,19 @@ struct MarkdownDisplayMap: Equatable, Sendable {
     return NSRange(location: rawStart, length: max(0, rawEnd - rawStart))
   }
 
+  func displayRange(forSourceRange sourceRange: NSRange) -> NSRange? {
+    guard sourceRange.location != NSNotFound, sourceRange.length > 0 else { return nil }
+    var lower: Int?
+    var upper: Int?
+    for (index, characterRange) in characterRanges.enumerated()
+    where NSIntersectionRange(characterRange, sourceRange).length > 0 {
+      lower = min(lower ?? index, index)
+      upper = max(upper ?? index, index + 1)
+    }
+    guard let lower, let upper, upper > lower else { return nil }
+    return NSRange(location: lower, length: upper - lower)
+  }
+
   fileprivate func replacing(match matchRange: NSRange, withGroup groupRange: NSRange)
     -> MarkdownDisplayMap
   {
@@ -569,6 +582,16 @@ struct MarkdownDisplayMap: Equatable, Sendable {
       boundaryColumns: newBoundaries,
       characterRanges: newCharacterRanges)
   }
+}
+
+struct MarkdownLinkTarget: Equatable, Sendable {
+  let displayRange: NSRange
+  let destination: String
+}
+
+private struct MarkdownPendingLinkTarget {
+  let sourceRange: NSRange
+  let destination: String
 }
 
 enum TextDocumentSyntaxHighlighter {
@@ -705,6 +728,24 @@ enum TextDocumentSyntaxHighlighter {
     state: MarkdownLineStyleState = .plain
   ) -> MarkdownDisplayMap {
     renderedMarkdownDisplayMap(line, state: state)
+  }
+
+  static func markdownLinkTargets(
+    for line: String,
+    state: MarkdownLineStyleState = .plain
+  ) -> [MarkdownLinkTarget] {
+    let baseMap = renderedMarkdownBlockDisplayMap(line, state: state)
+    let context = markdownLineContext(in: line)
+    guard !state.insideFence, !state.insideFrontMatter, !state.isSetextUnderline,
+      !state.isIndentedCodeBlock, !state.isReferenceDefinition, !state.isTableSeparator,
+      !markdownLineIsHorizontalRule(context.body)
+    else {
+      return []
+    }
+
+    var targets: [MarkdownLinkTarget] = []
+    _ = renderedInlineDisplayMap(from: baseMap, collectingLinkTargets: &targets)
+    return targets
   }
 
   static func isMarkdownFenceLine(_ line: String) -> Bool {
@@ -1273,7 +1314,18 @@ enum TextDocumentSyntaxHighlighter {
   private static func renderedInlineDisplayMap(from map: MarkdownDisplayMap)
     -> MarkdownDisplayMap
   {
+    var targets: [MarkdownLinkTarget] = []
+    return renderedInlineDisplayMap(from: map, collectingLinkTargets: &targets)
+  }
+
+  private static func renderedInlineDisplayMap(
+    from map: MarkdownDisplayMap,
+    collectingLinkTargets targets: inout [MarkdownLinkTarget]
+  )
+    -> MarkdownDisplayMap
+  {
     var current = map
+    var collectedTargets: [MarkdownPendingLinkTarget] = []
     var protectedRanges: [NSRange] = []
     replaceRenderedMatchesInMap(
       expression: escapeExpression,
@@ -1315,7 +1367,12 @@ enum TextDocumentSyntaxHighlighter {
       replacementGroup: 1,
       map: &current,
       protectedRanges: &protectedRanges,
-      protectsReplacement: true)
+      protectsReplacement: true,
+      onReplace: { match, text, _, _, sourceGroupRange in
+        let destination = text.substring(with: match.range(at: 2))
+        collectedTargets.append(
+          MarkdownPendingLinkTarget(sourceRange: sourceGroupRange, destination: destination))
+      })
     replaceRenderedMatchesInMap(
       expression: referenceLinkExpression,
       replacementGroup: 1,
@@ -1327,7 +1384,12 @@ enum TextDocumentSyntaxHighlighter {
       replacementGroup: 1,
       map: &current,
       protectedRanges: &protectedRanges,
-      protectsReplacement: true)
+      protectsReplacement: true,
+      onReplace: { match, text, _, _, sourceGroupRange in
+        let destination = text.substring(with: match.range(at: 1))
+        collectedTargets.append(
+          MarkdownPendingLinkTarget(sourceRange: sourceGroupRange, destination: destination))
+      })
     // Inline HTML formatting tags strip to their inner text (group 1), like the
     // markdown emphasis rules; a safe-href <a> strips to its text (group 2);
     // <br> becomes a space. allowsContainedProtectedRanges lets a tag wrap a
@@ -1360,7 +1422,16 @@ enum TextDocumentSyntaxHighlighter {
       protectedRanges: &protectedRanges,
       protectsReplacement: true,
       allowsContainedProtectedRanges: true,
-      shouldReplace: htmlLinkHasSafeHref)
+      shouldReplace: htmlLinkHasSafeHref,
+      onReplace: { match, text, _, _, sourceGroupRange in
+        guard let raw = htmlTagAttribute("href", in: text.substring(with: match.range)),
+          let destination = sanitizedHTMLHref(raw)
+        else {
+          return
+        }
+        collectedTargets.append(
+          MarkdownPendingLinkTarget(sourceRange: sourceGroupRange, destination: destination))
+      })
     replaceLiteralMatchesInMap(
       expression: htmlLineBreakExpression, decode: { _ in " " },
       map: &current, protectedRanges: &protectedRanges)
@@ -1392,6 +1463,13 @@ enum TextDocumentSyntaxHighlighter {
       protectedRanges: &protectedRanges,
       protectsReplacement: true,
       allowsContainedProtectedRanges: true)
+    targets.append(
+      contentsOf: collectedTargets.compactMap { target in
+        guard let displayRange = current.displayRange(forSourceRange: target.sourceRange) else {
+          return nil
+        }
+        return MarkdownLinkTarget(displayRange: displayRange, destination: target.destination)
+      })
     return current
   }
 
@@ -1402,7 +1480,16 @@ enum TextDocumentSyntaxHighlighter {
     protectedRanges: inout [NSRange],
     protectsReplacement: Bool,
     allowsContainedProtectedRanges: Bool = false,
-    shouldReplace: ((NSTextCheckingResult, NSString) -> Bool)? = nil
+    shouldReplace: ((NSTextCheckingResult, NSString) -> Bool)? = nil,
+    onReplace: (
+      (
+        _ match: NSTextCheckingResult,
+        _ text: NSString,
+        _ adjustedMatch: NSRange,
+        _ adjustedGroup: NSRange,
+        _ sourceGroupRange: NSRange
+      ) -> Void
+    )? = nil
   ) {
     let original = map.displayText
     let nsOriginal = original as NSString
@@ -1432,6 +1519,11 @@ enum TextDocumentSyntaxHighlighter {
       else {
         continue
       }
+      let sourceGroupRange = map.bufferRange(
+        forDisplayStart: adjustedGroup.location,
+        end: NSMaxRange(adjustedGroup),
+        includeWholeLineMarkers: false)
+      onReplace?(match, nsOriginal, adjustedMatch, adjustedGroup, sourceGroupRange)
       let beforeLength = map.displayLength
       map = map.replacing(match: adjustedMatch, withGroup: adjustedGroup)
       let replacementRange = NSRange(location: adjustedMatch.location, length: adjustedGroup.length)

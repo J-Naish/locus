@@ -15,6 +15,8 @@ struct WorkspaceDocumentSurface: View {
   /// dependent UI — notably Git status, which should turn a tracked file
   /// "modified" once an edit lands rather than waiting for another trigger.
   let onDocumentSaved: () -> Void
+  /// Opens a file path clicked from a rendered Markdown document.
+  let onOpenLinkedFile: (URL) -> Void
 
   @State private var saveErrorMessage: String?
   @State private var knownDocumentFingerprint: DocumentFileFingerprint?
@@ -196,6 +198,7 @@ struct WorkspaceDocumentSurface: View {
           onSaveCompletion: { result in handleDocumentSaveResult(result, for: entry) },
           onDirtyChange: { isDirty in handleDocumentDirtyChange(isDirty) },
           onFocusChange: { isFocused in isEditorFocused = isFocused },
+          onOpenLinkedFile: onOpenLinkedFile,
           documentCache: openDocuments
         )
         if syntax == .markdown {

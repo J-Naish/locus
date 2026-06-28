@@ -109,6 +109,7 @@ struct LargeTextViewport: NSViewRepresentable {
   var onSaveCompletion: (Result<DocumentFileFingerprint?, Error>) -> Void = { _ in }
   var onDirtyChange: (Bool) -> Void = { _ in }
   var onFocusChange: (Bool) -> Void = { _ in }
+  var onOpenLinkedFile: (URL) -> Void = { NSWorkspace.shared.open($0) }
 
   /// A read-only backend is never editable, regardless of the host's `isEditable`.
   private var resolvedIsEditable: Bool {
@@ -181,6 +182,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.onSaveCompletion = onSaveCompletion
     documentView.onDirtyChange = onDirtyChange
     documentView.onFocusChange = onFocusChange
+    documentView.onOpenLinkedFile = onOpenLinkedFile
     scrollView.documentView = documentView
 
     switch backend {
@@ -248,6 +250,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.onSaveCompletion = onSaveCompletion
     documentView.onDirtyChange = onDirtyChange
     documentView.onFocusChange = onFocusChange
+    documentView.onOpenLinkedFile = onOpenLinkedFile
     switch backend {
     case .editable(let buffer):
       if documentView.editableBuffer !== buffer {
@@ -348,6 +351,9 @@ struct VirtualizedTextDocumentView: View {
   /// Reports focus changes so the host can pause navigation shortcuts while the
   /// editor has the keyboard.
   var onFocusChange: (Bool) -> Void = { _ in }
+  /// Opens a rendered Markdown file link. The host can route workspace files
+  /// inside Locus; the default falls back to the system opener.
+  var onOpenLinkedFile: (URL) -> Void = { NSWorkspace.shared.open($0) }
   /// Holds opened buffers across file switches so unsaved edits survive navigating
   /// away and back; the view reads from and populates it instead of always opening
   /// a fresh buffer.
@@ -385,7 +391,8 @@ struct VirtualizedTextDocumentView: View {
           saveRequest: saveRequest,
           onSaveCompletion: onSaveCompletion,
           onDirtyChange: onDirtyChange,
-          onFocusChange: onFocusChange
+          onFocusChange: onFocusChange,
+          onOpenLinkedFile: onOpenLinkedFile
         )
       case .readOnly(let file):
         LargeTextViewport(
@@ -395,7 +402,8 @@ struct VirtualizedTextDocumentView: View {
           markdownViewMode: markdownViewMode,
           showsMarkdownViewModeToggleCursorRect: showsMarkdownViewModeToggleCursorRect,
           wrapsLines: wrapsLines,
-          onFocusChange: onFocusChange
+          onFocusChange: onFocusChange,
+          onOpenLinkedFile: onOpenLinkedFile
         )
       case .failed(let message):
         ContentUnavailableView {

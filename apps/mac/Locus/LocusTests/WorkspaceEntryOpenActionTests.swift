@@ -30,10 +30,13 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
     )
   }
 
-  func testSingleVectorImageHasNoOpenAction() {
+  func testSingleVectorImageOpensQuickLookPreviewInLocus() {
     let entry = makeWorkspaceEntry(name: "diagram.svg", kind: .file, fileType: .image)
 
-    XCTAssertNil(WorkspaceEntryOpenActionResolver.action(for: [entry]))
+    XCTAssertEqual(
+      WorkspaceEntryOpenActionResolver.action(for: [entry]),
+      .openInPlace(entry.url)
+    )
   }
 
   func testSinglePDFFileViewsInLocus() {
@@ -136,6 +139,65 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
     XCTAssertNil(WorkspaceEntryOpenActionResolver.action(for: [folder, file]))
     XCTAssertNil(WorkspaceEntryOpenActionResolver.action(for: []))
   }
+
+  func testLinkedPathResolverFindsEntryLoadedFromParentFolder() {
+    let visibleEntry = makeWorkspaceEntry(name: "README.md", kind: .file, fileType: .markdown)
+    let linkedEntry = makeWorkspaceEntry(
+      path: "/tmp/locus-test/docs/brief.md", kind: .file, fileType: .markdown)
+
+    XCTAssertEqual(
+      WorkspaceLinkedPathEntryResolver.entry(
+        matching: linkedEntry.url,
+        visibleEntries: [visibleEntry],
+        loadedParentEntries: [linkedEntry]),
+      linkedEntry)
+  }
+
+  func testLinkedPathResolverPrefersVisibleEntryMetadata() {
+    let visibleEntry = makeWorkspaceEntry(
+      path: "/tmp/locus-test/docs/brief.md", kind: .file, fileType: .markdown)
+    let staleLoadedEntry = makeWorkspaceEntry(
+      path: "/tmp/locus-test/docs/brief.md", kind: .file, fileType: .unknown)
+
+    XCTAssertEqual(
+      WorkspaceLinkedPathEntryResolver.entry(
+        matching: visibleEntry.url,
+        visibleEntries: [visibleEntry],
+        loadedParentEntries: [staleLoadedEntry]),
+      visibleEntry)
+  }
+
+  func testLinkedPathResolverSynthesizesOrdinaryFileEntry() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appending(component: "locus-linked-path-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let fileURL = directory.appending(component: "external.note", directoryHint: .notDirectory)
+    try "linked".write(to: fileURL, atomically: true, encoding: .utf8)
+
+    let entry = try XCTUnwrap(WorkspaceLinkedPathEntryResolver.syntheticEntry(for: fileURL))
+
+    XCTAssertEqual(entry.url.standardizedFileURL, fileURL.standardizedFileURL)
+    XCTAssertEqual(entry.name, "external.note")
+    XCTAssertEqual(entry.kind, .file)
+    XCTAssertEqual(entry.fileType, .unknown)
+    XCTAssertEqual(WorkspaceEntryOpenActionResolver.action(for: [entry]), .openInPlace(entry.url))
+  }
+
+  func testLinkedPathResolverSynthesizesDirectoryEntry() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appending(component: "locus-linked-folder-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let entry = try XCTUnwrap(WorkspaceLinkedPathEntryResolver.syntheticEntry(for: directory))
+
+    XCTAssertEqual(entry.url.standardizedFileURL, directory.standardizedFileURL)
+    XCTAssertEqual(entry.name, directory.lastPathComponent)
+    XCTAssertEqual(entry.kind, .directory)
+    XCTAssertEqual(WorkspaceEntryOpenActionResolver.action(for: [entry]), .browseFolder(entry.url))
+  }
 }
 
 private func makeWorkspaceEntry(
@@ -143,14 +205,22 @@ private func makeWorkspaceEntry(
   kind: WorkspaceEntryKind,
   fileType: WorkspaceFileType = .unknown
 ) -> WorkspaceEntry {
-  let url = URL(
-    filePath: "/tmp/locus-test/\(name)",
-    directoryHint: kind.isDirectoryLike ? .isDirectory : .notDirectory
-  )
+  makeWorkspaceEntry(
+    path: "/tmp/locus-test/\(name)",
+    kind: kind,
+    fileType: fileType)
+}
+
+private func makeWorkspaceEntry(
+  path: String,
+  kind: WorkspaceEntryKind,
+  fileType: WorkspaceFileType = .unknown
+) -> WorkspaceEntry {
+  let url = URL(filePath: path, directoryHint: kind.isDirectoryLike ? .isDirectory : .notDirectory)
   return WorkspaceEntry(
     id: url.path(percentEncoded: false),
     url: url,
-    name: name,
+    name: url.lastPathComponent,
     kind: kind,
     fileType: fileType,
     sizeBytes: nil,

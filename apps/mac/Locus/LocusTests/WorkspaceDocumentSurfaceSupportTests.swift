@@ -32,11 +32,11 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
     )
   }
 
-  func testVectorImagesUseUnsupportedSurfaceForQuickLookFallback() {
+  func testVectorImagesUseQuickLookPreviewSurface() {
     XCTAssertEqual(
       WorkspaceDocumentSurfaceSupport.surfaceKind(
         for: makeEntry(name: "diagram.svg", fileType: .image)),
-      .unsupported
+      .quickLookPreview
     )
   }
 
@@ -101,7 +101,7 @@ final class WorkspaceDocumentSurfaceSupportTests: XCTestCase {
       WorkspaceDocumentSurfaceSupport.surfaceKind(
         for: makeEntry(name: "linked-photo", kind: .symlinkToFile, fileType: .image)
       ),
-      .unsupported
+      .quickLookPreview
     )
     XCTAssertEqual(
       WorkspaceDocumentSurfaceSupport.surfaceKind(

@@ -37,6 +37,9 @@ enum WorkspaceDocumentSurfaceSupport {
       if canRenderImageInPlace(entry) {
         return .image
       }
+      if entry.fileType == .image {
+        return .quickLookPreview
+      }
       if entry.fileType == .pdf {
         return .pdf
       }
@@ -49,7 +52,7 @@ enum WorkspaceDocumentSurfaceSupport {
       if entry.fileType == .office {
         return .quickLookPreview
       }
-      return .unsupported
+      return .quickLookPreview
     case .directory, .symlinkToDirectory:
       return .folder
     case .symlink, .other:

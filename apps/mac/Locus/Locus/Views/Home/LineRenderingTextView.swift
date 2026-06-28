@@ -164,6 +164,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Reports focus changes so the host can pause document navigation shortcuts
   /// (e.g. Cmd+[ / Cmd+]) while the editor has the keyboard.
   var onFocusChange: ((Bool) -> Void)?
+  /// Opens a file link resolved from markdown. The host should route ordinary
+  /// files inside Locus; the fallback only reveals the file instead of launching it.
+  var onOpenLinkedFile: (URL) -> Void = { NSWorkspace.shared.activateFileViewerSelecting([$0]) }
 
   private let bufferStore = TextBufferStore()
 
@@ -1678,6 +1681,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       regions.append(HoverCursorRegion(rect: textRect, cursor: .iBeam))
     }
     if usesMarkdownDocumentLayout, let range = visibleMarkdownLineRange() {
+      for target in markdownLinkTargets(inLineRange: range) {
+        regions.append(HoverCursorRegion(rect: target.rect, cursor: .pointingHand))
+      }
       for target in markdownCodeCopyTargets(inLineRange: range) {
         regions.append(HoverCursorRegion(rect: target.buttonRect, cursor: .pointingHand))
       }
@@ -2094,6 +2100,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // without moving the caret or starting a selection.
     if handleMarkdownCodeCopyClick(at: point) {
       window?.makeFirstResponder(self)
+      return
+    }
+    if handleMarkdownLinkClick(at: point) {
       return
     }
     // Finalize any in-progress composition before moving the caret.
@@ -4684,6 +4693,74 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return first..<(last + 1)
   }
 
+  private struct MarkdownLinkClickTarget {
+    let rect: NSRect
+    let destination: String
+  }
+
+  private func markdownLinkTargets(inLineRange range: Range<Int>) -> [MarkdownLinkClickTarget] {
+    guard usesMarkdownDocumentLayout, syntax == .markdown, let buffer = reader,
+      let states = markdownLineStates(for: buffer)
+    else {
+      return []
+    }
+
+    var targets: [MarkdownLinkClickTarget] = []
+    let lowerBound = max(0, range.lowerBound)
+    let upperBound = min(lineCount, range.upperBound)
+    guard lowerBound < upperBound else { return [] }
+    let clampedRange = lowerBound..<upperBound
+    for line in clampedRange {
+      guard hugeLength(line) == nil else { continue }
+      let raw = rawLineText(line)
+      let visible = clippedDisplayLine(raw)
+      let state = line < states.count ? states[line] : .plain
+      let links = TextDocumentSyntaxHighlighter.markdownLinkTargets(for: visible, state: state)
+      guard !links.isEmpty else { continue }
+      let attributed = attributedLine(forLine: line)
+      targets.append(
+        contentsOf: markdownLinkTargets(for: links, inLine: line, attributed: attributed))
+    }
+    return targets
+  }
+
+  private func markdownLinkTargets(
+    for links: [MarkdownLinkTarget],
+    inLine line: Int,
+    attributed: NSAttributedString
+  ) -> [MarkdownLinkClickTarget] {
+    let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
+    let rowsTop = yOffset(ofLine: line) + leadingInset(forLine: line)
+    let rowHeight = rowHeight(forLine: line)
+    let textX = lineTextColumnX(forLine: line)
+    let length = attributed.length
+    var targets: [MarkdownLinkClickTarget] = []
+
+    for link in links {
+      let linkStart = max(0, link.displayRange.location)
+      let linkEnd = min(length, NSMaxRange(link.displayRange))
+      guard linkEnd > linkStart else { continue }
+
+      for rowIndex in starts.indices {
+        let bounds = rowRange(rowIndex, starts: starts, length: length)
+        let start = max(linkStart, bounds.start)
+        let end = min(linkEnd, bounds.end)
+        guard end > start else { continue }
+        let rowText = attributed.attributedSubstring(
+          from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
+        let xStart = xOffset(forColumn: start - bounds.start, in: rowText)
+        let xEnd = xOffset(forColumn: end - bounds.start, in: rowText)
+        let rect = NSRect(
+          x: textX + xStart,
+          y: rowsTop + CGFloat(rowIndex) * rowHeight,
+          width: max(1, xEnd - xStart),
+          height: rowHeight)
+        targets.append(MarkdownLinkClickTarget(rect: rect, destination: link.destination))
+      }
+    }
+    return targets
+  }
+
   /// Handles a click on a code block's copy control, returning true when one
   /// was hit (so the caller skips caret placement).
   private func handleMarkdownCodeCopyClick(at point: NSPoint) -> Bool {
@@ -4696,6 +4773,33 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       return false
     }
     performCopyForCodeBlock(target)
+    return true
+  }
+
+  /// Handles a click on a rendered markdown link, returning true when one was
+  /// opened so the click does not also move the insertion caret.
+  private func handleMarkdownLinkClick(at point: NSPoint) -> Bool {
+    guard usesMarkdownDocumentLayout, let range = visibleMarkdownLineRange() else { return false }
+    guard
+      let target = markdownLinkTargets(inLineRange: range).first(where: { $0.rect.contains(point) })
+    else {
+      return false
+    }
+
+    guard
+      let request = MarkdownLinkNavigation.openRequest(
+        for: target.destination,
+        baseFileURL: saveURL)
+    else {
+      return false
+    }
+
+    switch request {
+    case .external(let url):
+      NSWorkspace.shared.open(url)
+    case .file(let url):
+      onOpenLinkedFile(url)
+    }
     return true
   }
 

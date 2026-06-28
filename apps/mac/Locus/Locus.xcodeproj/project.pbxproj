@@ -62,6 +62,7 @@
 		1A00000100000000000000D4 /* GitWorkspaceStatusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000D5 /* GitWorkspaceStatusTests.swift */; };
 		1A00000100000000000000DA /* NativeSidebarToggle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000DB /* NativeSidebarToggle.swift */; };
 		1A00000100000000000000BE /* TextDocumentSyntaxHighlighter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */; };
+		1A0000010000000000000F73 /* MarkdownLinkNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F72 /* MarkdownLinkNavigation.swift */; };
 		1A0000010000000000000F00 /* TextBufferStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F01 /* TextBufferStore.swift */; };
 		1A0000010000000000000F04 /* TextEncoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F05 /* TextEncoding.swift */; };
 		1A0000010000000000000F02 /* TextBufferStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F03 /* TextBufferStoreTests.swift */; };
@@ -168,6 +169,7 @@
 		1A00000100000000000000D5 /* GitWorkspaceStatusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitWorkspaceStatusTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000DB /* NativeSidebarToggle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSidebarToggle.swift; sourceTree = "<group>"; };
 		1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextDocumentSyntaxHighlighter.swift; sourceTree = "<group>"; };
+		1A0000010000000000000F72 /* MarkdownLinkNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownLinkNavigation.swift; sourceTree = "<group>"; };
 		1A0000010000000000000F01 /* TextBufferStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextBufferStore.swift; sourceTree = "<group>"; };
 		1A0000010000000000000F05 /* TextEncoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextEncoding.swift; sourceTree = "<group>"; };
 		1A0000010000000000000F03 /* TextBufferStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextBufferStoreTests.swift; sourceTree = "<group>"; };
@@ -365,6 +367,7 @@
 				1A0000010000000000000F33 /* WorkspaceBrowserView.swift */,
 				1A00000100000000000000DB /* NativeSidebarToggle.swift */,
 				1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */,
+				1A0000010000000000000F72 /* MarkdownLinkNavigation.swift */,
 				1A0000010000000000000099 /* WorkspaceDocumentSurface.swift */,
 				1A00000100000000000000E7 /* VirtualizedTextDocumentView.swift */,
 				1A0000010000000000000F31 /* LineRenderingTextView.swift */,
@@ -560,6 +563,7 @@
 				1A0000010000000000000072 /* RecentFolderStore.swift in Sources */,
 				1A00000100000000000000C0 /* DocumentChangeMonitor.swift in Sources */,
 				1A00000100000000000000BE /* TextDocumentSyntaxHighlighter.swift in Sources */,
+				1A0000010000000000000F73 /* MarkdownLinkNavigation.swift in Sources */,
 				1A0000010000000000000F00 /* TextBufferStore.swift in Sources */,
 				1A0000010000000000000F04 /* TextEncoding.swift in Sources */,
 				1A000001000000000000008A /* WorkspaceDirectoryMonitor.swift in Sources */,
