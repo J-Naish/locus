@@ -67,6 +67,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       guard syntax != oldValue else { return }
       cachedBand = nil
       markdownLineStateCache = nil
+      invalidateMarkdownLinkVisualStateCache()
       cancelMarkdownLineStateBuild()
       maxObservedLineWidth = 0
       rebuildWrapIndex(recomputeLongLine: true)
@@ -98,6 +99,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       pendingMarkdownViewModeViewportAnchor = nil
       cachedBand = nil
       markdownLineStateCache = nil
+      invalidateMarkdownLinkVisualStateCache()
       cancelMarkdownLineStateBuild()
       maxObservedLineWidth = 0
       rebuildWrapIndex(recomputeLongLine: true)
@@ -130,7 +132,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// image paths resolve against its folder, so a change re-resolves them.
   var saveURL: URL? {
     didSet {
-      guard oldValue != saveURL, let store = markdownImageStoreStorage else { return }
+      guard oldValue != saveURL else { return }
+      invalidateMarkdownLinkVisualStateCache()
+      guard let store = markdownImageStoreStorage else { return }
       store.baseURL = saveURL
       store.reset()
       scheduleMarkdownImageRelayout()
@@ -200,6 +204,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   var maximumPastedByteCount = 64 * 1024 * 1024
   private var cachedBand: (revision: UInt64, range: Range<Int>, lines: [NSAttributedString])?
   private var markdownLineStateCache: (revision: UInt64, states: [MarkdownLineStyleState])?
+  private struct MarkdownLinkVisualStateCacheKey: Hashable {
+    let baseFilePath: String?
+    let destination: String
+  }
+  private var markdownLinkVisualStateCache:
+    [MarkdownLinkVisualStateCacheKey: MarkdownLinkVisualState] =
+      [:]
 
   /// Created on first use (markdown documents containing images); nil for
   /// every other document so plain viewers never pay for it.
@@ -231,6 +242,28 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     markdownImageStoreStorage = store
     return store
+  }
+
+  private func markdownLinkVisualState(
+    for destination: String,
+    baseFileURL: URL?
+  ) -> MarkdownLinkVisualState {
+    let key = MarkdownLinkVisualStateCacheKey(
+      baseFilePath: baseFileURL?.standardizedFileURL.path(percentEncoded: false),
+      destination: destination)
+    if let cached = markdownLinkVisualStateCache[key] {
+      return cached
+    }
+
+    let state = MarkdownLinkNavigation.visualState(
+      for: destination,
+      baseFileURL: baseFileURL)
+    markdownLinkVisualStateCache[key] = state
+    return state
+  }
+
+  private func invalidateMarkdownLinkVisualStateCache() {
+    markdownLinkVisualStateCache.removeAll(keepingCapacity: true)
   }
 
   /// Coalesces image-store updates into one relayout per main-actor turn —
@@ -1755,6 +1788,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private func didSetDocument() {
     cachedBand = nil
     markdownLineStateCache = nil
+    invalidateMarkdownLinkVisualStateCache()
     cancelMarkdownLineStateBuild()
     markdownImageStoreStorage?.reset()
     // Drop any copy confirmation so it cannot paint on a same-indexed block in
@@ -3809,6 +3843,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private func invalidateMarkdownLineStateCacheAfterContentChange() {
+    invalidateMarkdownLinkVisualStateCache()
     guard usesMarkdownDocumentLayout, let buffer = reader else {
       markdownLineStateCache = nil
       cancelMarkdownLineStateBuild()
@@ -3881,13 +3916,17 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // avoids regex over a huge line. Prose always highlights.
     let applyRules = highlightsLine(lengthUTF16: length)
     if usesMarkdownDocumentLayout, syntax == .markdown {
+      let linkBaseFileURL = saveURL
       return TextDocumentSyntaxHighlighter.highlightedLine(
         visible,
         syntax: syntax,
         font: font,
         applyRules: applyRules,
         markdownLineState: markdownLineState,
-        markdownTypography: markdownTypography
+        markdownTypography: markdownTypography,
+        markdownLinkStatus: { [linkBaseFileURL] destination in
+          self.markdownLinkVisualState(for: destination, baseFileURL: linkBaseFileURL)
+        }
       )
     }
     let attributed = NSMutableAttributedString(string: visible)

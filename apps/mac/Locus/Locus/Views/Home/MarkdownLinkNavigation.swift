@@ -5,7 +5,14 @@ enum MarkdownLinkOpenRequest: Equatable {
   case file(URL)
 }
 
+enum MarkdownLinkVisualState: Equatable, Sendable {
+  case valid
+  case invalid
+}
+
 enum MarkdownLinkNavigation {
+  private static let allowedExternalSchemes: Set<String> = ["http", "https", "mailto", "tel"]
+
   static func openRequest(
     for destination: String,
     baseFileURL: URL?,
@@ -17,10 +24,7 @@ enum MarkdownLinkNavigation {
       return nil
     }
 
-    if let url = URL(string: cleaned),
-      let scheme = url.scheme?.lowercased(),
-      scheme == "http" || scheme == "https"
-    {
+    if let url = externalURL(for: cleaned) {
       return .external(url)
     }
 
@@ -30,6 +34,50 @@ enum MarkdownLinkNavigation {
       return nil
     }
     return .file(fileURL)
+  }
+
+  static func visualState(
+    for destination: String,
+    baseFileURL: URL?,
+    fileExists: (URL) -> Bool = {
+      FileManager.default.fileExists(atPath: $0.path(percentEncoded: false))
+    }
+  ) -> MarkdownLinkVisualState {
+    guard let cleaned = primaryDestination(in: destination) else {
+      return .invalid
+    }
+
+    if externalURL(for: cleaned) != nil {
+      return .valid
+    }
+
+    guard !hasExplicitNonFileScheme(cleaned),
+      let fileURL = fileURL(for: cleaned, baseFileURL: baseFileURL)
+    else {
+      return .invalid
+    }
+
+    return fileExists(fileURL) ? .valid : .invalid
+  }
+
+  private static func externalURL(for destination: String) -> URL? {
+    guard let url = URL(string: destination),
+      let scheme = url.scheme?.lowercased(),
+      allowedExternalSchemes.contains(scheme)
+    else {
+      return nil
+    }
+
+    switch scheme {
+    case "http", "https":
+      let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+      return components?.host?.isEmpty == false ? url : nil
+    case "mailto", "tel":
+      let value = destination.dropFirst(scheme.count + 1)
+      return value.isEmpty ? nil : url
+    default:
+      return nil
+    }
   }
 
   private static func primaryDestination(in raw: String) -> String? {

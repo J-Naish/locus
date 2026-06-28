@@ -677,6 +677,39 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       true)
   }
 
+  func testMarkdownRenderedBrokenLinksUseBrokenLinkColor() {
+    let line = TextDocumentSyntaxHighlighter.highlightedLine(
+      "Read [docs](https://example.com) or [missing](missing.md)",
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLinkStatus: { destination in
+        destination == "missing.md" ? .invalid : .valid
+      }
+    )
+
+    XCTAssertEqual(line.string, "Read docs or missing")
+    XCTAssertEqual(line.foregroundColor(in: line.string, matching: "docs"), .linkColor)
+    XCTAssertEqual(
+      line.foregroundColor(in: line.string, matching: "missing"),
+      MarkdownDocumentMetrics.brokenLinkColor)
+  }
+
+  func testMarkdownRenderedAutolinkURLStaysLinkColorWhenValid() {
+    let line = TextDocumentSyntaxHighlighter.highlightedLine(
+      "Autolink: <https://example.com/reports/q2>.",
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLinkStatus: { destination in
+        MarkdownLinkNavigation.visualState(for: destination, baseFileURL: nil)
+      }
+    )
+
+    XCTAssertEqual(line.string, "Autolink: https://example.com/reports/q2.")
+    XCTAssertEqual(
+      line.foregroundColor(in: line.string, matching: "https://example.com/reports/q2"),
+      .linkColor)
+  }
+
   func testMarkdownRenderedBoldCanContainInlineCodeWithoutRawFallback() {
     let line = TextDocumentSyntaxHighlighter.highlightedLine(
       "Use **bold with `code` inside** now",
@@ -771,13 +804,39 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       MarkdownLinkNavigation.openRequest(for: "https://example.com/roadmap", baseFileURL: base),
       .external(URL(string: "https://example.com/roadmap")!))
     XCTAssertEqual(
+      MarkdownLinkNavigation.openRequest(for: "mailto:hello@example.com", baseFileURL: base),
+      .external(URL(string: "mailto:hello@example.com")!))
+    XCTAssertEqual(
       MarkdownLinkNavigation.openRequest(for: "docs/brief.md#intro", baseFileURL: base),
       .file(linked.standardizedFileURL))
     XCTAssertEqual(
       MarkdownLinkNavigation.openRequest(for: "<docs/brief.md>", baseFileURL: base),
       .file(linked.standardizedFileURL))
+    XCTAssertNil(MarkdownLinkNavigation.openRequest(for: "https://", baseFileURL: base))
     XCTAssertNil(MarkdownLinkNavigation.openRequest(for: "javascript:alert(1)", baseFileURL: base))
     XCTAssertNil(MarkdownLinkNavigation.openRequest(for: "docs/missing.md", baseFileURL: base))
+
+    XCTAssertEqual(
+      MarkdownLinkNavigation.visualState(for: "https://example.com/roadmap", baseFileURL: base),
+      .valid)
+    XCTAssertEqual(
+      MarkdownLinkNavigation.visualState(for: "https://", baseFileURL: base),
+      .invalid)
+    XCTAssertEqual(
+      MarkdownLinkNavigation.visualState(for: "docs/brief.md#intro", baseFileURL: base),
+      .valid)
+    XCTAssertEqual(
+      MarkdownLinkNavigation.visualState(for: "docs/missing.md", baseFileURL: base),
+      .invalid)
+    XCTAssertEqual(
+      MarkdownLinkNavigation.visualState(for: "javascript:alert(1)", baseFileURL: base),
+      .invalid)
+    XCTAssertEqual(
+      MarkdownLinkNavigation.visualState(for: "mailto:hello@example.com", baseFileURL: base),
+      .valid)
+    XCTAssertEqual(
+      MarkdownLinkNavigation.visualState(for: "tel:+15551234567", baseFileURL: base),
+      .valid)
   }
 
   func testMarkdownImageOnlyLineIsClassifiedWithSourceAndAlt() {

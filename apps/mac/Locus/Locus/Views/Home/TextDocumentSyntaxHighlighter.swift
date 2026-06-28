@@ -202,6 +202,9 @@ enum MarkdownDocumentMetrics {
   static var ruleColor: NSColor { .separatorColor }
   static var accentColor: NSColor { .controlAccentColor }
   static var markerColor: NSColor { .tertiaryLabelColor }
+  static var brokenLinkColor: NSColor {
+    NSColor.systemRed.blended(withFraction: 0.30, of: .secondaryLabelColor) ?? .systemRed
+  }
   static var tableRuleColor: NSColor { .separatorColor }
   static var codeCopyIconColor: NSColor { .secondaryLabelColor }
   static var codeCopyConfirmColor: NSColor { .controlAccentColor }
@@ -589,6 +592,8 @@ struct MarkdownLinkTarget: Equatable, Sendable {
   let destination: String
 }
 
+typealias MarkdownLinkStatusProvider = (String) -> MarkdownLinkVisualState
+
 private struct MarkdownPendingLinkTarget {
   let sourceRange: NSRange
   let destination: String
@@ -674,7 +679,8 @@ enum TextDocumentSyntaxHighlighter {
     font: NSFont,
     applyRules: Bool = true,
     markdownLineState: MarkdownLineStyleState = .plain,
-    markdownTypography: MarkdownTypography? = nil
+    markdownTypography: MarkdownTypography? = nil,
+    markdownLinkStatus: MarkdownLinkStatusProvider? = nil
   ) -> NSAttributedString {
     let visible = line
     if syntax == .markdown {
@@ -683,7 +689,8 @@ enum TextDocumentSyntaxHighlighter {
         font: font,
         state: markdownLineState,
         typography: markdownTypography ?? MarkdownTypography(baseFont: font),
-        includeVisualAttributes: true)
+        includeVisualAttributes: true,
+        linkStatus: markdownLinkStatus)
     }
     let attributed = NSMutableAttributedString(string: visible)
     let fullRange = NSRange(location: 0, length: (visible as NSString).length)
@@ -773,7 +780,8 @@ enum TextDocumentSyntaxHighlighter {
     font: NSFont,
     state: MarkdownLineStyleState,
     typography: MarkdownTypography,
-    includeVisualAttributes: Bool
+    includeVisualAttributes: Bool,
+    linkStatus: MarkdownLinkStatusProvider? = nil
   ) -> NSAttributedString {
     let displayMap = renderedMarkdownBlockDisplayMap(line, state: state)
     let block = renderedMarkdownBlock(
@@ -827,9 +835,12 @@ enum TextDocumentSyntaxHighlighter {
     if block.stylesInline {
       applyRenderedMarkdownInline(
         to: attributed,
+        sourceLine: line,
+        markdownLineState: state,
         lineFonts: block.fonts,
         typography: typography,
-        includeVisualAttributes: includeVisualAttributes)
+        includeVisualAttributes: includeVisualAttributes,
+        linkStatus: linkStatus)
     }
     return attributed
   }
@@ -1539,9 +1550,12 @@ enum TextDocumentSyntaxHighlighter {
 
   private static func applyRenderedMarkdownInline(
     to attributed: NSMutableAttributedString,
+    sourceLine: String,
+    markdownLineState: MarkdownLineStyleState,
     lineFonts: MarkdownFontSet,
     typography: MarkdownTypography,
-    includeVisualAttributes: Bool
+    includeVisualAttributes: Bool,
+    linkStatus: MarkdownLinkStatusProvider?
   ) {
     var protectedRanges: [NSRange] = []
     replaceRenderedMatches(
@@ -1723,6 +1737,34 @@ enum TextDocumentSyntaxHighlighter {
       lineFonts: lineFonts,
       protectedRanges: &protectedRanges,
       includeVisualAttributes: includeVisualAttributes)
+    applyRenderedLinkColors(
+      to: attributed,
+      sourceLine: sourceLine,
+      state: markdownLineState,
+      includeVisualAttributes: includeVisualAttributes,
+      linkStatus: linkStatus)
+  }
+
+  private static func applyRenderedLinkColors(
+    to attributed: NSMutableAttributedString,
+    sourceLine: String,
+    state: MarkdownLineStyleState,
+    includeVisualAttributes: Bool,
+    linkStatus: MarkdownLinkStatusProvider?
+  ) {
+    guard includeVisualAttributes else { return }
+    for target in markdownLinkTargets(for: sourceLine, state: state) {
+      guard target.displayRange.location >= 0,
+        target.displayRange.length > 0,
+        NSMaxRange(target.displayRange) <= attributed.length
+      else {
+        continue
+      }
+      attributed.addAttribute(
+        .foregroundColor,
+        value: renderedLinkColor(destination: target.destination, linkStatus: linkStatus),
+        range: target.displayRange)
+    }
   }
 
   private static func replaceRenderedMatches(
@@ -2932,6 +2974,14 @@ enum TextDocumentSyntaxHighlighter {
       attributes[.foregroundColor] = NSColor.linkColor
     }
     return attributes
+  }
+
+  private static func renderedLinkColor(
+    destination: String?,
+    linkStatus: MarkdownLinkStatusProvider?
+  ) -> NSColor {
+    let state = destination.flatMap { linkStatus?($0) } ?? .valid
+    return state == .invalid ? MarkdownDocumentMetrics.brokenLinkColor : .linkColor
   }
 
   private static func markdownInlineCodeAttributes(
