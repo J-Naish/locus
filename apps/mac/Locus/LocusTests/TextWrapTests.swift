@@ -706,6 +706,8 @@ final class TextWrapTests: XCTestCase {
     XCTAssertNotNil(area, "expected a mouseMoved tracking area")
     XCTAssertEqual(area?.options.contains(.inVisibleRect), true)
     XCTAssertEqual(area?.options.contains(.mouseEnteredAndExited), true)
+    XCTAssertEqual(area?.options.contains(.cursorUpdate), true)
+    XCTAssertEqual(area?.options.contains(.activeInKeyWindow), true)
   }
 
   // Opening a document scrolls to the top — which, with a top content inset,

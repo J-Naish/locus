@@ -1593,19 +1593,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   // corners; keep this cursor contract under manual review when changing the
   // card chrome.
   override func resetCursorRects() {
-    let gutterEdge = (enclosingScrollView?.contentView.bounds.origin.x ?? 0) + gutterWidth
-    if let textRect = Self.iBeamCursorRect(visible: visibleRect, gutterEdge: gutterEdge) {
-      addCursorRect(textRect, cursor: .iBeam)
-    }
-    // A pointing hand over each visible copy control (added after the I-beam
-    // so it wins inside the button rect).
-    if usesMarkdownDocumentLayout, let range = visibleMarkdownLineRange() {
-      for target in markdownCodeCopyTargets(inLineRange: range) {
-        addCursorRect(target.buttonRect, cursor: .pointingHand)
-      }
-    }
-    if let toggleRect = markdownViewModeToggleCursorRect() {
-      addCursorRect(toggleRect, cursor: .pointingHand)
+    for region in hoverCursorRegions() {
+      addCursorRect(region.rect, cursor: region.cursor.nsCursor)
     }
   }
 
@@ -1625,6 +1614,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       case .pointingHand: .pointingHand
       }
     }
+  }
+
+  private struct HoverCursorRegion {
+    let rect: NSRect
+    let cursor: HoverCursor
   }
 
   override func updateTrackingAreas() {
@@ -1670,18 +1664,32 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private func hoverCursor(at point: NSPoint) -> HoverCursor {
-    if markdownViewModeToggleContains(point) {
-      return .pointingHand
+    // Match AppKit cursor-rect precedence: later registered regions win when
+    // controls sit on top of the broad text I-beam band.
+    for region in hoverCursorRegions().reversed() where region.rect.contains(point) {
+      return region.cursor
     }
-    if codeCopyButtonContains(point) {
-      return .pointingHand
-    }
-    let gutterEdge = (enclosingScrollView?.contentView.bounds.origin.x ?? 0) + gutterWidth
-    return point.x >= gutterEdge ? .iBeam : .arrow
+    return .arrow
   }
 
-  private func markdownViewModeToggleContains(_ point: NSPoint) -> Bool {
-    markdownViewModeToggleCursorRect()?.contains(point) ?? false
+  private func hoverCursorRegions() -> [HoverCursorRegion] {
+    var regions: [HoverCursorRegion] = []
+    if let textRect = Self.iBeamCursorRect(visible: visibleRect, gutterEdge: cursorGutterEdge) {
+      regions.append(HoverCursorRegion(rect: textRect, cursor: .iBeam))
+    }
+    if usesMarkdownDocumentLayout, let range = visibleMarkdownLineRange() {
+      for target in markdownCodeCopyTargets(inLineRange: range) {
+        regions.append(HoverCursorRegion(rect: target.buttonRect, cursor: .pointingHand))
+      }
+    }
+    if let toggleRect = markdownViewModeToggleCursorRect() {
+      regions.append(HoverCursorRegion(rect: toggleRect, cursor: .pointingHand))
+    }
+    return regions
+  }
+
+  private var cursorGutterEdge: CGFloat {
+    (enclosingScrollView?.contentView.bounds.origin.x ?? 0) + gutterWidth
   }
 
   private func markdownViewModeToggleCursorRect() -> NSRect? {
@@ -1696,12 +1704,6 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       y: visible.minY + MarkdownViewModeToggleMetrics.topPadding,
       width: MarkdownViewModeToggleMetrics.size,
       height: MarkdownViewModeToggleMetrics.size)
-  }
-
-  /// Whether `point` (content coordinates) falls on a visible copy control.
-  private func codeCopyButtonContains(_ point: NSPoint) -> Bool {
-    guard usesMarkdownDocumentLayout, let range = visibleMarkdownLineRange() else { return false }
-    return markdownCodeCopyTargets(inLineRange: range).contains { $0.buttonRect.contains(point) }
   }
 
   /// The I-beam region of the visible band: everything right of the pinned
