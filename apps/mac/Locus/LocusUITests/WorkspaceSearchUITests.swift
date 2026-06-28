@@ -1445,6 +1445,7 @@ final class WorkspaceSearchUITests: XCTestCase {
     try Data("OTHER".utf8).write(to: bURL)
 
     let app = try launchApp(workspacePath: workspace.path)
+    disableAutoSave(in: app)
     let viewer = app.textViews["document-large-text-viewer"]
 
     func open(_ name: String) {
@@ -1680,7 +1681,7 @@ final class WorkspaceSearchUITests: XCTestCase {
 
   @MainActor
   private func workspaceSidebarLabel(named name: String, in app: XCUIApplication) -> XCUIElement {
-    app.descendants(matching: .any)[name]
+    workspaceSidebarList(in: app).descendants(matching: .staticText)[name]
   }
 
   private func stableHash(for value: String) -> String {
