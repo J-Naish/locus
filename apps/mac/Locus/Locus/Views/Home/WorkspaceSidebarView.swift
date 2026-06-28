@@ -424,7 +424,6 @@ struct WorkspaceSidebarView: View {
       case .loaded(let snapshot):
         if snapshot.entries.isEmpty {
           appendChildCreation(childCreationKind)
-          result.append(.status(.empty(parentID: entry.id), depth: depth + 1))
         } else {
           result.append(
             contentsOf: rows(
@@ -1235,15 +1234,6 @@ private struct WorkspaceSidebarStatus: Equatable {
       id: "\(parentID)::loading",
       title: "Loading...",
       systemImage: "hourglass",
-      isError: false
-    )
-  }
-
-  static func empty(parentID: WorkspaceEntry.ID) -> WorkspaceSidebarStatus {
-    WorkspaceSidebarStatus(
-      id: "\(parentID)::empty",
-      title: "Empty folder",
-      systemImage: "folder",
       isError: false
     )
   }

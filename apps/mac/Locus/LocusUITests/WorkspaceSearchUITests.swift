@@ -190,6 +190,24 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testEmptyDirectoryDisclosureShowsNoPlaceholderRow() throws {
+    let workspaceURL = try makeEmptyFolderWorkspace()
+    let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
+
+    XCTAssertTrue(app.staticTexts["Empty"].waitForExistence(timeout: 5), app.debugDescription)
+
+    let emptyDisclosure = disclosureButton(for: workspaceURL.appending(path: "Empty"), in: app)
+    XCTAssertTrue(emptyDisclosure.waitForExistence(timeout: 5), app.debugDescription)
+    XCTAssertEqual(emptyDisclosure.label, "Expand Empty")
+    emptyDisclosure.click()
+
+    XCTAssertEqual(emptyDisclosure.label, "Collapse Empty")
+    XCTAssertFalse(
+      app.staticTexts["Empty folder"].waitForExistence(timeout: 1), app.debugDescription)
+    XCTAssertTrue(app.staticTexts["Filled"].waitForExistence(timeout: 2), app.debugDescription)
+  }
+
+  @MainActor
   func testNestedDirectoryDisclosuresExpandAndCollapseIndependently() throws {
     let workspaceURL = try makeNavigationHistoryWorkspace()
     let app = try launchApp(workspacePath: workspaceURL.path(percentEncoded: false))
@@ -1799,6 +1817,24 @@ final class WorkspaceSearchUITests: XCTestCase {
     )
     try "Other\n".write(
       to: otherURL.appending(path: "Other Note.md"),
+      atomically: true,
+      encoding: .utf8
+    )
+
+    filesToRemove.insert(workspaceURL.path(percentEncoded: false))
+    return workspaceURL
+  }
+
+  private func makeEmptyFolderWorkspace() throws -> URL {
+    let workspaceURL = FileManager.default.temporaryDirectory
+      .appending(path: "locus-empty-folder-\(UUID().uuidString)", directoryHint: .isDirectory)
+    let emptyURL = workspaceURL.appending(path: "Empty", directoryHint: .isDirectory)
+    let filledURL = workspaceURL.appending(path: "Filled", directoryHint: .isDirectory)
+
+    try FileManager.default.createDirectory(at: emptyURL, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: filledURL, withIntermediateDirectories: true)
+    try "Filled\n".write(
+      to: filledURL.appending(path: "Filled Note.md"),
       atomically: true,
       encoding: .utf8
     )
