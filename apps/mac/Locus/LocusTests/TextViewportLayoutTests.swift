@@ -1047,7 +1047,8 @@ final class TextViewportLayoutTests: XCTestCase {
       accuracy: 0.5)
     XCTAssertEqual(
       line2Y - line1Y,
-      MarkdownDocumentMetrics.frontMatterRowHeight,
+      MarkdownDocumentMetrics.frontMatterRowHeight * 2
+        + MarkdownDocumentMetrics.frontMatterItemSpacing,
       accuracy: 0.5)
   }
 
@@ -1063,19 +1064,23 @@ final class TextViewportLayoutTests: XCTestCase {
     let reviewersY = try XCTUnwrap(view.endpointYForTesting(line: 2))
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 3)),
-      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight,
+      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight * 2
+        + MarkdownDocumentMetrics.frontMatterItemSpacing,
       accuracy: 0.5)
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 4)),
-      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight,
+      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight * 2
+        + MarkdownDocumentMetrics.frontMatterItemSpacing,
       accuracy: 0.5)
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 5)),
-      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight,
+      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight * 2
+        + MarkdownDocumentMetrics.frontMatterItemSpacing,
       accuracy: 0.5)
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 6)),
-      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight,
+      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight * 2
+        + MarkdownDocumentMetrics.frontMatterItemSpacing,
       accuracy: 0.5)
   }
 
@@ -1295,7 +1300,7 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 2))
         - (try XCTUnwrap(view.endpointYForTesting(line: 1))),
-      rowHeight,
+      rowHeight * 2 + MarkdownDocumentMetrics.frontMatterItemSpacing,
       accuracy: 0.5)
     // Closing `---` becomes the bottom padding and carries the block air below it.
     XCTAssertEqual(

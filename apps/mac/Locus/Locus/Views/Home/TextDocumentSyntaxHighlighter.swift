@@ -116,14 +116,14 @@ enum MarkdownDocumentMetrics {
   /// The alt text renders as a small muted caption below the image.
   static let imageCaptionFontSize: CGFloat = 12
   static let frontMatterHorizontalInset: CGFloat = 34
-  static let frontMatterKeyColumnWidth: CGFloat = 150
   static let frontMatterVerticalPadding: CGFloat = 18
-  static let frontMatterRowHeight: CGFloat = 34
+  static let frontMatterRowHeight: CGFloat = 22
+  static let frontMatterItemSpacing: CGFloat = 20
   static let frontMatterCornerRadius: CGFloat = 10
   static let frontMatterChipHorizontalPadding: CGFloat = 10
   static let frontMatterChipHeight: CGFloat = 24
   static let frontMatterChipCornerRadius: CGFloat = 7
-  static let frontMatterKeyValueSeparator = "\t"
+  static let frontMatterKeyValueSeparator = "\n"
   static let frontMatterChipDisplaySeparator = "        "
   static let frontMatterKeyValueSeparatorLength =
     (frontMatterKeyValueSeparator as NSString).length
@@ -247,7 +247,7 @@ enum MarkdownDocumentMetrics {
   }
 
   static var frontMatterKeyFont: NSFont {
-    .systemFont(ofSize: bodyFontSize, weight: .medium)
+    .systemFont(ofSize: 12, weight: .semibold)
   }
 
   static var frontMatterValueFont: NSFont {
@@ -312,7 +312,7 @@ struct MarkdownFrontMatterField: Equatable, Sendable {
   }
 
   var displayText: String {
-    key + "\t" + displayValueText
+    key + MarkdownDocumentMetrics.frontMatterKeyValueSeparator + displayValueText
   }
 }
 
@@ -1323,9 +1323,6 @@ enum TextDocumentSyntaxHighlighter {
       }
     }
 
-    display += MarkdownDocumentMetrics.frontMatterKeyValueSeparator
-    ranges.append(NSRange(location: value.sourceRange.location, length: 0))
-    boundaries.append(value.sourceRange.location)
     appendMapped(value.text, sourceRange: value.sourceRange)
 
     return MarkdownDisplayMap(
@@ -3222,12 +3219,9 @@ enum TextDocumentSyntaxHighlighter {
     rendersValuesAsChips: Bool
   ) -> NSParagraphStyle {
     let style = NSMutableParagraphStyle()
-    let valueColumn =
-      MarkdownDocumentMetrics.frontMatterKeyColumnWidth
-      + (rendersValuesAsChips ? MarkdownDocumentMetrics.frontMatterChipHorizontalPadding : 0)
     style.defaultTabInterval = 0
-    style.tabStops = [NSTextTab(textAlignment: .left, location: valueColumn)]
-    style.headIndent = valueColumn
+    style.tabStops = []
+    style.headIndent = 0
     return style
   }
 

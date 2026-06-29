@@ -231,8 +231,11 @@ enum LineWrap {
   static let defaultMaximumRows = 4096
 
   /// UTF-16 offsets where each wrapped visual row begins (the first is always 0).
-  /// A non-positive width or an empty line yields `[0]` — a single row. Stops at
-  /// `maximumRows` so the result is always bounded.
+  /// Core Text treats embedded `\n` as a mandatory break even when `width` is
+  /// large; markdown front matter relies on that to stack a key above its value
+  /// while keeping both pieces inside one logical source line. A non-positive
+  /// width or an empty line yields `[0]` — a single row. Stops at `maximumRows`
+  /// so the result is always bounded.
   static func visualRowStartOffsets(
     of attributed: NSAttributedString, width: CGFloat, maximumRows: Int = defaultMaximumRows
   ) -> [Int] {

@@ -55,6 +55,13 @@ final class TextWrapTests: XCTestCase {
   }
 
   @MainActor
+  func testLineWrapTreatsEmbeddedNewlineAsMandatoryBreak() {
+    let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    let line = NSAttributedString(string: "title\nHi", attributes: [.font: font])
+    XCTAssertEqual(LineWrap.visualRowStartOffsets(of: line, width: 10_000), [0, 6])
+  }
+
+  @MainActor
   func testLineWrapRowCountMatchesWidthForFixedWidthFont() {
     let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
     let charWidth = ("x" as NSString).size(withAttributes: [.font: font]).width

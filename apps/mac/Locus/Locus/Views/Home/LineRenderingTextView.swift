@@ -826,7 +826,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       ? MarkdownDocumentMetrics.frontMatterVerticalPadding
       : MarkdownDocumentMetrics.frontMatterRowHeight
     let leading = isFirst && !isDocumentTop ? MarkdownDocumentMetrics.codeBlockAir : 0
-    let trailing = isLast ? MarkdownDocumentMetrics.codeBlockAir : 0
+    let trailing =
+      isLast
+      ? MarkdownDocumentMetrics.codeBlockAir
+      : (state.isFrontMatterDelimiter ? 0 : MarkdownDocumentMetrics.frontMatterItemSpacing)
     return LineRowMetrics(rowHeight: rowHeight, leadingInset: leading, trailingInset: trailing)
   }
 
@@ -4640,7 +4643,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         values: values)
     } else if let sequenceValue {
       values = [sequenceValue]
-      valueRanges = [NSRange(location: 1, length: (sequenceValue.text as NSString).length)]
+      valueRanges = [NSRange(location: 0, length: (sequenceValue.text as NSString).length)]
     } else {
       return
     }

@@ -1067,7 +1067,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       font: TextDocumentSyntax.markdown.font,
       markdownLineState: frontmatter[1])
     XCTAssertEqual(frontmatter[1].insideFrontMatter, true)
-    XCTAssertEqual(frontmatterLine.string, "title\tHi")
+    XCTAssertEqual(frontmatterLine.string, "title\nHi")
     XCTAssertEqual(
       frontmatterLine.foregroundColor(in: frontmatterLine.string, matching: "title"),
       NSColor.tertiaryLabelColor)
@@ -1458,25 +1458,19 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       lines[3], syntax: .markdown, font: TextDocumentSyntax.markdown.font,
       markdownLineState: states[3])
 
-    XCTAssertEqual(name.string, "name\tpdf")
+    XCTAssertEqual(name.string, "name\npdf")
     XCTAssertEqual(
       tools.string,
-      "allowed-tools\tRead\(MarkdownDocumentMetrics.frontMatterChipDisplaySeparator)Write"
+      "allowed-tools\nRead\(MarkdownDocumentMetrics.frontMatterChipDisplaySeparator)Write"
         + "\(MarkdownDocumentMetrics.frontMatterChipDisplaySeparator)Bash")
-    let nameStyle = name.paragraphStyle(at: 0)
-    let toolsStyle = tools.paragraphStyle(at: 0)
-    XCTAssertEqual(
-      try XCTUnwrap(nameStyle?.tabStops.first?.location),
-      MarkdownDocumentMetrics.frontMatterKeyColumnWidth,
-      accuracy: 0.5)
-    XCTAssertEqual(
-      try XCTUnwrap(toolsStyle?.tabStops.first?.location),
-      MarkdownDocumentMetrics.frontMatterKeyColumnWidth
-        + MarkdownDocumentMetrics.frontMatterChipHorizontalPadding,
-      accuracy: 0.5)
+    XCTAssertTrue(try XCTUnwrap(name.paragraphStyle(at: 0)?.tabStops).isEmpty)
+    XCTAssertTrue(try XCTUnwrap(tools.paragraphStyle(at: 0)?.tabStops).isEmpty)
     XCTAssertFalse(
       try XCTUnwrap(name.resolvedFont(in: name.string, matching: "name"))
         .fontDescriptor.symbolicTraits.contains(.monoSpace))
+    XCTAssertLessThan(
+      try XCTUnwrap(name.resolvedFont(in: name.string, matching: "name")).pointSize,
+      try XCTUnwrap(name.resolvedFont(in: name.string, matching: "pdf")).pointSize)
     XCTAssertEqual(
       name.foregroundColor(in: name.string, matching: "name"), NSColor.tertiaryLabelColor)
     XCTAssertEqual(name.foregroundColor(in: name.string, matching: "pdf"), NSColor.labelColor)
@@ -1511,14 +1505,10 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
 
     XCTAssertEqual(
       reviewers.string,
-      "reviewers\tdario\(MarkdownDocumentMetrics.frontMatterChipDisplaySeparator)"
+      "reviewers\ndario\(MarkdownDocumentMetrics.frontMatterChipDisplaySeparator)"
         + "role: reviewer\(MarkdownDocumentMetrics.frontMatterChipDisplaySeparator)musk")
     XCTAssertEqual(dario.string, "")
-    XCTAssertEqual(
-      try XCTUnwrap(reviewers.paragraphStyle(at: 0)?.tabStops.first?.location),
-      MarkdownDocumentMetrics.frontMatterKeyColumnWidth
-        + MarkdownDocumentMetrics.frontMatterChipHorizontalPadding,
-      accuracy: 0.5)
+    XCTAssertTrue(try XCTUnwrap(reviewers.paragraphStyle(at: 0)?.tabStops).isEmpty)
     XCTAssertEqual(
       try XCTUnwrap(reviewers.resolvedFont(in: reviewers.string, matching: "dario")).pointSize,
       MarkdownDocumentMetrics.frontMatterChipFont.pointSize,
@@ -1578,7 +1568,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     let role = TextDocumentSyntaxHighlighter.highlightedLine(
       lines[1], syntax: .markdown, font: TextDocumentSyntax.markdown.font,
       markdownLineState: states[1])
-    XCTAssertEqual(role.string, "\trole: reviewer")
+    XCTAssertEqual(role.string, "role: reviewer")
   }
 
   func testMarkdownFrontMatterQuotedEmptyScalarDoesNotCollectFollowingSequence() {
@@ -1599,7 +1589,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     let item = TextDocumentSyntaxHighlighter.highlightedLine(
       lines[2], syntax: .markdown, font: TextDocumentSyntax.markdown.font,
       markdownLineState: states[2])
-    XCTAssertEqual(item.string, "\tshould stay visible")
+    XCTAssertEqual(item.string, "should stay visible")
   }
 
   func testMarkdownEscapedEmphasisMarkersStayLiteral() {
