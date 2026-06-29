@@ -79,11 +79,11 @@ Image:
 
 Bitmap image:
 
-![Sample bitmap](../workspaces/file-types/sample.png)
+![Sample bitmap](../media/valid/markdown-images/earthrise-nasa.jpg)
 
 Captionless image:
 
-![](../workspaces/file-types/sample.png)
+![](../media/valid/markdown-images/product-still.png)
 
 Missing image:
 
@@ -245,7 +245,7 @@ Inline HTML: <kbd>Cmd</kbd> + <kbd>B</kbd>
 
 Single-line block HTML renders natively. An `<img>` becomes an image block:
 
-<img src="../workspaces/file-types/sample.png" alt="HTML image block">
+<img src="../media/valid/markdown-images/dashboard-wide.png" alt="HTML image block">
 
 An `<hr>` becomes a horizontal rule:
 

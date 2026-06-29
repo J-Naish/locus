@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="520" viewBox="0 0 900 520">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f8fafc"/><stop offset="1" stop-color="#e0f2fe"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#0f172a" flood-opacity="0.16"/></filter>
+  </defs>
+  <rect width="900" height="520" rx="36" fill="url(#bg)"/>
+  <text x="64" y="78" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial" font-size="34" font-weight="700" fill="#0f172a">SVG workflow diagram</text>
+  <text x="64" y="116" font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial" font-size="18" fill="#64748b">Vector source with gradients, shadows, text, and paths</text>
+  <g filter="url(#shadow)">
+    <rect x="84" y="180" width="180" height="104" rx="24" fill="#ffffff"/>
+    <rect x="360" y="180" width="180" height="104" rx="24" fill="#ffffff"/>
+    <rect x="636" y="180" width="180" height="104" rx="24" fill="#ffffff"/>
+  </g>
+  <g font-family="-apple-system, BlinkMacSystemFont, Helvetica, Arial" font-size="22" font-weight="700" fill="#1f2937">
+    <text x="132" y="240">Draft</text><text x="398" y="240">Review</text><text x="688" y="240">Ship</text>
+  </g>
+  <path d="M264 232 C300 232, 318 232, 360 232" stroke="#2563eb" stroke-width="7" fill="none" stroke-linecap="round"/>
+  <path d="M540 232 C576 232, 594 232, 636 232" stroke="#10b981" stroke-width="7" fill="none" stroke-linecap="round"/>
+  <circle cx="318" cy="232" r="7" fill="#2563eb"/><circle cx="594" cy="232" r="7" fill="#10b981"/>
+  <path d="M156 354 L744 354" stroke="#cbd5e1" stroke-width="2" stroke-dasharray="10 12"/>
+  <circle cx="156" cy="354" r="12" fill="#2563eb"/><circle cx="450" cy="354" r="12" fill="#f59e0b"/><circle cx="744" cy="354" r="12" fill="#10b981"/>
+</svg>

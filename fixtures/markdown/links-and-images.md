@@ -26,11 +26,11 @@ Image with alt text:
 
 Bitmap image:
 
-![Sample bitmap](../workspaces/file-types/sample.png)
+![Sample bitmap](../media/valid/markdown-images/earthrise-nasa.jpg)
 
 Image without alt text:
 
-![](../workspaces/file-types/sample.png)
+![](../media/valid/markdown-images/product-still.png)
 
 Missing image:
 
