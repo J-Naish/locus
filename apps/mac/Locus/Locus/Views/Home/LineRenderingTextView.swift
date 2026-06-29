@@ -610,6 +610,110 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return max(1, baseWidth - markdownLineIndent(for: state) - chipTrailingReserve)
   }
 
+  private struct FrontMatterChipLayoutItem {
+    let displayRange: NSRange
+    let rowIndex: Int
+    let textXOffset: CGFloat
+    let textWidth: CGFloat
+  }
+
+  private struct FrontMatterChipLayout {
+    let rowCount: Int
+    let items: [FrontMatterChipLayoutItem]
+  }
+
+  private nonisolated static func markdownFrontMatterChipValues(
+    field: MarkdownFrontMatterField?,
+    sequenceValue: MarkdownFrontMatterValue?
+  ) -> (values: [MarkdownFrontMatterValue], displayRanges: [NSRange])? {
+    if let field, field.rendersValuesAsChips, !field.values.isEmpty {
+      return (
+        field.values,
+        frontMatterChipDisplayRanges(
+          keyLength: (field.key as NSString).length,
+          values: field.values)
+      )
+    }
+    if let sequenceValue {
+      return (
+        [sequenceValue],
+        [NSRange(location: 0, length: (sequenceValue.text as NSString).length)]
+      )
+    }
+    return nil
+  }
+
+  private nonisolated static func markdownFrontMatterChipLayout(
+    values: [MarkdownFrontMatterValue],
+    displayRanges: [NSRange],
+    availableTextWidth: CGFloat,
+    font: NSFont
+  ) -> FrontMatterChipLayout {
+    let maxTextWidth = max(1, availableTextWidth)
+    let padding = MarkdownDocumentMetrics.frontMatterChipHorizontalPadding
+    let gap = MarkdownDocumentMetrics.frontMatterChipHorizontalGap
+    var rowIndex = 0
+    var textX: CGFloat = 0
+    var items: [FrontMatterChipLayoutItem] = []
+    items.reserveCapacity(values.count)
+
+    for (index, value) in values.enumerated() {
+      guard index < displayRanges.count else { break }
+      let displayRange = displayRanges[index]
+      guard displayRange.length > 0 else { continue }
+      let measuredWidth = ceil(markdownFrontMatterChipTextWidth(value.text, font: font))
+      let textWidth = min(maxTextWidth, max(1, measuredWidth))
+      if !items.isEmpty, textX > 0, textX + textWidth > maxTextWidth {
+        rowIndex += 1
+        textX = 0
+      }
+      items.append(
+        FrontMatterChipLayoutItem(
+          displayRange: displayRange,
+          rowIndex: rowIndex,
+          textXOffset: textX,
+          textWidth: textWidth))
+      textX += textWidth + padding * 2 + gap
+    }
+
+    return FrontMatterChipLayout(
+      rowCount: items.map(\.rowIndex).max().map { $0 + 1 } ?? 1,
+      items: items)
+  }
+
+  private nonisolated static func markdownFrontMatterChipVisualRowCount(
+    availableTextWidth: CGFloat,
+    state: MarkdownLineStyleState,
+    font: NSFont
+  ) -> Int? {
+    guard
+      let chips = markdownFrontMatterChipValues(
+        field: state.frontMatterField,
+        sequenceValue: state.isFrontMatterSequenceContinuation
+          ? nil : state.frontMatterSequenceValue
+      )
+    else {
+      return nil
+    }
+    let chipRows = markdownFrontMatterChipLayout(
+      values: chips.values,
+      displayRanges: chips.displayRanges,
+      availableTextWidth: availableTextWidth,
+      font: font
+    ).rowCount
+    return (state.frontMatterField == nil ? 0 : 1) + chipRows
+  }
+
+  private nonisolated static func markdownFrontMatterChipTextWidth(
+    _ text: String,
+    font: NSFont
+  ) -> CGFloat {
+    guard !text.isEmpty else { return 0 }
+    let attributed = NSAttributedString(string: text, attributes: [.font: font])
+    let line = CTLineCreateWithAttributedString(attributed)
+    return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+  }
+
   private nonisolated static func markdownOuterContentWidth(
     baseWidth: CGFloat,
     state: MarkdownLineStyleState
@@ -1285,6 +1389,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       let lineWidth = markdownWrapContentWidth(baseWidth: input.width, state: state)
       counts.append(
         gridRows
+          ?? markdownFrontMatterChipVisualRowCount(
+            availableTextWidth: lineWidth,
+            state: state,
+            font: typography.frontMatterChip)
           ?? Self.wrapRowCount(
             attributed: attributed, width: lineWidth, maximumRows: input.drawnCharacterCap))
     }
@@ -1501,6 +1609,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     markdownLineState: MarkdownLineStyleState = .plain
   ) -> Int {
     if usesMarkdownDocumentLayout {
+      if let count = Self.markdownFrontMatterChipVisualRowCount(
+        availableTextWidth: width,
+        state: markdownLineState,
+        font: markdownTypography.frontMatterChip)
+      {
+        return count
+      }
       let attributed = TextDocumentSyntaxHighlighter.markdownMeasurementLine(
         text, font: font, state: markdownLineState, typography: markdownTypography)
       return Self.wrapRowCount(
@@ -1569,6 +1684,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// document is not wrapping). `attributed` is the line's displayed string.
   private func visualRowStartOffsets(ofLine line: Int, attributed: NSAttributedString) -> [Int] {
     guard wrapIndex != nil else { return [0] }
+    if let starts = markdownFrontMatterChipVisualRowStartOffsets(forLine: line) {
+      return starts
+    }
     return LineWrap.visualRowStartOffsets(
       of: attributed, width: lineWrapContentWidth(forLine: line),
       maximumRows: maximumDrawnCharactersPerLine)
@@ -4133,6 +4251,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       }
       let drawn = composedLineForDisplay(line: lineIndex, base: attributedLine)
       widest = max(widest, drawn.size().width)
+      if drawMarkdownFrontMatterChipLineIfNeeded(line: lineIndex, attributed: drawn) {
+        continue
+      }
       drawVisualRows(of: drawn, line: lineIndex, textX: lineTextColumnX(forLine: lineIndex))
     }
     // Copy controls draw above the code so a long line never occludes them.
@@ -4664,61 +4785,134 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
   }
 
+  private func drawMarkdownFrontMatterChipLineIfNeeded(
+    line: Int,
+    attributed: NSAttributedString
+  ) -> Bool {
+    guard usesMarkdownDocumentLayout, let buffer = reader, line >= 0, line < lineCount else {
+      return false
+    }
+    let state = markdownLineState(forLine: line, in: buffer)
+    guard
+      let layout = markdownFrontMatterChipLayout(
+        field: state.frontMatterField,
+        sequenceValue: state.isFrontMatterSequenceContinuation
+          ? nil : state.frontMatterSequenceValue,
+        line: line
+      )
+    else {
+      return false
+    }
+
+    let rowsTop = yOffset(ofLine: line) + leadingInset(forLine: line)
+    let rowHeight = rowHeight(forLine: line)
+    let textX = lineTextColumnX(forLine: line)
+    if let field = state.frontMatterField {
+      let keyLength = min((field.key as NSString).length, attributed.length)
+      if keyLength > 0 {
+        let keyText = attributed.attributedSubstring(
+          from: NSRange(location: 0, length: keyLength))
+        let keyY =
+          rowsTop
+          + Self.rowVerticalInset(rowHeight: rowHeight, naturalHeight: keyText.size().height)
+        keyText.draw(
+          with: NSRect(x: textX, y: keyY, width: keyText.size().width, height: rowHeight),
+          options: [.usesLineFragmentOrigin])
+      }
+    }
+
+    let chipRowOffset = state.frontMatterField == nil ? 0 : 1
+    for item in layout.items {
+      guard NSMaxRange(item.displayRange) <= attributed.length else { continue }
+      let chipText = attributed.attributedSubstring(from: item.displayRange)
+      let natural = chipText.size()
+      let y =
+        rowsTop + CGFloat(chipRowOffset + item.rowIndex) * rowHeight
+        + Self.rowVerticalInset(rowHeight: rowHeight, naturalHeight: natural.height)
+      chipText.draw(
+        with: NSRect(
+          x: textX + item.textXOffset,
+          y: y,
+          width: item.textWidth,
+          height: rowHeight),
+        options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+    }
+    return true
+  }
+
   private func markdownFrontMatterChipRects(
     field: MarkdownFrontMatterField?,
     sequenceValue: MarkdownFrontMatterValue?,
     line: Int,
     y: CGFloat
   ) -> [NSRect] {
-    let values: [MarkdownFrontMatterValue]
-    let valueRanges: [NSRange]
-    if let field, field.rendersValuesAsChips, !field.values.isEmpty {
-      values = field.values
-      valueRanges = Self.frontMatterChipDisplayRanges(
-        keyLength: (field.key as NSString).length,
-        values: values)
-    } else if let sequenceValue {
-      values = [sequenceValue]
-      valueRanges = [NSRange(location: 0, length: (sequenceValue.text as NSString).length)]
-    } else {
+    guard
+      let layout = markdownFrontMatterChipLayout(
+        field: field,
+        sequenceValue: sequenceValue,
+        line: line
+      )
+    else {
       return []
     }
-
-    let attributed = attributedLine(forLine: line)
-    guard attributed.length > 0, values.count == valueRanges.count else { return [] }
-    let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
     let rowsTop = y + leadingInset(forLine: line)
     let rowHeight = rowHeight(forLine: line)
     let textX = lineTextColumnX(forLine: line)
     let chipHeight = MarkdownDocumentMetrics.frontMatterChipHeight
-    var rects: [NSRect] = []
-    for range in valueRanges {
-      guard range.length > 0 else { continue }
-      for rowIndex in starts.indices {
-        let bounds = rowRange(rowIndex, starts: starts, length: attributed.length)
-        let segmentStart = max(range.location, bounds.start)
-        let segmentEnd = min(NSMaxRange(range), bounds.end)
-        guard segmentEnd > segmentStart else { continue }
-        let rowText = attributed.attributedSubstring(
-          from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
-        let xStart =
-          textX + xOffset(forColumn: segmentStart - bounds.start, in: rowText)
-          - MarkdownDocumentMetrics.frontMatterChipHorizontalPadding
-        let xEnd =
-          textX + xOffset(forColumn: segmentEnd - bounds.start, in: rowText)
-          + MarkdownDocumentMetrics.frontMatterChipHorizontalPadding
-        let chipY =
-          rowsTop + CGFloat(rowIndex) * rowHeight
-          + max(0, (rowHeight - chipHeight) / 2)
-        let rect = NSRect(
-          x: xStart,
-          y: chipY,
-          width: max(0, xEnd - xStart),
-          height: chipHeight)
-        rects.append(rect)
+    let chipRowOffset = field == nil ? 0 : 1
+    return layout.items.map { item in
+      let chipY =
+        rowsTop + CGFloat(chipRowOffset + item.rowIndex) * rowHeight
+        + max(0, (rowHeight - chipHeight) / 2)
+      return NSRect(
+        x: textX + item.textXOffset - MarkdownDocumentMetrics.frontMatterChipHorizontalPadding,
+        y: chipY,
+        width: item.textWidth + MarkdownDocumentMetrics.frontMatterChipHorizontalPadding * 2,
+        height: chipHeight)
+    }
+  }
+
+  private func markdownFrontMatterChipLayout(
+    field: MarkdownFrontMatterField?,
+    sequenceValue: MarkdownFrontMatterValue?,
+    line: Int
+  ) -> FrontMatterChipLayout? {
+    guard
+      let chips = Self.markdownFrontMatterChipValues(
+        field: field,
+        sequenceValue: sequenceValue)
+    else {
+      return nil
+    }
+    return Self.markdownFrontMatterChipLayout(
+      values: chips.values,
+      displayRanges: chips.displayRanges,
+      availableTextWidth: lineWrapContentWidth(forLine: line),
+      font: markdownTypography.frontMatterChip)
+  }
+
+  private func markdownFrontMatterChipVisualRowStartOffsets(forLine line: Int) -> [Int]? {
+    guard usesMarkdownDocumentLayout, let buffer = reader, line >= 0, line < lineCount else {
+      return nil
+    }
+    let state = markdownLineState(forLine: line, in: buffer)
+    guard
+      let layout = markdownFrontMatterChipLayout(
+        field: state.frontMatterField,
+        sequenceValue: state.isFrontMatterSequenceContinuation
+          ? nil : state.frontMatterSequenceValue,
+        line: line)
+    else {
+      return nil
+    }
+    let keyRows = state.frontMatterField == nil ? 0 : 1
+    var starts: [Int] = keyRows == 0 ? [] : [0]
+    for row in 0..<layout.rowCount {
+      if let first = layout.items.first(where: { $0.rowIndex == row }) {
+        starts.append(first.displayRange.location)
       }
     }
-    return rects
+    return starts.isEmpty ? [0] : starts
   }
 
   nonisolated static func frontMatterChipDisplayRanges(

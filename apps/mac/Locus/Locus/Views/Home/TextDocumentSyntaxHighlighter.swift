@@ -122,6 +122,7 @@ enum MarkdownDocumentMetrics {
   static let frontMatterItemSpacing: CGFloat = 20
   static let frontMatterCornerRadius: CGFloat = 10
   static let frontMatterChipHorizontalPadding: CGFloat = 10
+  static let frontMatterChipHorizontalGap: CGFloat = 8
   static let frontMatterChipHeight: CGFloat = 24
   static let frontMatterChipCornerRadius: CGFloat = 7
   static let frontMatterKeyValueSeparator = "\n"
@@ -372,6 +373,7 @@ struct MarkdownTypography: @unchecked Sendable {
   let inlineCode: NSFont
   let codeBlock: NSFont
   let codeFence: NSFont
+  let frontMatterChip: NSFont
 
   init(baseFont: NSFont) {
     let manager = NSFontManager.shared
@@ -409,6 +411,7 @@ struct MarkdownTypography: @unchecked Sendable {
       ofSize: MarkdownDocumentMetrics.codeBlockFontSize, weight: .regular)
     codeFence = .monospacedSystemFont(
       ofSize: MarkdownDocumentMetrics.codeFenceFontSize, weight: .regular)
+    frontMatterChip = MarkdownDocumentMetrics.frontMatterChipFont
   }
 
   func heading(level: Int) -> MarkdownFontSet {

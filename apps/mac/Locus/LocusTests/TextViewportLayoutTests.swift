@@ -1133,6 +1133,34 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testMarkdownFrontMatterChipWrapKeepsEachChipWhole() throws {
+    let view = try makeViewer(
+      "---\ntags: [yaml-frontmatter, long-chip-wrapping, document-preview]\nstatus: x\n---"
+    )
+    view.setFrameSize(NSSize(width: 360, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let chipRects = view.markdownFrontMatterChipRectsForTesting(line: 1)
+    XCTAssertEqual(chipRects.count, 3)
+    let rowYs = chipRects.reduce(into: [CGFloat]()) { rows, rect in
+      if !rows.contains(where: { abs($0 - rect.minY) <= 0.5 }) {
+        rows.append(rect.minY)
+      }
+    }
+    XCTAssertGreaterThan(rowYs.count, 1)
+    for leftIndex in chipRects.indices {
+      for rightIndex in chipRects.indices where rightIndex > leftIndex {
+        let left = chipRects[leftIndex]
+        let right = chipRects[rightIndex]
+        let overlapWidth = max(0, min(left.maxX, right.maxX) - max(left.minX, right.minX))
+        let overlapHeight = max(0, min(left.maxY, right.maxY) - max(left.minY, right.minY))
+        XCTAssertLessThanOrEqual(overlapWidth * overlapHeight, 0.5)
+      }
+    }
+  }
+
+  @MainActor
   func testEditingCollectedFrontMatterChipDoesNotInsertIntoKeyLine() throws {
     let contents = "---\nreviewers:\n  - dario\n---"
     let view = try makeEditableViewer(contents)
@@ -1918,6 +1946,7 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 5))
   }
 
+  @MainActor
   func testMarkdownViewModeToggleCursorRectTracksVisibleTopTrailingCorner() {
     let visible = NSRect(x: 120, y: 340, width: 640, height: 480)
 
