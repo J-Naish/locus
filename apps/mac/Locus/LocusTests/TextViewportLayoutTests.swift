@@ -1052,7 +1052,7 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
-  func testMarkdownFrontMatterSequenceRowsStayVisibleForEditing() throws {
+  func testMarkdownFrontMatterSequenceRowsCollapseIntoCollectedChipRow() throws {
     let view = try makeViewer(
       "---\ntitle: Markdown Syntax Coverage\nreviewers:\n  - dario\n  - altman\n  - musk\ntags:\n  - markdown\n  - rendering\n---\n# Body"
     )
@@ -1067,16 +1067,33 @@ final class TextViewportLayoutTests: XCTestCase {
       accuracy: 0.5)
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 4)),
-      reviewersY + 2 * MarkdownDocumentMetrics.frontMatterRowHeight,
+      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight,
       accuracy: 0.5)
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 5)),
-      reviewersY + 3 * MarkdownDocumentMetrics.frontMatterRowHeight,
+      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight,
       accuracy: 0.5)
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 6)),
-      reviewersY + 4 * MarkdownDocumentMetrics.frontMatterRowHeight,
+      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight,
       accuracy: 0.5)
+  }
+
+  @MainActor
+  func testEditingCollectedFrontMatterChipDoesNotInsertIntoKeyLine() throws {
+    let contents = "---\nreviewers:\n  - dario\n---"
+    let view = try makeEditableViewer(contents)
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let firstChipColumn =
+      ("reviewers" as NSString).length + MarkdownDocumentMetrics.frontMatterKeyValueSeparatorLength
+    view.setSelectionForTesting(
+      anchor: .init(line: 1, columnUTF16: firstChipColumn),
+      head: .init(line: 1, columnUTF16: firstChipColumn))
+    view.insertText("X")
+
+    XCTAssertEqual(content(of: view), contents)
   }
 
   @MainActor

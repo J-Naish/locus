@@ -1492,7 +1492,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       MarkdownDocumentMetrics.headingFont(level: 1).pointSize)
   }
 
-  func testMarkdownFrontMatterSequenceValuesRemainEditableRows() {
+  func testMarkdownFrontMatterSequenceValuesRenderAsCollectedChips() {
     let lines = [
       "---",
       "reviewers:",
@@ -1508,37 +1508,98 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     let dario = TextDocumentSyntaxHighlighter.highlightedLine(
       lines[2], syntax: .markdown, font: TextDocumentSyntax.markdown.font,
       markdownLineState: states[2])
-    let role = TextDocumentSyntaxHighlighter.highlightedLine(
-      lines[3], syntax: .markdown, font: TextDocumentSyntax.markdown.font,
-      markdownLineState: states[3])
 
-    XCTAssertEqual(reviewers.string, "reviewers\t")
-    XCTAssertEqual(dario.string, "\tdario")
-    XCTAssertEqual(role.string, "\trole: reviewer")
     XCTAssertEqual(
-      try XCTUnwrap(dario.paragraphStyle(at: 0)?.tabStops.first?.location),
+      reviewers.string,
+      "reviewers\tdario\(MarkdownDocumentMetrics.frontMatterChipDisplaySeparator)"
+        + "role: reviewer\(MarkdownDocumentMetrics.frontMatterChipDisplaySeparator)musk")
+    XCTAssertEqual(dario.string, "")
+    XCTAssertEqual(
+      try XCTUnwrap(reviewers.paragraphStyle(at: 0)?.tabStops.first?.location),
       MarkdownDocumentMetrics.frontMatterKeyColumnWidth
         + MarkdownDocumentMetrics.frontMatterChipHorizontalPadding,
       accuracy: 0.5)
     XCTAssertEqual(
-      try XCTUnwrap(dario.resolvedFont(in: dario.string, matching: "dario")).pointSize,
+      try XCTUnwrap(reviewers.resolvedFont(in: reviewers.string, matching: "dario")).pointSize,
       MarkdownDocumentMetrics.frontMatterChipFont.pointSize,
       accuracy: 0.5)
-    XCTAssertEqual(states[1].frontMatterField?.rendersValuesAsChips, false)
+    XCTAssertEqual(states[1].frontMatterField?.rendersValuesAsChips, true)
+    XCTAssertEqual(
+      states[1].frontMatterField?.values.map(\.text), ["dario", "role: reviewer", "musk"])
+    XCTAssertEqual(states[2].isFrontMatterSequenceContinuation, true)
     XCTAssertEqual(states[2].frontMatterSequenceValue?.text, "dario")
     XCTAssertEqual(
       states[2].frontMatterSequenceValue?.sourceRange,
       NSRange(location: 4, length: 5))
     XCTAssertNil(states[3].frontMatterField)
+    XCTAssertEqual(states[3].isFrontMatterSequenceContinuation, true)
     XCTAssertEqual(states[3].frontMatterSequenceValue?.text, "role: reviewer")
     XCTAssertEqual(
       TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
-        lines[2], font: TextDocumentSyntax.markdown.font, state: states[2]), "\tdario")
+        lines[2], font: TextDocumentSyntax.markdown.font, state: states[2]), "")
 
     let map = TextDocumentSyntaxHighlighter.markdownDisplayMap(for: lines[2], state: states[2])
     XCTAssertEqual(
-      map.bufferRange(forDisplayStart: 1, end: 6, includeWholeLineMarkers: false),
-      NSRange(location: 4, length: 5))
+      map.bufferRange(forDisplayStart: 0, end: 0, includeWholeLineMarkers: false),
+      NSRange(location: 4, length: 0))
+
+    let separatorLength = (MarkdownDocumentMetrics.frontMatterChipDisplaySeparator as NSString)
+      .length
+    let valueStart =
+      ("reviewers" as NSString).length + MarkdownDocumentMetrics.frontMatterKeyValueSeparatorLength
+    XCTAssertEqual(
+      LineRenderingTextView.frontMatterChipDisplayRanges(
+        keyLength: ("reviewers" as NSString).length,
+        values: states[1].frontMatterField?.values ?? []),
+      [
+        NSRange(location: valueStart, length: 5),
+        NSRange(location: valueStart + 5 + separatorLength, length: 14),
+        NSRange(location: valueStart + 5 + separatorLength + 14 + separatorLength, length: 4),
+      ])
+  }
+
+  func testMarkdownFrontMatterSequenceValuesWithColonsStaySequenceRows() {
+    let lines = [
+      "---",
+      "- role: reviewer",
+      "- https://example.com",
+      "- 10:30",
+      "---",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertNil(states[1].frontMatterField)
+    XCTAssertEqual(states[1].frontMatterSequenceValue?.text, "role: reviewer")
+    XCTAssertNil(states[2].frontMatterField)
+    XCTAssertEqual(states[2].frontMatterSequenceValue?.text, "https://example.com")
+    XCTAssertNil(states[3].frontMatterField)
+    XCTAssertEqual(states[3].frontMatterSequenceValue?.text, "10:30")
+
+    let role = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[1], syntax: .markdown, font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[1])
+    XCTAssertEqual(role.string, "\trole: reviewer")
+  }
+
+  func testMarkdownFrontMatterQuotedEmptyScalarDoesNotCollectFollowingSequence() {
+    let lines = [
+      "---",
+      #"note: """#,
+      "  - should stay visible",
+      "---",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(states[1].frontMatterField?.key, "note")
+    XCTAssertEqual(states[1].frontMatterField?.values.first?.text, "")
+    XCTAssertEqual(states[1].frontMatterField?.rendersValuesAsChips, false)
+    XCTAssertEqual(states[2].frontMatterSequenceValue?.text, "should stay visible")
+    XCTAssertEqual(states[2].isFrontMatterSequenceContinuation, false)
+
+    let item = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[2], syntax: .markdown, font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[2])
+    XCTAssertEqual(item.string, "\tshould stay visible")
   }
 
   func testMarkdownEscapedEmphasisMarkersStayLiteral() {

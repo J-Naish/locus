@@ -123,7 +123,10 @@ enum MarkdownDocumentMetrics {
   static let frontMatterChipHorizontalPadding: CGFloat = 10
   static let frontMatterChipHeight: CGFloat = 24
   static let frontMatterChipCornerRadius: CGFloat = 7
+  static let frontMatterKeyValueSeparator = "\t"
   static let frontMatterChipDisplaySeparator = "        "
+  static let frontMatterKeyValueSeparatorLength =
+    (frontMatterKeyValueSeparator as NSString).length
 
   static func headingFont(level: Int) -> NSFont {
     switch level {
@@ -326,9 +329,13 @@ struct MarkdownLineStyleState: Equatable, Sendable {
   var isFrontMatterDelimiter = false
   /// Parsed metadata field for frontmatter rows that should be visible.
   var frontMatterField: MarkdownFrontMatterField?
-  /// A YAML sequence item inside frontmatter. It renders aligned with the value
-  /// column, but maps back to the real `- value` source range so it stays editable.
+  /// A YAML sequence item inside frontmatter. Standalone items render aligned
+  /// with the value column; items collected by the preceding key render as chips
+  /// on that key's row and leave this source row concealed in rendered mode.
   var frontMatterSequenceValue: MarkdownFrontMatterValue?
+  /// True when this sequence line has been visually collected into the previous
+  /// frontmatter field row.
+  var isFrontMatterSequenceContinuation = false
   var isFenceDelimiter = false
   /// True for the opening fence delimiter of a block (vs the closer). The
   /// authoritative opener/closer distinction from the pairing pass, so callers
@@ -1045,6 +1052,11 @@ enum TextDocumentSyntaxHighlighter {
       if markdownFrontMatterDelimiter(in: line) {
         return .empty(sourceText: line)
       }
+      if state.isFrontMatterSequenceContinuation {
+        return .empty(
+          sourceText: line,
+          insertionColumn: state.frontMatterSequenceValue?.sourceRange.location)
+      }
       if let value = state.frontMatterSequenceValue {
         return markdownFrontMatterSequenceDisplayMap(for: value, sourceText: line)
       }
@@ -1273,7 +1285,9 @@ enum TextDocumentSyntaxHighlighter {
     }
 
     appendMapped(field.key, sourceRange: field.keyRange)
-    appendLiteral("\t", sourceColumn: NSMaxRange(field.keyRange))
+    appendLiteral(
+      MarkdownDocumentMetrics.frontMatterKeyValueSeparator,
+      sourceColumn: NSMaxRange(field.keyRange))
     for (index, value) in field.values.enumerated() {
       if index > 0 {
         appendLiteral(
@@ -1309,7 +1323,7 @@ enum TextDocumentSyntaxHighlighter {
       }
     }
 
-    display += "\t"
+    display += MarkdownDocumentMetrics.frontMatterKeyValueSeparator
     ranges.append(NSRange(location: value.sourceRange.location, length: 0))
     boundaries.append(value.sourceRange.location)
     appendMapped(value.text, sourceRange: value.sourceRange)
@@ -2573,10 +2587,66 @@ enum TextDocumentSyntaxHighlighter {
       if let value = markdownFrontMatterSequenceValue(in: lines[index]) {
         states[index].frontMatterSequenceValue = value
       } else if let field = markdownFrontMatterField(in: lines[index]) {
+        if frontMatterFieldCanCollectSequenceValues(field, in: lines[index]) {
+          let sequenceValues = frontMatterSequenceValues(
+            after: index, in: lines, closingIndex: closingIndex, states: &states)
+          if !sequenceValues.isEmpty {
+            let sourceColumn = (lines[index] as NSString).length
+            states[index].frontMatterField = MarkdownFrontMatterField(
+              key: field.key,
+              keyRange: field.keyRange,
+              values: sequenceValues.map {
+                MarkdownFrontMatterValue(
+                  text: $0.text,
+                  sourceRange: NSRange(location: sourceColumn, length: 0))
+              },
+              rendersValuesAsChips: true)
+            index += sequenceValues.count + 1
+            continue
+          }
+        }
         states[index].frontMatterField = field
       }
       index += 1
     }
+  }
+
+  private static func frontMatterFieldCanCollectSequenceValues(
+    _ field: MarkdownFrontMatterField,
+    in line: String
+  ) -> Bool {
+    let nsLine = line as NSString
+    guard let colon = (0..<nsLine.length).first(where: { nsLine.character(at: $0) == 58 }) else {
+      return false
+    }
+    let rawValueRange = NSRange(
+      location: min(nsLine.length, colon + 1),
+      length: max(0, nsLine.length - colon - 1))
+    return trimmedRange(in: nsLine, range: rawValueRange).length == 0
+      && !field.rendersValuesAsChips
+      && field.values.count == 1
+      && field.values[0].text.isEmpty
+      && field.values[0].sourceRange.length == 0
+  }
+
+  private static func frontMatterSequenceValues(
+    after fieldIndex: Int,
+    in lines: [String],
+    closingIndex: Int,
+    states: inout [MarkdownLineStyleState]
+  ) -> [MarkdownFrontMatterValue] {
+    var values: [MarkdownFrontMatterValue] = []
+    var index = fieldIndex + 1
+    while index < closingIndex {
+      guard let value = markdownFrontMatterSequenceValue(in: lines[index]) else {
+        break
+      }
+      states[index].frontMatterSequenceValue = value
+      states[index].isFrontMatterSequenceContinuation = true
+      values.append(value)
+      index += 1
+    }
+    return values
   }
 
   /// Longest body that may classify as an image-only line. Far above any real
@@ -3097,7 +3167,8 @@ enum TextDocumentSyntaxHighlighter {
         range: NSRange(location: 0, length: keyLength))
     }
 
-    let valueStart = min(attributed.length, keyLength + 1)
+    let valueStart = min(
+      attributed.length, keyLength + MarkdownDocumentMetrics.frontMatterKeyValueSeparatorLength)
     guard valueStart < attributed.length else { return }
     var offset = valueStart
     let chipSeparatorLength = (MarkdownDocumentMetrics.frontMatterChipDisplaySeparator as NSString)

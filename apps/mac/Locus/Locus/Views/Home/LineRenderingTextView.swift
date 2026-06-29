@@ -818,6 +818,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private func markdownFrontMatterLineMetrics(
     state: MarkdownLineStyleState, isFirst: Bool, isLast: Bool, isDocumentTop: Bool
   ) -> LineRowMetrics? {
+    if state.isFrontMatterSequenceContinuation {
+      return LineRowMetrics(rowHeight: 0)
+    }
     let rowHeight =
       state.isFrontMatterDelimiter
       ? MarkdownDocumentMetrics.frontMatterVerticalPadding
@@ -2351,7 +2354,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if state.isFenceDelimiter {
       return !(state.isFenceOpen && state.isFenceLabel)
     }
-    return state.isFrontMatterDelimiter || state.isTableSeparator || state.isSetextUnderline
+    return state.isFrontMatterDelimiter || state.isFrontMatterSequenceContinuation
+      || state.isTableSeparator || state.isSetextUnderline
   }
 
   /// Moves a navigation/edit result off a concealed delimiter line, continuing
@@ -2928,7 +2932,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Inserts `string`, replacing the current selection if any, and leaves the
   /// caret after the inserted text. A no-op when read-only, empty, or absent.
   func insertText(_ string: String) {
+    let activeSelection = selection ?? TextSelection(caretAt: navigationHead)
     guard isEditable, !string.isEmpty, let range = currentSelectionUTF16Range() else {
+      return
+    }
+    guard !selectionTouchesCollectedFrontMatterChips(activeSelection) else {
+      NSSound.beep()
       return
     }
     replace(globalStart: range.start, globalEnd: range.end, with: string)
@@ -3322,6 +3331,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// the start. Endpoints must already be ordered (`from` before `to`).
   private func deleteRange(from start: TextSelection.Endpoint, to end: TextSelection.Endpoint) {
     let selection = TextSelection(anchor: start, head: end)
+    guard !selectionTouchesCollectedFrontMatterChips(selection) else {
+      NSSound.beep()
+      return
+    }
     guard let buffer = editableBuffer, let range = rawUTF16Range(for: selection),
       range.end > range.start
     else {
@@ -3340,6 +3353,56 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     } catch {
       NSSound.beep()
     }
+  }
+
+  private func selectionTouchesCollectedFrontMatterChips(_ selection: TextSelection) -> Bool {
+    guard usesMarkdownDocumentLayout else { return false }
+    let startLine = max(0, selection.start.line)
+    let endLine = min(max(0, lineCount - 1), selection.end.line)
+    guard startLine <= endLine else { return false }
+
+    for line in startLine...endLine {
+      guard let chipRange = collectedFrontMatterChipDisplayRange(line: line) else {
+        continue
+      }
+      if selection.isEmpty {
+        guard selection.head.line == line else { continue }
+        if selection.head.columnUTF16 >= chipRange.lowerBound
+          && selection.head.columnUTF16 <= chipRange.upperBound
+        {
+          return true
+        }
+      } else if let span = selection.columnSpan(
+        onLine: line, lineLengthUTF16: lineLengthUTF16(line)),
+        span.start < chipRange.upperBound && span.end > chipRange.lowerBound
+      {
+        return true
+      }
+    }
+    return false
+  }
+
+  private func collectedFrontMatterChipDisplayRange(line: Int) -> Range<Int>? {
+    guard let buffer = reader, line >= 0, line < lineCount else { return nil }
+    let state = markdownLineState(forLine: line, in: buffer)
+    guard let field = state.frontMatterField, field.rendersValuesAsChips,
+      !field.values.isEmpty,
+      field.values.allSatisfy({ $0.sourceRange.length == 0 })
+    else {
+      return nil
+    }
+    let ranges = Self.frontMatterChipDisplayRanges(
+      keyLength: (field.key as NSString).length,
+      values: field.values
+    )
+    .filter { $0.length > 0 }
+    guard let lower = ranges.map(\.location).min(),
+      let upper = ranges.map({ NSMaxRange($0) }).max(),
+      upper > lower
+    else {
+      return nil
+    }
+    return lower..<upper
   }
 
   /// The current selection as a global UTF-16 range, or a zero-length range at
@@ -4175,7 +4238,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       if state.insideFrontMatter, visibleRows.contains(firstRow) {
         drawMarkdownFrontMatterChips(
           field: state.frontMatterField,
-          sequenceValue: state.frontMatterSequenceValue,
+          sequenceValue: state.isFrontMatterSequenceContinuation
+            ? nil : state.frontMatterSequenceValue,
           line: line,
           y: lineY)
       }
@@ -4568,46 +4632,77 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     y: CGFloat
   ) {
     let values: [MarkdownFrontMatterValue]
+    let valueRanges: [NSRange]
     if let field, field.rendersValuesAsChips, !field.values.isEmpty {
       values = field.values
+      valueRanges = Self.frontMatterChipDisplayRanges(
+        keyLength: (field.key as NSString).length,
+        values: values)
     } else if let sequenceValue {
       values = [sequenceValue]
+      valueRanges = [NSRange(location: 1, length: (sequenceValue.text as NSString).length)]
     } else {
       return
     }
 
-    var x =
-      lineTextColumnX(forLine: line)
-      + MarkdownDocumentMetrics.frontMatterKeyColumnWidth
-      + MarkdownDocumentMetrics.frontMatterChipHorizontalPadding
-    let rowTop = y + leadingInset(forLine: line)
+    let attributed = attributedLine(forLine: line)
+    guard attributed.length > 0, values.count == valueRanges.count else { return }
+    let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
+    let rowsTop = y + leadingInset(forLine: line)
+    let rowHeight = rowHeight(forLine: line)
+    let textX = lineTextColumnX(forLine: line)
     let chipHeight = MarkdownDocumentMetrics.frontMatterChipHeight
-    let chipY = rowTop + max(0, (rowHeight(forLine: line) - chipHeight) / 2)
-    let attributes: [NSAttributedString.Key: Any] = [
-      .font: MarkdownDocumentMetrics.frontMatterChipFont
-    ]
-    let separatorWidth = NSAttributedString(
-      string: MarkdownDocumentMetrics.frontMatterChipDisplaySeparator,
-      attributes: attributes
-    ).size().width
-    for value in values {
-      let text = NSAttributedString(string: value.text, attributes: attributes)
-      let textWidth = ceil(text.size().width)
-      let width = textWidth + 2 * MarkdownDocumentMetrics.frontMatterChipHorizontalPadding
-      let rect = NSRect(
-        x: x - MarkdownDocumentMetrics.frontMatterChipHorizontalPadding,
-        y: chipY,
-        width: width,
-        height: chipHeight)
-      MarkdownDocumentMetrics.frontMatterChipBackground.setFill()
-      NSBezierPath(
-        roundedRect: backingAlignedRect(rect, options: .alignAllEdgesNearest),
-        xRadius: MarkdownDocumentMetrics.frontMatterChipCornerRadius,
-        yRadius: MarkdownDocumentMetrics.frontMatterChipCornerRadius
-      )
-      .fill()
-      x += textWidth + separatorWidth
+    for range in valueRanges {
+      guard range.length > 0 else { continue }
+      for rowIndex in starts.indices {
+        let bounds = rowRange(rowIndex, starts: starts, length: attributed.length)
+        let segmentStart = max(range.location, bounds.start)
+        let segmentEnd = min(NSMaxRange(range), bounds.end)
+        guard segmentEnd > segmentStart else { continue }
+        let rowText = attributed.attributedSubstring(
+          from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
+        let xStart =
+          textX + xOffset(forColumn: segmentStart - bounds.start, in: rowText)
+          - MarkdownDocumentMetrics.frontMatterChipHorizontalPadding
+        let xEnd =
+          textX + xOffset(forColumn: segmentEnd - bounds.start, in: rowText)
+          + MarkdownDocumentMetrics.frontMatterChipHorizontalPadding
+        let chipY =
+          rowsTop + CGFloat(rowIndex) * rowHeight
+          + max(0, (rowHeight - chipHeight) / 2)
+        let rect = NSRect(
+          x: xStart,
+          y: chipY,
+          width: max(0, xEnd - xStart),
+          height: chipHeight)
+        MarkdownDocumentMetrics.frontMatterChipBackground.setFill()
+        NSBezierPath(
+          roundedRect: backingAlignedRect(rect, options: .alignAllEdgesNearest),
+          xRadius: MarkdownDocumentMetrics.frontMatterChipCornerRadius,
+          yRadius: MarkdownDocumentMetrics.frontMatterChipCornerRadius
+        )
+        .fill()
+      }
     }
+  }
+
+  nonisolated static func frontMatterChipDisplayRanges(
+    keyLength: Int,
+    values: [MarkdownFrontMatterValue]
+  ) -> [NSRange] {
+    var ranges: [NSRange] = []
+    let separatorLength = (MarkdownDocumentMetrics.frontMatterChipDisplaySeparator as NSString)
+      .length
+    var offset = max(0, keyLength) + MarkdownDocumentMetrics.frontMatterKeyValueSeparatorLength
+    for (index, value) in values.enumerated() {
+      if index > 0 {
+        offset += separatorLength
+      }
+      let length = (value.text as NSString).length
+      ranges.append(NSRange(location: offset, length: length))
+      offset += length
+    }
+    return ranges
   }
 
   /// The copy control of one fenced code block: its block's opening-fence line,
@@ -5241,6 +5336,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     attributedLine(forLine: line).string
   }
 
+  func setSelectionForTesting(anchor: TextSelection.Endpoint, head: TextSelection.Endpoint) {
+    selection = TextSelection(anchor: anchor, head: head)
+  }
+
   static func markdownViewModeToggleCursorRectForTesting(in visible: NSRect) -> NSRect {
     markdownViewModeToggleCursorRect(in: visible)
   }
@@ -5449,6 +5548,11 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
       if wasComposing { refreshAfterComposition() }
       return
     }
+    if let selection, selectionTouchesCollectedFrontMatterChips(selection) {
+      NSSound.beep()
+      refreshAfterComposition()
+      return
+    }
     if replacementRange.location != NSNotFound {
       replace(
         globalStart: replacementRange.location,
@@ -5471,6 +5575,10 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
     if composition == nil {
       // Begin composing: clear whatever the marked text replaces so it sits at a
       // collapsed caret.
+      if let selection, selectionTouchesCollectedFrontMatterChips(selection) {
+        NSSound.beep()
+        return
+      }
       if replacementRange.location != NSNotFound {
         replace(
           globalStart: replacementRange.location,
