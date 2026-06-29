@@ -118,6 +118,7 @@ enum MarkdownDocumentMetrics {
   static let frontMatterHorizontalInset: CGFloat = 34
   static let frontMatterVerticalPadding: CGFloat = 18
   static let frontMatterRowHeight: CGFloat = 22
+  static let frontMatterChipRowHeight: CGFloat = 30
   static let frontMatterItemSpacing: CGFloat = 20
   static let frontMatterCornerRadius: CGFloat = 10
   static let frontMatterChipHorizontalPadding: CGFloat = 10

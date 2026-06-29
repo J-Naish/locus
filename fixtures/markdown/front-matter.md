@@ -4,15 +4,25 @@ status: draft
 name: pdf
 description: "Comprehensive PDF toolkit for extracting text and tables, merging, splitting, and handling forms."
 license: see LICENSE.txt
-allowed-tools: [Read, Write, Bash]
+allowed-tools: [Read, Write, Bash, Glob, Grep, WebFetch, TodoWrite, NotebookEdit, MultiEdit]
 tags:
   - markdown
   - rendering
   - fixture
+  - agent-skill
+  - yaml-frontmatter
+  - long-chip-wrapping
+  - document-preview
+  - business-review
 reviewers:
   - dario
   - altman
   - musk
+  - nishi
+  - christina-wodtke
+  - product-ops-review
+  - localization-owner
+  - accessibility-review
 empty-value:
 quoted-colon: "owner: docs"
 single-quoted: 'literal value'

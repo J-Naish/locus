@@ -1041,6 +1041,7 @@ final class TextViewportLayoutTests: XCTestCase {
     let line0Y = try XCTUnwrap(view.endpointYForTesting(line: 0))
     let line1Y = try XCTUnwrap(view.endpointYForTesting(line: 1))
     let line2Y = try XCTUnwrap(view.endpointYForTesting(line: 2))
+    let line3Y = try XCTUnwrap(view.endpointYForTesting(line: 3))
     XCTAssertEqual(
       line1Y - line0Y,
       MarkdownDocumentMetrics.frontMatterVerticalPadding,
@@ -1048,6 +1049,11 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(
       line2Y - line1Y,
       MarkdownDocumentMetrics.frontMatterRowHeight * 2
+        + MarkdownDocumentMetrics.frontMatterItemSpacing,
+      accuracy: 0.5)
+    XCTAssertEqual(
+      line3Y - line2Y,
+      MarkdownDocumentMetrics.frontMatterChipRowHeight * 2
         + MarkdownDocumentMetrics.frontMatterItemSpacing,
       accuracy: 0.5)
   }
@@ -1064,24 +1070,66 @@ final class TextViewportLayoutTests: XCTestCase {
     let reviewersY = try XCTUnwrap(view.endpointYForTesting(line: 2))
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 3)),
-      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight * 2
+      reviewersY + MarkdownDocumentMetrics.frontMatterChipRowHeight * 2
         + MarkdownDocumentMetrics.frontMatterItemSpacing,
       accuracy: 0.5)
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 4)),
-      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight * 2
+      reviewersY + MarkdownDocumentMetrics.frontMatterChipRowHeight * 2
         + MarkdownDocumentMetrics.frontMatterItemSpacing,
       accuracy: 0.5)
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 5)),
-      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight * 2
+      reviewersY + MarkdownDocumentMetrics.frontMatterChipRowHeight * 2
         + MarkdownDocumentMetrics.frontMatterItemSpacing,
       accuracy: 0.5)
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 6)),
-      reviewersY + MarkdownDocumentMetrics.frontMatterRowHeight * 2
+      reviewersY + MarkdownDocumentMetrics.frontMatterChipRowHeight * 2
         + MarkdownDocumentMetrics.frontMatterItemSpacing,
       accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownFrontMatterWrappedChipRowsReserveVerticalSpace() throws {
+    let view = try makeViewer(
+      "---\nallowed-tools: [Read, Write, Bash, Glob, Grep, WebFetch, TodoWrite, NotebookEdit, MultiEdit]\nstatus: x\n---\n# Body"
+    )
+    view.setFrameSize(NSSize(width: 360, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let toolsY = try XCTUnwrap(view.endpointYForTesting(line: 1))
+    let statusY = try XCTUnwrap(view.endpointYForTesting(line: 2))
+    XCTAssertGreaterThanOrEqual(
+      statusY - toolsY,
+      MarkdownDocumentMetrics.frontMatterChipRowHeight * 3
+        + MarkdownDocumentMetrics.frontMatterItemSpacing - 0.5)
+
+    let frame = try XCTUnwrap(
+      view.markdownFrontMatterFrameForTesting(
+        fromLine: 0, toLine: 3, visibleRows: 0..<view.visualRowCount))
+    XCTAssertGreaterThan(frame.maxY, statusY)
+  }
+
+  @MainActor
+  func testMarkdownFrontMatterWrappedChipRowsStayInsideMetadataCard() throws {
+    let view = try makeViewer(
+      "---\nallowed-tools: [Read, Write, Bash, Glob, Grep, WebFetch, TodoWrite, NotebookEdit, MultiEdit]\nstatus: x\n---"
+    )
+    view.setFrameSize(NSSize(width: 420, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let frame = try XCTUnwrap(
+      view.markdownFrontMatterFrameForTesting(
+        fromLine: 0, toLine: 3, visibleRows: 0..<view.visualRowCount))
+    let chipRects = view.markdownFrontMatterChipRectsForTesting(line: 1)
+    XCTAssertFalse(chipRects.isEmpty)
+    for rect in chipRects {
+      XCTAssertGreaterThanOrEqual(rect.minX, frame.minX - 0.5)
+      XCTAssertLessThanOrEqual(rect.maxX, frame.maxX + 0.5)
+    }
   }
 
   @MainActor
@@ -1099,6 +1147,98 @@ final class TextViewportLayoutTests: XCTestCase {
     view.insertText("X")
 
     XCTAssertEqual(content(of: view), contents)
+  }
+
+  @MainActor
+  func testDeletingInsideCollectedFrontMatterChipLeavesSourceUnchanged() throws {
+    let contents = "---\nreviewers:\n  - dario\n---"
+    let view = try makeEditableViewer(contents)
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let firstChipColumn =
+      ("reviewers" as NSString).length + MarkdownDocumentMetrics.frontMatterKeyValueSeparatorLength
+    view.setSelectionForTesting(
+      anchor: .init(line: 1, columnUTF16: firstChipColumn + 1),
+      head: .init(line: 1, columnUTF16: firstChipColumn + 1))
+    view.deleteBackward()
+    XCTAssertEqual(content(of: view), contents)
+
+    view.deleteForward()
+    XCTAssertEqual(content(of: view), contents)
+  }
+
+  @MainActor
+  func testReplacingCollectedFrontMatterChipSelectionLeavesSourceUnchanged() throws {
+    let contents = "---\nreviewers:\n  - dario\n---"
+    let view = try makeEditableViewer(contents)
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let firstChipColumn =
+      ("reviewers" as NSString).length + MarkdownDocumentMetrics.frontMatterKeyValueSeparatorLength
+    view.setSelectionForTesting(
+      anchor: .init(line: 1, columnUTF16: firstChipColumn),
+      head: .init(line: 1, columnUTF16: firstChipColumn + ("dario" as NSString).length))
+    view.insertText("nishi")
+
+    XCTAssertEqual(content(of: view), contents)
+  }
+
+  @MainActor
+  func testPasteOverCollectedFrontMatterChipLeavesSourceUnchanged() throws {
+    let contents = "---\nreviewers:\n  - dario\n---"
+    let view = try makeEditableViewer(contents)
+    view.syntax = .markdown
+    view.updateLayout()
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString("nishi", forType: .string)
+
+    let firstChipColumn =
+      ("reviewers" as NSString).length + MarkdownDocumentMetrics.frontMatterKeyValueSeparatorLength
+    view.setSelectionForTesting(
+      anchor: .init(line: 1, columnUTF16: firstChipColumn),
+      head: .init(line: 1, columnUTF16: firstChipColumn + ("dario" as NSString).length))
+    view.paste(nil)
+
+    XCTAssertEqual(content(of: view), contents)
+  }
+
+  @MainActor
+  func testFrontMatterScalarValueRemainsEditableInRenderedMode() throws {
+    let contents = "---\nstatus: draft\n---"
+    let view = try makeEditableViewer(contents)
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let valueEndColumn =
+      ("status" as NSString).length + MarkdownDocumentMetrics.frontMatterKeyValueSeparatorLength
+      + ("draft" as NSString).length
+    view.setSelectionForTesting(
+      anchor: .init(line: 1, columnUTF16: valueEndColumn),
+      head: .init(line: 1, columnUTF16: valueEndColumn))
+    view.insertText("s")
+
+    XCTAssertEqual(content(of: view), "---\nstatus: drafts\n---")
+  }
+
+  @MainActor
+  func testInlineFrontMatterChipValueRemainsEditableInRenderedMode() throws {
+    let contents = "---\nallowed-tools: [Read, Write]\n---"
+    let view = try makeEditableViewer(contents)
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let firstChipEndColumn =
+      ("allowed-tools" as NSString).length
+      + MarkdownDocumentMetrics.frontMatterKeyValueSeparatorLength
+      + ("Read" as NSString).length
+    view.setSelectionForTesting(
+      anchor: .init(line: 1, columnUTF16: firstChipEndColumn),
+      head: .init(line: 1, columnUTF16: firstChipEndColumn))
+    view.insertText("File")
+
+    XCTAssertEqual(content(of: view), "---\nallowed-tools: [ReadFile, Write]\n---")
   }
 
   @MainActor

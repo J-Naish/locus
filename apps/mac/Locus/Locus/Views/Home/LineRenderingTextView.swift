@@ -603,7 +603,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     baseWidth: CGFloat,
     state: MarkdownLineStyleState
   ) -> CGFloat {
-    max(1, baseWidth - markdownLineIndent(for: state))
+    let chipTrailingReserve =
+      state.insideFrontMatter && markdownFrontMatterLineRendersChips(state)
+      ? MarkdownDocumentMetrics.frontMatterChipHorizontalPadding
+      : 0
+    return max(1, baseWidth - markdownLineIndent(for: state) - chipTrailingReserve)
   }
 
   private nonisolated static func markdownOuterContentWidth(
@@ -821,16 +825,26 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if state.isFrontMatterSequenceContinuation {
       return LineRowMetrics(rowHeight: 0)
     }
+    // Collapsed continuation rows return above; only visible field rows should
+    // expand for chip pills.
     let rowHeight =
       state.isFrontMatterDelimiter
       ? MarkdownDocumentMetrics.frontMatterVerticalPadding
-      : MarkdownDocumentMetrics.frontMatterRowHeight
+      : (Self.markdownFrontMatterLineRendersChips(state)
+        ? MarkdownDocumentMetrics.frontMatterChipRowHeight
+        : MarkdownDocumentMetrics.frontMatterRowHeight)
     let leading = isFirst && !isDocumentTop ? MarkdownDocumentMetrics.codeBlockAir : 0
     let trailing =
       isLast
       ? MarkdownDocumentMetrics.codeBlockAir
       : (state.isFrontMatterDelimiter ? 0 : MarkdownDocumentMetrics.frontMatterItemSpacing)
     return LineRowMetrics(rowHeight: rowHeight, leadingInset: leading, trailingInset: trailing)
+  }
+
+  nonisolated private static func markdownFrontMatterLineRendersChips(
+    _ state: MarkdownLineStyleState
+  ) -> Bool {
+    state.frontMatterField?.rendersValuesAsChips == true || state.frontMatterSequenceValue != nil
   }
 
   /// Per-line metrics for a code-slab line: empty fence delimiters collapse to
@@ -4634,6 +4648,28 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     line: Int,
     y: CGFloat
   ) {
+    for rect in markdownFrontMatterChipRects(
+      field: field,
+      sequenceValue: sequenceValue,
+      line: line,
+      y: y)
+    {
+      MarkdownDocumentMetrics.frontMatterChipBackground.setFill()
+      NSBezierPath(
+        roundedRect: backingAlignedRect(rect, options: .alignAllEdgesNearest),
+        xRadius: MarkdownDocumentMetrics.frontMatterChipCornerRadius,
+        yRadius: MarkdownDocumentMetrics.frontMatterChipCornerRadius
+      )
+      .fill()
+    }
+  }
+
+  private func markdownFrontMatterChipRects(
+    field: MarkdownFrontMatterField?,
+    sequenceValue: MarkdownFrontMatterValue?,
+    line: Int,
+    y: CGFloat
+  ) -> [NSRect] {
     let values: [MarkdownFrontMatterValue]
     let valueRanges: [NSRange]
     if let field, field.rendersValuesAsChips, !field.values.isEmpty {
@@ -4645,16 +4681,17 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       values = [sequenceValue]
       valueRanges = [NSRange(location: 0, length: (sequenceValue.text as NSString).length)]
     } else {
-      return
+      return []
     }
 
     let attributed = attributedLine(forLine: line)
-    guard attributed.length > 0, values.count == valueRanges.count else { return }
+    guard attributed.length > 0, values.count == valueRanges.count else { return [] }
     let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
     let rowsTop = y + leadingInset(forLine: line)
     let rowHeight = rowHeight(forLine: line)
     let textX = lineTextColumnX(forLine: line)
     let chipHeight = MarkdownDocumentMetrics.frontMatterChipHeight
+    var rects: [NSRect] = []
     for range in valueRanges {
       guard range.length > 0 else { continue }
       for rowIndex in starts.indices {
@@ -4678,15 +4715,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
           y: chipY,
           width: max(0, xEnd - xStart),
           height: chipHeight)
-        MarkdownDocumentMetrics.frontMatterChipBackground.setFill()
-        NSBezierPath(
-          roundedRect: backingAlignedRect(rect, options: .alignAllEdgesNearest),
-          xRadius: MarkdownDocumentMetrics.frontMatterChipCornerRadius,
-          yRadius: MarkdownDocumentMetrics.frontMatterChipCornerRadius
-        )
-        .fill()
+        rects.append(rect)
       }
     }
+    return rects
   }
 
   nonisolated static func frontMatterChipDisplayRanges(
@@ -5394,6 +5426,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       y: y,
       width: lineOuterContentWidth(forLine: startLine),
       height: bottom - y)
+  }
+
+  func markdownFrontMatterChipRectsForTesting(line: Int) -> [NSRect] {
+    guard usesMarkdownDocumentLayout, let buffer = reader, line >= 0, line < lineCount else {
+      return []
+    }
+    let state = markdownLineState(forLine: line, in: buffer)
+    return markdownFrontMatterChipRects(
+      field: state.frontMatterField,
+      sequenceValue: state.isFrontMatterSequenceContinuation ? nil : state.frontMatterSequenceValue,
+      line: line,
+      y: yOffset(ofLine: line))
   }
 
   /// The image block's frame inside an image line's leading inset, or nil for
