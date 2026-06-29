@@ -4754,6 +4754,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       let raw = rawLineText(line)
       let visible = clippedDisplayLine(raw)
       let state = line < states.count ? states[line] : .plain
+      if let destination = state.imageSource?.linkDestination,
+        let frame = markdownImageBlockFrame(line: line)
+      {
+        targets.append(MarkdownLinkClickTarget(rect: frame, destination: destination))
+      }
       let links = TextDocumentSyntaxHighlighter.markdownLinkTargets(for: visible, state: state)
       guard !links.isEmpty else { continue }
       let attributed = attributedLine(forLine: line)

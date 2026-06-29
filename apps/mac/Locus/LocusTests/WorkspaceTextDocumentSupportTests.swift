@@ -858,6 +858,104 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertNil(states[3].imageSource)
   }
 
+  func testMarkdownReferenceStyleImageOnlyLineIsClassifiedWithResolvedSource() {
+    let lines = [
+      "![Referenced image][fixture-svg]",
+      "",
+      "[fixture-svg]: ../media/valid/locus-fixture.svg",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(
+      states[0].imageSource,
+      MarkdownImageSource(
+        source: "../media/valid/locus-fixture.svg",
+        altText: "Referenced image"))
+  }
+
+  func testMarkdownReferenceImageDefinitionDestinationStopsAtUnquotedWhitespace() {
+    let lines = [
+      "![Plain][plain-space]",
+      "![Angled][angled-space]",
+      "[plain-space]: images/two words.png",
+      "[angled-space]: <images/two words.png> \"title\"",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(
+      states[0].imageSource,
+      MarkdownImageSource(source: "images/two", altText: "Plain"))
+    XCTAssertEqual(
+      states[1].imageSource,
+      MarkdownImageSource(source: "images/two words.png", altText: "Angled"))
+  }
+
+  func testMarkdownLinkedImageOnlyLineKeepsImageSourceAndLinkDestination() {
+    let lines = [
+      "[![Fixture image](../media/valid/locus-fixture.svg)](../../docs/requirements.md)",
+      "[![Referenced image][fixture-svg]](../../docs/requirements.md)",
+      "[fixture-svg]: ../media/valid/locus-fixture.svg",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(
+      states[0].imageSource,
+      MarkdownImageSource(
+        source: "../media/valid/locus-fixture.svg",
+        altText: "Fixture image",
+        linkDestination: "../../docs/requirements.md"))
+    XCTAssertEqual(
+      states[1].imageSource,
+      MarkdownImageSource(
+        source: "../media/valid/locus-fixture.svg",
+        altText: "Referenced image",
+        linkDestination: "../../docs/requirements.md"))
+  }
+
+  func testMarkdownImageOnlyLinesRenderCaptionWithoutRawImageSyntax() {
+    let lines = [
+      "[![Fixture image](../media/valid/locus-fixture.svg)](../../docs/requirements.md)",
+      "![Referenced image][fixture-svg]",
+      "[fixture-svg]: ../media/valid/locus-fixture.svg",
+      "[![Referenced link image][fixture-svg]](../../docs/requirements.md)",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[0], font: TextDocumentSyntax.markdown.font, state: states[0]),
+      "Fixture image")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[1], font: TextDocumentSyntax.markdown.font, state: states[1]),
+      "Referenced image")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[3], font: TextDocumentSyntax.markdown.font, state: states[3]),
+      "Referenced link image")
+
+    let map = TextDocumentSyntaxHighlighter.markdownDisplayMap(for: lines[0], state: states[0])
+    XCTAssertEqual(map.displayText, "Fixture image")
+    XCTAssertEqual(
+      map.bufferRange(forDisplayStart: 0, end: map.displayLength, includeWholeLineMarkers: false),
+      NSRange(location: 3, length: 13))
+  }
+
+  func testMarkdownImageCaptionUsesSameWhitespaceTrimAsClassification() {
+    let line = "\u{00A0}![Fixture image](../media/valid/locus-fixture.svg)\u{00A0}"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+
+    XCTAssertEqual(
+      state.imageSource,
+      MarkdownImageSource(
+        source: "../media/valid/locus-fixture.svg",
+        altText: "Fixture image"))
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        line, font: TextDocumentSyntax.markdown.font, state: state),
+      "Fixture image")
+  }
+
   func testMarkdownImageDestinationStripsTitleAndAngleBrackets() {
     let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: [
       "![A](photo.png \"The title\")",

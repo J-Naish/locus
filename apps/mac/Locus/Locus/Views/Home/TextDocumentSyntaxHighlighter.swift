@@ -263,6 +263,13 @@ struct MarkdownTableColumn: Equatable, Sendable {
 struct MarkdownImageSource: Equatable, Hashable, Sendable {
   var source: String
   var altText: String
+  var linkDestination: String?
+
+  init(source: String, altText: String, linkDestination: String? = nil) {
+    self.source = source
+    self.altText = altText
+    self.linkDestination = linkDestination
+  }
 }
 
 struct MarkdownFrontMatterValue: Equatable, Sendable {
@@ -1057,6 +1064,9 @@ enum TextDocumentSyntaxHighlighter {
     if state.isSetextUnderline || markdownLineIsHorizontalRule(context.body) {
       return .empty(sourceText: line)
     }
+    if state.imageSource != nil, let map = markdownImageCaptionDisplayMap(for: line) {
+      return map
+    }
     if let heading = markdownHeadingInfo(in: context.body) {
       let start = min(context.quotePrefixLength + heading.prefixLength, sourceLength)
       return .map(
@@ -1077,6 +1087,76 @@ enum TextDocumentSyntaxHighlighter {
         sourceStart: start)
     }
     return .identity(line)
+  }
+
+  private static func markdownImageCaptionDisplayMap(for line: String) -> MarkdownDisplayMap? {
+    guard let body = trimmedMarkdownBody(in: line) else { return nil }
+    let range = NSRange(location: 0, length: body.nsTrimmed.length)
+    let expressions = [
+      linkedImageExpression,
+      linkedReferenceImageExpression,
+      imageExpression,
+      referenceImageExpression,
+    ]
+    for expression in expressions {
+      guard let match = expression.firstMatch(in: body.trimmed, range: range),
+        match.range == range
+      else {
+        continue
+      }
+      let altRange = match.range(at: 1)
+      let sourceStart = body.sourceOffset + altRange.location
+      if altRange.length == 0 {
+        return .empty(sourceText: line, insertionColumn: sourceStart)
+      }
+      return .map(
+        sourceText: line,
+        displayText: body.nsTrimmed.substring(with: altRange),
+        sourceStart: sourceStart)
+    }
+    if let match = htmlImageExpression.firstMatch(in: body.trimmed, range: range),
+      match.range == range,
+      htmlImageAltLiteral(forMatch: body.trimmed) != nil
+    {
+      var map = MarkdownDisplayMap.map(
+        sourceText: line,
+        displayText: body.trimmed,
+        sourceStart: body.sourceOffset)
+      var protectedRanges: [NSRange] = []
+      replaceLiteralMatchesInMap(
+        expression: htmlImageExpression,
+        decode: htmlImageAltLiteral(forMatch:),
+        map: &map,
+        protectedRanges: &protectedRanges)
+      return map
+    }
+    return nil
+  }
+
+  private static func trimmedMarkdownBody(in line: String) -> (
+    trimmed: String, nsTrimmed: NSString, sourceOffset: Int
+  )? {
+    let context = markdownLineContext(in: line)
+    let nsBody = context.body as NSString
+    var start = 0
+    var end = nsBody.length
+    while start < end {
+      guard markdownTrimWhitespaceContains(nsBody.character(at: start)) else { break }
+      start += 1
+    }
+    while end > start {
+      guard markdownTrimWhitespaceContains(nsBody.character(at: end - 1)) else { break }
+      end -= 1
+    }
+    guard start < end else { return nil }
+    let range = NSRange(location: start, length: end - start)
+    let trimmed = nsBody.substring(with: range)
+    return (trimmed, trimmed as NSString, context.quotePrefixLength + start)
+  }
+
+  private static func markdownTrimWhitespaceContains(_ character: unichar) -> Bool {
+    guard let scalar = UnicodeScalar(Int(character)) else { return false }
+    return CharacterSet.whitespaces.contains(scalar)
   }
 
   private static func markdownFenceInfoTextRange(in line: String, markerLength: Int) -> NSRange {
@@ -2020,6 +2100,71 @@ enum TextDocumentSyntaxHighlighter {
       in: line, range: NSRange(location: 0, length: (line as NSString).length)) != nil
   }
 
+  private static func markdownReferenceDefinitions(
+    in lines: [String],
+    states: [MarkdownLineStyleState]
+  ) -> [String: String] {
+    var definitions: [String: String] = [:]
+    for index in lines.indices {
+      let state = index < states.count ? states[index] : .plain
+      guard state.isReferenceDefinition, !state.insideFence, !state.insideFrontMatter,
+        !state.isIndentedCodeBlock
+      else {
+        continue
+      }
+      guard
+        let definition = markdownReferenceDefinitionParts(
+          in: markdownLineContext(in: lines[index]).body)
+      else {
+        continue
+      }
+      definitions[definition.id] = definition.destination
+    }
+    return definitions
+  }
+
+  private static func markdownReferenceDefinitionParts(in line: String) -> (
+    id: String, destination: String
+  )? {
+    let nsLine = line as NSString
+    let range = NSRange(location: 0, length: nsLine.length)
+    guard
+      let match = referenceDefinitionPartsExpression.firstMatch(in: line, range: range),
+      let id = markdownReferenceIdentifier(nsLine.substring(with: match.range(at: 1))),
+      let destination = markdownReferenceDefinitionDestination(
+        in: nsLine.substring(with: match.range(at: 2)))
+    else {
+      return nil
+    }
+    return (id, destination)
+  }
+
+  private static func markdownReferenceDefinitionDestination(in raw: String) -> String? {
+    let trimmed = raw.trimmingCharacters(in: .whitespaces)
+    guard !trimmed.isEmpty else { return nil }
+    let nsTrimmed = trimmed as NSString
+
+    if trimmed.hasPrefix("<") {
+      let end = nsTrimmed.range(of: ">").location
+      guard end != NSNotFound else { return nil }
+      return markdownImageDestination(in: nsTrimmed.substring(to: end + 1))
+    }
+
+    var end = 0
+    while end < nsTrimmed.length {
+      guard !markdownTrimWhitespaceContains(nsTrimmed.character(at: end)) else { break }
+      end += 1
+    }
+    guard end > 0 else { return nil }
+    return markdownImageDestination(in: nsTrimmed.substring(to: end))
+  }
+
+  private static func markdownReferenceIdentifier(_ raw: String) -> String? {
+    let parts = raw.split(whereSeparator: { $0.isWhitespace })
+    let normalized = parts.joined(separator: " ").lowercased()
+    return normalized.isEmpty ? nil : normalized
+  }
+
   private static func markdownTableCells(in line: String) -> [NSRange]? {
     let nsLine = line as NSString
     var start = 0
@@ -2379,6 +2524,8 @@ enum TextDocumentSyntaxHighlighter {
       states[index].headingLevel = heading.level
     }
 
+    let referenceDefinitions = markdownReferenceDefinitions(in: lines, states: states)
+
     for index in lines.indices {
       let state = states[index]
       guard !state.insideFence, !state.insideFrontMatter, !state.isFenceDelimiter,
@@ -2389,7 +2536,8 @@ enum TextDocumentSyntaxHighlighter {
         continue
       }
       states[index].imageSource = markdownImageOnlyLine(
-        in: markdownLineContext(in: lines[index]).body)
+        in: markdownLineContext(in: lines[index]).body,
+        referenceDefinitions: referenceDefinitions)
     }
 
     return states
@@ -2421,12 +2569,23 @@ enum TextDocumentSyntaxHighlighter {
   /// The image source when the line's whole body is a single image — either a
   /// markdown `![alt](…)` or an HTML `<img src=… alt=…>`; nil otherwise. Such
   /// lines render as image blocks.
-  private static func markdownImageOnlyLine(in body: String) -> MarkdownImageSource? {
+  private static func markdownImageOnlyLine(
+    in body: String,
+    referenceDefinitions: [String: String] = [:]
+  ) -> MarkdownImageSource? {
     let trimmed = body.trimmingCharacters(in: .whitespaces)
     guard !trimmed.isEmpty else { return nil }
     let nsTrimmed = trimmed as NSString
     guard nsTrimmed.length <= imageOnlyLineMaximumLength else { return nil }
     let range = NSRange(location: 0, length: nsTrimmed.length)
+    if let image = markdownLinkedImageOnlyLine(
+      trimmed: trimmed,
+      nsTrimmed: nsTrimmed,
+      range: range,
+      referenceDefinitions: referenceDefinitions)
+    {
+      return image
+    }
     if let match = imageExpression.firstMatch(in: trimmed, range: range),
       match.range == range,
       let source = markdownImageDestination(in: nsTrimmed.substring(with: match.range(at: 2)))
@@ -2435,7 +2594,62 @@ enum TextDocumentSyntaxHighlighter {
         source: source,
         altText: nsTrimmed.substring(with: match.range(at: 1)))
     }
+    if let match = referenceImageExpression.firstMatch(in: trimmed, range: range),
+      match.range == range,
+      let source = markdownReferenceImageDestination(
+        altText: nsTrimmed.substring(with: match.range(at: 1)),
+        referenceText: nsTrimmed.substring(with: match.range(at: 2)),
+        definitions: referenceDefinitions)
+    {
+      return MarkdownImageSource(
+        source: source,
+        altText: nsTrimmed.substring(with: match.range(at: 1)))
+    }
     return htmlImageOnlyLine(trimmed: trimmed, nsTrimmed: nsTrimmed, range: range)
+  }
+
+  private static func markdownLinkedImageOnlyLine(
+    trimmed: String,
+    nsTrimmed: NSString,
+    range: NSRange,
+    referenceDefinitions: [String: String]
+  ) -> MarkdownImageSource? {
+    if let match = linkedImageExpression.firstMatch(in: trimmed, range: range),
+      match.range == range,
+      let source = markdownImageDestination(in: nsTrimmed.substring(with: match.range(at: 2))),
+      let linkDestination = markdownImageDestination(
+        in: nsTrimmed.substring(with: match.range(at: 3)))
+    {
+      return MarkdownImageSource(
+        source: source,
+        altText: nsTrimmed.substring(with: match.range(at: 1)),
+        linkDestination: linkDestination)
+    }
+    if let match = linkedReferenceImageExpression.firstMatch(in: trimmed, range: range),
+      match.range == range,
+      let source = markdownReferenceImageDestination(
+        altText: nsTrimmed.substring(with: match.range(at: 1)),
+        referenceText: nsTrimmed.substring(with: match.range(at: 2)),
+        definitions: referenceDefinitions),
+      let linkDestination = markdownImageDestination(
+        in: nsTrimmed.substring(with: match.range(at: 3)))
+    {
+      return MarkdownImageSource(
+        source: source,
+        altText: nsTrimmed.substring(with: match.range(at: 1)),
+        linkDestination: linkDestination)
+    }
+    return nil
+  }
+
+  private static func markdownReferenceImageDestination(
+    altText: String,
+    referenceText: String,
+    definitions: [String: String]
+  ) -> String? {
+    let rawID = referenceText.isEmpty ? altText : referenceText
+    guard let id = markdownReferenceIdentifier(rawID) else { return nil }
+    return definitions[id]
   }
 
   /// The image source when the trimmed body is a single, safe HTML `<img>` tag.
@@ -3363,9 +3577,16 @@ enum TextDocumentSyntaxHighlighter {
   private static let renderedLinkExpression = markdownRegex(#"(?<!!)\[([^\]\n]+)\]\(([^\)\n]+)\)"#)
   private static let referenceLinkExpression = markdownRegex(#"(?<!!)\[([^\]\n]+)\]\[([^\]\n]*)\]"#)
   private static let referenceDefinitionExpression = markdownRegex(#"^\s{0,3}\[[^\]\n]+\]:\s+\S+"#)
+  private static let referenceDefinitionPartsExpression = markdownRegex(
+    #"^\s{0,3}\[([^\]\n]+)\]:\s+(.+?)\s*$"#)
   private static let autolinkExpression = markdownRegex(#"<(https?://[^>\s]+)>"#)
   private static let escapeExpression = markdownRegex(#"\\([\\`*_{}\[\]()#+\-.!>~|])"#)
   private static let imageExpression = markdownRegex(#"!\[([^\]\n]*)\]\(([^\)\n]+)\)"#)
+  private static let referenceImageExpression = markdownRegex(#"!\[([^\]\n]*)\]\[([^\]\n]*)\]"#)
+  private static let linkedImageExpression = markdownRegex(
+    #"^\[!\[([^\]\n]*)\]\(([^\)\n]+)\)\]\(([^\)\n]+)\)$"#)
+  private static let linkedReferenceImageExpression = markdownRegex(
+    #"^\[!\[([^\]\n]*)\]\[([^\]\n]*)\]\]\(([^\)\n]+)\)$"#)
   private static let imageTitleExpression = markdownRegex(#"^(.+?)\s+("[^"]*"|'[^']*')$"#)
   private static let boldItalicExpression = markdownRegex(
     #"(?<![\\*])\*\*\*([^\*\n]+)(?<!\\)\*\*\*(?!\*)"#)
