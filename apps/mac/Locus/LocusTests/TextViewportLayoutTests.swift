@@ -1524,6 +1524,57 @@ final class TextViewportLayoutTests: XCTestCase {
       tall.width, ceil(MarkdownDocumentMetrics.imageMaximumBlockHeight * 1000 / 4000))
   }
 
+  func testMarkdownImageFailureCardWidthStaysCompactAndWithinContentColumn() {
+    XCTAssertEqual(LineRenderingTextView.markdownImageFailureCardWidth(contentWidth: 0), 0)
+    XCTAssertEqual(LineRenderingTextView.markdownImageFailureCardWidth(contentWidth: 240), 240)
+    XCTAssertEqual(
+      LineRenderingTextView.markdownImageFailureCardWidth(contentWidth: 600),
+      MarkdownDocumentMetrics.imageFailureCardMaximumWidth)
+  }
+
+  func testMarkdownImageFailureDetailPrefersHumanAltText() {
+    XCTAssertEqual(
+      LineRenderingTextView.markdownImageFailureDetailLabel(
+        for: MarkdownImageSource(
+          source: "https://cdn.example.com/chart.png?token=abc",
+          altText: "Quarterly sales chart")),
+      "Quarterly sales chart")
+  }
+
+  func testMarkdownImageFailureDetailFallsBackToReadableSourceLabel() {
+    XCTAssertEqual(
+      LineRenderingTextView.markdownImageFailureDetailLabel(
+        for: MarkdownImageSource(source: "https://cdn.example.com/", altText: "")),
+      "cdn.example.com")
+    XCTAssertEqual(
+      LineRenderingTextView.markdownImageFailureDetailLabel(
+        for: MarkdownImageSource(source: "https://h.com/?v=1", altText: "")),
+      "h.com")
+    XCTAssertEqual(
+      LineRenderingTextView.markdownImageFailureDetailLabel(
+        for: MarkdownImageSource(source: "https://h.com/a.png?v=2#x", altText: "")),
+      "a.png")
+    XCTAssertEqual(
+      LineRenderingTextView.markdownImageFailureDetailLabel(
+        for: MarkdownImageSource(source: #"C:\images\chart.png"#, altText: "")),
+      "chart.png")
+  }
+
+  func testMarkdownImageFailureDetailFallsBackToGenericLabelForUnhelpfulSources() {
+    XCTAssertEqual(
+      LineRenderingTextView.markdownImageFailureDetailLabel(
+        for: MarkdownImageSource(source: "data:image/png;base64,iVBORw0KGgo=", altText: "")),
+      "Image")
+    XCTAssertEqual(
+      LineRenderingTextView.markdownImageFailureDetailLabel(
+        for: MarkdownImageSource(source: "///", altText: "")),
+      "Image")
+    XCTAssertEqual(
+      LineRenderingTextView.markdownImageFailureDetailLabel(
+        for: MarkdownImageSource(source: "", altText: "   ")),
+      "Image")
+  }
+
   @MainActor
   func testMarkdownImageLineUsesPlaceholderThenFailureMetrics() async throws {
     let folder = try makeTemporaryImageFolder()
@@ -1544,6 +1595,15 @@ final class TextViewportLayoutTests: XCTestCase {
 
     await view.settleMarkdownImageLoadsForTesting()
 
+    let failureFrame = try XCTUnwrap(view.markdownImageBlockFrame(line: 0))
+    XCTAssertEqual(
+      failureFrame.width,
+      MarkdownDocumentMetrics.imageFailureCardMaximumWidth,
+      accuracy: 0.5)
+    XCTAssertEqual(
+      failureFrame.height,
+      MarkdownDocumentMetrics.imageFailureHeight,
+      accuracy: 0.5)
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 1)),
       chrome + MarkdownDocumentMetrics.imageFailureHeight,

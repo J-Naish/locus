@@ -918,6 +918,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return CGSize(width: ceil(width), height: ceil(height))
   }
 
+  nonisolated static func markdownImageFailureCardWidth(contentWidth: CGFloat) -> CGFloat {
+    guard contentWidth > 0 else { return 0 }
+    return min(contentWidth, MarkdownDocumentMetrics.imageFailureCardMaximumWidth)
+  }
+
   /// A heading line's vertical metrics: a row sized to its font plus the
   /// level's sectional insets (suppressed above a document-top title).
   nonisolated static func headingLineMetrics(level: Int, isDocumentTop: Bool) -> LineRowMetrics {
@@ -4916,7 +4921,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Strips Unicode directional formatting characters so attacker-authored
   /// alt text or paths cannot visually reorder the failure message.
-  private static func sanitizedImageLabel(_ label: String) -> String {
+  private nonisolated static func sanitizedImageLabel(_ label: String) -> String {
     String(
       String.UnicodeScalarView(
         label.unicodeScalars.filter { scalar in
@@ -4930,25 +4935,120 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private func drawMarkdownImageFailureCard(in frame: NSRect, source: MarkdownImageSource) {
-    drawMarkdownImagePlaceholder(in: frame)
-    let label = Self.sanitizedImageLabel(
-      source.altText.isEmpty ? source.source : source.altText)
-    let text = NSAttributedString(
-      string: "Image unavailable · \(label)",
+    let aligned = backingAlignedRect(frame, options: .alignAllEdgesNearest)
+    MarkdownDocumentMetrics.codeBackground
+      .withAlphaComponent(MarkdownDocumentMetrics.imageFailureCardOpacity)
+      .setFill()
+    NSBezierPath(
+      roundedRect: aligned,
+      xRadius: MarkdownDocumentMetrics.imageCornerRadius
+        + MarkdownDocumentMetrics.imageFailureCardCornerRadiusExtra,
+      yRadius: MarkdownDocumentMetrics.imageCornerRadius
+        + MarkdownDocumentMetrics.imageFailureCardCornerRadiusExtra
+    ).fill()
+
+    let inset = MarkdownDocumentMetrics.imageFailureCardHorizontalPadding
+    let iconSize = MarkdownDocumentMetrics.imageFailureIconSize
+    let iconFrame = NSRect(
+      x: aligned.minX + inset,
+      y: aligned.midY - iconSize / 2,
+      width: iconSize,
+      height: iconSize)
+    let iconConfiguration = NSImage.SymbolConfiguration(
+      pointSize: iconSize,
+      weight: .regular
+    )
+    .applying(
+      NSImage.SymbolConfiguration(
+        paletteColors: [
+          NSColor.secondaryLabelColor.withAlphaComponent(
+            MarkdownDocumentMetrics.imageFailureIconOpacity)
+        ]))
+    if let icon = NSImage(
+      systemSymbolName: "photo.badge.exclamationmark",
+      accessibilityDescription: nil)?
+      .withSymbolConfiguration(iconConfiguration)
+    {
+      icon.draw(in: iconFrame, from: .zero, operation: .sourceOver, fraction: 1)
+    }
+
+    let paragraph = NSMutableParagraphStyle()
+    paragraph.lineBreakMode = .byTruncatingMiddle
+    let title = NSAttributedString(
+      string: "Image unavailable",
       attributes: [
-        .font: MarkdownDocumentMetrics.imageCaptionFont,
-        .foregroundColor: NSColor.tertiaryLabelColor,
+        .font: MarkdownDocumentMetrics.imageFailureTitleFont,
+        .foregroundColor: NSColor.secondaryLabelColor,
+        .paragraphStyle: paragraph,
       ])
-    let inset = MarkdownDocumentMetrics.codeCardInset
-    let size = text.size()
-    let origin = NSPoint(
-      x: frame.minX + inset,
-      y: frame.midY - size.height / 2)
-    text.draw(
+    let detail = NSAttributedString(
+      string: Self.markdownImageFailureDetailLabel(for: source),
+      attributes: [
+        .font: MarkdownDocumentMetrics.imageFailureDetailFont,
+        .foregroundColor: NSColor.tertiaryLabelColor,
+        .paragraphStyle: paragraph,
+      ])
+    let titleSize = title.size()
+    let detailSize = detail.size()
+    let verticalGap = MarkdownDocumentMetrics.imageFailureTextVerticalGap
+    let textBlockHeight = titleSize.height + verticalGap + detailSize.height
+    let textX = iconFrame.maxX + MarkdownDocumentMetrics.imageFailureTextGap
+    let textWidth = max(0, aligned.maxX - inset - textX)
+    let textY = aligned.midY - textBlockHeight / 2
+    title.draw(
+      with: NSRect(x: textX, y: textY, width: textWidth, height: titleSize.height),
+      options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+    detail.draw(
       with: NSRect(
-        origin: origin,
-        size: NSSize(width: max(0, frame.width - inset * 2), height: size.height)),
-      options: [.usesLineFragmentOrigin])
+        x: textX,
+        y: textY + titleSize.height + verticalGap,
+        width: textWidth,
+        height: detailSize.height),
+      options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+  }
+
+  nonisolated static func markdownImageFailureDetailLabel(for source: MarkdownImageSource) -> String
+  {
+    let altText = sanitizedImageLabel(source.altText).trimmingCharacters(in: .whitespaces)
+    if !altText.isEmpty {
+      return altText
+    }
+
+    let sanitizedSource = sanitizedImageLabel(source.source).trimmingCharacters(in: .whitespaces)
+    guard !sanitizedSource.isEmpty else {
+      return "Image"
+    }
+    guard let label = markdownImageFailureSourceLabel(from: sanitizedSource) else {
+      return "Image"
+    }
+    return label
+  }
+
+  private nonisolated static func markdownImageFailureSourceLabel(from sanitizedSource: String)
+    -> String?
+  {
+    if sanitizedSource.contains("\\") {
+      return markdownImageFailurePathLabel(from: sanitizedSource)
+    }
+
+    if let url = URL(string: sanitizedSource), let scheme = url.scheme, !scheme.isEmpty {
+      guard scheme != "data" else { return nil }
+      let lastPathComponent = url.lastPathComponent
+      if !lastPathComponent.isEmpty, lastPathComponent != "/" {
+        return lastPathComponent
+      }
+      return url.host?.isEmpty == false ? url.host : nil
+    }
+
+    return markdownImageFailurePathLabel(from: sanitizedSource)
+  }
+
+  private nonisolated static func markdownImageFailurePathLabel(from sanitizedSource: String)
+    -> String?
+  {
+    let path = sanitizedSource.trimmingCharacters(in: CharacterSet(charactersIn: "/\\"))
+    guard !path.isEmpty else { return nil }
+    return path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init)
   }
 
   private func markdownQuoteBody(in line: String) -> String {
@@ -5196,9 +5296,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// The image block's frame inside an image line's leading inset, or nil for
   /// lines that are not image-only lines. Width and height follow the load
-  /// state: full column width for the placeholder and failure cards, the
-  /// fitted display size once the natural size is known. Internal so tests
-  /// can assert on it; the draw path is its production consumer.
+  /// state: full column width for the placeholder, a compact card width for
+  /// failures, and the fitted display size once the natural size is known.
+  /// Internal so tests can assert on it; the draw path is its production
+  /// consumer.
   func markdownImageBlockFrame(line: Int) -> NSRect? {
     guard usesMarkdownDocumentLayout, let buffer = reader,
       line >= 0, line < lineCount,
@@ -5216,7 +5317,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         height: MarkdownDocumentMetrics.imagePlaceholderHeight)
     case .failed:
       return NSRect(
-        x: x, y: y, width: contentWidth, height: MarkdownDocumentMetrics.imageFailureHeight)
+        x: x,
+        y: y,
+        width: Self.markdownImageFailureCardWidth(contentWidth: contentWidth),
+        height: MarkdownDocumentMetrics.imageFailureHeight)
     case .sized(let natural):
       let size = Self.markdownImageDisplaySize(natural: natural, contentWidth: contentWidth)
       return NSRect(x: x, y: y, width: size.width, height: size.height)

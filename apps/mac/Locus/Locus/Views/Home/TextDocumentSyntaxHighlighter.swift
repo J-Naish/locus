@@ -96,7 +96,18 @@ enum MarkdownDocumentMetrics {
   /// Block height while the image's natural size is still being probed.
   static let imagePlaceholderHeight: CGFloat = 120
   /// Height of the quiet card shown when an image cannot be loaded.
-  static let imageFailureHeight: CGFloat = 48
+  static let imageFailureHeight: CGFloat = 56
+  /// Missing images should read as compact asset notices, not full-width bars.
+  static let imageFailureCardMaximumWidth: CGFloat = 360
+  static let imageFailureCardOpacity: CGFloat = 0.72
+  static let imageFailureCardCornerRadiusExtra: CGFloat = 4
+  static let imageFailureCardHorizontalPadding: CGFloat = 14
+  static let imageFailureIconSize: CGFloat = 20
+  static let imageFailureIconOpacity: CGFloat = 0.72
+  static let imageFailureTextGap: CGFloat = 10
+  static let imageFailureTextVerticalGap: CGFloat = 2
+  static let imageFailureTitleFontSize: CGFloat = 12
+  static let imageFailureDetailFontSize: CGFloat = 11
   /// Tall images scale down to this height so one screenshot never fills
   /// several screens; width shrinks proportionally.
   static let imageMaximumBlockHeight: CGFloat = 560
@@ -222,6 +233,14 @@ enum MarkdownDocumentMetrics {
 
   static var imageCaptionFont: NSFont {
     .systemFont(ofSize: imageCaptionFontSize)
+  }
+
+  static var imageFailureTitleFont: NSFont {
+    .systemFont(ofSize: imageFailureTitleFontSize, weight: .medium)
+  }
+
+  static var imageFailureDetailFont: NSFont {
+    .systemFont(ofSize: imageFailureDetailFontSize)
   }
 
   static var frontMatterKeyFont: NSFont {
