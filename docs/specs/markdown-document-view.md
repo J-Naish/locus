@@ -175,14 +175,17 @@ content. Wrap width per line = measure − indent.
   each other; the top and bottom rules breathe 4 pt into adjacent blank
   lines. Header cells are 12 pt semibold in the
   secondary color — a column label, unmistakably not body text; body
-  cells are 13 pt. Columns are separated by a 32 pt gutter, the first
-  column flush with the text column's left edge; column widths come from
+  cells are 13 pt. Columns are separated by a 40 pt gutter, the first
+  column flush with the table's left padding; column widths come from
   the **styled** rendered cell (chips, code fonts, and emphasis measured
-  as drawn, never plain text), per-column max 240 pt, total clamped to
-  the measure with proportional shrink and ellipsis clipping until
-  Phase A enables cell wrapping. **Column alignment markers are
+  as drawn, never plain text), with a per-column max of 240 pt. The
+  document measure stays fixed: when a table's natural width exceeds
+  the prose column, only the table block clips and scrolls horizontally,
+  Notion-style. The page itself never widens, and other Markdown blocks
+  keep their normal fixed measure. **Column alignment markers are
   honored** (`:---` left, `:---:` center, `---:` right) via aligned tab
-  stops. One source row stays one 24 pt row. Cell text edits work
+  stops. Escaped pipes (`\|`) remain inside the cell and render as a
+  literal pipe. One source row stays one 24 pt row. Cell text edits work
   normally; the cell-boundary tab is structural — deleting it is a no-op
   and the caret steps across. A pipe line without a delimiter row stays
   literal. (Tunable later: ultralight row hairlines for tables longer

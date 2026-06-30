@@ -1278,6 +1278,35 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertEqual(paragraphStyle?.tabStops.last?.alignment, .center)
   }
 
+  func testMarkdownTableEscapedPipesStayInsideCells() {
+    let lines = [
+      "| Pattern | Meaning |",
+      "| --- | --- |",
+      "| A \\| B | Escaped pipe in text |",
+      "| `a \\| b` | Escaped pipe in inline code |",
+      "| trailing | Ends with \\| |",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertTrue(states[2].isTableRow)
+    XCTAssertTrue(states[3].isTableRow)
+    XCTAssertTrue(states[4].isTableRow)
+    XCTAssertEqual(states[2].tableColumns.count, 2)
+    XCTAssertEqual(states[4].tableColumns.count, 2)
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[2], font: TextDocumentSyntax.markdown.font, state: states[2]),
+      "A | B\tEscaped pipe in text")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[3], font: TextDocumentSyntax.markdown.font, state: states[3]),
+      "a | b\tEscaped pipe in inline code")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[4], font: TextDocumentSyntax.markdown.font, state: states[4]),
+      "trailing\tEnds with |")
+  }
+
   func testMarkdownTableHeaderRendersAsMutedColumnLabel() {
     let lines = ["| Team | Owner |", "| --- | --- |", "| Sales | Nishi |"]
     let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
@@ -1323,6 +1352,25 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       MarkdownDocumentMetrics.tableColumnMinimumWidth, ceil(styled.size().width))
     let exampleColumn = try XCTUnwrap(columns.last)
     XCTAssertEqual(exampleColumn.width, expected, accuracy: 1)
+  }
+
+  func testMarkdownWideTableColumnsAreNotScaledIntoProseWidth() {
+    let lines = [
+      "| Team | Owner | Region | Priority | Status | Budget | Actual | Delta | Risk | Next Step |",
+      "| :--- | :--- | :--- | :---: | :---: | ---: | ---: | ---: | :---: | :--- |",
+      "| Sales | Nishi | Japan | P0 | Draft | 120,000 | 118,400 | -1.3% | Medium | Confirm enterprise pipeline assumptions before Friday. |",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let columns = states[0].tableColumns
+    let tableWidth =
+      columns.reduce(CGFloat(0)) { $0 + $1.width }
+      + MarkdownDocumentMetrics.tableColumnGutter * CGFloat(max(0, columns.count - 1))
+      + MarkdownDocumentMetrics.tableEdgeInset * 2
+
+    XCTAssertGreaterThan(tableWidth, MarkdownDocumentMetrics.maxMeasureWidth)
+    XCTAssertGreaterThanOrEqual(
+      columns.map(\.width).max() ?? 0,
+      MarkdownDocumentMetrics.tableColumnMaximumWidth)
   }
 
   func testMarkdownTableTabStopsUseGutterModel() throws {

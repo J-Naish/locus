@@ -70,6 +70,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       markdownLineStateCache = nil
       invalidateMarkdownLinkVisualStateCache()
       cancelMarkdownLineStateBuild()
+      markdownTableScrollOffsets.removeAll()
       maxObservedLineWidth = 0
       rebuildWrapIndex(recomputeLongLine: true)
       updateLayout()
@@ -102,6 +103,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       markdownLineStateCache = nil
       invalidateMarkdownLinkVisualStateCache()
       cancelMarkdownLineStateBuild()
+      markdownTableScrollOffsets.removeAll()
       maxObservedLineWidth = 0
       rebuildWrapIndex(recomputeLongLine: true)
       updateLayout()
@@ -218,6 +220,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private var markdownLinkVisualStateCache:
     [MarkdownLinkVisualStateCacheKey: MarkdownLinkVisualState] =
       [:]
+  private var markdownTableScrollOffsets: [Int: CGFloat] = [:]
 
   /// Created on first use (markdown documents containing images); nil for
   /// every other document so plain viewers never pay for it.
@@ -584,7 +587,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       return gutterWidth + horizontalPadding
     }
     let visible = enclosingScrollView?.documentVisibleRect ?? bounds
-    return visible.minX + max(0, (visible.width - wrapContentWidth) / 2)
+    return visible.minX + markdownTextColumnX(forVisibleWidth: visible.width)
+  }
+
+  private func markdownTextColumnX(forVisibleWidth visibleWidth: CGFloat) -> CGFloat {
+    max(0, (visibleWidth - wrapContentWidth) / 2)
   }
 
   private nonisolated static func markdownStructuralIndent(for state: MarkdownLineStyleState)
@@ -628,7 +635,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     return max(
       1,
-      baseWidth - lineIndent - trailingReserve)
+      max(
+        baseWidth - lineIndent - trailingReserve,
+        markdownTableTextContentWidth(for: state) ?? 0))
   }
 
   private struct FrontMatterChipLayoutItem {
@@ -742,13 +751,29 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     max(1, baseWidth - markdownStructuralIndent(for: state))
   }
 
+  private nonisolated static func markdownTableTextContentWidth(
+    for state: MarkdownLineStyleState
+  ) -> CGFloat? {
+    guard state.isTableRow, !state.tableColumns.isEmpty else { return nil }
+    return state.tableColumns.reduce(CGFloat(0)) { $0 + $1.width }
+      + MarkdownDocumentMetrics.tableColumnGutter
+      * CGFloat(max(0, state.tableColumns.count - 1))
+  }
+
+  private nonisolated static func markdownTableOuterContentWidth(
+    for state: MarkdownLineStyleState
+  ) -> CGFloat? {
+    guard let textWidth = markdownTableTextContentWidth(for: state) else { return nil }
+    return textWidth + MarkdownDocumentMetrics.tableEdgeInset * 2
+  }
+
   private func markdownLineIndent(forLine line: Int) -> CGFloat {
     guard usesMarkdownDocumentLayout, let buffer = reader else { return 0 }
     return Self.markdownLineIndent(for: markdownLineState(forLine: line, in: buffer))
   }
 
   private func lineTextColumnX(forLine line: Int) -> CGFloat {
-    textColumnX + markdownLineIndent(forLine: line)
+    textColumnX + markdownLineIndent(forLine: line) - markdownTableHorizontalOffset(forLine: line)
   }
 
   private func lineOuterColumnX(forLine line: Int) -> CGFloat {
@@ -770,6 +795,78 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return Self.markdownOuterContentWidth(
       baseWidth: wrapContentWidth,
       state: markdownLineState(forLine: line, in: buffer))
+  }
+
+  private func markdownTableRange(
+    containing line: Int,
+    states: [MarkdownLineStyleState]
+  ) -> ClosedRange<Int>? {
+    guard line >= 0, line < states.count,
+      states[line].isTableRow || states[line].isTableSeparator
+    else { return nil }
+    var start = line
+    while start > 0, states[start - 1].isTableRow || states[start - 1].isTableSeparator {
+      start -= 1
+    }
+    var end = line
+    while end + 1 < states.count,
+      states[end + 1].isTableRow || states[end + 1].isTableSeparator
+    {
+      end += 1
+    }
+    return start...end
+  }
+
+  private func markdownTableRange(containing line: Int) -> ClosedRange<Int>? {
+    guard usesMarkdownDocumentLayout, let buffer = reader,
+      let states = markdownLineStates(for: buffer)
+    else { return nil }
+    return markdownTableRange(containing: line, states: states)
+  }
+
+  private func markdownTableHorizontalOffset(forLine line: Int) -> CGFloat {
+    guard let range = markdownTableRange(containing: line) else { return 0 }
+    return min(
+      markdownTableScrollOffsets[range.lowerBound] ?? 0,
+      markdownTableMaximumHorizontalOffset(forTableStartingAt: range.lowerBound))
+  }
+
+  private func markdownTableMaximumHorizontalOffset(forTableStartingAt startLine: Int) -> CGFloat {
+    guard usesMarkdownDocumentLayout, let buffer = reader,
+      let states = markdownLineStates(for: buffer),
+      startLine >= 0, startLine < states.count,
+      let contentWidth = Self.markdownTableOuterContentWidth(for: states[startLine])
+    else { return 0 }
+    return max(0, contentWidth - lineOuterContentWidth(forLine: startLine))
+  }
+
+  @discardableResult
+  private func scrollMarkdownTable(containing line: Int, deltaX: CGFloat) -> Bool {
+    guard let range = markdownTableRange(containing: line) else { return false }
+    let maxOffset = markdownTableMaximumHorizontalOffset(forTableStartingAt: range.lowerBound)
+    guard maxOffset > 0 else { return false }
+    let current = markdownTableScrollOffsets[range.lowerBound] ?? 0
+    let proposed = min(maxOffset, max(0, current + deltaX))
+    guard abs(proposed - current) > 0.1 else { return false }
+    markdownTableScrollOffsets[range.lowerBound] = proposed
+    invalidateMarkdownTable(range)
+    return true
+  }
+
+  private func invalidateMarkdownTable(_ range: ClosedRange<Int>) {
+    let startRow = firstVisualRow(ofLine: range.lowerBound)
+    let endRow =
+      firstVisualRow(ofLine: range.upperBound)
+      + max(1, wrapIndex?.visualRowCount(ofLine: range.upperBound) ?? 1)
+    let rect = NSRect(
+      x: 0,
+      y: yOffset(ofVisualRow: startRow) - MarkdownDocumentMetrics.tableRuleBreath - 2,
+      width: bounds.width,
+      height: max(
+        1,
+        yOffset(ofVisualRow: endRow) - yOffset(ofVisualRow: startRow)
+          + MarkdownDocumentMetrics.tableRuleBreath * 2 + 4))
+    setNeedsDisplay(rect)
   }
 
   /// (Re)builds the wrap index for the current buffer and width when the document
@@ -2002,6 +2099,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     markdownLineStateCache = nil
     invalidateMarkdownLinkVisualStateCache()
     cancelMarkdownLineStateBuild()
+    markdownTableScrollOffsets.removeAll()
     markdownImageStoreStorage?.reset()
     removeAllMarkdownVideoViews()
     // Drop any copy confirmation so it cannot paint on a same-indexed block in
@@ -2495,6 +2593,34 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   override func mouseUp(with event: NSEvent) {
     isSelecting = false
+  }
+
+  override func scrollWheel(with event: NSEvent) {
+    let point = convert(event.locationInWindow, from: nil)
+    let horizontalDelta = event.scrollingDeltaX
+    if abs(horizontalDelta) > abs(event.scrollingDeltaY),
+      let line = markdownTableLine(at: point),
+      scrollMarkdownTable(containing: line, deltaX: -horizontalDelta)
+    {
+      return
+    }
+    super.scrollWheel(with: event)
+  }
+
+  private func markdownTableLine(at point: NSPoint) -> Int? {
+    guard usesMarkdownDocumentLayout, reader != nil, point.y < totalContentHeight else {
+      return nil
+    }
+    let line = rowLocation(forY: max(0, point.y)).line
+    guard let range = markdownTableRange(containing: line),
+      let frame = markdownTableFrameForTesting(
+        fromLine: range.lowerBound,
+        toLine: range.upperBound,
+        visibleRows: firstVisualRow(
+          ofLine: range.lowerBound)..<(firstVisualRow(ofLine: range.upperBound)
+          + max(1, wrapIndex?.visualRowCount(ofLine: range.upperBound) ?? 1)))
+    else { return nil }
+    return frame.contains(point) ? line : nil
   }
 
   /// Maps a point in this view's coordinates to the nearest (line, UTF-16 column)
@@ -3992,7 +4118,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       height = max(contentHeight, frame.height)
     }
     if wrapIndex != nil {
-      // Wrapped: fill the viewport width; no horizontal scrolling.
+      // Wrapped: fill the viewport width; Markdown tables scroll inside their
+      // own clipped block instead of widening the entire document.
       setFrameSize(NSSize(width: visibleWidth, height: height))
     } else {
       let contentWidth =
@@ -4384,6 +4511,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Draws each soft-wrapped visual row of `attributed` (one row when not
   /// wrapping) at its row's y position.
   private func drawVisualRows(of attributed: NSAttributedString, line: Int, textX: CGFloat) {
+    let didClip = beginMarkdownTableClipIfNeeded(forLine: line)
+    defer {
+      if didClip {
+        NSGraphicsContext.restoreGraphicsState()
+      }
+    }
     let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
     let rowsTop = yOffset(ofLine: line) + leadingInset(forLine: line)
     let height = rowHeight(forLine: line)
@@ -4401,6 +4534,23 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         options: [.usesLineFragmentOrigin]
       )
     }
+  }
+
+  private func beginMarkdownTableClipIfNeeded(forLine line: Int) -> Bool {
+    guard let range = markdownTableRange(containing: line) else { return false }
+    let visibleRows =
+      firstVisualRow(
+        ofLine: range.lowerBound)..<(firstVisualRow(ofLine: range.upperBound)
+      + max(1, wrapIndex?.visualRowCount(ofLine: range.upperBound) ?? 1))
+    guard
+      let frame = markdownTableFrameForTesting(
+        fromLine: range.lowerBound,
+        toLine: range.upperBound,
+        visibleRows: visibleRows)
+    else { return false }
+    NSGraphicsContext.saveGraphicsState()
+    frame.clip()
+    return true
   }
 
   /// Centers a fragment shorter than its row: the slack splits evenly above
@@ -5795,17 +5945,20 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     for line in range {
       let lineTextX = lineTextColumnX(forLine: line)
       let attributed = lines[line - range.lowerBound]
+      let didClip = beginMarkdownTableClipIfNeeded(forLine: line)
       // A fully-selected line includes its trailing newline; mark it on the line's
       // last visual row.
       let includesNewline = line < selection.end.line
       guard let span = selection.columnSpan(onLine: line, lineLengthUTF16: lineLengthUTF16(line))
       else {
+        if didClip { NSGraphicsContext.restoreGraphicsState() }
         continue
       }
       if let length = hugeLength(line) {
         drawHugeSelectionHighlight(
           line: line, utf16Length: length, span: span, includesNewline: includesNewline,
           textX: lineTextX, visibleRows: visibleRows)
+        if didClip { NSGraphicsContext.restoreGraphicsState() }
         continue
       }
       let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
@@ -5830,6 +5983,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
           width: max(0, xEnd - xStart), height: height
         ).fill()
       }
+      if didClip { NSGraphicsContext.restoreGraphicsState() }
     }
   }
 
@@ -5944,6 +6098,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   func markdownOuterColumnXForTesting(line: Int) -> CGFloat {
     lineOuterColumnX(forLine: line)
+  }
+
+  func markdownTableHorizontalOffsetForTesting(line: Int) -> CGFloat {
+    markdownTableHorizontalOffset(forLine: line)
+  }
+
+  @discardableResult
+  func scrollMarkdownTableForTesting(containing line: Int, deltaX: CGFloat) -> Bool {
+    scrollMarkdownTable(containing: line, deltaX: deltaX)
   }
 
   func attributedLineStringForTesting(line: Int) -> String {

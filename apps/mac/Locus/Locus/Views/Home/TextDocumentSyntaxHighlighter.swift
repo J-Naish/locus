@@ -2361,14 +2361,21 @@ enum TextDocumentSyntaxHighlighter {
     }
     guard start < end else { return nil }
     if nsLine.character(at: start) == 124 { start += 1 }  // "|"
-    if end > start, nsLine.character(at: end - 1) == 124 { end -= 1 }
+    if end > start, nsLine.character(at: end - 1) == 124,
+      !markdownTablePipeIsEscaped(in: nsLine, at: end - 1)
+    {
+      end -= 1
+    }
     guard start < end else { return nil }
 
     var cells: [NSRange] = []
     var cellStart = start
     var cursor = start
     while cursor <= end {
-      if cursor == end || nsLine.character(at: cursor) == 124 {
+      if cursor == end
+        || (nsLine.character(at: cursor) == 124
+          && !markdownTablePipeIsEscaped(in: nsLine, at: cursor))
+      {
         var trimmedStart = cellStart
         var trimmedEnd = cursor
         while trimmedStart < trimmedEnd {
@@ -2387,6 +2394,17 @@ enum TextDocumentSyntaxHighlighter {
       cursor += 1
     }
     return cells.count >= 2 ? cells : nil
+  }
+
+  private static func markdownTablePipeIsEscaped(in nsLine: NSString, at index: Int) -> Bool {
+    guard index > 0 else { return false }
+    var backslashCount = 0
+    var cursor = index - 1
+    while cursor >= 0, nsLine.character(at: cursor) == 92 {  // "\"
+      backslashCount += 1
+      cursor -= 1
+    }
+    return backslashCount % 2 == 1
   }
 
   private static func markdownTableSeparatorAlignments(in line: String)
@@ -2420,13 +2438,24 @@ enum TextDocumentSyntaxHighlighter {
     var boundaries: [Int] = [cells.first?.location ?? 0]
     var characterRanges: [NSRange] = []
 
-    func appendText(_ text: String, sourceRange: NSRange) {
-      let nsText = text as NSString
-      for offset in 0..<nsText.length {
-        characterRanges.append(NSRange(location: sourceRange.location + offset, length: 1))
-        boundaries.append(min(sourceLength, sourceRange.location + offset + 1))
+    func appendCellText(sourceRange: NSRange) {
+      var cursor = sourceRange.location
+      let end = NSMaxRange(sourceRange)
+      while cursor < end {
+        let character = nsLine.character(at: cursor)
+        if character == 92, cursor + 1 < end, nsLine.character(at: cursor + 1) == 124 {
+          display += "|"
+          characterRanges.append(NSRange(location: cursor, length: 2))
+          boundaries.append(min(sourceLength, cursor + 2))
+          cursor += 2
+        } else {
+          let text = nsLine.substring(with: NSRange(location: cursor, length: 1))
+          display += text
+          characterRanges.append(NSRange(location: cursor, length: 1))
+          boundaries.append(min(sourceLength, cursor + 1))
+          cursor += 1
+        }
       }
-      display += text
     }
 
     func appendTab(after sourceColumn: Int) {
@@ -2439,7 +2468,7 @@ enum TextDocumentSyntaxHighlighter {
       if index > 0 {
         appendTab(after: cell.location)
       }
-      appendText(nsLine.substring(with: cell), sourceRange: cell)
+      appendCellText(sourceRange: cell)
     }
 
     return MarkdownDisplayMap(
@@ -2477,19 +2506,6 @@ enum TextDocumentSyntaxHighlighter {
         widths[column] = min(
           MarkdownDocumentMetrics.tableColumnMaximumWidth,
           max(widths[column], measured))
-      }
-    }
-
-    let gutters =
-      MarkdownDocumentMetrics.tableColumnGutter * CGFloat(max(0, alignments.count - 1))
-    let maxTotal =
-      MarkdownDocumentMetrics.maxMeasureWidth - gutters
-      - MarkdownDocumentMetrics.tableEdgeInset * 2
-    let total = widths.reduce(0, +)
-    if total > maxTotal, total > 0 {
-      let scale = maxTotal / total
-      widths = widths.map {
-        max(MarkdownDocumentMetrics.tableColumnMinimumWidth, floor($0 * scale))
       }
     }
 

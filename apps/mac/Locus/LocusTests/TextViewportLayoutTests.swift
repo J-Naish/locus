@@ -1616,6 +1616,105 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testMarkdownWideTableScrollsInsideFixedDocumentWidth() throws {
+    let view = try makeViewer(
+      """
+      | Team | Owner | Region | Priority | Status | Budget | Actual | Delta | Risk | Next Step |
+      | :--- | :--- | :--- | :---: | :---: | ---: | ---: | ---: | :---: | :--- |
+      | Sales | Nishi | Japan | P0 | Draft | 120,000 | 118,400 | -1.3% | Medium | Confirm enterprise pipeline assumptions before Friday. |
+      """)
+    view.setFrameSize(NSSize(width: 560, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let frame = try XCTUnwrap(
+      view.markdownTableFrameForTesting(fromLine: 0, toLine: 2, visibleRows: 0..<3))
+    let startingTextX = view.markdownTextColumnXForTesting(line: 0)
+
+    XCTAssertLessThanOrEqual(frame.width, view.markdownWrapContentWidthForTesting() + 0.5)
+    XCTAssertEqual(view.frame.width, 560, accuracy: 0.5)
+    XCTAssertTrue(view.scrollMarkdownTableForTesting(containing: 0, deltaX: 120))
+    XCTAssertEqual(view.markdownTableHorizontalOffsetForTesting(line: 0), 120, accuracy: 0.5)
+    XCTAssertEqual(
+      view.markdownTextColumnXForTesting(line: 0),
+      startingTextX - 120,
+      accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownTableScrollOffsetClearsWhenDocumentChanges() throws {
+    let view = try makeViewer(
+      """
+      | Team | Owner | Region | Priority | Status | Budget | Actual | Delta | Risk | Next Step |
+      | :--- | :--- | :--- | :---: | :---: | ---: | ---: | ---: | :---: | :--- |
+      | Sales | Nishi | Japan | P0 | Draft | 120,000 | 118,400 | -1.3% | Medium | Confirm enterprise pipeline assumptions before Friday. |
+      """)
+    view.setFrameSize(NSSize(width: 560, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    XCTAssertTrue(view.scrollMarkdownTableForTesting(containing: 0, deltaX: 120))
+    XCTAssertEqual(view.markdownTableHorizontalOffsetForTesting(line: 0), 120, accuracy: 0.5)
+
+    let replacement = try TextBuffer.open(
+      bytes: Data(
+        """
+        | Team | Owner | Region | Priority | Status | Budget | Actual | Delta | Risk | Next Step |
+        | :--- | :--- | :--- | :---: | :---: | ---: | ---: | ---: | :---: | :--- |
+        | Finance | Aoki | Global | P1 | Review | 80,000 | 83,250 | +4.1% | Low | Reconcile vendor accruals and update the closing memo. |
+        """.utf8))
+    view.setBuffer(replacement)
+    view.updateLayout()
+
+    XCTAssertEqual(view.markdownTableHorizontalOffsetForTesting(line: 0), 0, accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownTableScrollOffsetClearsWhenMarkdownModeChanges() throws {
+    let view = try makeViewer(
+      """
+      | Team | Owner | Region | Priority | Status | Budget | Actual | Delta | Risk | Next Step |
+      | :--- | :--- | :--- | :---: | :---: | ---: | ---: | ---: | :---: | :--- |
+      | Sales | Nishi | Japan | P0 | Draft | 120,000 | 118,400 | -1.3% | Medium | Confirm enterprise pipeline assumptions before Friday. |
+      """)
+    view.setFrameSize(NSSize(width: 560, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    XCTAssertTrue(view.scrollMarkdownTableForTesting(containing: 0, deltaX: 120))
+    XCTAssertEqual(view.markdownTableHorizontalOffsetForTesting(line: 0), 120, accuracy: 0.5)
+
+    view.markdownViewMode = .source
+    view.markdownViewMode = .rendered
+    view.updateLayout()
+
+    XCTAssertEqual(view.markdownTableHorizontalOffsetForTesting(line: 0), 0, accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownTableScrollOffsetIsClamped() throws {
+    let view = try makeViewer(
+      """
+      | Team | Owner | Region | Priority | Status | Budget | Actual | Delta | Risk | Next Step |
+      | :--- | :--- | :--- | :---: | :---: | ---: | ---: | ---: | :---: | :--- |
+      | Sales | Nishi | Japan | P0 | Draft | 120,000 | 118,400 | -1.3% | Medium | Confirm enterprise pipeline assumptions before Friday. |
+      """)
+    view.setFrameSize(NSSize(width: 560, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    XCTAssertTrue(view.scrollMarkdownTableForTesting(containing: 0, deltaX: 10_000))
+    let maxOffset = view.markdownTableHorizontalOffsetForTesting(line: 0)
+    XCTAssertGreaterThan(maxOffset, 0)
+    XCTAssertFalse(view.scrollMarkdownTableForTesting(containing: 0, deltaX: 10_000))
+    XCTAssertEqual(view.markdownTableHorizontalOffsetForTesting(line: 0), maxOffset, accuracy: 0.5)
+
+    XCTAssertTrue(view.scrollMarkdownTableForTesting(containing: 0, deltaX: -10_000))
+    XCTAssertEqual(view.markdownTableHorizontalOffsetForTesting(line: 0), 0, accuracy: 0.5)
+    XCTAssertFalse(view.scrollMarkdownTableForTesting(containing: 0, deltaX: -10_000))
+  }
+
+  @MainActor
   func testMarkdownTableDrawsExactlyThreeRules() throws {
     let view = try makeViewer(
       """
