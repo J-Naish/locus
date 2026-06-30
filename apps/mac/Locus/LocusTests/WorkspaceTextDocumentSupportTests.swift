@@ -858,6 +858,51 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertNil(states[3].imageSource)
   }
 
+  func testMarkdownVideoOnlyLineIsClassifiedWithSourceAndAlt() {
+    let lines = [
+      "![Demo clip](media/demo.mp4)",
+      "![Movie](https://cdn.example.com/movie.mov?token=abc)",
+      "![Stream][demo-stream]",
+      "[demo-stream]: media/session.m3u8",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(
+      states[0].imageSource,
+      MarkdownImageSource(source: "media/demo.mp4", altText: "Demo clip", kind: .video))
+    XCTAssertEqual(
+      states[1].imageSource,
+      MarkdownImageSource(
+        source: "https://cdn.example.com/movie.mov?token=abc",
+        altText: "Movie",
+        kind: .video))
+    XCTAssertEqual(
+      states[2].imageSource,
+      MarkdownImageSource(source: "media/session.m3u8", altText: "Stream", kind: .video))
+  }
+
+  func testHTMLVideoOnlyLineIsClassifiedWithSourceAndCaption() {
+    let lines = [
+      "<video src=\"media/demo.mp4\" title=\"Launch demo\" controls></video>",
+      "<video controls src='https://cdn.example.com/demo.m4v' aria-label='Remote demo'>",
+      "Before <video src=\"inline.mp4\"></video> after",
+      "<video title=\"No source\"></video>",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(
+      states[0].imageSource,
+      MarkdownImageSource(source: "media/demo.mp4", altText: "Launch demo", kind: .video))
+    XCTAssertEqual(
+      states[1].imageSource,
+      MarkdownImageSource(
+        source: "https://cdn.example.com/demo.m4v",
+        altText: "Remote demo",
+        kind: .video))
+    XCTAssertNil(states[2].imageSource, "an inline <video> in prose is not a media block")
+    XCTAssertNil(states[3].imageSource, "a <video> without a src is not a media block")
+  }
+
   func testMarkdownReferenceStyleImageOnlyLineIsClassifiedWithResolvedSource() {
     let lines = [
       "![Referenced image][fixture-svg]",
@@ -939,6 +984,21 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertEqual(
       map.bufferRange(forDisplayStart: 0, end: map.displayLength, includeWholeLineMarkers: false),
       NSRange(location: 3, length: 13))
+  }
+
+  func testMarkdownVideoOnlyLinesRenderCaptionWithoutRawVideoSyntax() {
+    let markdown = "![Demo clip](media/demo.mp4)"
+    let html = "<video src=\"media/demo.mp4\" title=\"Launch demo\" controls></video>"
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: [markdown, html])
+
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        markdown, font: TextDocumentSyntax.markdown.font, state: states[0]),
+      "Demo clip")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        html, font: TextDocumentSyntax.markdown.font, state: states[1]),
+      "Launch demo")
   }
 
   func testMarkdownImageCaptionUsesSameWhitespaceTrimAsClassification() {

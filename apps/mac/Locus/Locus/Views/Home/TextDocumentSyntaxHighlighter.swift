@@ -112,6 +112,11 @@ enum MarkdownDocumentMetrics {
   /// Tall images scale down to this height so one screenshot never fills
   /// several screens; width shrinks proportionally.
   static let imageMaximumBlockHeight: CGFloat = 560
+  /// Embedded video blocks use a stable 16:9 preview/player surface. We do not
+  /// inspect assets during markdown layout; keeping this deterministic avoids
+  /// scroll jumps while still making videos feel like first-class media blocks.
+  static let videoAspectRatio: CGFloat = 16 / 9
+  static let videoMaximumBlockHeight: CGFloat = 360
   /// Slight rounding keeps image blocks calm against the page background.
   static let imageCornerRadius: CGFloat = 4
   /// The alt text renders as a small muted caption below the image.
@@ -299,17 +304,30 @@ struct MarkdownTableColumn: Equatable, Sendable {
   var alignment: MarkdownTableColumnAlignment
 }
 
-/// The destination and alt text of a line whose only content is one image,
-/// e.g. `![alt](images/chart.png)` — such lines render as image blocks.
+enum MarkdownEmbeddedMediaKind: Equatable, Hashable, Sendable {
+  case image
+  case video
+}
+
+/// The destination and alt text of a line whose only content is one embedded
+/// media item, e.g. `![alt](images/chart.png)` or `![alt](clip.mp4)`.
+/// Image sources render as image blocks; video sources render as inline players.
 struct MarkdownImageSource: Equatable, Hashable, Sendable {
   var source: String
   var altText: String
   var linkDestination: String?
+  var kind: MarkdownEmbeddedMediaKind
 
-  init(source: String, altText: String, linkDestination: String? = nil) {
+  init(
+    source: String,
+    altText: String,
+    linkDestination: String? = nil,
+    kind: MarkdownEmbeddedMediaKind = .image
+  ) {
     self.source = source
     self.altText = altText
     self.linkDestination = linkDestination
+    self.kind = kind
   }
 }
 
@@ -1218,6 +1236,16 @@ enum TextDocumentSyntaxHighlighter {
         map: &map,
         protectedRanges: &protectedRanges)
       return map
+    }
+    if let match = htmlVideoExpression.firstMatch(in: body.trimmed, range: range),
+      match.range == range,
+      htmlTagHasBalancedQuotes(body.trimmed),
+      htmlVideoSource(in: body.trimmed) != nil
+    {
+      return .map(
+        sourceText: line,
+        displayText: htmlVideoCaption(in: body.trimmed),
+        sourceStart: body.sourceOffset)
     }
     return nil
   }
@@ -2843,7 +2871,8 @@ enum TextDocumentSyntaxHighlighter {
     {
       return MarkdownImageSource(
         source: source,
-        altText: nsTrimmed.substring(with: match.range(at: 1)))
+        altText: nsTrimmed.substring(with: match.range(at: 1)),
+        kind: markdownEmbeddedMediaKind(for: source))
     }
     if let match = referenceImageExpression.firstMatch(in: trimmed, range: range),
       match.range == range,
@@ -2854,7 +2883,11 @@ enum TextDocumentSyntaxHighlighter {
     {
       return MarkdownImageSource(
         source: source,
-        altText: nsTrimmed.substring(with: match.range(at: 1)))
+        altText: nsTrimmed.substring(with: match.range(at: 1)),
+        kind: markdownEmbeddedMediaKind(for: source))
+    }
+    if let video = htmlVideoOnlyLine(trimmed: trimmed, range: range) {
+      return video
     }
     return htmlImageOnlyLine(trimmed: trimmed, nsTrimmed: nsTrimmed, range: range)
   }
@@ -2874,7 +2907,8 @@ enum TextDocumentSyntaxHighlighter {
       return MarkdownImageSource(
         source: source,
         altText: nsTrimmed.substring(with: match.range(at: 1)),
-        linkDestination: linkDestination)
+        linkDestination: linkDestination,
+        kind: markdownEmbeddedMediaKind(for: source))
     }
     if let match = linkedReferenceImageExpression.firstMatch(in: trimmed, range: range),
       match.range == range,
@@ -2888,7 +2922,8 @@ enum TextDocumentSyntaxHighlighter {
       return MarkdownImageSource(
         source: source,
         altText: nsTrimmed.substring(with: match.range(at: 1)),
-        linkDestination: linkDestination)
+        linkDestination: linkDestination,
+        kind: markdownEmbeddedMediaKind(for: source))
     }
     return nil
   }
@@ -2914,6 +2949,24 @@ enum TextDocumentSyntaxHighlighter {
       return nil
     }
     return MarkdownImageSource(source: source, altText: htmlImageAlt(in: trimmed) ?? "")
+  }
+
+  /// The video source when the trimmed body is a single, safe HTML `<video>` tag.
+  /// We intentionally support single-line opening/closed tags only; richer HTML
+  /// blocks stay literal instead of building a permissive HTML parser into the
+  /// markdown renderer.
+  private static func htmlVideoOnlyLine(trimmed: String, range: NSRange) -> MarkdownImageSource? {
+    guard let match = htmlVideoExpression.firstMatch(in: trimmed, range: range),
+      match.range == range,
+      htmlTagHasBalancedQuotes(trimmed),
+      let source = htmlVideoSource(in: trimmed)
+    else {
+      return nil
+    }
+    return MarkdownImageSource(
+      source: source,
+      altText: htmlVideoCaption(in: trimmed),
+      kind: .video)
   }
 
   /// Extracts the destination from an image target, dropping an optional
@@ -3654,6 +3707,31 @@ enum TextDocumentSyntaxHighlighter {
     return decoded.isEmpty ? nil : decoded
   }
 
+  private static func htmlVideoSource(in tag: String) -> String? {
+    guard let raw = htmlTagAttribute("src", in: tag) else { return nil }
+    return sanitizedHTMLImageSource(raw)
+  }
+
+  private static func htmlVideoCaption(in tag: String) -> String {
+    for attribute in ["title", "aria-label"] {
+      guard let raw = htmlTagAttribute(attribute, in: tag) else { continue }
+      let decoded = decodeHTMLEntities(in: raw).trimmingCharacters(in: .whitespaces)
+      if !decoded.isEmpty {
+        return decoded
+      }
+    }
+    return "Video"
+  }
+
+  private static func markdownEmbeddedMediaKind(for source: String) -> MarkdownEmbeddedMediaKind {
+    let destination =
+      source.split(maxSplits: 1, whereSeparator: { $0 == "?" || $0 == "#" })
+      .first
+      .map(String.init) ?? source
+    let pathExtension = (destination as NSString).pathExtension.lowercased()
+    return markdownVideoFileExtensions.contains(pathExtension) ? .video : .image
+  }
+
   /// The raw (still entity-encoded) value of the first `name` attribute
   /// (case-insensitive) in a single HTML tag, honoring quoted spans — so an
   /// attribute keyword appearing *inside* another attribute's quoted value
@@ -3912,7 +3990,12 @@ enum TextDocumentSyntaxHighlighter {
   // (htmlTagAttribute), not a regex, so a keyword inside another attribute's
   // quoted value is never mistaken for a real attribute.
   private static let htmlImageExpression = markdownRegex(#"(?i)<img\b[^<>\n]*>"#)
+  private static let htmlVideoExpression = markdownRegex(
+    #"(?i)<video\b[^<>\n]*(?:>\s*</video\s*>|/?>)"#)
   private static let htmlHorizontalRuleExpression = markdownRegex(#"(?i)<hr\b[^<>\n]*>"#)
+  private static let markdownVideoFileExtensions: Set<String> = [
+    "mp4", "m4v", "mov", "webm", "m3u8",
+  ]
   /// The paired formatting tags whose display-map removal is identical (keep
   /// group 1); kept in one list so both inline passes use the same order.
   private static let htmlPairedInlineExpressions: [NSRegularExpression] = [

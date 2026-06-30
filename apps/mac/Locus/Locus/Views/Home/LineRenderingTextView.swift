@@ -1,3 +1,4 @@
+import AVKit
 import AppKit
 import CoreText
 
@@ -112,6 +113,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       if let anchor {
         restoreViewportAnchor(anchor)
       }
+      if !usesMarkdownDocumentLayout {
+        removeAllMarkdownVideoViews()
+      }
       invalidateVisibleArea()
     }
   }
@@ -134,10 +138,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     didSet {
       guard oldValue != saveURL else { return }
       invalidateMarkdownLinkVisualStateCache()
-      guard let store = markdownImageStoreStorage else { return }
-      store.baseURL = saveURL
-      store.reset()
-      scheduleMarkdownImageRelayout()
+      removeAllMarkdownVideoViews()
+      if let store = markdownImageStoreStorage {
+        store.baseURL = saveURL
+        store.reset()
+        scheduleMarkdownImageRelayout()
+      }
+      syncMarkdownVideoViewsInVisibleViewport()
     }
   }
 
@@ -216,6 +223,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// every other document so plain viewers never pay for it.
   private var markdownImageStoreStorage: MarkdownImageStore?
   private var markdownImageRelayoutScheduled = false
+  private struct MarkdownVideoViewKey: Hashable {
+    let line: Int
+    let source: String
+  }
+  private var markdownVideoViews: [MarkdownVideoViewKey: AVPlayerView] = [:]
 
   /// The opening-fence line of the code block whose copy control was most
   /// recently clicked — drawn with a checkmark until the confirmation lapses.
@@ -1025,7 +1037,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     for image: MarkdownImageSource, state: MarkdownLineStyleState
   ) -> LineRowMetrics {
     let contentWidth = Self.markdownWrapContentWidth(baseWidth: wrapContentWidth, state: state)
-    let blockHeight = markdownImageBlockHeight(source: image.source, contentWidth: contentWidth)
+    let blockHeight = markdownMediaBlockHeight(for: image, contentWidth: contentWidth)
     return LineRowMetrics(
       rowHeight: Self.markdownImageCaptionRowHeight,
       leadingInset: MarkdownDocumentMetrics.imageBlockAir + blockHeight
@@ -1036,6 +1048,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   nonisolated static var markdownImageCaptionRowHeight: CGFloat {
     let font = MarkdownDocumentMetrics.imageCaptionFont
     return ceil(font.ascender - font.descender + font.leading)
+  }
+
+  private func markdownMediaBlockHeight(
+    for source: MarkdownImageSource,
+    contentWidth: CGFloat
+  ) -> CGFloat {
+    switch source.kind {
+    case .image:
+      return markdownImageBlockHeight(source: source.source, contentWidth: contentWidth)
+    case .video:
+      return Self.markdownVideoDisplaySize(contentWidth: contentWidth).height
+    }
   }
 
   /// The block height for the image's current load state; querying the store
@@ -1049,6 +1073,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     case .sized(let natural):
       return Self.markdownImageDisplaySize(natural: natural, contentWidth: contentWidth).height
     }
+  }
+
+  nonisolated static func markdownVideoDisplaySize(contentWidth: CGFloat) -> CGSize {
+    guard contentWidth > 0 else {
+      return CGSize(width: 0, height: MarkdownDocumentMetrics.imagePlaceholderHeight)
+    }
+    let height = min(
+      MarkdownDocumentMetrics.videoMaximumBlockHeight,
+      contentWidth / MarkdownDocumentMetrics.videoAspectRatio)
+    return CGSize(
+      width: ceil(height * MarkdownDocumentMetrics.videoAspectRatio),
+      height: ceil(height))
   }
 
   /// Fits an image's natural pixel size (treated as points) into the text
@@ -1125,6 +1161,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // toward a completion the generation check would drop anyway.
     wrapBuildTask?.cancel()
     markdownLineStateBuildTask?.cancel()
+    removeAllMarkdownVideoViews()
     NotificationCenter.default.removeObserver(self)
   }
 
@@ -1966,6 +2003,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     invalidateMarkdownLinkVisualStateCache()
     cancelMarkdownLineStateBuild()
     markdownImageStoreStorage?.reset()
+    removeAllMarkdownVideoViews()
     // Drop any copy confirmation so it cannot paint on a same-indexed block in
     // the new document; the token bump defuses the pending revert.
     copiedCodeBlockStartLine = nil
@@ -2007,6 +2045,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// to stay aligned. The band fetch and highlight are bounded to the visible rows,
   /// so this stays cheap even for a multi-gigabyte document.
   func viewportDidScroll() {
+    syncMarkdownVideoViewsInVisibleViewport()
     invalidateVisibleArea()
     // The gutter is viewport-pinned, so its right edge (the I-beam boundary)
     // shifts with horizontal scroll; re-establish the cursor rects for it.
@@ -2166,8 +2205,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // Stop the timer when detached so it does not keep the view alive.
     if window == nil {
       stopCaretBlinking()
+      removeAllMarkdownVideoViews()
     } else {
       updateCaretBlinkTimerForFocusState()
+      syncMarkdownVideoViewsInVisibleViewport()
     }
   }
 
@@ -4411,7 +4452,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         }
       }
       if let imageSource = state.imageSource, visibleRows.contains(firstRow) {
-        drawMarkdownImageBlock(source: imageSource, line: line)
+        drawMarkdownMediaBlock(source: imageSource, line: line)
       }
       if state.insideFrontMatter, visibleRows.contains(firstRow) {
         drawMarkdownFrontMatterChips(
@@ -5393,6 +5434,116 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     path.stroke()
   }
 
+  private func drawMarkdownMediaBlock(source: MarkdownImageSource, line: Int) {
+    switch source.kind {
+    case .image:
+      drawMarkdownImageBlock(source: source, line: line)
+    case .video:
+      drawMarkdownVideoBlock(source: source, line: line)
+    }
+  }
+
+  private func syncMarkdownVideoViewsInVisibleViewport() {
+    guard usesMarkdownDocumentLayout, let buffer = reader else {
+      removeAllMarkdownVideoViews()
+      return
+    }
+    let visible = enclosingScrollView?.documentVisibleRect ?? visibleRect
+    let visibleRows = visibleVisualRowRange(in: visible)
+    guard !visibleRows.isEmpty else {
+      removeAllMarkdownVideoViews()
+      return
+    }
+    let firstLine = lineLocation(ofVisualRow: visibleRows.lowerBound).line
+    let lastLine = lineLocation(ofVisualRow: visibleRows.upperBound - 1).line
+    syncMarkdownVideoViews(
+      range: firstLine..<(lastLine + 1),
+      visibleRows: visibleRows,
+      buffer: buffer)
+  }
+
+  private func syncMarkdownVideoViews(
+    range: Range<Int>,
+    visibleRows: Range<Int>,
+    buffer: any TextDocumentReading
+  ) {
+    var visibleKeys = Set<MarkdownVideoViewKey>()
+    for line in range {
+      guard !isHugeLine(line) else { continue }
+      let firstRow = firstVisualRow(ofLine: line)
+      guard visibleRows.contains(firstRow) else { continue }
+      let state = markdownLineState(forLine: line, in: buffer)
+      guard let media = state.imageSource, media.kind == .video,
+        let frame = markdownImageBlockFrame(line: line),
+        let url = markdownVideoURL(for: media.source)
+      else {
+        continue
+      }
+      let key = MarkdownVideoViewKey(line: line, source: media.source)
+      visibleKeys.insert(key)
+      let playerView = markdownVideoView(for: key, url: url)
+      let aligned = backingAlignedRect(frame, options: .alignAllEdgesNearest)
+      if playerView.frame != aligned {
+        playerView.frame = aligned
+      }
+      if playerView.superview !== self {
+        addSubview(playerView)
+      }
+    }
+
+    let staleKeys = markdownVideoViews.keys.filter { !visibleKeys.contains($0) }
+    for key in staleKeys {
+      removeMarkdownVideoView(for: key)
+    }
+  }
+
+  private func markdownVideoView(for key: MarkdownVideoViewKey, url: URL) -> AVPlayerView {
+    if let view = markdownVideoViews[key] {
+      return view
+    }
+    let player = AVPlayer(url: url)
+    let playerView = AVPlayerView()
+    playerView.controlsStyle = .inline
+    playerView.videoGravity = .resizeAspect
+    playerView.player = player
+    playerView.wantsLayer = true
+    playerView.layer?.cornerRadius = MarkdownDocumentMetrics.imageCornerRadius
+    playerView.layer?.masksToBounds = true
+    playerView.layer?.backgroundColor = MarkdownDocumentMetrics.codeBackground.cgColor
+    playerView.setAccessibilityIdentifier("markdown-video-player")
+    markdownVideoViews[key] = playerView
+    return playerView
+  }
+
+  private func markdownVideoURL(for source: String) -> URL? {
+    guard let location = MarkdownImageStore.resolvedLocation(source: source, baseURL: saveURL)
+    else {
+      return nil
+    }
+    guard !location.isRemote else {
+      return nil
+    }
+    let path = location.url.path(percentEncoded: false)
+    return FileManager.default.fileExists(atPath: path) ? location.url : nil
+  }
+
+  private func removeMarkdownVideoView(for key: MarkdownVideoViewKey) {
+    if let view = markdownVideoViews.removeValue(forKey: key) {
+      view.player?.pause()
+      view.player = nil
+      view.removeFromSuperview()
+    }
+  }
+
+  private func removeAllMarkdownVideoViews() {
+    for view in markdownVideoViews.values {
+      view.player?.pause()
+      view.player = nil
+      view.removeFromSuperview()
+    }
+    markdownVideoViews.removeAll()
+  }
+
   /// Draws the image block living in an image line's leading inset: the
   /// decoded pixels when ready, a quiet placeholder card while loading or
   /// decoding, and a labeled card when the source cannot be loaded.
@@ -5441,6 +5592,17 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
   }
 
+  private func drawMarkdownVideoBlock(source: MarkdownImageSource, line: Int) {
+    guard let frame = markdownImageBlockFrame(line: line) else { return }
+    if markdownVideoURL(for: source.source) == nil {
+      drawMarkdownMediaFailureCard(
+        in: frame,
+        source: source,
+        title: "Video unavailable",
+        iconName: "video.slash")
+    }
+  }
+
   private func drawMarkdownImagePlaceholder(in frame: NSRect) {
     MarkdownDocumentMetrics.codeBackground.setFill()
     NSBezierPath(
@@ -5466,6 +5628,19 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private func drawMarkdownImageFailureCard(in frame: NSRect, source: MarkdownImageSource) {
+    drawMarkdownMediaFailureCard(
+      in: frame,
+      source: source,
+      title: "Image unavailable",
+      iconName: "photo.badge.exclamationmark")
+  }
+
+  private func drawMarkdownMediaFailureCard(
+    in frame: NSRect,
+    source: MarkdownImageSource,
+    title: String,
+    iconName: String
+  ) {
     let aligned = backingAlignedRect(frame, options: .alignAllEdgesNearest)
     MarkdownDocumentMetrics.codeBackground
       .withAlphaComponent(MarkdownDocumentMetrics.imageFailureCardOpacity)
@@ -5495,9 +5670,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
           NSColor.secondaryLabelColor.withAlphaComponent(
             MarkdownDocumentMetrics.imageFailureIconOpacity)
         ]))
-    if let icon = NSImage(
-      systemSymbolName: "photo.badge.exclamationmark",
-      accessibilityDescription: nil)?
+    if let icon = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)?
       .withSymbolConfiguration(iconConfiguration)
     {
       icon.draw(in: iconFrame, from: .zero, operation: .sourceOver, fraction: 1)
@@ -5505,8 +5678,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
     let paragraph = NSMutableParagraphStyle()
     paragraph.lineBreakMode = .byTruncatingMiddle
-    let title = NSAttributedString(
-      string: "Image unavailable",
+    let titleText = NSAttributedString(
+      string: title,
       attributes: [
         .font: MarkdownDocumentMetrics.imageFailureTitleFont,
         .foregroundColor: NSColor.secondaryLabelColor,
@@ -5519,14 +5692,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         .foregroundColor: NSColor.tertiaryLabelColor,
         .paragraphStyle: paragraph,
       ])
-    let titleSize = title.size()
+    let titleSize = titleText.size()
     let detailSize = detail.size()
     let verticalGap = MarkdownDocumentMetrics.imageFailureTextVerticalGap
     let textBlockHeight = titleSize.height + verticalGap + detailSize.height
     let textX = iconFrame.maxX + MarkdownDocumentMetrics.imageFailureTextGap
     let textWidth = max(0, aligned.maxX - inset - textX)
     let textY = aligned.midY - textBlockHeight / 2
-    title.draw(
+    titleText.draw(
       with: NSRect(x: textX, y: textY, width: textWidth, height: titleSize.height),
       options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
     detail.draw(
@@ -5910,10 +6083,24 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     handleMarkdownTaskCheckboxClick(at: point, inLineRange: 0..<lineCount)
   }
 
-  /// The image block's frame inside an image line's leading inset, or nil for
-  /// lines that are not image-only lines. Width and height follow the load
-  /// state: full column width for the placeholder, a compact card width for
-  /// failures, and the fitted display size once the natural size is known.
+  func syncMarkdownVideoViewsForTesting() {
+    syncMarkdownVideoViewsInVisibleViewport()
+  }
+
+  func markdownVideoViewCountForTesting() -> Int {
+    markdownVideoViews.count
+  }
+
+  func markdownVideoPlayerIdentifiersForTesting() -> Set<ObjectIdentifier> {
+    Set(
+      markdownVideoViews.values.compactMap { view in
+        view.player.map(ObjectIdentifier.init)
+      })
+  }
+
+  /// The embedded media block's frame inside a media line's leading inset, or
+  /// nil for lines that are not image/video-only lines. Images follow their load
+  /// state; videos use a stable player frame.
   /// Internal so tests can assert on it; the draw path is its production
   /// consumer.
   func markdownImageBlockFrame(line: Int) -> NSRect? {
@@ -5926,6 +6113,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let x = lineTextColumnX(forLine: line)
     let y = yOffset(ofLine: line) + MarkdownDocumentMetrics.imageBlockAir
     let contentWidth = lineWrapContentWidth(forLine: line)
+    if image.kind == .video {
+      let size = Self.markdownVideoDisplaySize(contentWidth: contentWidth)
+      return NSRect(x: x, y: y, width: size.width, height: size.height)
+    }
     switch markdownImageStore.state(for: image.source) {
     case .loading:
       return NSRect(

@@ -218,6 +218,14 @@ content. Wrap width per line = measure − indent.
   literal), and its `alt` becomes the caption. Unlike a markdown image's
   alt, the HTML `<img>` caption collapses to a single unit (the whole tag
   is one buffer span), so it is not separately editable.
+- **Videos**: a line whose only content is one video reference renders in
+  the same media-block slot as images. Markdown image syntax with a video
+  extension (`.mp4`, `.m4v`, `.mov`, `.webm`, `.m3u8`) and simple
+  whole-line `<video src="…" title="…">` tags are accepted. The native
+  AppKit/AVKit player is mounted only while the row is visible and reuses
+  the same caption row/editing map as image blocks. For now video embeds
+  are local-file only; remote video URLs show the quiet unavailable card
+  instead of streaming arbitrary media inside the app.
 - **Inline**: bold/italic/bold-italic/strike (asterisk and underscore
   forms), inline code chips, links (label in accent; Cmd+click opens
   `http`/`https`), **reference links** `[text][label]` resolved through

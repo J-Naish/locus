@@ -44,6 +44,30 @@ Reference-style image:
 
 ![Referenced image][fixture-svg]
 
+Video MP4:
+
+![Flower sample MP4](../media/valid/markdown-videos/flower.mp4)
+
+Video WebM:
+
+![Flower sample WebM](../media/valid/markdown-videos/flower.webm)
+
+Video MOV:
+
+![Flower sample MOV](../media/valid/markdown-videos/flower.mov)
+
+Video M4V:
+
+![Flower sample M4V](../media/valid/markdown-videos/flower.m4v)
+
+Video HLS playlist:
+
+![Flower sample HLS](../media/valid/markdown-videos/hls/flower.m3u8)
+
+HTML video:
+
+<video src="../media/valid/markdown-videos/flower.mp4" title="HTML sample video" controls></video>
+
 [product-brief]: ../../docs/product/brief.md
 [requirements]: ../../docs/requirements.md
 [Roadmap]: ../../docs/product/mvp-roadmap.md

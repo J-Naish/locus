@@ -1816,6 +1816,19 @@ final class TextViewportLayoutTests: XCTestCase {
       tall.width, ceil(MarkdownDocumentMetrics.imageMaximumBlockHeight * 1000 / 4000))
   }
 
+  func testMarkdownVideoDisplaySizeUsesStableAspectRatioAndCapsHeight() {
+    XCTAssertEqual(
+      LineRenderingTextView.markdownVideoDisplaySize(contentWidth: 640),
+      CGSize(width: 640, height: 360))
+    XCTAssertEqual(
+      LineRenderingTextView.markdownVideoDisplaySize(contentWidth: 1000),
+      CGSize(
+        width: ceil(
+          MarkdownDocumentMetrics.videoMaximumBlockHeight
+            * MarkdownDocumentMetrics.videoAspectRatio),
+        height: MarkdownDocumentMetrics.videoMaximumBlockHeight))
+  }
+
   func testMarkdownImageFailureCardWidthStaysCompactAndWithinContentColumn() {
     XCTAssertEqual(LineRenderingTextView.markdownImageFailureCardWidth(contentWidth: 0), 0)
     XCTAssertEqual(LineRenderingTextView.markdownImageFailureCardWidth(contentWidth: 240), 240)
@@ -1926,6 +1939,62 @@ final class TextViewportLayoutTests: XCTestCase {
       accuracy: 0.5)
     // A click inside the image strip lands on the image line (its caption).
     XCTAssertEqual(view.endpoint(at: NSPoint(x: 100, y: frame.midY)).line, 0)
+  }
+
+  @MainActor
+  func testMarkdownVideoBlockUsesPlayerFrameAndKeepsCaptionRow() throws {
+    let view = try makeViewer("![Demo](clip.mp4)\nBody")
+    view.saveURL = URL(filePath: "/tmp/doc.md")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let frame = try XCTUnwrap(view.markdownImageBlockFrame(line: 0))
+    let expected = LineRenderingTextView.markdownVideoDisplaySize(
+      contentWidth: view.markdownWrapContentWidthForTesting(line: 0))
+    XCTAssertEqual(frame.minX, view.markdownTextColumnXForTesting(line: 0), accuracy: 0.5)
+    XCTAssertEqual(frame.minY, MarkdownDocumentMetrics.imageBlockAir, accuracy: 0.5)
+    XCTAssertEqual(frame.size, expected)
+
+    let captionRow = LineRenderingTextView.markdownImageCaptionRowHeight
+    XCTAssertEqual(
+      try XCTUnwrap(view.endpointYForTesting(line: 1)),
+      MarkdownDocumentMetrics.imageBlockAir * 2 + expected.height
+        + MarkdownDocumentMetrics.imageCaptionGap + captionRow,
+      accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownVideoViewSyncCreatesAndReusesVisiblePlayer() throws {
+    let folder = try makeTemporaryImageFolder()
+    try Data("fixture video placeholder".utf8).write(to: folder.appendingPathComponent("clip.mp4"))
+    let view = try makeViewer("![Demo](clip.mp4)\nBody")
+    view.saveURL = folder.appendingPathComponent("doc.md")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+    view.syncMarkdownVideoViewsForTesting()
+
+    XCTAssertEqual(view.markdownVideoViewCountForTesting(), 1)
+    let initialPlayers = view.markdownVideoPlayerIdentifiersForTesting()
+    XCTAssertEqual(initialPlayers.count, 1)
+
+    view.syncMarkdownVideoViewsForTesting()
+
+    XCTAssertEqual(view.markdownVideoViewCountForTesting(), 1)
+    XCTAssertEqual(view.markdownVideoPlayerIdentifiersForTesting(), initialPlayers)
+  }
+
+  @MainActor
+  func testMarkdownVideoViewSyncRejectsRemoteVideoSources() throws {
+    let view = try makeViewer("![Demo](https://example.com/clip.mp4)\nBody")
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+    view.syncMarkdownVideoViewsForTesting()
+
+    XCTAssertNotNil(view.markdownImageBlockFrame(line: 0))
+    XCTAssertEqual(view.markdownVideoViewCountForTesting(), 0)
   }
 
   @MainActor
