@@ -1258,7 +1258,6 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // toward a completion the generation check would drop anyway.
     wrapBuildTask?.cancel()
     markdownLineStateBuildTask?.cancel()
-    removeAllMarkdownVideoViews()
     NotificationCenter.default.removeObserver(self)
   }
 
