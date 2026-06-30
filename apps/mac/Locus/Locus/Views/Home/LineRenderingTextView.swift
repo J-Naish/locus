@@ -1887,6 +1887,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       for target in markdownLinkTargets(inLineRange: range) {
         regions.append(HoverCursorRegion(rect: target.rect, cursor: .pointingHand))
       }
+      if isEditable {
+        for target in markdownTaskCheckboxTargets(inLineRange: range) {
+          regions.append(HoverCursorRegion(rect: target.hitRect, cursor: .pointingHand))
+        }
+      }
       for target in markdownCodeCopyTargets(inLineRange: range) {
         regions.append(HoverCursorRegion(rect: target.buttonRect, cursor: .pointingHand))
       }
@@ -2303,6 +2308,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // A click on a code block's copy control copies and consumes the event,
     // without moving the caret or starting a selection.
     if handleMarkdownCodeCopyClick(at: point) {
+      window?.makeFirstResponder(self)
+      return
+    }
+    if handleMarkdownTaskCheckboxClick(at: point) {
       window?.makeFirstResponder(self)
       return
     }
@@ -4215,7 +4224,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// The half-open range of global visual rows intersecting `rect`.
   private func visibleVisualRowRange(in rect: CGRect) -> Range<Int> {
     let total = totalVisualRows
-    guard total > 0, layout.lineHeight > 0, rect.height > 0 else { return 0..<0 }
+    guard total > 0, layout.lineHeight > 0, rect.height > 0,
+      rect.minY.isFinite, rect.maxY.isFinite, rect.height.isFinite
+    else { return 0..<0 }
     guard let wrapIndex, wrapIndex.hasCustomRowHeights else {
       let first = max(0, Int((rect.minY / layout.lineHeight).rounded(.down)))
       let last = min(total, Int((rect.maxY / layout.lineHeight).rounded(.up)))
@@ -4589,12 +4600,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private func drawMarkdownTaskCheckbox(checked: Bool, markerX: CGFloat, y: CGFloat) {
-    let size = MarkdownDocumentMetrics.checkboxSize
-    let rect = NSRect(
-      x: markerX + 4,
-      y: y + (layout.lineHeight - size) / 2,
-      width: size,
-      height: size)
+    let rect = markdownTaskCheckboxRect(markerX: markerX, y: y)
     let path = NSBezierPath(
       roundedRect: rect,
       xRadius: 3,
@@ -4614,6 +4620,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     mark.line(to: NSPoint(x: rect.minX + 6, y: rect.midY + 3.5))
     mark.line(to: NSPoint(x: rect.maxX - 3, y: rect.midY - 3.5))
     mark.stroke()
+  }
+
+  private func markdownTaskCheckboxRect(markerX: CGFloat, y: CGFloat) -> NSRect {
+    let size = MarkdownDocumentMetrics.checkboxSize
+    return NSRect(
+      x: markerX + 4,
+      y: y + (layout.lineHeight - size) / 2,
+      width: size,
+      height: size)
   }
 
   private func drawMarkdownTableBackgrounds(
@@ -4776,13 +4791,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if index + 1 < nsLine.length, Self.isMarkdownBulletMarker(nsLine.character(at: index)),
       nsLine.character(at: index + 1) == 32
     {
-      let taskStart = index + 2
-      if taskStart + 3 <= nsLine.length,
-        nsLine.character(at: taskStart) == 91,
-        nsLine.character(at: taskStart + 2) == 93
-      {
-        let value = nsLine.character(at: taskStart + 1)
-        return .task(checked: value == 120 || value == 88)
+      if let checkbox = markdownTaskCheckboxInfo(in: line, state: state) {
+        return .task(checked: checkbox.checked)
       }
       return .bullet
     }
@@ -4800,6 +4810,32 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       return .ordered("\(number).")
     }
     return nil
+  }
+
+  private func markdownTaskCheckboxInfo(
+    in line: String,
+    state: MarkdownLineStyleState
+  ) -> (checked: Bool, checkColumnUTF16: Int)? {
+    guard !state.insideFrontMatter, !state.insideFence, !state.isSetextUnderline,
+      !state.isReferenceDefinition, !state.isIndentedCodeBlock
+    else { return nil }
+
+    let nsLine = line as NSString
+    let bodyStart = markdownQuoteBodyStartColumn(in: line)
+    var index = bodyStart
+    while index < nsLine.length, nsLine.character(at: index) == 32 {
+      index += 1
+    }
+    guard index + 4 < nsLine.length,
+      Self.isMarkdownBulletMarker(nsLine.character(at: index)),
+      nsLine.character(at: index + 1) == 32,
+      nsLine.character(at: index + 2) == 91,
+      nsLine.character(at: index + 4) == 93
+    else {
+      return nil
+    }
+    let value = nsLine.character(at: index + 3)
+    return (checked: value == 120 || value == 88, checkColumnUTF16: index + 3)
   }
 
   /// Draws a code card: a rounded, faintly-toned surface, no border. The
@@ -5009,6 +5045,51 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       offset += length
     }
     return ranges
+  }
+
+  struct MarkdownTaskCheckboxTarget: Equatable {
+    let line: Int
+    let checked: Bool
+    let checkColumnUTF16: Int
+    let rect: NSRect
+    let hitRect: NSRect
+  }
+
+  private func markdownTaskCheckboxTargets(
+    inLineRange range: Range<Int>
+  ) -> [MarkdownTaskCheckboxTarget] {
+    guard usesMarkdownDocumentLayout, syntax == .markdown, let buffer = reader,
+      let states = markdownLineStates(for: buffer)
+    else {
+      return []
+    }
+
+    let lower = max(0, range.lowerBound)
+    let upper = min(lineCount, states.count, range.upperBound)
+    guard lower < upper else { return [] }
+
+    var targets: [MarkdownTaskCheckboxTarget] = []
+    for line in lower..<upper {
+      guard hugeLength(line) == nil else { continue }
+      guard let checkbox = markdownTaskCheckboxInfo(in: rawLineText(line), state: states[line])
+      else {
+        continue
+      }
+
+      let markerX = lineTextColumnX(forLine: line) - MarkdownDocumentMetrics.markerColumnWidth
+      let rect = markdownTaskCheckboxRect(markerX: markerX, y: yOffset(ofLine: line))
+      let hitRect = rect.insetBy(
+        dx: -MarkdownDocumentMetrics.checkboxHitOutset,
+        dy: -MarkdownDocumentMetrics.checkboxHitOutset)
+      targets.append(
+        MarkdownTaskCheckboxTarget(
+          line: line,
+          checked: checkbox.checked,
+          checkColumnUTF16: checkbox.checkColumnUTF16,
+          rect: rect,
+          hitRect: hitRect))
+    }
+    return targets
   }
 
   /// The copy control of one fenced code block: its block's opening-fence line,
@@ -5223,6 +5304,55 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       return false
     }
     performCopyForCodeBlock(target)
+    return true
+  }
+
+  private func handleMarkdownTaskCheckboxClick(at point: NSPoint) -> Bool {
+    guard isEditable, usesMarkdownDocumentLayout, let range = visibleMarkdownLineRange() else {
+      return false
+    }
+    return handleMarkdownTaskCheckboxClick(at: point, inLineRange: range)
+  }
+
+  private func handleMarkdownTaskCheckboxClick(
+    at point: NSPoint,
+    inLineRange range: Range<Int>
+  ) -> Bool {
+    guard isEditable, usesMarkdownDocumentLayout else {
+      return false
+    }
+    guard
+      let target = markdownTaskCheckboxTargets(inLineRange: range).first(where: {
+        $0.hitRect.contains(point)
+      })
+    else {
+      return false
+    }
+    guard let lineStart = globalUTF16Offset(line: target.line, column: 0) else {
+      return false
+    }
+    let previousSelection = selection
+    let previousSelectionGranularity = selectionGranularity
+    let previousSelectionAnchorRange = selectionAnchorRange
+    let previousIsSelecting = isSelecting
+    let previousVerticalGoalX = verticalGoalX
+    let checkOffset = lineStart + target.checkColumnUTF16
+    guard
+      replace(
+        globalStart: checkOffset,
+        globalEnd: checkOffset + 1,
+        with: target.checked ? " " : "x")
+    else {
+      return false
+    }
+    selection = previousSelection
+    selectionGranularity = previousSelectionGranularity
+    selectionAnchorRange = previousSelectionAnchorRange
+    isSelecting = previousIsSelecting
+    verticalGoalX = previousVerticalGoalX
+    clampSelectionToBounds()
+    showCaretSolid()
+    invalidateVisibleArea()
     return true
   }
 
@@ -5454,6 +5584,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   private func markdownQuoteBody(in line: String) -> String {
     let nsLine = line as NSString
+    return nsLine.substring(from: markdownQuoteBodyStartColumn(in: line))
+  }
+
+  private func markdownQuoteBodyStartColumn(in line: String) -> Int {
+    let nsLine = line as NSString
     var index = 0
     while index < nsLine.length {
       let markerStart = index
@@ -5471,7 +5606,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         index += 1
       }
     }
-    return nsLine.substring(from: index)
+    return index
   }
 
   /// Fills the selected column span on each visible line, behind the text. Lines
@@ -5763,6 +5898,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       sequenceValue: state.isFrontMatterSequenceContinuation ? nil : state.frontMatterSequenceValue,
       line: line,
       y: yOffset(ofLine: line))
+  }
+
+  func markdownTaskCheckboxTargetsForTesting(
+    inLineRange range: Range<Int>
+  ) -> [MarkdownTaskCheckboxTarget] {
+    markdownTaskCheckboxTargets(inLineRange: range)
+  }
+
+  func handleMarkdownTaskCheckboxClickForTesting(at point: NSPoint) -> Bool {
+    handleMarkdownTaskCheckboxClick(at: point, inLineRange: 0..<lineCount)
   }
 
   /// The image block's frame inside an image line's leading inset, or nil for

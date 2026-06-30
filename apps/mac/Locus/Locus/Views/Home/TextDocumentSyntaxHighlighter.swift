@@ -54,6 +54,7 @@ enum MarkdownDocumentMetrics {
   static let markerColumnWidth: CGFloat = 24
   static let quoteIndentWidth: CGFloat = 17
   static let checkboxSize: CGFloat = 14
+  static let checkboxHitOutset: CGFloat = 4
   /// Inset from the code card's edges to the code glyphs on both sides.
   static let codeCardInset: CGFloat = 12
   static let codeBlockCornerRadius: CGFloat = 8

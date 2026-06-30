@@ -2151,6 +2151,113 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testClickingRenderedMarkdownTaskCheckboxTogglesRawTaskState() throws {
+    let view = try makeEditableViewer("- [ ] Update\n- [X] Done")
+    view.setFrameSize(NSSize(width: 360, height: 140))
+    view.syntax = .markdown
+    view.updateLayout()
+    let preservedSelectionEndpoint = TextSelection.Endpoint(line: 0, columnUTF16: 2)
+    view.setSelectionForTesting(
+      anchor: preservedSelectionEndpoint,
+      head: preservedSelectionEndpoint)
+
+    let uncheckedTarget = try XCTUnwrap(
+      view.markdownTaskCheckboxTargetsForTesting(inLineRange: 0..<view.lineCount)
+        .first(where: { $0.line == 0 }))
+    XCTAssertFalse(uncheckedTarget.checked)
+    XCTAssertTrue(
+      view.handleMarkdownTaskCheckboxClickForTesting(
+        at: NSPoint(x: uncheckedTarget.rect.midX, y: uncheckedTarget.rect.midY)))
+    XCTAssertEqual(content(of: view), "- [x] Update\n- [X] Done")
+    XCTAssertEqual(view.selection?.anchor, preservedSelectionEndpoint)
+    XCTAssertEqual(view.selection?.head, preservedSelectionEndpoint)
+
+    view.updateLayout()
+    let checkedTarget = try XCTUnwrap(
+      view.markdownTaskCheckboxTargetsForTesting(inLineRange: 0..<view.lineCount)
+        .first(where: { $0.line == 1 }))
+    XCTAssertTrue(checkedTarget.checked)
+    XCTAssertTrue(
+      view.handleMarkdownTaskCheckboxClickForTesting(
+        at: NSPoint(x: checkedTarget.rect.midX, y: checkedTarget.rect.midY)))
+    XCTAssertEqual(content(of: view), "- [x] Update\n- [ ] Done")
+  }
+
+  @MainActor
+  func testClickingOutsideRenderedMarkdownTaskCheckboxLeavesRawTaskStateUnchanged() throws {
+    let view = try makeEditableViewer("- [ ] Update")
+    view.setFrameSize(NSSize(width: 360, height: 120))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let target = try XCTUnwrap(
+      view.markdownTaskCheckboxTargetsForTesting(inLineRange: 0..<view.lineCount).first)
+    let outsidePoint = NSPoint(x: target.hitRect.maxX + 8, y: target.hitRect.midY)
+
+    XCTAssertFalse(view.handleMarkdownTaskCheckboxClickForTesting(at: outsidePoint))
+    XCTAssertEqual(content(of: view), "- [ ] Update")
+  }
+
+  @MainActor
+  func testRenderedMarkdownTaskCheckboxTargetsSkipFencedCode() throws {
+    let view = try makeEditableViewer("```markdown\n- [ ] not a task\n```")
+    view.setFrameSize(NSSize(width: 360, height: 160))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    XCTAssertTrue(
+      view.markdownTaskCheckboxTargetsForTesting(inLineRange: 0..<view.lineCount).isEmpty)
+  }
+
+  @MainActor
+  func testClickingNestedRenderedMarkdownTaskCheckboxTogglesRawTaskState() throws {
+    let view = try makeEditableViewer("  - [ ] Nested")
+    view.setFrameSize(NSSize(width: 360, height: 120))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let target = try XCTUnwrap(
+      view.markdownTaskCheckboxTargetsForTesting(inLineRange: 0..<view.lineCount).first)
+
+    XCTAssertTrue(
+      view.handleMarkdownTaskCheckboxClickForTesting(
+        at: NSPoint(x: target.rect.midX, y: target.rect.midY)))
+    XCTAssertEqual(content(of: view), "  - [x] Nested")
+  }
+
+  @MainActor
+  func testReadOnlyRenderedMarkdownTaskCheckboxDoesNotToggleRawTaskState() throws {
+    let view = try makeViewer("- [ ] Update")
+    view.setFrameSize(NSSize(width: 360, height: 120))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let target = try XCTUnwrap(
+      view.markdownTaskCheckboxTargetsForTesting(inLineRange: 0..<view.lineCount).first)
+
+    XCTAssertFalse(
+      view.handleMarkdownTaskCheckboxClickForTesting(
+        at: NSPoint(x: target.rect.midX, y: target.rect.midY)))
+    XCTAssertEqual(content(of: view), "- [ ] Update")
+  }
+
+  @MainActor
+  func testClickingRenderedMarkdownTaskCheckboxInsideQuoteTogglesRawTaskState() throws {
+    let view = try makeEditableViewer("> - [ ] Review")
+    view.setFrameSize(NSSize(width: 360, height: 120))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let target = try XCTUnwrap(
+      view.markdownTaskCheckboxTargetsForTesting(inLineRange: 0..<view.lineCount).first)
+
+    XCTAssertTrue(
+      view.handleMarkdownTaskCheckboxClickForTesting(
+        at: NSPoint(x: target.rect.midX, y: target.rect.midY)))
+    XCTAssertEqual(content(of: view), "> - [x] Review")
+  }
+
+  @MainActor
   func testMarkdownEnterAtRenderedListEndContinuesRawListPrefix() throws {
     let view = try makeEditableViewer("- Item")
     view.syntax = .markdown
