@@ -585,6 +585,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private nonisolated static func markdownInnerInset(for state: MarkdownLineStyleState) -> CGFloat {
     if state.insideFrontMatter {
       return MarkdownDocumentMetrics.frontMatterHorizontalInset
+        + (state.isFrontMatterBlockScalarContinuation
+          ? MarkdownDocumentMetrics.frontMatterBlockValueTextInset : 0)
     }
     if state.insideFence || state.isFenceDelimiter || state.isIndentedCodeBlock {
       return MarkdownDocumentMetrics.codeCardInset
@@ -603,11 +605,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     baseWidth: CGFloat,
     state: MarkdownLineStyleState
   ) -> CGFloat {
-    let chipTrailingReserve =
-      state.insideFrontMatter && markdownFrontMatterLineRendersChips(state)
-      ? MarkdownDocumentMetrics.frontMatterChipHorizontalPadding
-      : 0
-    return max(1, baseWidth - markdownLineIndent(for: state) - chipTrailingReserve)
+    let lineIndent = markdownLineIndent(for: state)
+    let trailingReserve: CGFloat
+    if state.isFrontMatterBlockScalarContinuation {
+      trailingReserve = lineIndent
+    } else if state.insideFrontMatter {
+      trailingReserve = MarkdownDocumentMetrics.frontMatterHorizontalInset
+    } else {
+      trailingReserve = 0
+    }
+    return max(
+      1,
+      baseWidth - lineIndent - trailingReserve)
   }
 
   private struct FrontMatterChipLayoutItem {
@@ -929,6 +938,20 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if state.isFrontMatterSequenceContinuation {
       return LineRowMetrics(rowHeight: 0)
     }
+    if state.isFrontMatterBlockScalarContinuation {
+      let leading =
+        state.isFrontMatterBlockScalarContinuationFirst
+        ? MarkdownDocumentMetrics.frontMatterBlockValueVerticalPadding : 0
+      let trailing =
+        state.isFrontMatterBlockScalarContinuationLast
+        ? MarkdownDocumentMetrics.frontMatterBlockValueVerticalPadding
+          + MarkdownDocumentMetrics.frontMatterItemSpacing
+        : MarkdownDocumentMetrics.frontMatterBlockValueLineSpacing
+      return LineRowMetrics(
+        rowHeight: MarkdownDocumentMetrics.frontMatterRowHeight,
+        leadingInset: leading,
+        trailingInset: trailing)
+    }
     // Collapsed continuation rows return above; only visible field rows should
     // expand for chip pills.
     let rowHeight =
@@ -941,7 +964,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let trailing =
       isLast
       ? MarkdownDocumentMetrics.codeBlockAir
-      : (state.isFrontMatterDelimiter ? 0 : MarkdownDocumentMetrics.frontMatterItemSpacing)
+      : (state.isFrontMatterDelimiter
+        ? 0
+        : (state.frontMatterBlockScalar != nil
+          ? MarkdownDocumentMetrics.frontMatterBlockKeyValueSpacing
+          : MarkdownDocumentMetrics.frontMatterItemSpacing))
     return LineRowMetrics(rowHeight: rowHeight, leadingInset: leading, trailingInset: trailing)
   }
 
@@ -4347,6 +4374,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       rawLines: rawLines, range: range, visibleRows: visibleRows, buffer: buffer)
     drawMarkdownFrontMatterBackgrounds(
       rawLines: rawLines, range: range, visibleRows: visibleRows, buffer: buffer)
+    drawMarkdownFrontMatterBlockScalarBackgrounds(
+      rawLines: rawLines, range: range, visibleRows: visibleRows, buffer: buffer)
     drawMarkdownFenceBackgrounds(
       rawLines: rawLines, range: range, visibleRows: visibleRows)
     for (offset, rawLine) in rawLines.enumerated() {
@@ -4480,6 +4509,54 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       drawMarkdownFrontMatterBackground(
         fromLine: start, toLine: max(start, range.upperBound - 1), visibleRows: visibleRows)
     }
+  }
+
+  private func drawMarkdownFrontMatterBlockScalarBackgrounds(
+    rawLines: [String], range: Range<Int>, visibleRows: Range<Int>,
+    buffer: any TextDocumentReading
+  ) {
+    let states = markdownLineStates(for: buffer)
+    var runStart: Int?
+    for (offset, _) in rawLines.enumerated() {
+      let line = range.lowerBound + offset
+      let state =
+        line >= 0 && line < (states?.count ?? 0)
+        ? states?[line] ?? .plain
+        : .plain
+      if state.isFrontMatterBlockScalarContinuation {
+        if runStart == nil {
+          runStart = line
+        }
+      } else if let start = runStart {
+        drawMarkdownFrontMatterBlockScalarBackground(
+          fromLine: start, toLine: max(start, line - 1), visibleRows: visibleRows)
+        runStart = nil
+      }
+    }
+    if let start = runStart {
+      drawMarkdownFrontMatterBlockScalarBackground(
+        fromLine: start, toLine: max(start, range.upperBound - 1), visibleRows: visibleRows)
+    }
+  }
+
+  private func drawMarkdownFrontMatterBlockScalarBackground(
+    fromLine startLine: Int,
+    toLine endLine: Int,
+    visibleRows: Range<Int>
+  ) {
+    guard
+      let rect = markdownFrontMatterBlockScalarFrameForTesting(
+        fromLine: startLine,
+        toLine: endLine,
+        visibleRows: visibleRows)
+    else { return }
+    MarkdownDocumentMetrics.frontMatterBlockValueBackground.setFill()
+    NSBezierPath(
+      roundedRect: backingAlignedRect(rect, options: .alignAllEdgesNearest),
+      xRadius: MarkdownDocumentMetrics.frontMatterBlockValueCornerRadius,
+      yRadius: MarkdownDocumentMetrics.frontMatterBlockValueCornerRadius
+    )
+    .fill()
   }
 
   private func drawMarkdownBullet(markerX: CGFloat, y: CGFloat) {
@@ -5620,6 +5697,60 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       y: y,
       width: lineOuterContentWidth(forLine: startLine),
       height: bottom - y)
+  }
+
+  func markdownFrontMatterBlockScalarFrameForTesting(
+    fromLine startLine: Int,
+    toLine endLine: Int,
+    visibleRows: Range<Int>
+  ) -> NSRect? {
+    guard startLine >= 0, endLine >= startLine, endLine < lineCount else { return nil }
+    let startRow = firstVisualRow(ofLine: startLine)
+    let endRowCount = max(1, wrapIndex?.visualRowCount(ofLine: endLine) ?? 1)
+    let endRow = firstVisualRow(ofLine: endLine) + endRowCount
+    guard endRow > visibleRows.lowerBound, startRow < visibleRows.upperBound else { return nil }
+    let slabTop = yOffset(ofLine: startLine)
+    let slabBottom =
+      yOffset(ofLine: endLine) + leadingInset(forLine: endLine)
+      + rowHeight(forLine: endLine) * CGFloat(endRowCount)
+      + MarkdownDocumentMetrics.frontMatterBlockValueVerticalPadding
+    let y = max(slabTop, yOffset(ofVisualRow: visibleRows.lowerBound))
+    let bottom = min(slabBottom, yOffset(ofVisualRow: visibleRows.upperBound))
+    guard bottom > y else { return nil }
+    let padding = MarkdownDocumentMetrics.frontMatterBlockValueHorizontalPadding
+    let outerX = lineOuterColumnX(forLine: startLine)
+    let outerMaxX = outerX + lineOuterContentWidth(forLine: startLine)
+    let x = lineTextColumnX(forLine: startLine) - padding
+    let sideMargin = max(0, x - outerX)
+    let availableMaxX = outerMaxX - sideMargin
+    let naturalWidth =
+      markdownFrontMatterBlockScalarContentWidth(fromLine: startLine, toLine: endLine)
+      + padding * 2
+    let width = min(max(1, naturalWidth), max(1, availableMaxX - x))
+    return NSRect(
+      x: x,
+      y: y,
+      width: width,
+      height: bottom - y)
+  }
+
+  private func markdownFrontMatterBlockScalarContentWidth(
+    fromLine startLine: Int,
+    toLine endLine: Int
+  ) -> CGFloat {
+    var width: CGFloat = 0
+    for line in startLine...endLine where line >= 0 && line < lineCount {
+      let attributed = attributedLine(forLine: line)
+      let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
+      for rowIndex in starts.indices {
+        let bounds = rowRange(rowIndex, starts: starts, length: attributed.length)
+        guard bounds.end > bounds.start else { continue }
+        let rowText = attributed.attributedSubstring(
+          from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
+        width = max(width, rowText.size().width)
+      }
+    }
+    return width
   }
 
   func markdownFrontMatterChipRectsForTesting(line: Int) -> [NSRect] {

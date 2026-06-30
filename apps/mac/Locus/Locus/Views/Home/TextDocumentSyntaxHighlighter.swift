@@ -125,6 +125,12 @@ enum MarkdownDocumentMetrics {
   static let frontMatterChipHorizontalGap: CGFloat = 8
   static let frontMatterChipHeight: CGFloat = 24
   static let frontMatterChipCornerRadius: CGFloat = 7
+  static let frontMatterBlockValueTextInset: CGFloat = 16
+  static let frontMatterBlockValueHorizontalPadding: CGFloat = 14
+  static let frontMatterBlockValueVerticalPadding: CGFloat = 8
+  static let frontMatterBlockValueLineSpacing: CGFloat = 4
+  static let frontMatterBlockKeyValueSpacing: CGFloat = 6
+  static let frontMatterBlockValueCornerRadius: CGFloat = 8
   static let frontMatterKeyValueSeparator = "\n"
   static let frontMatterChipDisplaySeparator = "        "
   static let frontMatterKeyValueSeparatorLength =
@@ -213,6 +219,16 @@ enum MarkdownDocumentMetrics {
       return base.blended(withFraction: 0.10, of: .white) ?? base
     }
     return base.blended(withFraction: 0.04, of: .black) ?? base
+  }
+
+  static var frontMatterBlockValueBackground: NSColor {
+    let base = frontMatterBackground.usingColorSpace(.sRGB) ?? frontMatterBackground
+    let appearance = NSAppearance.currentDrawing()
+    let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    if dark {
+      return base.blended(withFraction: 0.08, of: .white) ?? base
+    }
+    return base.blended(withFraction: 0.025, of: .black) ?? base
   }
 
   static var ruleColor: NSColor { .separatorColor }
@@ -318,6 +334,11 @@ struct MarkdownFrontMatterField: Equatable, Sendable {
   }
 }
 
+struct MarkdownFrontMatterBlockScalar: Equatable, Sendable {
+  var key: String
+  var keyRange: NSRange
+}
+
 struct MarkdownLineStyleState: Equatable, Sendable {
   var insideFence = false
   var setextHeadingLevel: Int?
@@ -331,6 +352,9 @@ struct MarkdownLineStyleState: Equatable, Sendable {
   var isFrontMatterDelimiter = false
   /// Parsed metadata field for frontmatter rows that should be visible.
   var frontMatterField: MarkdownFrontMatterField?
+  /// YAML block scalar opener (`key: |` or `key: >`). Rendered mode hides the
+  /// marker and shows the following indented rows as one quiet value block.
+  var frontMatterBlockScalar: MarkdownFrontMatterBlockScalar?
   /// A YAML sequence item inside frontmatter. Standalone items render aligned
   /// with the value column; items collected by the preceding key render as chips
   /// on that key's row and leave this source row concealed in rendered mode.
@@ -338,6 +362,9 @@ struct MarkdownLineStyleState: Equatable, Sendable {
   /// True when this sequence line has been visually collected into the previous
   /// frontmatter field row.
   var isFrontMatterSequenceContinuation = false
+  var isFrontMatterBlockScalarContinuation = false
+  var isFrontMatterBlockScalarContinuationFirst = false
+  var isFrontMatterBlockScalarContinuationLast = false
   var isFenceDelimiter = false
   /// True for the opening fence delimiter of a block (vs the closer). The
   /// authoritative opener/closer distinction from the pairing pass, so callers
@@ -848,7 +875,15 @@ enum TextDocumentSyntaxHighlighter {
       attributed.addAttribute(
         .kern, value: MarkdownDocumentMetrics.codeCaptionTracking, range: fullRange)
     }
-    if state.insideFrontMatter, state.frontMatterSequenceValue != nil {
+    if state.insideFrontMatter, state.frontMatterBlockScalar != nil {
+      applyMarkdownFrontMatterBlockScalarAttributes(
+        to: attributed,
+        includeVisualAttributes: includeVisualAttributes)
+    } else if state.insideFrontMatter, state.isFrontMatterBlockScalarContinuation {
+      applyMarkdownFrontMatterBlockScalarContinuationAttributes(
+        to: attributed,
+        includeVisualAttributes: includeVisualAttributes)
+    } else if state.insideFrontMatter, state.frontMatterSequenceValue != nil {
       applyMarkdownFrontMatterSequenceAttributes(
         to: attributed,
         includeVisualAttributes: includeVisualAttributes)
@@ -932,6 +967,18 @@ enum TextDocumentSyntaxHighlighter {
     let context = markdownLineContext(in: line)
 
     if state.insideFrontMatter {
+      if state.frontMatterBlockScalar != nil {
+        return block(
+          displayFont: MarkdownDocumentMetrics.frontMatterKeyFont,
+          foregroundColor: .tertiaryLabelColor,
+          stylesInline: false)
+      }
+      if state.isFrontMatterBlockScalarContinuation {
+        return block(
+          displayFont: MarkdownDocumentMetrics.frontMatterValueFont,
+          foregroundColor: .secondaryLabelColor,
+          stylesInline: false)
+      }
       if state.frontMatterSequenceValue != nil {
         return block(
           displayFont: MarkdownDocumentMetrics.frontMatterValueFont,
@@ -1055,6 +1102,12 @@ enum TextDocumentSyntaxHighlighter {
     if state.insideFrontMatter {
       if markdownFrontMatterDelimiter(in: line) {
         return .empty(sourceText: line)
+      }
+      if let block = state.frontMatterBlockScalar {
+        return markdownFrontMatterBlockScalarDisplayMap(for: block, sourceText: line)
+      }
+      if state.isFrontMatterBlockScalarContinuation {
+        return markdownFrontMatterBlockScalarContinuationDisplayMap(for: line)
       }
       if state.isFrontMatterSequenceContinuation {
         return .empty(
@@ -1309,6 +1362,28 @@ enum TextDocumentSyntaxHighlighter {
       characterRanges: ranges)
   }
 
+  private static func markdownFrontMatterBlockScalarDisplayMap(
+    for block: MarkdownFrontMatterBlockScalar,
+    sourceText: String
+  ) -> MarkdownDisplayMap {
+    .map(sourceText: sourceText, displayText: block.key, sourceStart: block.keyRange.location)
+  }
+
+  private static func markdownFrontMatterBlockScalarContinuationDisplayMap(
+    for line: String
+  ) -> MarkdownDisplayMap {
+    let nsLine = line as NSString
+    let lineRange = NSRange(location: 0, length: nsLine.length)
+    let visibleRange = trimmedLeadingWhitespaceRange(in: nsLine, range: lineRange)
+    guard visibleRange.length > 0 else {
+      return .empty(sourceText: line, insertionColumn: nsLine.length)
+    }
+    return .map(
+      sourceText: line,
+      displayText: nsLine.substring(with: visibleRange),
+      sourceStart: visibleRange.location)
+  }
+
   private static func markdownFrontMatterSequenceDisplayMap(
     for value: MarkdownFrontMatterValue,
     sourceText: String
@@ -1334,6 +1409,38 @@ enum TextDocumentSyntaxHighlighter {
       displayText: display,
       boundaryColumns: boundaries,
       characterRanges: ranges)
+  }
+
+  private static func markdownFrontMatterBlockScalar(in line: String)
+    -> MarkdownFrontMatterBlockScalar?
+  {
+    let nsLine = line as NSString
+    let length = nsLine.length
+    guard let colon = (0..<length).first(where: { nsLine.character(at: $0) == 58 }) else {
+      return nil
+    }
+
+    let keyRange = trimmedRange(in: nsLine, range: NSRange(location: 0, length: colon))
+    guard keyRange.length > 0 else { return nil }
+    let key = nsLine.substring(with: keyRange)
+    guard !key.hasPrefix("- ") else { return nil }
+    let valueRange = trimmedRange(
+      in: nsLine,
+      range: NSRange(location: min(length, colon + 1), length: max(0, length - colon - 1)))
+    guard valueRange.length > 0 else { return nil }
+    let marker = nsLine.character(at: valueRange.location)
+    guard marker == 124 || marker == 62 else { return nil }  // `|` or `>`
+    var index = valueRange.location + 1
+    while index < NSMaxRange(valueRange) {
+      let character = nsLine.character(at: index)
+      guard character == 43 || character == 45 || (character >= 48 && character <= 57) else {
+        return nil
+      }
+      index += 1
+    }
+    return MarkdownFrontMatterBlockScalar(
+      key: key,
+      keyRange: keyRange)
   }
 
   private static func markdownFrontMatterBracketValues(
@@ -1432,6 +1539,18 @@ enum TextDocumentSyntaxHighlighter {
       let character = nsLine.character(at: end - 1)
       guard character == 32 || character == 9 else { break }
       end -= 1
+    }
+    return NSRange(location: start, length: max(0, end - start))
+  }
+
+  private static func trimmedLeadingWhitespaceRange(in nsLine: NSString, range: NSRange) -> NSRange
+  {
+    var start = max(0, range.location)
+    let end = min(nsLine.length, NSMaxRange(range))
+    while start < end {
+      let character = nsLine.character(at: start)
+      guard character == 32 || character == 9 else { break }
+      start += 1
     }
     return NSRange(location: start, length: max(0, end - start))
   }
@@ -2585,7 +2704,18 @@ enum TextDocumentSyntaxHighlighter {
     guard closingIndex > 1 else { return }
     var index = 1
     while index < closingIndex {
-      if let value = markdownFrontMatterSequenceValue(in: lines[index]) {
+      if let block = markdownFrontMatterBlockScalar(in: lines[index]) {
+        states[index].frontMatterBlockScalar = block
+        let continuationRange = markFrontMatterBlockScalarContinuations(
+          after: index,
+          in: lines,
+          closingIndex: closingIndex,
+          states: &states)
+        if let continuationRange {
+          index = continuationRange.upperBound
+          continue
+        }
+      } else if let value = markdownFrontMatterSequenceValue(in: lines[index]) {
         states[index].frontMatterSequenceValue = value
       } else if let field = markdownFrontMatterField(in: lines[index]) {
         if frontMatterFieldCanCollectSequenceValues(field, in: lines[index]) {
@@ -2610,6 +2740,36 @@ enum TextDocumentSyntaxHighlighter {
       }
       index += 1
     }
+  }
+
+  private static func markFrontMatterBlockScalarContinuations(
+    after fieldIndex: Int,
+    in lines: [String],
+    closingIndex: Int,
+    states: inout [MarkdownLineStyleState]
+  ) -> Range<Int>? {
+    var index = fieldIndex + 1
+    var continuationIndices: [Int] = []
+    while index < closingIndex {
+      guard frontMatterLineContinuesBlockScalar(lines[index]) else { break }
+      states[index].isFrontMatterBlockScalarContinuation = true
+      continuationIndices.append(index)
+      index += 1
+    }
+    guard let first = continuationIndices.first, let last = continuationIndices.last else {
+      return nil
+    }
+    states[first].isFrontMatterBlockScalarContinuationFirst = true
+    states[last].isFrontMatterBlockScalarContinuationLast = true
+    return first..<(last + 1)
+  }
+
+  private static func frontMatterLineContinuesBlockScalar(_ line: String) -> Bool {
+    let nsLine = line as NSString
+    let range = NSRange(location: 0, length: nsLine.length)
+    let trimmed = trimmedRange(in: nsLine, range: range)
+    guard trimmed.length > 0 else { return true }
+    return trimmed.location > 0
   }
 
   private static func frontMatterFieldCanCollectSequenceValues(
@@ -3197,6 +3357,41 @@ enum TextDocumentSyntaxHighlighter {
         attributed.addAttribute(.foregroundColor, value: NSColor.labelColor, range: range)
       }
       offset += length
+    }
+  }
+
+  private static func applyMarkdownFrontMatterBlockScalarAttributes(
+    to attributed: NSMutableAttributedString,
+    includeVisualAttributes: Bool
+  ) {
+    let fullRange = NSRange(location: 0, length: attributed.length)
+    guard fullRange.length > 0 else { return }
+    attributed.addAttribute(
+      .paragraphStyle,
+      value: markdownFrontMatterParagraphStyle(rendersValuesAsChips: false),
+      range: fullRange)
+    attributed.addAttribute(
+      .font, value: MarkdownDocumentMetrics.frontMatterKeyFont, range: fullRange)
+    if includeVisualAttributes {
+      attributed.addAttribute(.foregroundColor, value: NSColor.tertiaryLabelColor, range: fullRange)
+    }
+  }
+
+  private static func applyMarkdownFrontMatterBlockScalarContinuationAttributes(
+    to attributed: NSMutableAttributedString,
+    includeVisualAttributes: Bool
+  ) {
+    let fullRange = NSRange(location: 0, length: attributed.length)
+    guard fullRange.length > 0 else { return }
+    attributed.addAttribute(
+      .paragraphStyle,
+      value: markdownFrontMatterParagraphStyle(rendersValuesAsChips: false),
+      range: fullRange)
+    attributed.addAttribute(
+      .font, value: MarkdownDocumentMetrics.frontMatterValueFont, range: fullRange)
+    if includeVisualAttributes {
+      attributed.addAttribute(
+        .foregroundColor, value: NSColor.secondaryLabelColor, range: fullRange)
     }
   }
 

@@ -1059,6 +1059,108 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testMarkdownFrontMatterContentKeepsSymmetricHorizontalPadding() throws {
+    let view = try makeViewer(
+      "---\ndescription: Comprehensive PDF toolkit for extracting text and tables, merging, splitting, and handling forms.\nstatus: draft\n---\n# Body"
+    )
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let frame = try XCTUnwrap(
+      view.markdownFrontMatterFrameForTesting(
+        fromLine: 0, toLine: 3, visibleRows: 0..<view.visualRowCount))
+    let textX = view.markdownTextColumnXForTesting(line: 1)
+    let textWidth = view.markdownWrapContentWidthForTesting(line: 1)
+    let leftPadding = textX - frame.minX
+    let rightPadding = frame.maxX - (textX + textWidth)
+
+    XCTAssertEqual(leftPadding, MarkdownDocumentMetrics.frontMatterHorizontalInset, accuracy: 0.5)
+    XCTAssertEqual(rightPadding, leftPadding, accuracy: 0.5)
+  }
+
+  @MainActor
+  func testMarkdownFrontMatterBlockScalarsRenderAsQuietValueCard() throws {
+    let view = try makeViewer(
+      "---\nmultiline-literal: |\n  First line of a literal value.\n  Second line should stay grouped.\nstatus: x\n---\n# Body"
+    )
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    XCTAssertEqual(view.attributedLineStringForTesting(line: 1), "multiline-literal")
+    XCTAssertEqual(view.attributedLineStringForTesting(line: 2), "First line of a literal value.")
+    XCTAssertEqual(view.attributedLineStringForTesting(line: 3), "Second line should stay grouped.")
+
+    let frontMatterFrame = try XCTUnwrap(
+      view.markdownFrontMatterFrameForTesting(
+        fromLine: 0, toLine: 5, visibleRows: 0..<view.visualRowCount))
+    let blockFrame = try XCTUnwrap(
+      view.markdownFrontMatterBlockScalarFrameForTesting(
+        fromLine: 2, toLine: 3, visibleRows: 0..<view.visualRowCount))
+    XCTAssertGreaterThan(blockFrame.minX, frontMatterFrame.minX)
+    XCTAssertLessThan(blockFrame.maxX, frontMatterFrame.maxX - 24)
+    XCTAssertGreaterThan(
+      try XCTUnwrap(view.endpointYForTesting(line: 4)),
+      blockFrame.maxY)
+  }
+
+  @MainActor
+  func testMarkdownFrontMatterBlockScalarCardKeepsSymmetricHorizontalMargins() throws {
+    let value = String(repeating: "WideValue", count: 32)
+    let view = try makeViewer(
+      "---\nmultiline-folded: >\n  \(value)\nstatus: x\n---\n# Body"
+    )
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let frontMatterFrame = try XCTUnwrap(
+      view.markdownFrontMatterFrameForTesting(
+        fromLine: 0, toLine: 4, visibleRows: 0..<view.visualRowCount))
+    let blockFrame = try XCTUnwrap(
+      view.markdownFrontMatterBlockScalarFrameForTesting(
+        fromLine: 2, toLine: 2, visibleRows: 0..<view.visualRowCount))
+    let leftMargin = blockFrame.minX - frontMatterFrame.minX
+    let rightMargin = frontMatterFrame.maxX - blockFrame.maxX
+    XCTAssertGreaterThan(leftMargin, 0)
+    XCTAssertGreaterThanOrEqual(rightMargin, leftMargin - 0.5)
+  }
+
+  @MainActor
+  func testMarkdownFrontMatterBlockScalarIndicatorsRenderAsKeys() throws {
+    let view = try makeViewer(
+      "---\nliteral-strip: |-\n  keep this\nfolded-keep: >+\n  keep that\nliteral-indent: |2\n  indented\n---\n# Body"
+    )
+    view.setFrameSize(NSSize(width: 520, height: 400))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    XCTAssertEqual(view.attributedLineStringForTesting(line: 1), "literal-strip")
+    XCTAssertEqual(view.attributedLineStringForTesting(line: 2), "keep this")
+    XCTAssertEqual(view.attributedLineStringForTesting(line: 3), "folded-keep")
+    XCTAssertEqual(view.attributedLineStringForTesting(line: 4), "keep that")
+    XCTAssertEqual(view.attributedLineStringForTesting(line: 5), "literal-indent")
+    XCTAssertEqual(view.attributedLineStringForTesting(line: 6), "indented")
+  }
+
+  @MainActor
+  func testFrontMatterBlockScalarContinuationRemainsEditableInRenderedMode() throws {
+    let contents = "---\nmultiline-literal: |\n  First line\n---"
+    let view = try makeEditableViewer(contents)
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let insertionColumn = ("First" as NSString).length
+    view.setSelectionForTesting(
+      anchor: .init(line: 2, columnUTF16: insertionColumn),
+      head: .init(line: 2, columnUTF16: insertionColumn))
+    view.insertText(" edited")
+
+    XCTAssertEqual(content(of: view), "---\nmultiline-literal: |\n  First edited line\n---")
+  }
+
+  @MainActor
   func testMarkdownFrontMatterSequenceRowsCollapseIntoCollectedChipRow() throws {
     let view = try makeViewer(
       "---\ntitle: Markdown Syntax Coverage\nreviewers:\n  - dario\n  - altman\n  - musk\ntags:\n  - markdown\n  - rendering\n---\n# Body"
