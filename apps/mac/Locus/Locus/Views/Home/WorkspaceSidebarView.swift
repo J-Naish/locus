@@ -1091,6 +1091,7 @@ private enum WorkspaceSidebarMetrics {
   static let depthIndent: CGFloat = 14
   static let chevronColumnWidth: CGFloat = 10
   static let iconColumnWidth: CGFloat = 18
+  static let systemIconFontSize: CGFloat = 15
   static let recentFoldersHeaderHeight: CGFloat = 28
   static let recentFolderRowHeight: CGFloat = 28
   static let recentFoldersMaximumHeight: CGFloat = 224
@@ -1505,21 +1506,14 @@ private struct WorkspaceSidebarEntryIcon: View {
   let gitStatus: GitWorkspaceChangeKind?
 
   var body: some View {
-    ZStack(alignment: .bottomTrailing) {
-      Image(systemName: entry.symbolName)
-        .foregroundStyle(gitStatus?.dimsSidebarSymbol == true ? .secondary : entry.symbolColor)
-
-      if entry.kind.isSymlink {
-        Image(systemName: "arrowshape.turn.up.right.fill")
-          .font(.system(size: WorkspaceSidebarMetrics.symlinkBadgeSize, weight: .semibold))
-          .foregroundStyle(.secondary)
-          .offset(
-            x: WorkspaceSidebarMetrics.symlinkBadgeOffset.width,
-            y: WorkspaceSidebarMetrics.symlinkBadgeOffset.height
-          )
-          .accessibilityHidden(true)
-      }
-    }
+    WorkspaceEntryIconImage(
+      entry: entry,
+      dimension: WorkspaceSidebarMetrics.iconColumnWidth,
+      systemFontSize: WorkspaceSidebarMetrics.systemIconFontSize,
+      symlinkBadgeSize: WorkspaceSidebarMetrics.symlinkBadgeSize,
+      symlinkBadgeOffset: WorkspaceSidebarMetrics.symlinkBadgeOffset,
+      isDimmed: gitStatus?.dimsSidebarSymbol == true
+    )
     // Reserve a square so every row has the same icon height regardless of the
     // symbol (e.g. a tall `doc` vs a short `folder`); otherwise rows differ in
     // height and the hover/selection highlight rounds inconsistently between

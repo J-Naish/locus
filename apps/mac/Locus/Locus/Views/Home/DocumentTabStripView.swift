@@ -183,6 +183,8 @@ enum DocumentTabStripMetrics {
   static let chipTrailingPadding: CGFloat = 14
   static let chipVerticalPadding: CGFloat = 6
   static let documentIconFontSize: CGFloat = 11
+  static let documentSymlinkBadgeSize: CGFloat = 6
+  static let documentSymlinkBadgeOffset = CGSize(width: 3, height: 2)
   static let closeIconFontSize: CGFloat = 9
   static let closeHitTarget: CGFloat = 16
   static let inactiveHoverOpacity: Double = 0.08
@@ -559,9 +561,14 @@ private struct DocumentTabChip: View {
           )
           .overlay {
             if !showsCloseButton {
-              Image(systemName: "doc.text")
-                .font(.system(size: DocumentTabStripMetrics.documentIconFontSize))
-                .foregroundStyle(.tertiary)
+              WorkspaceEntryIconImage(
+                entry: tab.entry,
+                dimension: DocumentTabStripMetrics.closeHitTarget,
+                systemFontSize: DocumentTabStripMetrics.documentIconFontSize,
+                symlinkBadgeSize: DocumentTabStripMetrics.documentSymlinkBadgeSize,
+                symlinkBadgeOffset: DocumentTabStripMetrics.documentSymlinkBadgeOffset,
+                isDimmed: !isActive
+              )
             }
           }
 

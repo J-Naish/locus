@@ -3,6 +3,71 @@ import XCTest
 @testable import Locus
 
 final class WorkspaceEntryOpenActionTests: XCTestCase {
+  func testWorkspaceFileIconUsesClaudeAssetForClaudeMarkdown() {
+    XCTAssertEqual(
+      WorkspaceFileIcon.assetName(forFileName: "CLAUDE.md"),
+      "fileicon-claude"
+    )
+  }
+
+  func testWorkspaceFileIconMapsProvidedLanguageExtensions() {
+    let cases: [(String, String)] = [
+      ("index.js", "fileicon-javascript"),
+      ("component.tsx", "fileicon-typescript"),
+      ("README.md", "fileicon-markdown"),
+      ("config.yaml", "fileicon-yaml"),
+      ("Widget.vue", "fileicon-vue"),
+      ("page.astro", "fileicon-astro"),
+      ("main.c", "fileicon-c"),
+      ("mix.exs", "fileicon-elixir"),
+      ("main.dart", "fileicon-flutter"),
+      ("solver.f90", "fileicon-fortran"),
+      ("mcp.json", "fileicon-mcp"),
+      ("gatsby-config.js", "fileicon-gatsby"),
+      ("welcome.blade.php", "fileicon-laravel"),
+    ]
+
+    for (fileName, assetName) in cases {
+      XCTAssertEqual(
+        WorkspaceFileIcon.assetName(forFileName: fileName),
+        assetName,
+        fileName
+      )
+    }
+  }
+
+  func testWorkspaceFileIconFallsBackForUnknownExtension() {
+    XCTAssertNil(WorkspaceFileIcon.assetName(forFileName: "archive.unknown"))
+  }
+
+  func testWorkspaceFileIconUsesURLExtensionWhenDisplayNameHasNoExtension() {
+    XCTAssertEqual(
+      WorkspaceFileIcon.assetName(
+        forFileName: "README",
+        url: URL(filePath: "/tmp/locus-test/README.md")
+      ),
+      "fileicon-markdown"
+    )
+  }
+
+  func testWorkspaceFileIconUsesNeutralBaseForUnresolvedSymlink() {
+    let entry = makeWorkspaceEntry(name: "broken", kind: .symlink, fileType: .unknown)
+    let icon = WorkspaceFileIcon(entry: entry)
+
+    XCTAssertNil(icon.assetName)
+    XCTAssertEqual(icon.systemName, "doc")
+    XCTAssertEqual(icon.systemColor, .secondary)
+  }
+
+  func testWorkspaceFileIconUsesFolderBaseForDirectorySymlink() {
+    let entry = makeWorkspaceEntry(name: "linked-docs", kind: .symlinkToDirectory)
+    let icon = WorkspaceFileIcon(entry: entry)
+
+    XCTAssertNil(icon.assetName)
+    XCTAssertEqual(icon.systemName, "folder")
+    XCTAssertEqual(icon.systemColor, .blue)
+  }
+
   func testSingleDirectoryBrowsesInLocus() {
     let entry = makeWorkspaceEntry(name: "Drafts", kind: .directory)
 
