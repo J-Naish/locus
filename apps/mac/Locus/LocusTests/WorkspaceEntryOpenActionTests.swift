@@ -13,18 +13,73 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
   func testWorkspaceFileIconMapsProvidedLanguageExtensions() {
     let cases: [(String, String)] = [
       ("index.js", "fileicon-javascript"),
-      ("component.tsx", "fileicon-typescript"),
+      ("component.tsx", "fileicon-react"),
       ("README.md", "fileicon-markdown"),
       ("config.yaml", "fileicon-yaml"),
       ("Widget.vue", "fileicon-vue"),
       ("page.astro", "fileicon-astro"),
       ("main.c", "fileicon-c"),
+      ("widget.cs", "fileicon-csharp"),
+      ("engine.cpp", "fileicon-cpp"),
+      ("styles.css", "fileicon-css"),
       ("mix.exs", "fileicon-elixir"),
-      ("main.dart", "fileicon-flutter"),
+      ("server.erl", "fileicon-erlang"),
+      ("main.dart", "fileicon-dart"),
       ("solver.f90", "fileicon-fortran"),
+      ("main.go", "fileicon-go"),
+      ("schema.graphql", "fileicon-graphql"),
+      ("index.html", "fileicon-html"),
+      ("data.json", "fileicon-json"),
+      ("notebook.ipynb", "fileicon-jupyter"),
+      ("paper.tex", "fileicon-latex"),
+      ("fragment.glsl", "fileicon-opengl"),
+      ("index.php", "fileicon-php"),
+      ("script.py", "fileicon-python"),
+      ("analysis.r", "fileicon-r"),
+      ("component.jsx", "fileicon-react"),
+      ("task.rb", "fileicon-ruby"),
+      ("lib.rs", "fileicon-rust"),
+      ("contract.sol", "fileicon-solidity"),
+      ("Widget.svelte", "fileicon-svelte"),
+      ("App.swift", "fileicon-swift"),
+      ("main.tf", "fileicon-terraform"),
+      ("config.toml", "fileicon-toml"),
+      ("layout.xml", "fileicon-xml"),
+      ("main.zig", "fileicon-zig"),
       ("mcp.json", "fileicon-mcp"),
       ("gatsby-config.js", "fileicon-gatsby"),
       ("welcome.blade.php", "fileicon-laravel"),
+    ]
+
+    for (fileName, assetName) in cases {
+      XCTAssertEqual(
+        WorkspaceFileIcon.assetName(forFileName: fileName),
+        assetName,
+        fileName
+      )
+    }
+  }
+
+  func testWorkspaceFileIconMapsProvidedProjectFileNames() {
+    let cases: [(String, String)] = [
+      ("angular.json", "fileicon-angular"),
+      ("app.component.ts", "fileicon-angular"),
+      ("wrangler.toml", "fileicon-cloudflare"),
+      (".eslintrc.json", "fileicon-eslint"),
+      ("eslint.config.js", "fileicon-eslint"),
+      (".gitignore", "fileicon-git"),
+      ("Cargo.toml", "fileicon-rust"),
+      ("dataset-metadata.json", "fileicon-kaggle"),
+      ("Gemfile", "fileicon-ruby"),
+      ("go.mod", "fileicon-go"),
+      ("kustomization.yaml", "fileicon-kubernetes"),
+      ("deployment.k8s.yaml", "fileicon-kubernetes"),
+      ("Pipfile", "fileicon-python"),
+      ("pyproject.toml", "fileicon-python"),
+      ("pom.xml", "fileicon-java"),
+      ("pubspec.yaml", "fileicon-flutter"),
+      ("rebar.config", "fileicon-erlang"),
+      (".terraform.lock.hcl", "fileicon-terraform"),
     ]
 
     for (fileName, assetName) in cases {

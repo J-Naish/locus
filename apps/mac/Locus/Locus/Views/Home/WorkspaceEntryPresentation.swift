@@ -99,12 +99,41 @@ struct WorkspaceFileIcon: Equatable, Sendable {
     let lowerExtension = pathExtension.lowercased()
 
     switch lowerName {
+    case ".dev.vars", "wrangler.json", "wrangler.toml":
+      return "fileicon-cloudflare"
+    case ".eslintrc", ".eslintrc.cjs", ".eslintrc.js", ".eslintrc.json", ".eslintrc.yaml",
+      ".eslintrc.yml", "eslint.config.cjs", "eslint.config.js", "eslint.config.mjs",
+      "eslint.config.ts":
+      return "fileicon-eslint"
+    case ".gitattributes", ".gitconfig", ".gitignore", ".gitkeep", ".gitmodules", ".mailmap",
+      "gitconfig":
+      return "fileicon-git"
+    case ".terraform.lock.hcl":
+      return "fileicon-terraform"
+    case "angular.json":
+      return "fileicon-angular"
     case "claude.md":
       return "fileicon-claude"
+    case "cargo.lock", "cargo.toml":
+      return "fileicon-rust"
+    case "dataset-metadata.json", "kaggle.json", "kernel-metadata.json":
+      return "fileicon-kaggle"
+    case "gemfile", "rakefile":
+      return "fileicon-ruby"
+    case "go.mod", "go.sum", "go.work":
+      return "fileicon-go"
+    case "kustomization.yaml", "kustomization.yml":
+      return "fileicon-kubernetes"
     case "mcp.json", ".mcp.json", "mcp.yaml", "mcp.yml":
       return "fileicon-mcp"
+    case "pipfile", "poetry.lock", "pyproject.toml", "requirements.txt":
+      return "fileicon-python"
+    case "pom.xml":
+      return "fileicon-java"
     case "pubspec.yaml", "pubspec.yml":
       return "fileicon-flutter"
+    case "rebar.config":
+      return "fileicon-erlang"
     case "gatsby-config.js", "gatsby-config.ts", "gatsby-node.js", "gatsby-browser.js",
       "gatsby-ssr.js":
       return "fileicon-gatsby"
@@ -117,31 +146,106 @@ struct WorkspaceFileIcon: Equatable, Sendable {
     if lowerName.hasSuffix(".blade.php") {
       return "fileicon-laravel"
     }
+    if Self.isAngularFile(lowerName) {
+      return "fileicon-angular"
+    }
+    if lowerName.hasSuffix(".k8s.yaml") || lowerName.hasSuffix(".k8s.yml")
+      || lowerName.hasSuffix(".kubernetes.yaml") || lowerName.hasSuffix(".kubernetes.yml")
+    {
+      return "fileicon-kubernetes"
+    }
 
     switch lowerExtension {
+    case "cs", "csproj", "csx", "sln":
+      return "fileicon-csharp"
+    case "cpp", "cxx", "cc", "hpp", "hh", "hxx", "ipp", "ixx", "tpp":
+      return "fileicon-cpp"
     case "md", "markdown", "mdx":
       return "fileicon-markdown"
+    case "json", "json5", "jsonc":
+      return "fileicon-json"
+    case "toml":
+      return "fileicon-toml"
     case "yml", "yaml":
       return "fileicon-yaml"
-    case "js", "mjs", "cjs", "jsx":
+    case "js", "mjs", "cjs":
       return "fileicon-javascript"
-    case "ts", "mts", "cts", "tsx":
+    case "jsx", "tsx":
+      return "fileicon-react"
+    case "ts", "mts", "cts":
       return "fileicon-typescript"
+    case "html", "htm", "xhtml":
+      return "fileicon-html"
+    case "css":
+      return "fileicon-css"
     case "vue":
       return "fileicon-vue"
+    case "svelte":
+      return "fileicon-svelte"
     case "astro":
       return "fileicon-astro"
     case "c", "h":
       return "fileicon-c"
     case "ex", "exs":
       return "fileicon-elixir"
+    case "erl", "hrl":
+      return "fileicon-erlang"
     case "dart":
-      return "fileicon-flutter"
+      return "fileicon-dart"
+    case "go":
+      return "fileicon-go"
+    case "graphql", "gql":
+      return "fileicon-graphql"
+    case "java", "gradle":
+      return "fileicon-java"
+    case "ipynb":
+      return "fileicon-jupyter"
+    case "tex", "sty", "cls", "bib":
+      return "fileicon-latex"
+    case "glsl", "vert", "frag", "geom", "tesc", "tese", "comp", "shader":
+      return "fileicon-opengl"
+    case "php", "phtml":
+      return "fileicon-php"
+    case "py", "pyi", "pyw":
+      return "fileicon-python"
+    case "r", "rmd", "rproj":
+      return "fileicon-r"
+    case "rb", "rake", "gemspec":
+      return "fileicon-ruby"
+    case "rs":
+      return "fileicon-rust"
+    case "sol":
+      return "fileicon-solidity"
+    case "swift":
+      return "fileicon-swift"
+    case "tf", "tfvars", "hcl":
+      return "fileicon-terraform"
+    case "xml", "xsd", "xslt", "plist", "storyboard", "xib":
+      return "fileicon-xml"
+    case "zig", "zon":
+      return "fileicon-zig"
     case "f", "for", "f77", "f90", "f95", "f03", "f08":
       return "fileicon-fortran"
     default:
       return nil
     }
+  }
+
+  private static func isAngularFile(_ lowerName: String) -> Bool {
+    [
+      ".component.ts",
+      ".component.html",
+      ".component.css",
+      ".component.scss",
+      ".component.sass",
+      ".directive.ts",
+      ".guard.ts",
+      ".module.ts",
+      ".pipe.ts",
+      ".resolver.ts",
+      ".routes.ts",
+      ".service.ts",
+    ].contains { lowerName.hasSuffix($0) }
   }
 }
 
