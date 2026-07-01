@@ -49,6 +49,23 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
       ("mcp.json", "fileicon-mcp"),
       ("gatsby-config.js", "fileicon-gatsby"),
       ("welcome.blade.php", "fileicon-laravel"),
+      ("poster.ai", "fileicon-illustrator"),
+      ("mockup.psd", "fileicon-photoshop"),
+      ("cut.prproj", "fileicon-premiere"),
+      ("prototype.xd", "fileicon-xd"),
+      ("composition.aep", "fileicon-after-effects"),
+      ("styles.scss", "fileicon-scss"),
+      ("theme.less", "fileicon-less"),
+      ("Program.fs", "fileicon-fsharp"),
+      ("Main.hs", "fileicon-haskell"),
+      ("Main.kt", "fileicon-kotlin"),
+      ("script.lua", "fileicon-lua"),
+      ("main.ml", "fileicon-ocaml"),
+      ("Controller.m", "fileicon-objectivec"),
+      ("script.pl", "fileicon-perl"),
+      ("app.sqlite", "fileicon-sqlite"),
+      ("build.scala", "fileicon-scala"),
+      ("analysis.jl", "fileicon-julia"),
     ]
 
     for (fileName, assetName) in cases {
@@ -80,6 +97,18 @@ final class WorkspaceEntryOpenActionTests: XCTestCase {
       ("pubspec.yaml", "fileicon-flutter"),
       ("rebar.config", "fileicon-erlang"),
       (".terraform.lock.hcl", "fileicon-terraform"),
+      ("Dockerfile", "fileicon-docker"),
+      ("docker-compose.yml", "fileicon-docker"),
+      ("CODEOWNERS", "fileicon-github"),
+      ("dependabot.yml", "fileicon-github"),
+      ("Jenkinsfile", "fileicon-jenkins"),
+      ("next.config.ts", "fileicon-nextjs"),
+      ("nuxt.config.ts", "fileicon-nuxt"),
+      ("tailwind.config.ts", "fileicon-tailwind"),
+      ("vite.config.ts", "fileicon-vite"),
+      ("build.sbt", "fileicon-scala"),
+      ("stack.yaml", "fileicon-haskell"),
+      ("dune-project", "fileicon-ocaml"),
     ]
 
     for (fileName, assetName) in cases {

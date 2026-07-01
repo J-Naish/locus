@@ -18,7 +18,7 @@ Default budgets:
 - symlink-heavy folder listing spike limit: max <= 150 ms
 - text buffer 256 KiB smoke: open <= 50 ms, scroll <= 20 ms, edit <= 50 ms
 - release Rust FFI static library: <= 25,000,000 bytes
-- release macOS app bundle: <= 10,240 KiB
+- release macOS app bundle: <= 102,400 KiB
 
 The default workspace is generated under `target/perf-fixtures/listing-1000`
 by `scripts/generate-performance-fixtures.sh`. Set

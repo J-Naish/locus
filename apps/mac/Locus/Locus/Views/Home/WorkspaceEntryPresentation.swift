@@ -99,6 +99,9 @@ struct WorkspaceFileIcon: Equatable, Sendable {
     let lowerExtension = pathExtension.lowercased()
 
     switch lowerName {
+    case ".dockerignore", "dockerfile", "docker-compose.yaml", "docker-compose.yml",
+      "compose.yaml", "compose.yml":
+      return "fileicon-docker"
     case ".dev.vars", "wrangler.json", "wrangler.toml":
       return "fileicon-cloudflare"
     case ".eslintrc", ".eslintrc.cjs", ".eslintrc.js", ".eslintrc.json", ".eslintrc.yaml",
@@ -108,6 +111,8 @@ struct WorkspaceFileIcon: Equatable, Sendable {
     case ".gitattributes", ".gitconfig", ".gitignore", ".gitkeep", ".gitmodules", ".mailmap",
       "gitconfig":
       return "fileicon-git"
+    case "codeowners", "dependabot.yaml", "dependabot.yml", "funding.yaml", "funding.yml":
+      return "fileicon-github"
     case ".terraform.lock.hcl":
       return "fileicon-terraform"
     case "angular.json":
@@ -122,10 +127,22 @@ struct WorkspaceFileIcon: Equatable, Sendable {
       return "fileicon-ruby"
     case "go.mod", "go.sum", "go.work":
       return "fileicon-go"
+    case "jenkinsfile":
+      return "fileicon-jenkins"
     case "kustomization.yaml", "kustomization.yml":
       return "fileicon-kubernetes"
+    case "next.config.cjs", "next.config.js", "next.config.mjs", "next.config.ts":
+      return "fileicon-nextjs"
+    case "nuxt.config.cjs", "nuxt.config.js", "nuxt.config.mjs", "nuxt.config.ts":
+      return "fileicon-nuxt"
     case "mcp.json", ".mcp.json", "mcp.yaml", "mcp.yml":
       return "fileicon-mcp"
+    case "build.sbt":
+      return "fileicon-scala"
+    case "cabal.project", "package.yaml", "stack.yaml":
+      return "fileicon-haskell"
+    case "dune", "dune-project":
+      return "fileicon-ocaml"
     case "pipfile", "poetry.lock", "pyproject.toml", "requirements.txt":
       return "fileicon-python"
     case "pom.xml":
@@ -134,6 +151,11 @@ struct WorkspaceFileIcon: Equatable, Sendable {
       return "fileicon-flutter"
     case "rebar.config":
       return "fileicon-erlang"
+    case "tailwind.config.cjs", "tailwind.config.js", "tailwind.config.mjs", "tailwind.config.ts":
+      return "fileicon-tailwind"
+    case "vite.config.cjs", "vite.config.js", "vite.config.mjs", "vite.config.mts",
+      "vite.config.ts":
+      return "fileicon-vite"
     case "gatsby-config.js", "gatsby-config.ts", "gatsby-node.js", "gatsby-browser.js",
       "gatsby-ssr.js":
       return "fileicon-gatsby"
@@ -156,6 +178,16 @@ struct WorkspaceFileIcon: Equatable, Sendable {
     }
 
     switch lowerExtension {
+    case "ai", "ait":
+      return "fileicon-illustrator"
+    case "psb", "psd":
+      return "fileicon-photoshop"
+    case "prproj", "mogrt":
+      return "fileicon-premiere"
+    case "xd":
+      return "fileicon-xd"
+    case "aep", "aepx", "aet":
+      return "fileicon-after-effects"
     case "cs", "csproj", "csx", "sln":
       return "fileicon-csharp"
     case "cpp", "cxx", "cc", "hpp", "hh", "hxx", "ipp", "ixx", "tpp":
@@ -178,6 +210,10 @@ struct WorkspaceFileIcon: Equatable, Sendable {
       return "fileicon-html"
     case "css":
       return "fileicon-css"
+    case "scss", "sass":
+      return "fileicon-scss"
+    case "less":
+      return "fileicon-less"
     case "vue":
       return "fileicon-vue"
     case "svelte":
@@ -190,20 +226,36 @@ struct WorkspaceFileIcon: Equatable, Sendable {
       return "fileicon-elixir"
     case "erl", "hrl":
       return "fileicon-erlang"
+    case "fs", "fsi", "fsproj", "fsx":
+      return "fileicon-fsharp"
     case "dart":
       return "fileicon-dart"
     case "go":
       return "fileicon-go"
     case "graphql", "gql":
       return "fileicon-graphql"
+    case "hs", "lhs", "cabal":
+      return "fileicon-haskell"
     case "java", "gradle":
       return "fileicon-java"
     case "ipynb":
       return "fileicon-jupyter"
+    case "jl":
+      return "fileicon-julia"
+    case "kt", "kts":
+      return "fileicon-kotlin"
     case "tex", "sty", "cls", "bib":
       return "fileicon-latex"
+    case "lua":
+      return "fileicon-lua"
+    case "ml", "mli":
+      return "fileicon-ocaml"
+    case "m", "mm":
+      return "fileicon-objectivec"
     case "glsl", "vert", "frag", "geom", "tesc", "tese", "comp", "shader":
       return "fileicon-opengl"
+    case "pl", "pm", "pod":
+      return "fileicon-perl"
     case "php", "phtml":
       return "fileicon-php"
     case "py", "pyi", "pyw":
@@ -214,6 +266,10 @@ struct WorkspaceFileIcon: Equatable, Sendable {
       return "fileicon-ruby"
     case "rs":
       return "fileicon-rust"
+    case "sbt", "sc", "scala":
+      return "fileicon-scala"
+    case "db", "db3", "sqlite", "sqlite3":
+      return "fileicon-sqlite"
     case "sol":
       return "fileicon-solidity"
     case "swift":
