@@ -178,18 +178,22 @@ content. Wrap width per line = measure − indent.
   cells are 13 pt. Columns are separated by a 40 pt gutter, the first
   column flush with the table's left padding; column widths come from
   the **styled** rendered cell (chips, code fonts, and emphasis measured
-  as drawn, never plain text), with a per-column max of 240 pt. The
-  document measure stays fixed: when a table's natural width exceeds
-  the prose column, only the table block clips and scrolls horizontally,
-  Notion-style. The page itself never widens, and other Markdown blocks
-  keep their normal fixed measure. **Column alignment markers are
-  honored** (`:---` left, `:---:` center, `---:` right) via aligned tab
-  stops. Escaped pipes (`\|`) remain inside the cell and render as a
-  literal pipe. One source row stays one 24 pt row. Cell text edits work
-  normally; the cell-boundary tab is structural — deleting it is a no-op
-  and the caret steps across. A pipe line without a delimiter row stays
-  literal. (Tunable later: ultralight row hairlines for tables longer
-  than ~8 rows.)
+  as drawn, never plain text), with a per-column max of 200 pt. Cells
+  whose text exceeds that width wrap inside the cell instead of
+  truncating; row height grows only for the affected source row, using a
+  compact 20 pt table-cell line height and 6 pt spacing between table
+  rows. Header cells may wrap at word boundaries, but should not split
+  short labels mid-word. The document measure stays fixed: when a
+  table's natural width exceeds the prose column, only the table block
+  clips and scrolls horizontally, Notion-style. The page itself never
+  widens, and other Markdown blocks keep their normal fixed measure.
+  **Column alignment markers are honored** (`:---` left, `:---:`
+  center, `---:` right) via aligned tab stops. Escaped pipes (`\|`)
+  remain inside the cell and render as a literal pipe. Cell text edits
+  work normally; the cell-boundary tab is structural — deleting it is a
+  no-op and the caret steps across. A pipe line without a delimiter row
+  stays literal. (Tunable later: ultralight row hairlines for tables
+  longer than ~8 rows.)
 - **Frontmatter / thematic breaks**: unchanged (muted mono card; drawn
   rule on an empty row). A whole-line HTML `<hr>` (`<hr>`, `<hr/>`,
   `<hr class="…">`) renders as the same drawn rule.

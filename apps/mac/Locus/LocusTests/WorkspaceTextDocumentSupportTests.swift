@@ -1373,6 +1373,75 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       MarkdownDocumentMetrics.tableColumnMaximumWidth)
   }
 
+  func testMarkdownTableLongCellsWrapInsideTheirColumnWithoutTruncating() throws {
+    let longCell =
+      "Confirm enterprise pipeline assumptions before Friday and capture follow-up notes in the review memo."
+    let lines = [
+      "| Team | Status | Next Step |",
+      "| :--- | :---: | :--- |",
+      "| Sales | Draft | \(longCell) |",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let columns = states[2].tableColumns
+    XCTAssertEqual(columns.count, 3)
+
+    let rendered = TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+      lines[2], font: TextDocumentSyntax.markdown.font, state: states[2])
+    let visualRows = rendered.components(separatedBy: "\n")
+    let firstRowCells = try XCTUnwrap(visualRows.first).components(separatedBy: "\t")
+    let normalizedRendered = rendered.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+
+    XCTAssertGreaterThanOrEqual(firstRowCells.count, 3)
+    XCTAssertEqual(firstRowCells[0], "Sales")
+    XCTAssertEqual(firstRowCells[1], "Draft")
+    XCTAssertTrue(normalizedRendered.contains("Confirm enterprise pipeline assumptions"))
+    XCTAssertTrue(normalizedRendered.contains("review memo"))
+    XCTAssertFalse(rendered.contains("…"))
+
+    XCTAssertGreaterThan(visualRows.count, 1)
+    XCTAssertTrue(visualRows.dropFirst().allSatisfy { $0.hasPrefix("\t\t") })
+
+    let nextStepColumn = try XCTUnwrap(columns.last)
+    XCTAssertEqual(
+      nextStepColumn.width,
+      MarkdownDocumentMetrics.tableColumnMaximumWidth,
+      accuracy: 1)
+  }
+
+  func testMarkdownTableHeadersWrapOnlyAtWordBoundaries() {
+    let lines = [
+      "| Empty | Very Long Header Name For Width Stress And Word Boundary Wrapping | Centred | Right Number | Symbol |",
+      "| :--- | :--- | :---: | ---: | :---: |",
+      "| filled | This is a deliberately long cell with repeated business prose. | maybe | 123 | * |",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let rendered = TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+      lines[0], font: TextDocumentSyntax.markdown.font, state: states[0])
+    let visualRows = rendered.components(separatedBy: "\n")
+
+    XCTAssertGreaterThan(visualRows.count, 1, rendered)
+    XCTAssertTrue(rendered.contains("Very Long Header Name For "), rendered)
+    XCTAssertTrue(rendered.contains("Width Stress And Word Boundary "), rendered)
+    XCTAssertTrue(rendered.contains("Wrapping"), rendered)
+    XCTAssertTrue(rendered.contains("Symbol"), rendered)
+    XCTAssertFalse(rendered.contains("Symbo\nl"))
+    XCTAssertFalse(rendered.contains("Centre\nd"))
+  }
+
+  func testMarkdownTableHeaderWrappingUsesHeaderTypography() {
+    let lines = [
+      "| Notes | Escaped Pipe | Date |",
+      "| :--- | :--- | :---: |",
+      "| Long note that makes the first column wider than the pipe column. | A \\| B | 2026-01-15 |",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let rendered = TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+      lines[0], font: TextDocumentSyntax.markdown.font, state: states[0])
+
+    XCTAssertTrue(rendered.contains("Escaped Pipe"), rendered)
+    XCTAssertFalse(rendered.contains("Escaped\nPipe"), rendered)
+  }
+
   func testMarkdownTableTabStopsUseGutterModel() throws {
     let lines = [
       "| Metric | Delta | Status |",

@@ -1004,7 +1004,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     for index in 0..<lineCount {
       let state = index < states.count ? states[index] : .plain
-      if state.isTableSeparator || state.isSetextUnderline {
+      if state.isTableRow {
+        let nextIsTableRow = index + 1 < states.count && states[index + 1].isTableRow
+        set(
+          index,
+          LineRowMetrics(
+            rowHeight: MarkdownDocumentMetrics.tableCellLineHeight,
+            trailingInset: nextIsTableRow ? MarkdownDocumentMetrics.tableRowSpacing : 0))
+      } else if state.isTableSeparator || state.isSetextUnderline {
         set(index, LineRowMetrics(rowHeight: MarkdownDocumentMetrics.slimMarkerRowHeight))
       } else if let level = state.headingLevel {
         set(index, Self.headingLineMetrics(level: level, isDocumentTop: index == 0))
@@ -2643,10 +2650,137 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let attributed = attributedLine(forLine: line)
     let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
     let bounds = rowRange(rowInLine, starts: starts, length: attributed.length)
+    if let endpoint = markdownTableEndpointForEmptyContinuationCell(
+      line: line,
+      rowInLine: rowInLine,
+      textRelativeX: textRelativeX,
+      attributed: attributed,
+      starts: starts)
+    {
+      return endpoint
+    }
+    return endpointInVisualRow(
+      line: line,
+      rowInLine: rowInLine,
+      textRelativeX: textRelativeX,
+      attributed: attributed,
+      starts: starts,
+      bounds: bounds)
+  }
+
+  private func endpointInVisualRow(
+    line: Int,
+    rowInLine: Int,
+    textRelativeX: CGFloat,
+    attributed: NSAttributedString,
+    starts: [Int],
+    bounds providedBounds: (start: Int, end: Int)? = nil
+  ) -> TextSelection.Endpoint {
+    let bounds = providedBounds ?? rowRange(rowInLine, starts: starts, length: attributed.length)
     let rowText = attributed.attributedSubstring(
       from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
     let columnInRow = columnUTF16(forX: textRelativeX, in: rowText)
     return TextSelection.Endpoint(line: line, columnUTF16: bounds.start + columnInRow)
+  }
+
+  private func markdownTableEndpointForEmptyContinuationCell(
+    line: Int,
+    rowInLine: Int,
+    textRelativeX: CGFloat,
+    attributed: NSAttributedString,
+    starts: [Int]
+  ) -> TextSelection.Endpoint? {
+    guard rowInLine > 0,
+      let columnIndex = markdownTableColumnIndex(atTextRelativeX: textRelativeX, line: line),
+      markdownTableCellIsEmpty(
+        columnIndex, rowInLine: rowInLine, attributed: attributed, starts: starts)
+    else { return nil }
+    if let populatedRow = markdownTableNearestPopulatedRow(
+      columnIndex: columnIndex, fromRow: rowInLine, attributed: attributed, starts: starts)
+    {
+      return endpointInVisualRow(
+        line: line,
+        rowInLine: populatedRow,
+        textRelativeX: textRelativeX,
+        attributed: attributed,
+        starts: starts)
+    }
+    return endpointInVisualRow(
+      line: line,
+      rowInLine: 0,
+      textRelativeX: textRelativeX,
+      attributed: attributed,
+      starts: starts)
+  }
+
+  private func markdownTableColumnIndex(atTextRelativeX x: CGFloat, line: Int) -> Int? {
+    guard usesMarkdownDocumentLayout, let buffer = reader else { return nil }
+    let state = markdownLineState(forLine: line, in: buffer)
+    guard state.isTableRow, !state.tableColumns.isEmpty else { return nil }
+    let gutter = MarkdownDocumentMetrics.tableColumnGutter
+    let clampedX = max(0, x)
+    var origin: CGFloat = 0
+    for (index, column) in state.tableColumns.enumerated() {
+      let end = origin + column.width
+      if clampedX <= end || index == state.tableColumns.count - 1 {
+        return index
+      }
+      let nextOrigin = end + gutter
+      if clampedX < nextOrigin {
+        return index
+      }
+      origin = nextOrigin
+    }
+    return nil
+  }
+
+  private func markdownTableCellIsEmpty(
+    _ columnIndex: Int,
+    rowInLine: Int,
+    attributed: NSAttributedString,
+    starts: [Int]
+  ) -> Bool {
+    let cells = markdownTableCellsInVisualRow(
+      rowInLine, attributed: attributed, starts: starts)
+    guard columnIndex < cells.count else { return true }
+    return cells[columnIndex].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  private func markdownTableNearestPopulatedRow(
+    columnIndex: Int,
+    fromRow rowInLine: Int,
+    attributed: NSAttributedString,
+    starts: [Int]
+  ) -> Int? {
+    guard !starts.isEmpty else { return nil }
+    for distance in 1..<starts.count {
+      let previous = rowInLine - distance
+      if previous >= 0,
+        !markdownTableCellIsEmpty(
+          columnIndex, rowInLine: previous, attributed: attributed, starts: starts)
+      {
+        return previous
+      }
+      let next = rowInLine + distance
+      if next < starts.count,
+        !markdownTableCellIsEmpty(
+          columnIndex, rowInLine: next, attributed: attributed, starts: starts)
+      {
+        return next
+      }
+    }
+    return nil
+  }
+
+  private func markdownTableCellsInVisualRow(
+    _ rowInLine: Int,
+    attributed: NSAttributedString,
+    starts: [Int]
+  ) -> [String] {
+    let bounds = rowRange(rowInLine, starts: starts, length: attributed.length)
+    let rowText = attributed.attributedSubstring(
+      from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
+    return rowText.string.components(separatedBy: "\t")
   }
 
   /// A click target, snapped off concealed structural delimiter rows (fence
@@ -3111,7 +3245,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       newHead = TextSelection.Endpoint(
         line: head.line, columnUTF16: down ? lineLengthUTF16(head.line) : 0)
     } else {
-      newHead = endpoint(forVisualRow: targetRow, goalX: goalX)
+      newHead = endpoint(
+        forVisualRow: targetRow,
+        goalX: goalX,
+        skippingEmptyTableContinuationsToward: down ? 1 : -1)
     }
     applyMovedHead(newHead, extend: extend, keepGoalX: true)
     verticalGoalX = goalX
@@ -3119,6 +3256,51 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// The caret endpoint at the horizontal goal `goalX` on visual row `row`.
   private func endpoint(forVisualRow row: Int, goalX: CGFloat) -> TextSelection.Endpoint {
+    endpoint(forVisualRow: row, goalX: goalX, skippingEmptyTableContinuationsToward: nil)
+  }
+
+  private func endpoint(
+    forVisualRow row: Int,
+    goalX: CGFloat,
+    skippingEmptyTableContinuationsToward direction: Int?
+  ) -> TextSelection.Endpoint {
+    var targetRow = row
+    while true {
+      if let endpoint = endpointIfPopulatedTableCell(
+        forVisualRow: targetRow,
+        goalX: goalX)
+      {
+        return endpoint
+      }
+      guard let direction else {
+        let (line, rowInLine) = lineLocation(ofVisualRow: targetRow)
+        let attributed = attributedLine(forLine: line)
+        let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
+        return markdownTableEndpointForEmptyContinuationCell(
+          line: line,
+          rowInLine: rowInLine,
+          textRelativeX: goalX,
+          attributed: attributed,
+          starts: starts)
+          ?? endpointInVisualRow(
+            line: line,
+            rowInLine: rowInLine,
+            textRelativeX: goalX,
+            attributed: attributed,
+            starts: starts)
+      }
+      let next = targetRow + direction
+      guard next >= 0, next < totalVisualRows else {
+        return endpoint(forVisualRow: targetRow, goalX: goalX)
+      }
+      targetRow = next
+    }
+  }
+
+  private func endpointIfPopulatedTableCell(
+    forVisualRow row: Int,
+    goalX: CGFloat
+  ) -> TextSelection.Endpoint? {
     let (line, rowInLine) = lineLocation(ofVisualRow: row)
     if let length = hugeLength(line) {
       let rowStart = rowInLine * hugeLineColumns
@@ -3128,11 +3310,19 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     let attributed = attributedLine(forLine: line)
     let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
-    let bounds = rowRange(rowInLine, starts: starts, length: attributed.length)
-    let rowText = attributed.attributedSubstring(
-      from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
-    return TextSelection.Endpoint(
-      line: line, columnUTF16: bounds.start + columnUTF16(forX: goalX, in: rowText))
+    if rowInLine > 0,
+      let columnIndex = markdownTableColumnIndex(atTextRelativeX: goalX, line: line),
+      markdownTableCellIsEmpty(
+        columnIndex, rowInLine: rowInLine, attributed: attributed, starts: starts)
+    {
+      return nil
+    }
+    return endpointInVisualRow(
+      line: line,
+      rowInLine: rowInLine,
+      textRelativeX: goalX,
+      attributed: attributed,
+      starts: starts)
   }
 
   /// One composed-character step left/right, wrapping across line boundaries.
@@ -6077,6 +6267,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   func endpointYForTesting(line: Int) -> CGFloat? {
     guard line >= 0, line < lineCount else { return nil }
     return yOffset(ofLine: line)
+  }
+
+  func rowHeightForTesting(line: Int) -> CGFloat {
+    rowHeight(forLine: line)
+  }
+
+  func visualRowCountForTesting(line: Int) -> Int {
+    wrapIndex?.visualRowCount(ofLine: line) ?? 1
   }
 
   func markdownWrapContentWidthForTesting(line: Int) -> CGFloat {

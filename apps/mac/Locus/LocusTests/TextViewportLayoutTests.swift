@@ -1642,6 +1642,111 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testMarkdownTableLongCellsIncreaseOnlyTheirOwnRowHeight() throws {
+    let view = try makeViewer(
+      """
+      | Team | Status | Next Step |
+      | :--- | :---: | :--- |
+      | Sales | Draft | Confirm enterprise pipeline assumptions before Friday and capture follow-up notes in the review memo. |
+      | Finance | Review | Reconcile vendor accruals. |
+      """)
+    view.setFrameSize(NSSize(width: 560, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let firstBodyY = try XCTUnwrap(view.endpointYForTesting(line: 2))
+    let secondBodyY = try XCTUnwrap(view.endpointYForTesting(line: 3))
+    let firstBodyRows = view.visualRowCountForTesting(line: 2)
+
+    XCTAssertGreaterThan(secondBodyY - firstBodyY, view.layout.lineHeight)
+    XCTAssertGreaterThan(firstBodyRows, 1)
+    XCTAssertEqual(
+      view.rowHeightForTesting(line: 2),
+      MarkdownDocumentMetrics.tableCellLineHeight,
+      accuracy: 0.5)
+    XCTAssertLessThan(
+      secondBodyY - firstBodyY,
+      CGFloat(firstBodyRows) * view.layout.lineHeight)
+  }
+
+  @MainActor
+  func testMarkdownTableEmptyContinuationCellHitSnapsToRealCellRow() throws {
+    let view = try makeViewer(
+      """
+      | Team | Status | Next Step |
+      | :--- | :---: | :--- |
+      | Sales | Draft | Confirm enterprise pipeline assumptions before Friday and capture follow-up notes in the review memo. |
+      """)
+    view.setFrameSize(NSSize(width: 560, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    XCTAssertGreaterThan(view.visualRowCountForTesting(line: 2), 1)
+    let lineY = try XCTUnwrap(view.endpointYForTesting(line: 2))
+    let point = NSPoint(
+      x: view.markdownTextColumnXForTesting(line: 2) + 2,
+      y: lineY + MarkdownDocumentMetrics.tableCellLineHeight + 2)
+
+    XCTAssertEqual(view.endpoint(at: point), TextSelection.Endpoint(line: 2, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testMarkdownTableSelectionAcrossWrappedCellMapsToSourceCellText() throws {
+    let longCell =
+      "Confirm enterprise pipeline assumptions before Friday and capture follow-up notes in the review memo."
+    let line = "| Sales | Draft | \(longCell) |"
+    let lines = [
+      "| Team | Status | Next Step |",
+      "| :--- | :---: | :--- |",
+      line,
+    ]
+    let view = try makeViewer(lines.joined(separator: "\n"))
+    view.setFrameSize(NSSize(width: 560, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let rendered = TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+      line, font: TextDocumentSyntax.markdown.font, state: states[2])
+    XCTAssertGreaterThan(rendered.components(separatedBy: "\n").count, 1)
+
+    let start = try XCTUnwrap(rendered.range(of: "Confirm"))
+    let end = try XCTUnwrap(rendered.range(of: "review memo."))
+    let startColumn = rendered.utf16.distance(from: rendered.utf16.startIndex, to: start.lowerBound)
+    let endColumn = rendered.utf16.distance(from: rendered.utf16.startIndex, to: end.upperBound)
+
+    view.beginCaretSelection(at: TextSelection.Endpoint(line: 2, columnUTF16: startColumn))
+    view.extendSelection(to: TextSelection.Endpoint(line: 2, columnUTF16: endColumn))
+
+    XCTAssertEqual(view.selectedText(), longCell)
+  }
+
+  @MainActor
+  func testMarkdownTableVerticalMovementSkipsEmptyContinuationCells() throws {
+    let view = try makeViewer(
+      """
+      | Team | Status | Next Step |
+      | :--- | :---: | :--- |
+      | Sales | Draft | Confirm enterprise pipeline assumptions before Friday and capture follow-up notes in the review memo. |
+      | Finance | Review | Reconcile vendor accruals. |
+      """)
+    view.setFrameSize(NSSize(width: 560, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    XCTAssertGreaterThan(view.visualRowCountForTesting(line: 2), 1)
+
+    view.beginCaretSelection(at: TextSelection.Endpoint(line: 2, columnUTF16: 0))
+    view.moveVertically(down: true, extend: false)
+
+    XCTAssertEqual(view.selection?.head, TextSelection.Endpoint(line: 3, columnUTF16: 0))
+
+    view.moveVertically(down: false, extend: false)
+
+    XCTAssertEqual(view.selection?.head, TextSelection.Endpoint(line: 2, columnUTF16: 0))
+  }
+
+  @MainActor
   func testMarkdownTableScrollOffsetClearsWhenDocumentChanges() throws {
     let view = try makeViewer(
       """
@@ -1729,13 +1834,16 @@ final class TextViewportLayoutTests: XCTestCase {
 
     let rules = try XCTUnwrap(
       view.markdownTableRuleYsForTesting(fromLine: 0, toLine: 3, visibleRows: 0..<4))
-    let rowHeight = view.layout.lineHeight
+    let rowHeight = MarkdownDocumentMetrics.tableCellLineHeight
 
     let separatorHeight = MarkdownDocumentMetrics.slimMarkerRowHeight
     XCTAssertEqual(rules.count, 3)
     XCTAssertEqual(rules[0], 0, accuracy: 0.5)
     XCTAssertEqual(rules[1], rowHeight + separatorHeight / 2, accuracy: 0.5)
-    XCTAssertEqual(rules[2], rowHeight * 3 + separatorHeight, accuracy: 0.5)
+    XCTAssertEqual(
+      rules[2],
+      rowHeight * 3 + separatorHeight + MarkdownDocumentMetrics.tableRowSpacing,
+      accuracy: 0.5)
   }
 
   @MainActor
@@ -1754,14 +1862,16 @@ final class TextViewportLayoutTests: XCTestCase {
 
     let rules = try XCTUnwrap(
       view.markdownTableRuleYsForTesting(fromLine: 1, toLine: 3, visibleRows: 0..<5))
-    let rowHeight = view.layout.lineHeight
+    let rowHeight = MarkdownDocumentMetrics.tableCellLineHeight
     let breath = MarkdownDocumentMetrics.tableRuleBreath
 
     let separatorHeight = MarkdownDocumentMetrics.slimMarkerRowHeight
     XCTAssertEqual(rules.count, 3)
-    XCTAssertEqual(rules[0], rowHeight - breath, accuracy: 0.5)
-    XCTAssertEqual(rules[1], rowHeight * 2 + separatorHeight / 2, accuracy: 0.5)
-    XCTAssertEqual(rules[2], rowHeight * 3 + separatorHeight + breath, accuracy: 0.5)
+    XCTAssertEqual(rules[0], view.layout.lineHeight - breath, accuracy: 0.5)
+    XCTAssertEqual(
+      rules[1], view.layout.lineHeight + rowHeight + separatorHeight / 2, accuracy: 0.5)
+    XCTAssertEqual(
+      rules[2], view.layout.lineHeight + rowHeight * 2 + separatorHeight + breath, accuracy: 0.5)
   }
 
   @MainActor
@@ -1776,7 +1886,7 @@ final class TextViewportLayoutTests: XCTestCase {
     view.syntax = .markdown
     view.updateLayout()
 
-    let rowHeight = view.layout.lineHeight
+    let rowHeight = MarkdownDocumentMetrics.tableCellLineHeight
     let separatorHeight = MarkdownDocumentMetrics.slimMarkerRowHeight
     // The body row starts one full header row plus one slim separator row down.
     let body = try XCTUnwrap(view.endpointYForTesting(line: 2))

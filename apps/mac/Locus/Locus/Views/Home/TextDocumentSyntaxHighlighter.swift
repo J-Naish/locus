@@ -77,8 +77,10 @@ enum MarkdownDocumentMetrics {
   static let codeCopyIconPointSize: CGFloat = 12
   static let tableColumnGutter: CGFloat = 40
   static let tableColumnMinimumWidth: CGFloat = 48
-  static let tableColumnMaximumWidth: CGFloat = 240
+  static let tableColumnMaximumWidth: CGFloat = 200
   static let tableFallbackColumnWidth: CGFloat = 160
+  static let tableCellLineHeight: CGFloat = 20
+  static let tableRowSpacing: CGFloat = 6
   static let tableHeaderFontSize: CGFloat = 12
   /// How far the top and bottom rules breathe outward into an adjacent blank
   /// line, so the text inside the table is never pressed against its rules.
@@ -550,7 +552,7 @@ struct MarkdownDisplayMap: Equatable, Sendable {
     if includeWholeLineMarkers, lower == 0, upper == displayLength {
       return NSRange(location: 0, length: sourceLength)
     }
-    let selectedRanges = characterRanges[lower..<upper]
+    let selectedRanges = characterRanges[lower..<upper].filter { $0.length > 0 }
     let rawStart = selectedRanges.map(\.location).min() ?? bufferColumn(forDisplayColumn: lower)
     let rawEnd = selectedRanges.map { NSMaxRange($0) }.max() ?? rawStart
     return NSRange(location: rawStart, length: max(0, rawEnd - rawStart))
@@ -567,6 +569,33 @@ struct MarkdownDisplayMap: Equatable, Sendable {
     }
     guard let lower, let upper, upper > lower else { return nil }
     return NSRange(location: lower, length: upper - lower)
+  }
+
+  fileprivate func slice(from start: Int, to end: Int) -> MarkdownDisplayMap {
+    let clampedStart = min(max(0, start), displayLength)
+    let clampedEnd = min(max(clampedStart, end), displayLength)
+    let nsDisplay = displayText as NSString
+    return MarkdownDisplayMap(
+      sourceText: sourceText,
+      displayText: nsDisplay.substring(
+        with: NSRange(location: clampedStart, length: clampedEnd - clampedStart)),
+      boundaryColumns: Array(boundaryColumns[clampedStart...clampedEnd]),
+      characterRanges: clampedStart < clampedEnd
+        ? Array(characterRanges[clampedStart..<clampedEnd])
+        : [])
+  }
+
+  fileprivate func appendContents(
+    to display: inout String,
+    boundaryColumns outputBoundaryColumns: inout [Int],
+    characterRanges outputCharacterRanges: inout [NSRange]
+  ) {
+    let nsDisplay = displayText as NSString
+    for index in 0..<displayLength {
+      display += nsDisplay.substring(with: NSRange(location: index, length: 1))
+      outputCharacterRanges.append(characterRanges[index])
+      outputBoundaryColumns.append(boundaryColumns[index + 1])
+    }
   }
 
   fileprivate func replacing(match matchRange: NSRange, withGroup groupRange: NSRange)
@@ -1114,7 +1143,10 @@ enum TextDocumentSyntaxHighlighter {
       return .empty(sourceText: line)
     }
 
-    if state.isTableRow, let table = markdownTableDisplayMap(for: line) {
+    if state.isTableRow,
+      let table = markdownTableDisplayMap(
+        for: line, columns: state.tableColumns, isHeader: state.isTableHeader)
+    {
       return table
     }
 
@@ -2430,45 +2462,116 @@ enum TextDocumentSyntaxHighlighter {
     return alignments
   }
 
-  private static func markdownTableDisplayMap(for line: String) -> MarkdownDisplayMap? {
+  private static func markdownTableCellDisplayMap(
+    in nsLine: NSString,
+    sourceText: String,
+    sourceRange: NSRange
+  ) -> MarkdownDisplayMap {
+    let sourceLength = nsLine.length
+    var cellDisplay = ""
+    var cellBoundaries: [Int] = [sourceRange.location]
+    var cellCharacterRanges: [NSRange] = []
+    var cursor = sourceRange.location
+    let end = NSMaxRange(sourceRange)
+    while cursor < end {
+      let character = nsLine.character(at: cursor)
+      if character == 92, cursor + 1 < end, nsLine.character(at: cursor + 1) == 124 {
+        cellDisplay += "|"
+        cellCharacterRanges.append(NSRange(location: cursor, length: 2))
+        cellBoundaries.append(min(sourceLength, cursor + 2))
+        cursor += 2
+      } else {
+        let text = nsLine.substring(with: NSRange(location: cursor, length: 1))
+        cellDisplay += text
+        cellCharacterRanges.append(NSRange(location: cursor, length: 1))
+        cellBoundaries.append(min(sourceLength, cursor + 1))
+        cursor += 1
+      }
+    }
+    return MarkdownDisplayMap(
+      sourceText: sourceText,
+      displayText: cellDisplay,
+      boundaryColumns: cellBoundaries,
+      characterRanges: cellCharacterRanges)
+  }
+
+  private static func markdownTableDisplayMap(
+    for line: String,
+    columns: [MarkdownTableColumn] = [],
+    isHeader: Bool = false
+  ) -> MarkdownDisplayMap? {
     guard let cells = markdownTableCells(in: line) else { return nil }
     let nsLine = line as NSString
     let sourceLength = nsLine.length
+
+    func cellMap(sourceRange: NSRange) -> MarkdownDisplayMap {
+      markdownTableCellDisplayMap(in: nsLine, sourceText: line, sourceRange: sourceRange)
+    }
+
+    func wrappedCellMaps(_ map: MarkdownDisplayMap, columnWidth: CGFloat) -> [MarkdownDisplayMap] {
+      guard map.displayLength > 0 else { return [map] }
+      let font = TextDocumentSyntax.markdown.font
+      var wrapState = MarkdownLineStyleState()
+      wrapState.isTableHeader = isHeader
+      let attributed = markdownMeasurementLine(
+        map.displayText,
+        font: font,
+        state: wrapState,
+        typography: MarkdownTypography.measurement(baseFont: font))
+      let starts =
+        isHeader
+        ? markdownTableHeaderVisualRowStartOffsets(of: attributed, width: columnWidth)
+        : LineWrap.visualRowStartOffsets(of: attributed, width: columnWidth)
+      guard starts.count > 1 else { return [map] }
+      return starts.indices.map { row in
+        let start = starts[row]
+        let end = row + 1 < starts.count ? starts[row + 1] : map.displayLength
+        return map.slice(from: start, to: end)
+      }
+    }
+
+    let cellRows = cells.enumerated().map { index, cell in
+      wrappedCellMaps(
+        cellMap(sourceRange: cell),
+        columnWidth: index < columns.count
+          ? columns[index].width
+          : MarkdownDocumentMetrics.tableFallbackColumnWidth)
+    }
+    let rowCount = max(1, cellRows.map(\.count).max() ?? 1)
+
     var display = ""
     var boundaries: [Int] = [cells.first?.location ?? 0]
     var characterRanges: [NSRange] = []
 
-    func appendCellText(sourceRange: NSRange) {
-      var cursor = sourceRange.location
-      let end = NSMaxRange(sourceRange)
-      while cursor < end {
-        let character = nsLine.character(at: cursor)
-        if character == 92, cursor + 1 < end, nsLine.character(at: cursor + 1) == 124 {
-          display += "|"
-          characterRanges.append(NSRange(location: cursor, length: 2))
-          boundaries.append(min(sourceLength, cursor + 2))
-          cursor += 2
-        } else {
-          let text = nsLine.substring(with: NSRange(location: cursor, length: 1))
-          display += text
-          characterRanges.append(NSRange(location: cursor, length: 1))
-          boundaries.append(min(sourceLength, cursor + 1))
-          cursor += 1
+    func appendLiteral(_ literal: String, sourceColumn: Int) {
+      let nsLiteral = literal as NSString
+      let sourceColumn = min(max(0, sourceColumn), sourceLength)
+      for index in 0..<nsLiteral.length {
+        display += nsLiteral.substring(with: NSRange(location: index, length: 1))
+        characterRanges.append(NSRange(location: sourceColumn, length: 0))
+        boundaries.append(sourceColumn)
+      }
+    }
+
+    func appendMapContents(_ map: MarkdownDisplayMap) {
+      map.appendContents(
+        to: &display,
+        boundaryColumns: &boundaries,
+        characterRanges: &characterRanges)
+    }
+
+    for row in 0..<rowCount {
+      if row > 0 {
+        appendLiteral("\n", sourceColumn: sourceLength)
+      }
+      for (column, cell) in cells.enumerated() {
+        if column > 0 {
+          appendLiteral("\t", sourceColumn: cell.location)
+        }
+        if row < cellRows[column].count {
+          appendMapContents(cellRows[column][row])
         }
       }
-    }
-
-    func appendTab(after sourceColumn: Int) {
-      display += "\t"
-      characterRanges.append(NSRange(location: min(sourceColumn, sourceLength), length: 0))
-      boundaries.append(min(sourceColumn, sourceLength))
-    }
-
-    for (index, cell) in cells.enumerated() {
-      if index > 0 {
-        appendTab(after: cell.location)
-      }
-      appendCellText(sourceRange: cell)
     }
 
     return MarkdownDisplayMap(
@@ -2476,6 +2579,97 @@ enum TextDocumentSyntaxHighlighter {
       displayText: display,
       boundaryColumns: boundaries,
       characterRanges: characterRanges)
+  }
+
+  private static func markdownTableHeaderVisualRowStartOffsets(
+    of attributed: NSAttributedString,
+    width: CGFloat
+  ) -> [Int] {
+    let length = attributed.length
+    guard width > 0, length > 0 else { return [0] }
+
+    let string = attributed.string as NSString
+    let typesetter = CTTypesetterCreateWithAttributedString(attributed)
+    var starts: [Int] = []
+    var index = 0
+    while index < length, starts.count < LineWrap.defaultMaximumRows {
+      starts.append(index)
+      let suggested = CTTypesetterSuggestLineBreak(typesetter, index, Double(width))
+      guard suggested > 0 else { break }
+      let proposedEnd = min(length, index + suggested)
+      guard proposedEnd < length else { break }
+
+      let wordSafeEnd = markdownTableHeaderWordBoundaryEnd(
+        in: string,
+        rowStart: index,
+        proposedEnd: proposedEnd)
+      guard wordSafeEnd > index else { break }
+      index = wordSafeEnd
+    }
+    return starts.isEmpty ? [0] : starts
+  }
+
+  private static func markdownTableHeaderWordBoundaryEnd(
+    in string: NSString,
+    rowStart: Int,
+    proposedEnd: Int
+  ) -> Int {
+    let length = string.length
+    guard proposedEnd > rowStart, proposedEnd < length else { return proposedEnd }
+    guard markdownTableHeaderBreakSplitsWord(in: string, at: proposedEnd) else {
+      return proposedEnd
+    }
+
+    if let previous = markdownTableHeaderPreviousWhitespaceBoundary(
+      in: string,
+      rowStart: rowStart,
+      proposedEnd: proposedEnd)
+    {
+      return previous
+    }
+    return markdownTableHeaderNextWhitespaceBoundary(in: string, from: proposedEnd) ?? length
+  }
+
+  private static func markdownTableHeaderBreakSplitsWord(in string: NSString, at offset: Int)
+    -> Bool
+  {
+    guard offset > 0, offset < string.length else { return false }
+    return !markdownTableHeaderIsWhitespace(string.character(at: offset - 1))
+      && !markdownTableHeaderIsWhitespace(string.character(at: offset))
+  }
+
+  private static func markdownTableHeaderPreviousWhitespaceBoundary(
+    in string: NSString,
+    rowStart: Int,
+    proposedEnd: Int
+  ) -> Int? {
+    guard proposedEnd > rowStart else { return nil }
+    var index = proposedEnd - 1
+    while index >= rowStart {
+      if markdownTableHeaderIsWhitespace(string.character(at: index)) {
+        return index + 1
+      }
+      index -= 1
+    }
+    return nil
+  }
+
+  private static func markdownTableHeaderNextWhitespaceBoundary(
+    in string: NSString,
+    from offset: Int
+  ) -> Int? {
+    var index = offset
+    while index < string.length {
+      if markdownTableHeaderIsWhitespace(string.character(at: index)) {
+        return index + 1
+      }
+      index += 1
+    }
+    return nil
+  }
+
+  private static func markdownTableHeaderIsWhitespace(_ character: unichar) -> Bool {
+    character == 32 || character == 9 || character == 10 || character == 13
   }
 
   private static func markdownTableColumns(
@@ -2490,19 +2684,16 @@ enum TextDocumentSyntaxHighlighter {
       count: alignments.count)
 
     for (rowIndex, rowBody) in rowBodies.enumerated() {
-      var state = MarkdownLineStyleState()
-      state.isTableRow = true
-      state.isTableHeader = rowIndex == 0
-      let rendered = markdownMeasurementLine(
-        rowBody, font: font, state: state, typography: typography)
-      var location = 0
-      for (column, cell) in rendered.string.components(separatedBy: "\t").enumerated() {
-        let length = (cell as NSString).length
-        defer { location += length + 1 }
+      guard let cells = markdownTableCells(in: rowBody) else { continue }
+      let nsRow = rowBody as NSString
+      for (column, cell) in cells.enumerated() {
         guard column < widths.count else { break }
-        let measured = ceil(
-          rendered.attributedSubstring(from: NSRange(location: location, length: length))
-            .size().width)
+        var state = MarkdownLineStyleState()
+        state.isTableHeader = rowIndex == 0
+        let map = markdownTableCellDisplayMap(in: nsRow, sourceText: rowBody, sourceRange: cell)
+        let rendered = markdownMeasurementLine(
+          map.displayText, font: font, state: state, typography: typography)
+        let measured = ceil(rendered.size().width)
         widths[column] = min(
           MarkdownDocumentMetrics.tableColumnMaximumWidth,
           max(widths[column], measured))
