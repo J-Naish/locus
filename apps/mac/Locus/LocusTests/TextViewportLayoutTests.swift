@@ -1820,6 +1820,49 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testMarkdownTableCaretIsHiddenWhenItsColumnScrollsOutOfView() throws {
+    let view = try makeEditableViewer(
+      """
+      | Team | Owner | Region | Priority | Status | Budget | Actual | Delta | Risk | Next Step |
+      | :--- | :--- | :--- | :---: | :---: | ---: | ---: | ---: | :---: | :--- |
+      | Sales | Nishi | Japan | P0 | Draft | 120,000 | 118,400 | -1.3% | Medium | Confirm enterprise pipeline assumptions before Friday. |
+      """)
+    view.setFrameSize(NSSize(width: 560, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    view.beginCaretSelection(at: .init(line: 2, columnUTF16: 0))
+
+    XCTAssertNotNil(view.caretRectForTesting())
+    XCTAssertTrue(view.scrollMarkdownTableForTesting(containing: 2, deltaX: 10_000))
+    XCTAssertNil(view.caretRectForTesting())
+    XCTAssertTrue(view.scrollMarkdownTableForTesting(containing: 2, deltaX: -10_000))
+    XCTAssertNotNil(view.caretRectForTesting())
+  }
+
+  @MainActor
+  func testMarkdownTableCaretInWrappedCellIsHiddenWhenItsColumnScrollsOutOfView() throws {
+    let longCell =
+      "Confirm enterprise pipeline assumptions, validate warehouse usage numbers, and schedule remediation review."
+    let view = try makeEditableViewer(
+      """
+      | Next Step | Owner | Budget | Actual | Delta | Risk |
+      | :--- | :--- | ---: | ---: | ---: | :--- |
+      | \(longCell) | Nishi | 120,000 | 118,400 | -1.3% | Medium |
+      """)
+    view.setFrameSize(NSSize(width: 520, height: 300))
+    view.syntax = .markdown
+    view.updateLayout()
+
+    XCTAssertGreaterThan(view.visualRowCountForTesting(line: 2), 1)
+    view.beginCaretSelection(at: .init(line: 2, columnUTF16: longCell.utf16.count - 12))
+
+    XCTAssertNotNil(view.caretRectForTesting())
+    XCTAssertTrue(view.scrollMarkdownTableForTesting(containing: 2, deltaX: 10_000))
+    XCTAssertNil(view.caretRectForTesting())
+  }
+
+  @MainActor
   func testMarkdownTableDrawsExactlyThreeRules() throws {
     let view = try makeViewer(
       """

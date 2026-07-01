@@ -2619,7 +2619,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     let line = rowLocation(forY: max(0, point.y)).line
     guard let range = markdownTableRange(containing: line),
-      let frame = markdownTableFrameForTesting(
+      let frame = markdownTableFrame(
         fromLine: range.lowerBound,
         toLine: range.upperBound,
         visibleRows: firstVisualRow(
@@ -4215,6 +4215,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private struct CaretGeometry {
     let x: CGFloat
     let visualRow: Int
+    let rowInLine: Int
   }
 
   /// Text-relative x and global visual row for a caret column in `line`.
@@ -4228,7 +4229,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       let rowText = hugeRowText(line: line, rowIndex: rowIndex, utf16Length: length)
       return CaretGeometry(
         x: xOffset(forColumn: min(max(0, column - rowStart), rowText.length), in: rowText),
-        visualRow: firstVisualRow(ofLine: line) + rowIndex
+        visualRow: firstVisualRow(ofLine: line) + rowIndex,
+        rowInLine: rowIndex
       )
     }
     let boundedColumn = max(0, min(column, attributed.length))
@@ -4239,7 +4241,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
     return CaretGeometry(
       x: xOffset(forColumn: min(boundedColumn, bounds.end) - bounds.start, in: rowText),
-      visualRow: firstVisualRow(ofLine: line) + rowIndex
+      visualRow: firstVisualRow(ofLine: line) + rowIndex,
+      rowInLine: rowIndex
     )
   }
 
@@ -4649,13 +4652,17 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       if drawMarkdownFrontMatterChipLineIfNeeded(line: lineIndex, attributed: drawn) {
         continue
       }
-      drawVisualRows(of: drawn, line: lineIndex, textX: lineTextColumnX(forLine: lineIndex))
+      drawVisualRows(
+        of: drawn,
+        line: lineIndex,
+        textX: lineTextColumnX(forLine: lineIndex),
+        visibleRows: rows)
     }
     // Copy controls draw above the code so a long line never occludes them.
     if usesMarkdownDocumentLayout {
       drawMarkdownCodeCopyControls(range: range, visibleRows: rows)
     }
-    drawCaretIfNeeded(lines: lines, range: range, textX: textX)
+    drawCaretIfNeeded(lines: lines, range: range, textX: textX, visibleRows: rows)
     if gutter > 0 {
       drawGutter(width: gutter, lineRange: range, dirtyRect: dirtyRect)
     }
@@ -4699,8 +4706,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Draws each soft-wrapped visual row of `attributed` (one row when not
   /// wrapping) at its row's y position.
-  private func drawVisualRows(of attributed: NSAttributedString, line: Int, textX: CGFloat) {
-    let didClip = beginMarkdownTableClipIfNeeded(forLine: line)
+  private func drawVisualRows(
+    of attributed: NSAttributedString,
+    line: Int,
+    textX: CGFloat,
+    visibleRows: Range<Int>
+  ) {
+    let didClip = beginMarkdownTableClipIfNeeded(forLine: line, visibleRows: visibleRows)
     defer {
       if didClip {
         NSGraphicsContext.restoreGraphicsState()
@@ -4725,18 +4737,28 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
   }
 
-  private func beginMarkdownTableClipIfNeeded(forLine line: Int) -> Bool {
-    guard let range = markdownTableRange(containing: line) else { return false }
-    let visibleRows =
+  private func markdownTableClipFrame(
+    forLine line: Int,
+    visibleRows requestedVisibleRows: Range<Int>
+  ) -> NSRect? {
+    guard let range = markdownTableRange(containing: line) else { return nil }
+    let tableRows =
       firstVisualRow(
         ofLine: range.lowerBound)..<(firstVisualRow(ofLine: range.upperBound)
       + max(1, wrapIndex?.visualRowCount(ofLine: range.upperBound) ?? 1))
-    guard
-      let frame = markdownTableFrameForTesting(
-        fromLine: range.lowerBound,
-        toLine: range.upperBound,
-        visibleRows: visibleRows)
-    else { return false }
+    let visibleLower = max(tableRows.lowerBound, requestedVisibleRows.lowerBound)
+    let visibleUpper = min(tableRows.upperBound, requestedVisibleRows.upperBound)
+    guard visibleLower < visibleUpper else { return nil }
+    return markdownTableFrame(
+      fromLine: range.lowerBound,
+      toLine: range.upperBound,
+      visibleRows: visibleLower..<visibleUpper)
+  }
+
+  private func beginMarkdownTableClipIfNeeded(forLine line: Int, visibleRows: Range<Int>) -> Bool {
+    guard let frame = markdownTableClipFrame(forLine: line, visibleRows: visibleRows) else {
+      return false
+    }
     NSGraphicsContext.saveGraphicsState()
     frame.clip()
     return true
@@ -5054,7 +5076,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     visibleRows: Range<Int>
   ) {
     guard
-      let frame = markdownTableFrameForTesting(
+      let frame = markdownTableFrame(
         fromLine: startLine, toLine: endLine, states: states, visibleRows: visibleRows),
       let ruleYs = markdownTableRuleYs(
         fromLine: startLine, toLine: endLine, states: states, visibleRows: visibleRows),
@@ -6134,7 +6156,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     for line in range {
       let lineTextX = lineTextColumnX(forLine: line)
       let attributed = lines[line - range.lowerBound]
-      let didClip = beginMarkdownTableClipIfNeeded(forLine: line)
+      let didClip = beginMarkdownTableClipIfNeeded(forLine: line, visibleRows: visibleRows)
       // A fully-selected line includes its trailing newline; mark it on the line's
       // last visual row.
       let includesNewline = line < selection.end.line
@@ -6212,10 +6234,20 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Draws the caret at the (empty) selection head while focused and visible, or
   /// within the marked text while composing.
-  private func drawCaretIfNeeded(lines: [NSAttributedString], range: Range<Int>, textX: CGFloat) {
+  private func drawCaretIfNeeded(
+    lines: [NSAttributedString],
+    range: Range<Int>,
+    textX: CGFloat,
+    visibleRows: Range<Int>
+  ) {
     guard isEditable, hasActiveKeyboardFocus else { return }
     if let composition {
-      drawCompositionCaret(composition, lines: lines, range: range, textX: textX)
+      drawCompositionCaret(
+        composition,
+        lines: lines,
+        range: range,
+        textX: textX,
+        visibleRows: visibleRows)
       return
     }
     // The plain caret is hidden during the blink's off phase; the composing caret
@@ -6228,13 +6260,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let displayed = composedLineForDisplay(line: line, base: lines[line - range.lowerBound])
     drawCaret(
       forColumn: selection.head.columnUTF16, line: line, attributed: displayed,
-      textX: lineTextColumnX(forLine: line))
+      textX: lineTextColumnX(forLine: line),
+      visibleRows: visibleRows)
   }
 
   /// Draws the caret within the marked (composing) text at the input method's
   /// cursor position.
   private func drawCompositionCaret(
-    _ composition: Composition, lines: [NSAttributedString], range: Range<Int>, textX: CGFloat
+    _ composition: Composition,
+    lines: [NSAttributedString],
+    range: Range<Int>,
+    textX: CGFloat,
+    visibleRows: Range<Int>
   ) {
     let line = composition.anchor.line
     guard range.contains(line) else { return }
@@ -6246,18 +6283,110 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     drawCaret(
       forColumn: column + within, line: line,
       attributed: composedLineForDisplay(line: line, base: base),
-      textX: lineTextColumnX(forLine: line))
+      textX: lineTextColumnX(forLine: line),
+      visibleRows: visibleRows)
   }
 
   /// Draws a 1.5pt caret at `column` on `line`, on the correct visual row.
   private func drawCaret(
-    forColumn column: Int, line: Int, attributed: NSAttributedString, textX: CGFloat
+    forColumn column: Int,
+    line: Int,
+    attributed: NSAttributedString,
+    textX: CGFloat,
+    visibleRows: Range<Int>
   ) {
-    let geometry = caretGeometry(forColumn: column, line: line, attributed: attributed)
-    let x = textX + geometry.x
-    let y = yOffset(ofVisualRow: geometry.visualRow)
+    guard
+      let rect = caretRect(
+        forColumn: column,
+        line: line,
+        attributed: attributed,
+        textX: textX,
+        visibleRows: visibleRows)
+    else { return }
     NSColor.textColor.setFill()
-    NSRect(x: x, y: y, width: 1.5, height: rowHeight(forLine: line)).fill()
+    rect.fill()
+  }
+
+  private func caretRect(
+    forColumn column: Int,
+    line: Int,
+    attributed: NSAttributedString,
+    textX: CGFloat,
+    visibleRows: Range<Int>
+  ) -> NSRect? {
+    let geometry = caretGeometry(forColumn: column, line: line, attributed: attributed)
+    let rect = NSRect(
+      x: textX + geometry.x,
+      y: yOffset(ofVisualRow: geometry.visualRow),
+      width: 1.5,
+      height: rowHeight(forLine: line))
+    guard
+      markdownTableAllowsCaretRect(
+        rect,
+        column: column,
+        line: line,
+        attributed: attributed,
+        geometry: geometry,
+        visibleRows: visibleRows)
+    else { return nil }
+    return rect
+  }
+
+  private func markdownTableAllowsCaretRect(
+    _ rect: NSRect,
+    column: Int,
+    line: Int,
+    attributed: NSAttributedString,
+    geometry: CaretGeometry,
+    visibleRows: Range<Int>
+  ) -> Bool {
+    guard let frame = markdownTableClipFrame(forLine: line, visibleRows: visibleRows) else {
+      return true
+    }
+    guard rect.maxX >= frame.minX, rect.minX <= frame.maxX else { return false }
+    // The caret x comes from Core Text, while the table clip comes from the
+    // column model. Check both so a scrolled-away column cannot leave a caret in
+    // the empty table margin if those two coordinate paths drift slightly.
+    guard
+      let columnFrame = markdownTableColumnFrame(
+        forDisplayColumn: column,
+        line: line,
+        attributed: attributed,
+        rowInLine: geometry.rowInLine)
+    else { return true }
+    return columnFrame.maxX >= frame.minX && columnFrame.minX <= frame.maxX
+  }
+
+  private func markdownTableColumnFrame(
+    forDisplayColumn column: Int,
+    line: Int,
+    attributed: NSAttributedString,
+    rowInLine: Int
+  ) -> NSRect? {
+    guard usesMarkdownDocumentLayout, let buffer = reader else { return nil }
+    let state = markdownLineState(forLine: line, in: buffer)
+    guard state.isTableRow, !state.tableColumns.isEmpty else { return nil }
+    let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
+    guard rowInLine >= 0, rowInLine < starts.count else { return nil }
+    let bounds = rowRange(rowInLine, starts: starts, length: attributed.length)
+    let boundedColumn = min(max(column, bounds.start), bounds.end)
+    let string = attributed.string as NSString
+    var columnIndex = 0
+    if bounds.start < boundedColumn {
+      for offset in bounds.start..<boundedColumn where string.character(at: offset) == 9 {
+        columnIndex += 1
+      }
+    }
+    guard columnIndex < state.tableColumns.count else { return nil }
+    let originX =
+      lineTextColumnX(forLine: line)
+      + state.tableColumns.prefix(columnIndex).reduce(CGFloat(0)) { $0 + $1.width }
+      + MarkdownDocumentMetrics.tableColumnGutter * CGFloat(columnIndex)
+    return NSRect(
+      x: originX,
+      y: 0,
+      width: state.tableColumns[columnIndex].width,
+      height: 0)
   }
 
   func markdownWrapContentWidthForTesting() -> CGFloat {
@@ -6275,6 +6404,19 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   func visualRowCountForTesting(line: Int) -> Int {
     wrapIndex?.visualRowCount(ofLine: line) ?? 1
+  }
+
+  func caretRectForTesting() -> NSRect? {
+    guard let selection, selection.isEmpty else { return nil }
+    let line = selection.head.line
+    guard line >= 0, line < lineCount else { return nil }
+    let attributed = attributedLine(forLine: line)
+    return caretRect(
+      forColumn: selection.head.columnUTF16,
+      line: line,
+      attributed: attributed,
+      textX: lineTextColumnX(forLine: line),
+      visibleRows: 0..<totalVisualRows)
   }
 
   func markdownWrapContentWidthForTesting(line: Int) -> CGFloat {
@@ -6499,8 +6641,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     toLine endLine: Int,
     visibleRows: Range<Int>
   ) -> NSRect? {
+    markdownTableFrame(fromLine: startLine, toLine: endLine, visibleRows: visibleRows)
+  }
+
+  private func markdownTableFrame(
+    fromLine startLine: Int,
+    toLine endLine: Int,
+    visibleRows: Range<Int>
+  ) -> NSRect? {
     guard let buffer = reader else { return nil }
-    return markdownTableFrameForTesting(
+    return markdownTableFrame(
       fromLine: startLine,
       toLine: endLine,
       states: markdownLineStates(for: buffer) ?? [],
@@ -6508,6 +6658,19 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   func markdownTableFrameForTesting(
+    fromLine startLine: Int,
+    toLine endLine: Int,
+    states: [MarkdownLineStyleState],
+    visibleRows: Range<Int>
+  ) -> NSRect? {
+    markdownTableFrame(
+      fromLine: startLine,
+      toLine: endLine,
+      states: states,
+      visibleRows: visibleRows)
+  }
+
+  private func markdownTableFrame(
     fromLine startLine: Int,
     toLine endLine: Int,
     states: [MarkdownLineStyleState],
