@@ -87,6 +87,21 @@ final class TextViewportLayoutTests: XCTestCase {
     return buffer.text(forLineRange: 0, count: buffer.lineCount)
   }
 
+  private func rowNaturalSizes(
+    of attributed: NSAttributedString,
+    starts: [Int]
+  ) -> [CGSize] {
+    guard !starts.isEmpty else { return [] }
+    return starts.indices.map { index in
+      let start = starts[index]
+      let end = index + 1 < starts.count ? starts[index + 1] : attributed.length
+      return attributed.attributedSubstring(
+        from: NSRange(location: start, length: end - start)
+      )
+      .size()
+    }
+  }
+
   // MARK: Line render cache
 
   @MainActor
@@ -232,6 +247,159 @@ final class TextViewportLayoutTests: XCTestCase {
 
     let band = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<20)
     XCTAssertTrue(view.attributedLineForTesting(forLine: 5) === band[5])
+  }
+
+  @MainActor
+  func testLineRenderCacheReusesVisualRowStartsAcrossRepeatedAccess() throws {
+    let markdown = String(
+      repeating: "A wrapped markdown paragraph with table-like prose. ", count: 8)
+    let view = try makeEditableViewer(markdown)
+    view.syntax = .markdown
+    view.setFrameSize(NSSize(width: 220, height: 240))
+    view.updateLayout()
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<1)
+
+    view.resetRowLayoutComputationCountsForTesting()
+    let first = view.visualRowStartOffsetsForTesting(forLine: 0)
+    let countAfterFirstAccess = view.rowStartComputationCountForTesting()
+    let second = view.visualRowStartOffsetsForTesting(forLine: 0)
+
+    XCTAssertGreaterThan(first.count, 1)
+    XCTAssertEqual(second, first)
+    XCTAssertEqual(countAfterFirstAccess, 1)
+    XCTAssertEqual(view.rowStartComputationCountForTesting(), 1)
+  }
+
+  @MainActor
+  func testLineRenderCacheReusesRowNaturalSizesAcrossRepeatedAccess() throws {
+    let markdown = String(repeating: "A wrapped markdown paragraph with **bold** text. ", count: 7)
+    let view = try makeEditableViewer(markdown)
+    view.syntax = .markdown
+    view.setFrameSize(NSSize(width: 220, height: 240))
+    view.updateLayout()
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let attributed = try XCTUnwrap(
+      view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<1).first)
+
+    view.resetRowLayoutComputationCountsForTesting()
+    let starts = view.visualRowStartOffsetsForTesting(forLine: 0)
+    let expected = rowNaturalSizes(of: attributed, starts: starts)
+    let first = view.rowNaturalSizesForTesting(forLine: 0)
+    let countAfterFirstAccess = view.rowSizeComputationCountForTesting()
+    let second = view.rowNaturalSizesForTesting(forLine: 0)
+
+    XCTAssertEqual(first.count, expected.count)
+    for index in expected.indices {
+      XCTAssertEqual(first[index].width, expected[index].width, accuracy: 0.5)
+      XCTAssertEqual(first[index].height, expected[index].height, accuracy: 0.5)
+      XCTAssertEqual(second[index].width, first[index].width, accuracy: 0.5)
+      XCTAssertEqual(second[index].height, first[index].height, accuracy: 0.5)
+    }
+    XCTAssertEqual(countAfterFirstAccess, 1)
+    XCTAssertEqual(view.rowSizeComputationCountForTesting(), 1)
+  }
+
+  @MainActor
+  func testLineRenderCacheRecomputesRowStartsAfterWidthChange() throws {
+    let markdown = String(
+      repeating: "A wrapped markdown paragraph with enough words to resize. ", count: 7)
+    let view = try makeEditableViewer(markdown)
+    view.syntax = .markdown
+    view.setFrameSize(NSSize(width: 220, height: 240))
+    view.updateLayout()
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<1)
+    let narrowStarts = view.visualRowStartOffsetsForTesting(forLine: 0)
+
+    view.setFrameSize(NSSize(width: 460, height: 240))
+    view.updateLayout()
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<1)
+    view.resetRowLayoutComputationCountsForTesting()
+    let wideStarts = view.visualRowStartOffsetsForTesting(forLine: 0)
+
+    let coldView = try makeEditableViewer(markdown)
+    coldView.syntax = .markdown
+    coldView.setFrameSize(NSSize(width: 460, height: 240))
+    coldView.updateLayout()
+    let coldBuffer = try XCTUnwrap(coldView.editableBuffer)
+    _ = coldView.attributedBandLineObjectsForTesting(buffer: coldBuffer, range: 0..<1)
+    let coldStarts = coldView.visualRowStartOffsetsForTesting(forLine: 0)
+
+    XCTAssertNotEqual(wideStarts, narrowStarts)
+    XCTAssertEqual(wideStarts, coldStarts)
+    XCTAssertEqual(view.rowStartComputationCountForTesting(), 1)
+  }
+
+  @MainActor
+  func testLineRenderCacheDoesNotUseComposedLineForRowLayoutCache() throws {
+    let markdown = String(
+      repeating: "A wrapped markdown paragraph with composition safety. ", count: 6)
+    let view = try makeEditableViewer(markdown)
+    view.syntax = .markdown
+    view.setFrameSize(NSSize(width: 220, height: 240))
+    view.updateLayout()
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<1)
+    let baselineStarts = view.visualRowStartOffsetsForTesting(forLine: 0)
+
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 1))
+    view.setMarkedText(
+      String(repeating: "かな", count: 12),
+      selectedRange: NSRange(location: 24, length: 0),
+      replacementRange: Self.noReplacement)
+    var actualRange = NSRange(location: NSNotFound, length: 0)
+    _ = view.firstRect(
+      forCharacterRange: NSRange(location: 1, length: 0), actualRange: &actualRange)
+
+    view.resetRowLayoutComputationCountsForTesting()
+    XCTAssertEqual(view.visualRowStartOffsetsForTesting(forLine: 0), baselineStarts)
+    XCTAssertEqual(view.rowStartComputationCountForTesting(), 0)
+
+    view.setMarkedText(
+      "", selectedRange: NSRange(location: 0, length: 0), replacementRange: Self.noReplacement)
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<1)
+    view.resetRowLayoutComputationCountsForTesting()
+    let restoredStarts = view.visualRowStartOffsetsForTesting(forLine: 0)
+
+    XCTAssertEqual(restoredStarts, baselineStarts)
+    XCTAssertEqual(view.rowStartComputationCountForTesting(), 0)
+  }
+
+  @MainActor
+  func testLineRenderCacheOverlappingMarkdownTableBandsMatchColdRowStarts() throws {
+    let markdown = """
+      # Table Cache
+
+      | Team | Notes | Next Step |
+      | --- | --- | --- |
+      | Sales | This table cell wraps into multiple visual rows so cached row starts matter. | Confirm enterprise pipeline assumptions before Friday. |
+      | Finance | Reconcile vendor accruals and update the closing memo with enough prose to wrap. | Keep |
+      | Product | Review roadmap changes with design and engineering leads. | Replace placeholder screenshots. |
+
+      After table paragraph with additional markdown text.
+      """
+    let document = try SpyTextDocumentReading(TextBuffer.open(bytes: Data(markdown.utf8)))
+    let cachedView = LineRenderingTextView()
+    cachedView.syntax = .markdown
+    cachedView.setFrameSize(NSSize(width: 360, height: 320))
+    cachedView.updateLayout()
+    let coldView = LineRenderingTextView()
+    coldView.syntax = .markdown
+    coldView.setFrameSize(NSSize(width: 360, height: 320))
+    coldView.updateLayout()
+
+    for range in [0..<5, 2..<7, 4..<9, 1..<8] {
+      _ = cachedView.attributedBandLineObjectsForTesting(buffer: document, range: range)
+      coldView.resetLineRenderCacheForTesting()
+      _ = coldView.attributedBandLineObjectsForTesting(buffer: document, range: range)
+      for line in range {
+        XCTAssertEqual(
+          cachedView.visualRowStartOffsetsForTesting(forLine: line),
+          coldView.visualRowStartOffsetsForTesting(forLine: line),
+          "Mismatch at line \(line), band \(range)")
+      }
+    }
   }
 
   @MainActor

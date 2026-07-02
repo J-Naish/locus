@@ -215,10 +215,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private static let lineRenderCacheMarginBands = 2
   private struct LineRenderCache {
     var revision: UInt64
+    var width: CGFloat
     var raw: [Int: String]
     var attributed: [Int: NSAttributedString]
+    var rowStarts: [Int: [Int]]
+    var rowSizes: [Int: [CGSize]]
   }
   private var lineRenderCache: LineRenderCache?
+  private var rowStartComputationCount = 0
+  private var rowSizeComputationCount = 0
   private var markdownLineStateCache: (revision: UInt64, states: [MarkdownLineStyleState])?
   private struct MarkdownLinkVisualStateCacheKey: Hashable {
     let baseFilePath: String?
@@ -1868,12 +1873,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// document is not wrapping). `attributed` is the line's displayed string.
   private func visualRowStartOffsets(ofLine line: Int, attributed: NSAttributedString) -> [Int] {
     guard wrapIndex != nil else { return [0] }
-    if let starts = markdownFrontMatterChipVisualRowStartOffsets(forLine: line) {
-      return starts
+    let canUseCache = canUseRowLayoutCache(forLine: line, attributed: attributed)
+    if canUseCache, let starts = lineRenderCache?.rowStarts[line] { return starts }
+    rowStartComputationCount += 1
+    let starts =
+      markdownFrontMatterChipVisualRowStartOffsets(forLine: line)
+      ?? LineWrap.visualRowStartOffsets(
+        of: attributed, width: lineWrapContentWidth(forLine: line),
+        maximumRows: maximumDrawnCharactersPerLine)
+    if canUseCache {
+      lineRenderCache?.rowStarts[line] = starts
     }
-    return LineWrap.visualRowStartOffsets(
-      of: attributed, width: lineWrapContentWidth(forLine: line),
-      maximumRows: maximumDrawnCharactersPerLine)
+    return starts
   }
 
   /// The visual-row index within a line for `column`, given the line's row starts.
@@ -1903,6 +1914,48 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let start = starts[safe]
     let end = safe + 1 < starts.count ? starts[safe + 1] : length
     return (start, end)
+  }
+
+  private func rowNaturalSizes(
+    of attributed: NSAttributedString,
+    line: Int,
+    starts: [Int]
+  ) -> [CGSize] {
+    let canUseCache = canUseRowLayoutCache(forLine: line, attributed: attributed)
+    if canUseCache, let sizes = lineRenderCache?.rowSizes[line] { return sizes }
+    let sizes = computeRowNaturalSizes(of: attributed, starts: starts)
+    if canUseCache {
+      lineRenderCache?.rowSizes[line] = sizes
+    }
+    return sizes
+  }
+
+  private func computeRowNaturalSizes(
+    of attributed: NSAttributedString,
+    starts: [Int]
+  ) -> [CGSize] {
+    rowSizeComputationCount += 1
+    let length = attributed.length
+    return starts.indices.map { rowIndex in
+      let bounds = rowRange(rowIndex, starts: starts, length: length)
+      return attributed.attributedSubstring(
+        from: NSRange(location: bounds.start, length: bounds.end - bounds.start)
+      )
+      .size()
+    }
+  }
+
+  private func canUseRowLayoutCache(
+    forLine line: Int,
+    attributed: NSAttributedString
+  ) -> Bool {
+    guard let cache = lineRenderCache,
+      cache.width == wrapContentWidth,
+      let cached = cache.attributed[line]
+    else {
+      return false
+    }
+    return cached === attributed
   }
 
   /// Width of the line-number gutter for the current line count, or 0 when hidden.
@@ -4430,9 +4483,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   private func prepareLineRenderCache(for buffer: any TextDocumentReading) {
     let revision = buffer.revision
-    guard lineRenderCache?.revision == revision else {
+    let width = wrapContentWidth
+    guard lineRenderCache?.revision == revision, lineRenderCache?.width == width else {
       resetLineRenderCache()
-      lineRenderCache = LineRenderCache(revision: revision, raw: [:], attributed: [:])
+      lineRenderCache = LineRenderCache(
+        revision: revision,
+        width: width,
+        raw: [:],
+        attributed: [:],
+        rowStarts: [:],
+        rowSizes: [:])
       return
     }
   }
@@ -4507,6 +4567,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let upper = range.upperBound + margin
     cache.raw = cache.raw.filter { line, _ in line >= lower && line < upper }
     cache.attributed = cache.attributed.filter { line, _ in line >= lower && line < upper }
+    cache.rowStarts = cache.rowStarts.filter { line, _ in line >= lower && line < upper }
+    cache.rowSizes = cache.rowSizes.filter { line, _ in line >= lower && line < upper }
     lineRenderCache = cache
   }
 
@@ -4882,11 +4944,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let rowsTop = yOffset(ofLine: line) + leadingInset(forLine: line)
     let height = rowHeight(forLine: line)
     let length = attributed.length
+    let naturalSizes = rowNaturalSizes(of: attributed, line: line, starts: starts)
     for rowIndex in starts.indices {
       let bounds = rowRange(rowIndex, starts: starts, length: length)
       let rowText = attributed.attributedSubstring(
         from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
-      let natural = rowText.size()
+      let natural =
+        rowIndex < naturalSizes.count
+        ? naturalSizes[rowIndex]
+        : rowText.size()
       let y =
         rowsTop + CGFloat(rowIndex) * height
         + Self.rowVerticalInset(rowHeight: height, naturalHeight: natural.height)
@@ -5296,6 +5362,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// which the table's outer rules may breathe into it.
   private func markdownLineIsBlank(_ line: Int) -> Bool {
     guard let buffer = reader, line >= 0, line < buffer.lineCount else { return false }
+    if let cache = lineRenderCache,
+      cache.revision == buffer.revision,
+      let text = cache.raw[line]
+    {
+      return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
     let text = buffer.text(
       forLineRange: line, count: 1, maxBytesPerLine: maximumFetchedBytesPerLine)
     return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -6646,7 +6718,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   func lineRenderCacheEntryCountForTesting() -> Int {
     guard let cache = lineRenderCache else { return 0 }
-    return Set(cache.raw.keys).union(cache.attributed.keys).count
+    return Set(cache.raw.keys)
+      .union(cache.attributed.keys)
+      .union(cache.rowStarts.keys)
+      .union(cache.rowSizes.keys)
+      .count
   }
 
   func setMarkdownVideoSyncHookForTesting(_ hook: (() -> Void)?) {
@@ -6669,6 +6745,40 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   func attributedLineForTesting(forLine line: Int) -> NSAttributedString {
     attributedLine(forLine: line)
+  }
+
+  func resetRowLayoutComputationCountsForTesting() {
+    rowStartComputationCount = 0
+    rowSizeComputationCount = 0
+  }
+
+  func rowStartComputationCountForTesting() -> Int {
+    rowStartComputationCount
+  }
+
+  func rowSizeComputationCountForTesting() -> Int {
+    rowSizeComputationCount
+  }
+
+  func visualRowStartOffsetsForTesting(forLine line: Int) -> [Int] {
+    let attributed = rowLayoutAttributedLineForTesting(forLine: line)
+    return visualRowStartOffsets(ofLine: line, attributed: attributed)
+  }
+
+  func rowNaturalSizesForTesting(forLine line: Int) -> [CGSize] {
+    let attributed = rowLayoutAttributedLineForTesting(forLine: line)
+    let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
+    return rowNaturalSizes(of: attributed, line: line, starts: starts)
+  }
+
+  private func rowLayoutAttributedLineForTesting(forLine line: Int) -> NSAttributedString {
+    if let cache = lineRenderCache,
+      cache.width == wrapContentWidth,
+      let attributed = cache.attributed[line]
+    {
+      return attributed
+    }
+    return attributedLine(forLine: line)
   }
 
   func setSelectionForTesting(anchor: TextSelection.Endpoint, head: TextSelection.Endpoint) {
