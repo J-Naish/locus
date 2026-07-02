@@ -1661,40 +1661,44 @@ enum TextDocumentSyntaxHighlighter {
     replaceLiteralMatchesInMap(
       expression: htmlEntityNumericExpression, decode: htmlNumericEntityLiteral(forMatch:),
       map: &current, protectedRanges: &protectedRanges)
-    replaceRenderedMatchesInMap(
-      expression: imageExpression,
-      replacementGroup: 1,
-      map: &current,
-      protectedRanges: &protectedRanges,
-      protectsReplacement: true)
-    replaceRenderedMatchesInMap(
-      expression: renderedLinkExpression,
-      replacementGroup: 1,
-      map: &current,
-      protectedRanges: &protectedRanges,
-      protectsReplacement: true,
-      onReplace: { match, text, _, _, sourceGroupRange in
-        let destination = text.substring(with: match.range(at: 2))
-        collectedTargets.append(
-          MarkdownPendingLinkTarget(sourceRange: sourceGroupRange, destination: destination))
-      })
-    replaceRenderedMatchesInMap(
-      expression: referenceLinkExpression,
-      replacementGroup: 1,
-      map: &current,
-      protectedRanges: &protectedRanges,
-      protectsReplacement: true)
-    replaceRenderedMatchesInMap(
-      expression: autolinkExpression,
-      replacementGroup: 1,
-      map: &current,
-      protectedRanges: &protectedRanges,
-      protectsReplacement: true,
-      onReplace: { match, text, _, _, sourceGroupRange in
-        let destination = text.substring(with: match.range(at: 1))
-        collectedTargets.append(
-          MarkdownPendingLinkTarget(sourceRange: sourceGroupRange, destination: destination))
-      })
+    if shouldRunMarkdownBracketInlinePasses(in: current.displayText) {
+      replaceRenderedMatchesInMap(
+        expression: imageExpression,
+        replacementGroup: 1,
+        map: &current,
+        protectedRanges: &protectedRanges,
+        protectsReplacement: true)
+      replaceRenderedMatchesInMap(
+        expression: renderedLinkExpression,
+        replacementGroup: 1,
+        map: &current,
+        protectedRanges: &protectedRanges,
+        protectsReplacement: true,
+        onReplace: { match, text, _, _, sourceGroupRange in
+          let destination = text.substring(with: match.range(at: 2))
+          collectedTargets.append(
+            MarkdownPendingLinkTarget(sourceRange: sourceGroupRange, destination: destination))
+        })
+      replaceRenderedMatchesInMap(
+        expression: referenceLinkExpression,
+        replacementGroup: 1,
+        map: &current,
+        protectedRanges: &protectedRanges,
+        protectsReplacement: true)
+    }
+    if shouldRunMarkdownAutolinkPass(in: current.displayText) {
+      replaceRenderedMatchesInMap(
+        expression: autolinkExpression,
+        replacementGroup: 1,
+        map: &current,
+        protectedRanges: &protectedRanges,
+        protectsReplacement: true,
+        onReplace: { match, text, _, _, sourceGroupRange in
+          let destination = text.substring(with: match.range(at: 1))
+          collectedTargets.append(
+            MarkdownPendingLinkTarget(sourceRange: sourceGroupRange, destination: destination))
+        })
+    }
     // Inline HTML formatting tags strip to their inner text (group 1), like the
     // markdown emphasis rules; a safe-href <a> strips to its text (group 2);
     // <br> becomes a space. allowsContainedProtectedRanges lets a tag wrap a
@@ -1892,43 +1896,47 @@ enum TextDocumentSyntaxHighlighter {
     replaceLiteralMatches(
       expression: htmlEntityNumericExpression, decode: htmlNumericEntityLiteral(forMatch:),
       attributes: entityAttributes, in: attributed, protectedRanges: &protectedRanges)
-    replaceRenderedMatches(
-      expression: imageExpression,
-      replacementGroup: 1,
-      attributes: markdownAttributes(
-        font: lineFonts.regular,
-        foregroundColor: .secondaryLabelColor,
-        includeVisualAttributes: includeVisualAttributes),
-      in: attributed,
-      protectedRanges: &protectedRanges,
-      protectsReplacement: true)
-    replaceRenderedMatches(
-      expression: renderedLinkExpression,
-      replacementGroup: 1,
-      attributes: renderedLinkAttributes(
-        font: lineFonts.regular,
-        includeVisualAttributes: includeVisualAttributes),
-      in: attributed,
-      protectedRanges: &protectedRanges,
-      protectsReplacement: true)
-    replaceRenderedMatches(
-      expression: referenceLinkExpression,
-      replacementGroup: 1,
-      attributes: renderedLinkAttributes(
-        font: lineFonts.regular,
-        includeVisualAttributes: includeVisualAttributes),
-      in: attributed,
-      protectedRanges: &protectedRanges,
-      protectsReplacement: true)
-    replaceRenderedMatches(
-      expression: autolinkExpression,
-      replacementGroup: 1,
-      attributes: renderedLinkAttributes(
-        font: lineFonts.regular,
-        includeVisualAttributes: includeVisualAttributes),
-      in: attributed,
-      protectedRanges: &protectedRanges,
-      protectsReplacement: true)
+    if shouldRunMarkdownBracketInlinePasses(in: attributed.string) {
+      replaceRenderedMatches(
+        expression: imageExpression,
+        replacementGroup: 1,
+        attributes: markdownAttributes(
+          font: lineFonts.regular,
+          foregroundColor: .secondaryLabelColor,
+          includeVisualAttributes: includeVisualAttributes),
+        in: attributed,
+        protectedRanges: &protectedRanges,
+        protectsReplacement: true)
+      replaceRenderedMatches(
+        expression: renderedLinkExpression,
+        replacementGroup: 1,
+        attributes: renderedLinkAttributes(
+          font: lineFonts.regular,
+          includeVisualAttributes: includeVisualAttributes),
+        in: attributed,
+        protectedRanges: &protectedRanges,
+        protectsReplacement: true)
+      replaceRenderedMatches(
+        expression: referenceLinkExpression,
+        replacementGroup: 1,
+        attributes: renderedLinkAttributes(
+          font: lineFonts.regular,
+          includeVisualAttributes: includeVisualAttributes),
+        in: attributed,
+        protectedRanges: &protectedRanges,
+        protectsReplacement: true)
+    }
+    if shouldRunMarkdownAutolinkPass(in: attributed.string) {
+      replaceRenderedMatches(
+        expression: autolinkExpression,
+        replacementGroup: 1,
+        attributes: renderedLinkAttributes(
+          font: lineFonts.regular,
+          includeVisualAttributes: includeVisualAttributes),
+        in: attributed,
+        protectedRanges: &protectedRanges,
+        protectsReplacement: true)
+    }
     // Inline HTML formatting tags — mirror the map pass exactly (same order and
     // same safe-href skip), so the attributed string stays byte-identical to the
     // display string and the caret map round-trips.
@@ -2780,19 +2788,22 @@ enum TextDocumentSyntaxHighlighter {
       }
     }
 
-    var fenceOpeningIndex: Int?
+    var fenceOpening: (index: Int, info: (markerLength: Int, marker: Character))?
     for index in lines.indices {
-      guard !states[index].insideFrontMatter, isMarkdownFenceLine(lines[index]) else {
+      guard !states[index].insideFrontMatter, let fence = markdownFenceInfo(in: lines[index])
+      else {
         continue
       }
-      if let openingIndex = fenceOpeningIndex {
+      if let opening = fenceOpening {
+        guard markdownFenceCanClose(opening: opening.info, closing: fence) else {
+          continue
+        }
+        let openingIndex = opening.index
         states[openingIndex].isFenceDelimiter = true
         states[openingIndex].isFenceOpen = true
-        if let fence = markdownFenceInfo(in: lines[openingIndex]) {
-          let infoRange = markdownFenceInfoTextRange(
-            in: lines[openingIndex], markerLength: fence.markerLength)
-          states[openingIndex].isFenceLabel = infoRange.length > 0
-        }
+        let infoRange = markdownFenceInfoTextRange(
+          in: lines[openingIndex], markerLength: opening.info.markerLength)
+        states[openingIndex].isFenceLabel = infoRange.length > 0
         states[index].isFenceDelimiter = true
         if openingIndex + 1 < index {
           for fencedIndex in (openingIndex + 1)..<index {
@@ -2800,9 +2811,9 @@ enum TextDocumentSyntaxHighlighter {
             states[fencedIndex].insideFence = true
           }
         }
-        fenceOpeningIndex = nil
+        fenceOpening = nil
       } else {
-        fenceOpeningIndex = index
+        fenceOpening = (index, fence)
       }
     }
 
@@ -3457,6 +3468,9 @@ enum TextDocumentSyntaxHighlighter {
     lineFonts: MarkdownFontSet,
     includeVisualAttributes: Bool
   ) -> [NSRange] {
+    guard shouldRunMarkdownBracketInlinePasses(in: line) else {
+      return []
+    }
     let expression = linkExpression
     let nsLine = line as NSString
     let full = NSRange(location: 0, length: nsLine.length)
@@ -4082,6 +4096,13 @@ enum TextDocumentSyntaxHighlighter {
     return count >= 3 ? (count, marker) : nil
   }
 
+  private static func markdownFenceCanClose(
+    opening: (markerLength: Int, marker: Character),
+    closing: (markerLength: Int, marker: Character)
+  ) -> Bool {
+    closing.marker == opening.marker && closing.markerLength >= opening.markerLength
+  }
+
   private static func markdownFrontMatterDelimiter(in line: String) -> Bool {
     line.trimmingCharacters(in: .whitespaces) == "---"
   }
@@ -4137,11 +4158,29 @@ enum TextDocumentSyntaxHighlighter {
     markdownThematicBreak(in: line) || markdownHTMLHorizontalRule(in: line)
   }
 
+  private static func shouldRunMarkdownBracketInlinePasses(in text: String) -> Bool {
+    let nsText = text as NSString
+    guard nsText.length <= markdownInlineBracketRegexMaximumLength else {
+      return false
+    }
+    return text.contains("[") && text.contains("]")
+  }
+
+  private static func shouldRunMarkdownAutolinkPass(in text: String) -> Bool {
+    let nsText = text as NSString
+    guard nsText.length <= markdownInlineAutolinkRegexMaximumLength else {
+      return false
+    }
+    return text.contains("<") && text.contains(">")
+  }
+
   private static func isBulletMarker(_ value: unichar) -> Bool {
     value == 45 || value == 42 || value == 43  // "-", "*", "+"
   }
 
   private static let inlineCodeExpression = markdownRegex(#"`([^`\n]+)`"#)
+  private static let markdownInlineBracketRegexMaximumLength = 4_096
+  private static let markdownInlineAutolinkRegexMaximumLength = 8_192
   private static let linkExpression = markdownRegex(#"(?<!!)\[([^\]\n]+)\]\((https?://[^\)\n]+)\)"#)
   private static let renderedLinkExpression = markdownRegex(#"(?<!!)\[([^\]\n]+)\]\(([^\)\n]+)\)"#)
   private static let referenceLinkExpression = markdownRegex(#"(?<!!)\[([^\]\n]+)\]\[([^\]\n]*)\]"#)

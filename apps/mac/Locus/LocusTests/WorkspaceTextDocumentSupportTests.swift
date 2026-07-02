@@ -1500,6 +1500,41 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       "```yaml")
   }
 
+  func testMarkdownFenceClosesOnlyWithMatchingMarkerKind() {
+    let lines = ["~~~", "```", "still code", "~~~", "body"]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertTrue(states[0].isFenceDelimiter)
+    XCTAssertTrue(states[1].insideFence)
+    XCTAssertFalse(states[1].isFenceDelimiter)
+    XCTAssertTrue(states[2].insideFence)
+    XCTAssertTrue(states[3].isFenceDelimiter)
+    XCTAssertFalse(states[4].insideFence)
+  }
+
+  func testMarkdownFenceClosesOnlyWithLongEnoughMarker() {
+    let lines = ["````", "```", "still code", "````"]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertTrue(states[0].isFenceDelimiter)
+    XCTAssertTrue(states[1].insideFence)
+    XCTAssertFalse(states[1].isFenceDelimiter)
+    XCTAssertTrue(states[2].insideFence)
+    XCTAssertTrue(states[3].isFenceDelimiter)
+  }
+
+  func testMarkdownUnclosedBracketRunDoesNotStallRendering() {
+    let line = String(repeating: "[", count: 5_000)
+    let start = Date()
+
+    let rendered = TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+      line,
+      font: TextDocumentSyntax.markdown.font)
+
+    XCTAssertEqual(rendered, line)
+    XCTAssertLessThan(Date().timeIntervalSince(start), 1)
+  }
+
   func testMarkdownSourceFallbackConcealsTaskMarkerButKeepsTextReadable() throws {
     let storage = NSTextStorage(string: "- [ ] Update the summary")
 

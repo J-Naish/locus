@@ -26,12 +26,14 @@ struct GitRepositoryMetadata: Equatable, Sendable {
 struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
   private enum Defaults {
     static let statusTimeout: TimeInterval = 2
+    static let maxOutputByteCount = 4 * 1024 * 1024
   }
 
   private static let logger = Logger(subsystem: "com.nash.locus", category: "GitWorkspaceStatus")
 
   private let gitExecutableURL: URL
   private let statusTimeout: TimeInterval
+  private let maxOutputByteCount: Int
 
   private static let securityOverrideArguments = [
     "-c", "core.fsmonitor=false",
@@ -40,10 +42,12 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
 
   init(
     gitExecutableURL: URL = URL(filePath: "/usr/bin/git"),
-    statusTimeout: TimeInterval = Defaults.statusTimeout
+    statusTimeout: TimeInterval = Defaults.statusTimeout,
+    maxOutputByteCount: Int = Defaults.maxOutputByteCount
   ) {
     self.gitExecutableURL = gitExecutableURL
     self.statusTimeout = statusTimeout
+    self.maxOutputByteCount = max(0, maxOutputByteCount)
   }
 
   func sidebarStatuses(
@@ -119,7 +123,8 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
     try await Self.runGit(
       gitExecutableURL: gitExecutableURL,
       arguments: Self.securityOverrideArguments + arguments,
-      timeout: statusTimeout
+      timeout: statusTimeout,
+      maxOutputByteCount: maxOutputByteCount
     )
   }
 
@@ -160,7 +165,8 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
   private static func runGit(
     gitExecutableURL: URL,
     arguments: [String],
-    timeout: TimeInterval
+    timeout: TimeInterval,
+    maxOutputByteCount: Int
   ) async throws -> Data {
     let temporaryDirectory = FileManager.default.temporaryDirectory
       .appending(path: "LocusGitStatus-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -202,6 +208,10 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
         await terminate(process)
         throw GitWorkspaceStatusError.timedOut
       }
+      if outputByteCount(at: outputURL) > maxOutputByteCount {
+        await terminate(process)
+        throw GitWorkspaceStatusError.outputTooLarge
+      }
       // On a freshly cancelled task the sleep returns immediately and the next
       // iteration takes the cancellation branch — no busy wait.
       try? await Task.sleep(for: exitPollInterval)
@@ -214,7 +224,21 @@ struct GitWorkspaceStatusProvider: GitWorkspaceStatusProviding {
     try? outputHandle.close()
     try? errorHandle.close()
 
+    guard outputByteCount(at: outputURL) <= maxOutputByteCount else {
+      throw GitWorkspaceStatusError.outputTooLarge
+    }
     return try Data(contentsOf: outputURL)
+  }
+
+  private static func outputByteCount(at url: URL) -> Int {
+    guard
+      let attributes = try? FileManager.default.attributesOfItem(
+        atPath: url.path(percentEncoded: false)),
+      let size = attributes[.size] as? NSNumber
+    else {
+      return 0
+    }
+    return size.intValue
   }
 
   private static func terminate(_ process: Process) async {
@@ -503,6 +527,7 @@ extension GitRepositoryMetadataChange {
 enum GitWorkspaceStatusError: Error, Equatable {
   case statusFailed(Int32)
   case timedOut
+  case outputTooLarge
 }
 
 struct GitStatusChange: Equatable, Sendable {

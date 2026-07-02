@@ -19,10 +19,8 @@ struct WorkspaceSidebarSelectionState: Equatable {
 
   var highlightedEntryID: WorkspaceEntry.ID? {
     // Explicit sidebar focus wins while that row is visible.
-    if let selectedSidebarEntryID,
-      visibleEntryIDs.contains(selectedSidebarEntryID)
-    {
-      return selectedSidebarEntryID
+    if let selectedSidebarEntryID {
+      return visibleEntryIDs.contains(selectedSidebarEntryID) ? selectedSidebarEntryID : nil
     }
 
     // Otherwise fall back to the open document unless an empty-area click
@@ -56,9 +54,6 @@ struct WorkspaceSidebarSelectionState: Equatable {
 
   mutating func setVisibleEntryIDs(_ entryIDs: Set<WorkspaceEntry.ID>) {
     visibleEntryIDs = entryIDs
-    if let selectedSidebarEntryID, !entryIDs.contains(selectedSidebarEntryID) {
-      self.selectedSidebarEntryID = nil
-    }
   }
 
   mutating func clearHighlightForEmptyAreaClick() {

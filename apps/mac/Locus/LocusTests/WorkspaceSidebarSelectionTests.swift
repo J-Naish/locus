@@ -38,7 +38,7 @@ final class WorkspaceSidebarSelectionTests: XCTestCase {
     XCTAssertEqual(state.highlightedEntryID, "brief")
   }
 
-  func testSidebarSelectionFallsBackToActiveEntryWhenHighlightedEntryBecomesInvisible() {
+  func testSidebarSelectionHidesExplicitHighlightWhileEntryIsTemporarilyInvisible() {
     var state = WorkspaceSidebarSelectionState(
       activeEntryID: "notes",
       visibleEntryIDs: ["root", "notes", "brief"]
@@ -48,7 +48,21 @@ final class WorkspaceSidebarSelectionTests: XCTestCase {
     state.setVisibleEntryIDs(["root", "notes"])
 
     XCTAssertEqual(state.activeEntryID, "notes")
-    XCTAssertEqual(state.highlightedEntryID, "notes")
+    XCTAssertNil(state.highlightedEntryID)
+  }
+
+  func testSidebarSelectionRestoresExplicitHighlightWhenEntryBecomesVisibleAgain() {
+    var state = WorkspaceSidebarSelectionState(
+      activeEntryID: "notes",
+      visibleEntryIDs: ["root", "notes", "brief"]
+    )
+
+    state.highlightSidebarEntry("brief")
+    state.setVisibleEntryIDs(["root", "notes"])
+    state.setVisibleEntryIDs(["root", "notes", "brief"])
+
+    XCTAssertEqual(state.activeEntryID, "notes")
+    XCTAssertEqual(state.highlightedEntryID, "brief")
   }
 
   func testEmptyAreaClickClearsFolderHighlightWithoutRestoringActiveEntryHighlight() {

@@ -30,6 +30,18 @@ final class OpenDocumentCacheTests: XCTestCase {
     XCTAssertEqual(got?.encoding, .utf8)
   }
 
+  func testStoreAppliesHistoryByteLimitToBuffer() throws {
+    let cache = OpenDocumentCache(historyByteLimit: 4)
+    let buffer = try makeBuffer("abcdef")
+
+    cache.store(buffer: buffer, encoding: .utf8, fingerprint: nil, forKey: "a")
+    try buffer.replace("A", fromUTF16: 0, toUTF16: 1)
+    try buffer.replace("C", fromUTF16: 2, toUTF16: 3)
+    try buffer.replace("E", fromUTF16: 4, toUTF16: 5)
+
+    XCTAssertLessThanOrEqual(buffer.historyByteLength, 4)
+  }
+
   func testFingerprintIsStoredAndUpdatable() throws {
     let cache = OpenDocumentCache()
     let original = DocumentFileFingerprint(

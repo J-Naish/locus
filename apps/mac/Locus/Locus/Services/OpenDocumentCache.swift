@@ -45,11 +45,20 @@ final class OpenDocumentCache: ObservableObject {
   /// `nonisolated` so it can be used as an `init` default argument.
   nonisolated static let defaultMaxRetainedByteCount = 128 * 1024 * 1024  // 128 MiB
 
+  /// Per-buffer undo/redo history budget. Dirty buffers are retained even when
+  /// the cache is over budget, so each buffer also needs its own Rust-side cap.
+  nonisolated static let defaultHistoryByteLimit = 16 * 1024 * 1024  // 16 MiB
+
+  let historyByteLimit: Int
+
   init(
-    maxRetained: Int = 8, maxRetainedByteCount: Int = OpenDocumentCache.defaultMaxRetainedByteCount
+    maxRetained: Int = 8,
+    maxRetainedByteCount: Int = OpenDocumentCache.defaultMaxRetainedByteCount,
+    historyByteLimit: Int = OpenDocumentCache.defaultHistoryByteLimit
   ) {
     self.maxRetained = maxRetained
     self.maxRetainedByteCount = maxRetainedByteCount
+    self.historyByteLimit = max(0, historyByteLimit)
   }
 
   var count: Int { entries.count }
@@ -107,6 +116,7 @@ final class OpenDocumentCache: ObservableObject {
     buffer: TextBuffer, encoding: String.Encoding, fingerprint: DocumentFileFingerprint?,
     forKey key: String
   ) {
+    try? buffer.setHistoryByteLimit(historyByteLimit)
     tick += 1
     entries[key] = Entry(
       buffer: buffer,
@@ -125,7 +135,7 @@ final class OpenDocumentCache: ObservableObject {
   }
 
   private var totalRetainedByteCount: Int {
-    entries.values.reduce(0) { $0 + $1.buffer.byteLength }
+    entries.values.reduce(0) { $0 + $1.buffer.byteLength + $1.buffer.historyByteLength }
   }
 
   private func evictIfNeeded() {

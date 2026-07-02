@@ -1321,6 +1321,9 @@ private struct WorkspaceSidebarCreationRow: View {
       guard !isFocused, !isCreating else {
         return
       }
+      guard name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return
+      }
 
       focusLost()
     }
