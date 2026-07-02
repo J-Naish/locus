@@ -3,6 +3,53 @@ import XCTest
 
 @testable import Locus
 
+private final class SpyTextDocumentReading: TextDocumentReading {
+  struct Fetch: Equatable {
+    let start: Int
+    let count: Int
+  }
+
+  let buffer: TextBuffer
+  private(set) var cappedLineFetches: [Fetch] = []
+  private(set) var uncappedLineFetches: [Fetch] = []
+
+  init(_ buffer: TextBuffer) {
+    self.buffer = buffer
+  }
+
+  var lineCount: Int { buffer.lineCount }
+  var byteLength: Int { buffer.byteLength }
+  var utf16Length: Int { buffer.utf16Length }
+  var revision: UInt64 { buffer.revision }
+
+  func position(forUTF16 utf16: Int) throws -> TextPosition {
+    try buffer.position(forUTF16: utf16)
+  }
+
+  func position(forLine line: Int, columnUTF16: Int) throws -> TextPosition {
+    try buffer.position(forLine: line, columnUTF16: columnUTF16)
+  }
+
+  func text(forLineRange start: Int, count: Int) -> String {
+    uncappedLineFetches.append(Fetch(start: start, count: count))
+    return buffer.text(forLineRange: start, count: count)
+  }
+
+  func text(forLineRange start: Int, count: Int, maxBytesPerLine: Int) -> String {
+    cappedLineFetches.append(Fetch(start: start, count: count))
+    return buffer.text(forLineRange: start, count: count, maxBytesPerLine: maxBytesPerLine)
+  }
+
+  func text(fromUTF16 start: Int, toUTF16 end: Int) -> String {
+    buffer.text(fromUTF16: start, toUTF16: end)
+  }
+
+  func resetFetches() {
+    cappedLineFetches = []
+    uncappedLineFetches = []
+  }
+}
+
 final class TextViewportLayoutTests: XCTestCase {
   private let layout = TextViewportLayout(lineHeight: 10)
 
@@ -23,12 +70,223 @@ final class TextViewportLayoutTests: XCTestCase {
     return view
   }
 
+  @MainActor
+  private func makeSpyDocument(
+    lineCount: Int = 120,
+    prefix: String = "line"
+  ) throws -> SpyTextDocumentReading {
+    let contents = (0..<lineCount).map { "\(prefix) \($0)" }.joined(separator: "\n")
+    return try SpyTextDocumentReading(TextBuffer.open(bytes: Data(contents.utf8)))
+  }
+
   /// The whole buffer content, for round-trip assertions (terminators normalized
   /// to LF, matching the line-based buffer read).
   @MainActor
   private func content(of view: LineRenderingTextView) -> String {
     guard let buffer = view.editableBuffer else { return "" }
     return buffer.text(forLineRange: 0, count: buffer.lineCount)
+  }
+
+  // MARK: Line render cache
+
+  @MainActor
+  func testLineRenderCacheBandShiftFetchesOnlyNewlyExposedLines() throws {
+    let document = try makeSpyDocument()
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+
+    let first = view.attributedBandLineObjectsForTesting(buffer: document, range: 10..<60)
+    document.resetFetches()
+    let shifted = view.attributedBandLineObjectsForTesting(buffer: document, range: 11..<61)
+
+    XCTAssertEqual(document.cappedLineFetches, [.init(start: 60, count: 1)])
+    XCTAssertEqual(first.count, 50)
+    XCTAssertEqual(shifted.count, 50)
+    for line in 11..<60 {
+      XCTAssertTrue(first[line - 10] === shifted[line - 11])
+    }
+  }
+
+  @MainActor
+  func testLineRenderCacheSteadyStateServesAttributedAndRawWithoutFetching() throws {
+    let document = try makeSpyDocument()
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+
+    _ = view.attributedBandLineObjectsForTesting(buffer: document, range: 20..<45)
+    document.resetFetches()
+    _ = view.attributedBandLineObjectsForTesting(buffer: document, range: 20..<45)
+    _ = view.rawBandLinesForTesting(buffer: document, range: 20..<45)
+
+    XCTAssertEqual(document.cappedLineFetches, [])
+  }
+
+  @MainActor
+  func testLineRenderCacheOverlappingMarkdownBandsMatchCacheColdRendering() throws {
+    let markdown = """
+      ---
+      title: Cache Test
+      tags:
+        - markdown
+        - cache
+      ---
+      # Heading
+      Intro paragraph with [reference][ref].
+
+      > Quote with **bold** text.
+
+      | Name | Notes |
+      | --- | --- |
+      | Alpha | A wrapped table value with `code` |
+
+      ```swift
+      let value = 42
+      ```
+
+      [ref]: https://example.com/report
+      """
+    let document = try SpyTextDocumentReading(TextBuffer.open(bytes: Data(markdown.utf8)))
+    let cachedView = LineRenderingTextView()
+    cachedView.syntax = .markdown
+    let coldView = LineRenderingTextView()
+    coldView.syntax = .markdown
+
+    for range in [0..<8, 3..<12, 8..<17, 1..<10] {
+      coldView.resetLineRenderCacheForTesting()
+      let actual = cachedView.attributedBandLineObjectsForTesting(buffer: document, range: range)
+      let expected = coldView.attributedBandLineObjectsForTesting(buffer: document, range: range)
+      XCTAssertEqual(actual.count, expected.count)
+      for index in actual.indices {
+        XCTAssertTrue(
+          actual[index].isEqual(to: expected[index]),
+          "Mismatch at band \(range), offset \(index)")
+      }
+    }
+  }
+
+  @MainActor
+  func testLineRenderCacheRevisionChangeDropsAndRefetchesBand() throws {
+    let document = try makeSpyDocument(lineCount: 40)
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+    let range = 0..<12
+
+    _ = view.attributedBandLineObjectsForTesting(buffer: document, range: range)
+    try document.buffer.insert("changed\n", atUTF16: 0)
+    document.resetFetches()
+    _ = view.attributedBandLineObjectsForTesting(buffer: document, range: range)
+
+    XCTAssertEqual(document.cappedLineFetches, [.init(start: 0, count: 12)])
+  }
+
+  @MainActor
+  func testLineRenderCacheEvictsOutsideExpandedBand() throws {
+    let document = try makeSpyDocument(lineCount: 500)
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+    let band = 20..<40
+
+    _ = view.attributedBandLineObjectsForTesting(buffer: document, range: band)
+    _ = view.attributedBandLineObjectsForTesting(buffer: document, range: 300..<320)
+
+    XCTAssertLessThanOrEqual(
+      view.lineRenderCacheEntryCountForTesting(),
+      band.count * LineRenderingTextView.lineRenderCacheMaximumBandMultiplierForTesting)
+  }
+
+  @MainActor
+  func testMarkdownVideoSyncSkipsUnchangedRevisionAndBand() throws {
+    let contents = (0..<80).map { "line \($0)" }.joined(separator: "\n")
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    let view = LineRenderingTextView()
+    view.syntax = .markdown
+    view.setBuffer(buffer)
+    view.setFrameSize(NSSize(width: 600, height: 240))
+    let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 600, height: 120))
+    scrollView.documentView = view
+    view.updateLayout()
+    var syncCount = 0
+    view.setMarkdownVideoSyncHookForTesting { syncCount += 1 }
+
+    view.syncMarkdownVideoViewsIfNeededForTesting()
+    view.syncMarkdownVideoViewsIfNeededForTesting()
+    XCTAssertEqual(syncCount, 1)
+
+    scrollView.contentView.scroll(to: NSPoint(x: 0, y: 300))
+    scrollView.reflectScrolledClipView(scrollView.contentView)
+    view.syncMarkdownVideoViewsIfNeededForTesting()
+    XCTAssertEqual(syncCount, 2)
+
+    try buffer.replace("L", fromUTF16: 0, toUTF16: 1)
+    view.syncMarkdownVideoViewsIfNeededForTesting()
+    XCTAssertEqual(syncCount, 3)
+  }
+
+  @MainActor
+  func testAttributedLineReusesCachedBandLineInstance() throws {
+    let contents = (0..<40).map { "line \($0)" }.joined(separator: "\n")
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+    view.setBuffer(buffer)
+
+    let band = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<20)
+    XCTAssertTrue(view.attributedLineForTesting(forLine: 5) === band[5])
+  }
+
+  @MainActor
+  func testMarkdownVideoSyncRunsAgainAfterWindowReattach() throws {
+    let contents = (0..<80).map { "line \($0)" }.joined(separator: "\n")
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    let view = LineRenderingTextView()
+    view.syntax = .markdown
+    view.setBuffer(buffer)
+    view.setFrameSize(NSSize(width: 600, height: 240))
+    view.updateLayout()
+    var syncCount = 0
+    view.setMarkdownVideoSyncHookForTesting { syncCount += 1 }
+
+    let window = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 600, height: 240),
+      styleMask: .borderless, backing: .buffered, defer: false)
+    window.contentView = view
+    let countAfterAttach = syncCount
+    XCTAssertGreaterThan(countAfterAttach, 0)
+
+    window.contentView = NSView()  // detach: removeAllMarkdownVideoViews() runs
+    window.contentView = view  // re-attach: sync must run again
+    XCTAssertGreaterThan(syncCount, countAfterAttach)
+
+    window.contentView = NSView()  // leave the view detached before teardown
+  }
+
+  @MainActor
+  func testCaretBlinkInvalidationRectIsLocalAndUnionIsGhostFree() throws {
+    let view = try makeEditableViewer(
+      "This is a long wrapped line whose caret should land on a later visual row.")
+    view.setFrameSize(NSSize(width: 220, height: 240))
+    view.showsLineNumbers = false
+    view.syntax = .markdown
+    view.updateLayout()
+    view.setSelectionForTesting(
+      anchor: TextSelection.Endpoint(line: 0, columnUTF16: 58),
+      head: TextSelection.Endpoint(line: 0, columnUTF16: 58))
+
+    let rect = try XCTUnwrap(view.caretBlinkInvalidationRectForTesting())
+
+    XCTAssertLessThanOrEqual(
+      rect.width, LineRenderingTextView.caretBlinkInvalidationMaximumWidthForTesting)
+    XCTAssertLessThanOrEqual(
+      rect.height,
+      view.rowHeightForTesting(line: 0)
+        + LineRenderingTextView.caretBlinkInvalidationPaddingForTesting * 2 + 0.5)
+    XCTAssertGreaterThan(rect.minY, 0)
+
+    let previous = NSRect(x: 10, y: 10, width: 4, height: 12)
+    let current = NSRect(x: 16, y: 14, width: 4, height: 12)
+    XCTAssertEqual(
+      LineRenderingTextView.caretBlinkInvalidationUnionForTesting(previous, current),
+      previous.union(current))
   }
 
   func testContentHeightScalesWithLineCount() {

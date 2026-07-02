@@ -66,7 +66,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   var syntax: TextDocumentSyntax = .plainText {
     didSet {
       guard syntax != oldValue else { return }
-      cachedBand = nil
+      resetLineRenderCache()
       markdownLineStateCache = nil
       invalidateMarkdownLinkVisualStateCache()
       cancelMarkdownLineStateBuild()
@@ -99,7 +99,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       let anchor = pendingMarkdownViewModeViewportAnchor
       pendingMarkdownViewModeSelection = nil
       pendingMarkdownViewModeViewportAnchor = nil
-      cachedBand = nil
+      resetLineRenderCache()
       markdownLineStateCache = nil
       invalidateMarkdownLinkVisualStateCache()
       cancelMarkdownLineStateBuild()
@@ -141,12 +141,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       guard oldValue != saveURL else { return }
       invalidateMarkdownLinkVisualStateCache()
       removeAllMarkdownVideoViews()
+      lastVideoSyncKey = nil
       if let store = markdownImageStoreStorage {
         store.baseURL = saveURL
         store.reset()
         scheduleMarkdownImageRelayout()
       }
-      syncMarkdownVideoViewsInVisibleViewport()
+      syncMarkdownVideoViewsIfNeeded()
     }
   }
 
@@ -211,7 +212,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// main thread being inserted. Over this, the paste is refused with a beep.
   /// Internal so tests can lower it.
   var maximumPastedByteCount = 64 * 1024 * 1024
-  private var cachedBand: (revision: UInt64, range: Range<Int>, lines: [NSAttributedString])?
+  private static let lineRenderCacheMarginBands = 2
+  private struct LineRenderCache {
+    var revision: UInt64
+    var raw: [Int: String]
+    var attributed: [Int: NSAttributedString]
+  }
+  private var lineRenderCache: LineRenderCache?
   private var markdownLineStateCache: (revision: UInt64, states: [MarkdownLineStyleState])?
   private struct MarkdownLinkVisualStateCacheKey: Hashable {
     let baseFilePath: String?
@@ -231,6 +238,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let source: String
   }
   private var markdownVideoViews: [MarkdownVideoViewKey: AVPlayerView] = [:]
+  private var lastVideoSyncKey: (revision: UInt64, band: Range<Int>)?
+  private var markdownVideoSyncHookForTesting: (() -> Void)?
+
+  private static let caretBlinkInvalidationPadding: CGFloat = 2
+  private var lastCaretBlinkInvalidationRect: NSRect?
 
   /// The opening-fence line of the code block whose copy control was most
   /// recently clicked — drawn with a checkmark until the confirmation lapses.
@@ -279,6 +291,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   private func invalidateMarkdownLinkVisualStateCache() {
     markdownLinkVisualStateCache.removeAll(keepingCapacity: true)
+  }
+
+  private func resetLineRenderCache() {
+    lineRenderCache = nil
+    lastVideoSyncKey = nil
   }
 
   /// Coalesces image-store updates into one relayout per main-actor turn —
@@ -1395,7 +1412,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       markdownLineStateBuildTargetRevision = nil
       markdownLineStateBuildTask?.cancel()
       markdownLineStateBuildTask = nil
-      cachedBand = nil
+      resetLineRenderCache()
     }
     if outcome.wraps {
       hugeLineInfo = outcome.hugeLines
@@ -2101,7 +2118,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// rebuild the wrap index for the new content, and scroll back to the top-left
   /// so a reused scroll view does not keep the previous file's position.
   private func didSetDocument() {
-    cachedBand = nil
+    resetLineRenderCache()
     markdownLineStateCache = nil
     invalidateMarkdownLinkVisualStateCache()
     cancelMarkdownLineStateBuild()
@@ -2149,7 +2166,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// to stay aligned. The band fetch and highlight are bounded to the visible rows,
   /// so this stays cheap even for a multi-gigabyte document.
   func viewportDidScroll() {
-    syncMarkdownVideoViewsInVisibleViewport()
+    syncMarkdownVideoViewsIfNeeded()
     invalidateVisibleArea()
     // The gutter is viewport-pinned, so its right edge (the I-beam boundary)
     // shifts with horizontal scroll; re-establish the cursor rects for it.
@@ -2312,7 +2329,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       removeAllMarkdownVideoViews()
     } else {
       updateCaretBlinkTimerForFocusState()
-      syncMarkdownVideoViewsInVisibleViewport()
+      syncMarkdownVideoViewsIfNeeded()
     }
   }
 
@@ -2418,6 +2435,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     caretBlinkTimer?.invalidate()
     caretBlinkTimer = nil
     caretBlinkOn = true
+    lastCaretBlinkInvalidationRect = nil
   }
 
   /// Keeps the caret solid right after the user acts (typing, moving, clicking). It
@@ -2432,17 +2450,70 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
   }
 
+  private func caretBlinkInvalidationRect() -> NSRect? {
+    guard let selection, selection.isEmpty else { return nil }
+    let line = selection.head.line
+    guard line >= 0, line < lineCount else { return nil }
+    let attributed = attributedLine(forLine: line)
+    let geometry = caretGeometry(
+      forColumn: selection.head.columnUTF16,
+      line: line,
+      attributed: attributed)
+    return NSRect(
+      x: lineTextColumnX(forLine: line) + geometry.x,
+      y: yOffset(ofVisualRow: geometry.visualRow),
+      width: 1,
+      height: rowHeight(forLine: line)
+    )
+    .insetBy(
+      dx: -Self.caretBlinkInvalidationPadding,
+      dy: -Self.caretBlinkInvalidationPadding)
+  }
+
+  private static func unionCaretBlinkInvalidationRects(
+    _ previous: NSRect?,
+    _ current: NSRect?
+  ) -> NSRect? {
+    switch (previous, current) {
+    case (nil, nil):
+      return nil
+    case (let rect?, nil), (nil, let rect?):
+      return rect
+    case (let previous?, let current?):
+      return previous.union(current)
+    }
+  }
+
+  private func invalidateCaretBlinkRects(previous: NSRect?, current: NSRect?) {
+    guard let rect = Self.unionCaretBlinkInvalidationRects(previous, current) else {
+      return
+    }
+    setNeedsDisplay(rect)
+  }
+
   @objc private func caretBlinkTimerFired() {
+    if composition != nil {
+      if !caretBlinkOn {
+        caretBlinkOn = true
+      }
+      invalidateVisibleArea()
+      return
+    }
+    let previousRect = lastCaretBlinkInvalidationRect
     guard showsBlinkingCaret else {
       // Nothing to blink (e.g. a range is selected): make sure the caret is solid.
       if !caretBlinkOn {
         caretBlinkOn = true
-        invalidateVisibleArea()
+        let currentRect = caretBlinkInvalidationRect()
+        lastCaretBlinkInvalidationRect = currentRect
+        invalidateCaretBlinkRects(previous: previousRect, current: currentRect)
       }
       return
     }
     caretBlinkOn.toggle()
-    invalidateVisibleArea()
+    let currentRect = caretBlinkInvalidationRect()
+    lastCaretBlinkInvalidationRect = currentRect
+    invalidateCaretBlinkRects(previous: previousRect, current: currentRect)
   }
 
   // MARK: Mouse selection
@@ -3825,7 +3896,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// re-measure, and repaint. `change` is the span the step rewrote, so the
   /// wrap index can be updated for just those lines.
   private func afterUndoRedo(change: TextChange) {
-    cachedBand = nil
+    resetLineRenderCache()
     invalidateMarkdownLineStateCacheAfterContentChange()
     maxObservedLineWidth = 0
     verticalGoalX = nil
@@ -3833,6 +3904,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     clampSelectionToBounds()
     showCaretSolid()
     updateLayout()
+    syncMarkdownVideoViewsIfNeeded()
     if let head = selection?.head {
       scrollCaretToVisible(head)
     }
@@ -4061,7 +4133,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// repaints the visible band. `change` is the span the edit rewrote; the wrap
   /// index is spliced for just those lines.
   private func finishEdit(caretUTF16 offset: Int, change: TextChange) {
-    cachedBand = nil
+    resetLineRenderCache()
     invalidateMarkdownLineStateCacheAfterContentChange()
     verticalGoalX = nil
     // The widest-line high-water mark can only shrink via an edit (deleting or
@@ -4075,6 +4147,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     updateWrapIndex(afterChange: change)
     showCaretSolid()
     updateLayout()
+    syncMarkdownVideoViewsIfNeeded()
     if let head = selection?.head {
       scrollCaretToVisible(head)
     }
@@ -4337,26 +4410,104 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private func attributedBandLines(for buffer: any TextDocumentReading, range: Range<Int>)
     -> [NSAttributedString]
   {
+    guard !range.isEmpty else { return [] }
+    prepareLineRenderCache(for: buffer)
+    populateRawLineRenderCache(for: buffer, range: range)
+    populateAttributedLineRenderCache(for: buffer, range: range)
+    evictLineRenderCache(keeping: range)
+    return range.map { line in
+      lineRenderCache?.attributed[line] ?? NSAttributedString()
+    }
+  }
+
+  private func rawBandLines(for buffer: any TextDocumentReading, range: Range<Int>) -> [String] {
+    guard !range.isEmpty else { return [] }
+    prepareLineRenderCache(for: buffer)
+    populateRawLineRenderCache(for: buffer, range: range)
+    evictLineRenderCache(keeping: range)
+    return range.map { lineRenderCache?.raw[$0] ?? "" }
+  }
+
+  private func prepareLineRenderCache(for buffer: any TextDocumentReading) {
     let revision = buffer.revision
-    if let cachedBand, cachedBand.revision == revision, cachedBand.range == range {
-      return cachedBand.lines
+    guard lineRenderCache?.revision == revision else {
+      resetLineRenderCache()
+      lineRenderCache = LineRenderCache(revision: revision, raw: [:], attributed: [:])
+      return
     }
-    let lines = buffer.text(
-      forLineRange: range.lowerBound, count: range.count,
-      maxBytesPerLine: maximumFetchedBytesPerLine
-    )
-    .components(separatedBy: "\n")
+  }
+
+  private func populateRawLineRenderCache(
+    for buffer: any TextDocumentReading,
+    range: Range<Int>
+  ) {
+    guard !range.isEmpty else { return }
+    if lineRenderCache == nil {
+      prepareLineRenderCache(for: buffer)
+    }
+    guard var cache = lineRenderCache else { return }
+    let gaps = missingLineRanges(in: range, from: cache.raw)
+    for gap in gaps {
+      let fetched = buffer.text(
+        forLineRange: gap.lowerBound,
+        count: gap.count,
+        maxBytesPerLine: maximumFetchedBytesPerLine
+      )
+      .components(separatedBy: "\n")
+      for (offset, line) in gap.enumerated() {
+        cache.raw[line] = offset < fetched.count ? fetched[offset] : ""
+      }
+    }
+    lineRenderCache = cache
+  }
+
+  private func populateAttributedLineRenderCache(
+    for buffer: any TextDocumentReading,
+    range: Range<Int>
+  ) {
+    guard !range.isEmpty, var cache = lineRenderCache else { return }
     let states = markdownLineStates(for: buffer)
-    let highlighted = lines.enumerated().map { offset, line in
-      let lineIndex = range.lowerBound + offset
+    for line in range where cache.attributed[line] == nil {
       let state =
-        lineIndex >= 0 && lineIndex < (states?.count ?? 0)
-        ? states?[lineIndex] ?? .plain
+        line >= 0 && line < (states?.count ?? 0)
+        ? states?[line] ?? .plain
         : .plain
-      return highlightedLine(line, lineIndex: lineIndex, markdownLineState: state)
+      cache.attributed[line] = highlightedLine(
+        cache.raw[line] ?? "", lineIndex: line, markdownLineState: state)
     }
-    cachedBand = (revision, range, highlighted)
-    return highlighted
+    lineRenderCache = cache
+  }
+
+  private func missingLineRanges<T>(
+    in range: Range<Int>,
+    from entries: [Int: T]
+  ) -> [Range<Int>] {
+    var gaps: [Range<Int>] = []
+    var gapStart: Int?
+    for line in range {
+      if entries[line] == nil {
+        if gapStart == nil {
+          gapStart = line
+        }
+      } else if let start = gapStart {
+        gaps.append(start..<line)
+        gapStart = nil
+      }
+    }
+    if let start = gapStart {
+      gaps.append(start..<range.upperBound)
+    }
+    return gaps
+  }
+
+  private func evictLineRenderCache(keeping range: Range<Int>) {
+    guard !range.isEmpty, var cache = lineRenderCache else { return }
+    let margin = range.count * Self.lineRenderCacheMarginBands
+    let lower = range.lowerBound - margin
+    let upper = range.upperBound + margin
+    cache.raw = cache.raw.filter { line, _ in line >= lower && line < upper }
+    cache.attributed = cache.attributed.filter { line, _ in line >= lower && line < upper }
+    lineRenderCache = cache
   }
 
   private func markdownLineStates(for buffer: any TextDocumentReading) -> [MarkdownLineStyleState]?
@@ -4430,7 +4581,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     markdownLineStateBuildTargetRevision = nil
     guard let states, reader?.revision == revision else { return }
     markdownLineStateCache = (revision, states)
-    cachedBand = nil
+    resetLineRenderCache()
     invalidateVisibleArea()
   }
 
@@ -4540,12 +4691,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   // MARK: Line geometry (selection / caret hit-testing)
 
   /// The displayed (highlighted, possibly truncated) attributed string for a
-  /// line, reusing the cached band when the line falls within it.
+  /// line: the cached band line when the render cache holds it, otherwise a
+  /// single-line fetch for an out-of-band line.
   private func attributedLine(forLine line: Int) -> NSAttributedString {
-    if let cachedBand, cachedBand.range.contains(line) {
-      return cachedBand.lines[line - cachedBand.range.lowerBound]
-    }
     guard let buffer = reader else { return NSAttributedString() }
+    if let cache = lineRenderCache, cache.revision == buffer.revision,
+      let cached = cache.attributed[line]
+    {
+      return cached
+    }
     let text =
       buffer.text(forLineRange: line, count: 1, maxBytesPerLine: maximumFetchedBytesPerLine)
       .components(separatedBy: "\n").first ?? ""
@@ -4587,14 +4741,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     guard total > 0, layout.lineHeight > 0, rect.height > 0,
       rect.minY.isFinite, rect.maxY.isFinite, rect.height.isFinite
     else { return 0..<0 }
+    let contentHeight = totalContentHeight
+    let lowerY = min(max(0, rect.minY), contentHeight)
+    let upperY = min(max(0, rect.maxY), contentHeight)
+    guard lowerY < upperY else { return 0..<0 }
     guard let wrapIndex, wrapIndex.hasCustomRowHeights else {
-      let first = max(0, Int((rect.minY / layout.lineHeight).rounded(.down)))
-      let last = min(total, Int((rect.maxY / layout.lineHeight).rounded(.up)))
+      let first = max(0, Int((lowerY / layout.lineHeight).rounded(.down)))
+      let last = min(total, Int((upperY / layout.lineHeight).rounded(.up)))
       return first < last ? first..<last : 0..<0
     }
-    let (firstLine, firstRowInLine) = rowLocation(forY: max(0, rect.minY))
+    let (firstLine, firstRowInLine) = rowLocation(forY: lowerY)
     let first = max(0, wrapIndex.firstVisualRow(ofLine: firstLine) + firstRowInLine)
-    let (lastLine, lastRowInLine) = rowLocation(forY: max(0, rect.maxY))
+    let (lastLine, lastRowInLine) = rowLocation(forY: upperY)
     let last = min(total, wrapIndex.firstVisualRow(ofLine: lastLine) + lastRowInLine + 1)
     return first < last ? first..<last : 0..<0
   }
@@ -4648,7 +4806,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         continue
       }
       let drawn = composedLineForDisplay(line: lineIndex, base: attributedLine)
-      widest = max(widest, drawn.size().width)
+      if wrapIndex == nil {
+        widest = max(widest, drawn.size().width)
+      }
       if drawMarkdownFrontMatterChipLineIfNeeded(line: lineIndex, attributed: drawn) {
         continue
       }
@@ -4856,16 +5016,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private func markdownRawLines(
     for range: Range<Int>, buffer: any TextDocumentReading
   ) -> [String] {
-    let lines = buffer.text(
-      forLineRange: range.lowerBound,
-      count: range.count,
-      maxBytesPerLine: maximumFetchedBytesPerLine
-    )
-    .components(separatedBy: "\n")
-    if lines.count >= range.count {
-      return Array(lines.prefix(range.count))
-    }
-    return lines + Array(repeating: "", count: range.count - lines.count)
+    rawBandLines(for: buffer, range: range)
   }
 
   private func drawMarkdownFenceBackgrounds(
@@ -5804,6 +5955,33 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
   }
 
+  private func syncMarkdownVideoViewsIfNeeded() {
+    guard usesMarkdownDocumentLayout, let buffer = reader else {
+      lastVideoSyncKey = nil
+      removeAllMarkdownVideoViews()
+      return
+    }
+    let visible = enclosingScrollView?.documentVisibleRect ?? visibleRect
+    let visibleRows = visibleVisualRowRange(in: visible)
+    let band: Range<Int>
+    if visibleRows.isEmpty {
+      band = 0..<0
+    } else {
+      let firstLine = lineLocation(ofVisualRow: visibleRows.lowerBound).line
+      let lastLine = lineLocation(ofVisualRow: visibleRows.upperBound - 1).line
+      band = firstLine..<(lastLine + 1)
+    }
+    if let key = lastVideoSyncKey, key.revision == buffer.revision, key.band == band {
+      return
+    }
+    if let markdownVideoSyncHookForTesting {
+      markdownVideoSyncHookForTesting()
+    } else {
+      syncMarkdownVideoViewsInVisibleViewport()
+    }
+    lastVideoSyncKey = (buffer.revision, band)
+  }
+
   private func syncMarkdownVideoViewsInVisibleViewport() {
     guard usesMarkdownDocumentLayout, let buffer = reader else {
       removeAllMarkdownVideoViews()
@@ -5903,6 +6081,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       view.removeFromSuperview()
     }
     markdownVideoViews.removeAll()
+    lastVideoSyncKey = nil
   }
 
   /// Draws the image block living in an image line's leading inset: the
@@ -6443,6 +6622,42 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     markdownTableHorizontalOffset(forLine: line)
   }
 
+  static var lineRenderCacheMaximumBandMultiplierForTesting: Int {
+    1 + 2 * lineRenderCacheMarginBands
+  }
+
+  func resetLineRenderCacheForTesting() {
+    resetLineRenderCache()
+  }
+
+  func attributedBandLineObjectsForTesting(
+    buffer: any TextDocumentReading,
+    range: Range<Int>
+  ) -> [NSAttributedString] {
+    attributedBandLines(for: buffer, range: range)
+  }
+
+  func rawBandLinesForTesting(
+    buffer: any TextDocumentReading,
+    range: Range<Int>
+  ) -> [String] {
+    rawBandLines(for: buffer, range: range)
+  }
+
+  func lineRenderCacheEntryCountForTesting() -> Int {
+    guard let cache = lineRenderCache else { return 0 }
+    return Set(cache.raw.keys).union(cache.attributed.keys).count
+  }
+
+  func setMarkdownVideoSyncHookForTesting(_ hook: (() -> Void)?) {
+    markdownVideoSyncHookForTesting = hook
+    lastVideoSyncKey = nil
+  }
+
+  func syncMarkdownVideoViewsIfNeededForTesting() {
+    syncMarkdownVideoViewsIfNeeded()
+  }
+
   @discardableResult
   func scrollMarkdownTableForTesting(containing line: Int, deltaX: CGFloat) -> Bool {
     scrollMarkdownTable(containing: line, deltaX: deltaX)
@@ -6450,6 +6665,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   func attributedLineStringForTesting(line: Int) -> String {
     attributedLine(forLine: line).string
+  }
+
+  func attributedLineForTesting(forLine line: Int) -> NSAttributedString {
+    attributedLine(forLine: line)
   }
 
   func setSelectionForTesting(anchor: TextSelection.Endpoint, head: TextSelection.Endpoint) {
@@ -6586,7 +6805,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   func syncMarkdownVideoViewsForTesting() {
-    syncMarkdownVideoViewsInVisibleViewport()
+    syncMarkdownVideoViewsIfNeeded()
   }
 
   func markdownVideoViewCountForTesting() -> Int {
@@ -6598,6 +6817,25 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       markdownVideoViews.values.compactMap { view in
         view.player.map(ObjectIdentifier.init)
       })
+  }
+
+  static var caretBlinkInvalidationPaddingForTesting: CGFloat {
+    caretBlinkInvalidationPadding
+  }
+
+  static var caretBlinkInvalidationMaximumWidthForTesting: CGFloat {
+    1 + caretBlinkInvalidationPadding * 2
+  }
+
+  func caretBlinkInvalidationRectForTesting() -> NSRect? {
+    caretBlinkInvalidationRect()
+  }
+
+  static func caretBlinkInvalidationUnionForTesting(
+    _ previous: NSRect?,
+    _ current: NSRect?
+  ) -> NSRect? {
+    unionCaretBlinkInvalidationRects(previous, current)
   }
 
   /// The embedded media block's frame inside a media line's leading inset, or
