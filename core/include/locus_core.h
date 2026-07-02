@@ -263,8 +263,11 @@ void locus_workspace_snapshot_free(LocusWorkspaceSnapshot *snapshot);
  * caller may run any number of read-only calls on one handle concurrently from
  * different threads. The read-only calls are every accessor and snapshot getter
  * (line count, byte/UTF-16 length, revision, is-dirty, history byte length, the
- * position queries, and the line-range and UTF-16-range snapshots) plus
- * locus_text_buffer_write_path, which only reads the buffer to stream it out.
+ * position queries, and the line-range and UTF-16-range snapshots). Direct
+ * locus_text_buffer_write_path also only reads the live buffer, so it follows
+ * the same readers-writer rule: it may overlap other reads, but it must not
+ * overlap edits or any other mutation on the same handle. Use the save-snapshot
+ * API below for background saves while editing continues.
  * The mutating calls --
  * locus_text_buffer_insert_bytes, locus_text_buffer_delete,
  * locus_text_buffer_replace, locus_text_buffer_undo, locus_text_buffer_redo,
@@ -497,11 +500,16 @@ LocusStatus locus_text_buffer_write_path(
  * snapshotted content as saved: a buffer edited during the write stays dirty, and
  * undoing back to the saved content reads clean again. The LocusTextBufferSnapshot
  * handle is distinct from LocusTextSnapshot (the borrowed viewport-read block) and
- * is released exactly once with locus_text_buffer_snapshot_free.
+ * is released exactly once with locus_text_buffer_snapshot_free. Do not free a
+ * snapshot until all background snapshot_write_path or snapshot-read calls using
+ * it have returned.
  *
  * Ownership: on LOCUS_STATUS_OK, take_save_snapshot writes a Rust-owned snapshot to
  * *out_snapshot. take_save_snapshot and mark_saved_snapshot mutate the buffer and
  * need exclusive access to it; snapshot_write_path only reads the snapshot.
+ * mark_saved_snapshot accepts only save snapshots taken from the same buffer;
+ * passing a read-only snapshot or a save snapshot from another buffer returns
+ * LOCUS_TEXT_STATUS_INVALID_ARGUMENT.
  */
 LocusStatus locus_text_buffer_take_save_snapshot(
     LocusTextBuffer *buffer, LocusTextBufferSnapshot **out_snapshot);
@@ -509,6 +517,7 @@ LocusStatus locus_text_buffer_snapshot_write_path(
     const LocusTextBufferSnapshot *snapshot, const char *path);
 LocusStatus locus_text_buffer_mark_saved_snapshot(
     LocusTextBuffer *buffer, const LocusTextBufferSnapshot *snapshot);
+/* Passing NULL is allowed. Do not call while another thread is using snapshot. */
 void locus_text_buffer_snapshot_free(LocusTextBufferSnapshot *snapshot);
 
 /*

@@ -299,10 +299,11 @@ fn compare_names_naturally(left: &str, right: &str) -> std::cmp::Ordering {
 
     let mut left_chars = left.char_indices().peekable();
     let mut right_chars = right.char_indices().peekable();
+    let mut zero_padding_ordering = Ordering::Equal;
 
     loop {
         match (left_chars.peek().copied(), right_chars.peek().copied()) {
-            (None, None) => return left.cmp(right),
+            (None, None) => return zero_padding_ordering.then_with(|| left.cmp(right)),
             (None, Some(_)) => return Ordering::Less,
             (Some(_), None) => return Ordering::Greater,
             (Some((_, left_char)), Some((_, right_char)))
@@ -313,6 +314,9 @@ fn compare_names_naturally(left: &str, right: &str) -> std::cmp::Ordering {
                 let ordering = compare_ascii_numbers(left_number, right_number);
                 if ordering != Ordering::Equal {
                     return ordering;
+                }
+                if zero_padding_ordering == Ordering::Equal {
+                    zero_padding_ordering = left_number.len().cmp(&right_number.len());
                 }
             }
             (Some((_, left_char)), Some((_, right_char))) => {
@@ -364,7 +368,6 @@ fn compare_ascii_numbers(left: &str, right: &str) -> std::cmp::Ordering {
         .len()
         .cmp(&right_digits.len())
         .then_with(|| left_digits.cmp(right_digits))
-        .then_with(|| left.len().cmp(&right.len()))
 }
 
 const IGNORED_NAMES: &[&str] = &[
@@ -423,6 +426,28 @@ mod tests {
         let names = entry_names(list_directory(workspace.path()).unwrap());
 
         assert_eq!(names, ["file1.md", "file2.md", "file10.md"]);
+    }
+
+    #[test]
+    fn list_directory_sorts_equal_numbers_by_following_text_before_zero_padding() {
+        let workspace = TestWorkspace::new();
+        workspace.create_file("chapter10-beta.md");
+        workspace.create_file("chapter010-alpha.md");
+
+        let names = entry_names(list_directory(workspace.path()).unwrap());
+
+        assert_eq!(names, ["chapter010-alpha.md", "chapter10-beta.md"]);
+    }
+
+    #[test]
+    fn list_directory_uses_zero_padding_as_final_natural_sort_tie_breaker() {
+        let workspace = TestWorkspace::new();
+        workspace.create_file("file01.md");
+        workspace.create_file("file1.md");
+
+        let names = entry_names(list_directory(workspace.path()).unwrap());
+
+        assert_eq!(names, ["file1.md", "file01.md"]);
     }
 
     #[test]

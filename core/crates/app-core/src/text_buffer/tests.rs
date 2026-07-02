@@ -136,6 +136,20 @@ fn history_byte_limit_keeps_latest_large_record() {
     assert_eq!(contents(&buffer), "abcdef");
 }
 
+#[test]
+fn history_byte_len_drops_when_new_edit_clears_redo_stack() {
+    let mut buffer = buffer("abcdef");
+    buffer.replace(0, 6, "x").expect("replace");
+    assert_eq!(buffer.history_byte_len(), 7);
+
+    assert!(buffer.undo().is_some());
+    assert_eq!(buffer.history_byte_len(), 7);
+
+    buffer.insert(0, "z").expect("insert");
+
+    assert_eq!(buffer.history_byte_len(), 1);
+}
+
 // MARK: - Read (read-only slice behavior, retained)
 
 #[test]

@@ -12,6 +12,7 @@
 
 use std::ffi::c_char;
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use app_core::text_buffer::{EditSpan, Position, TextBuffer, TextBufferError};
 
@@ -68,7 +69,14 @@ impl LocusTextChange {
 
 /// Opaque Rust-owned text buffer handle.
 pub struct LocusTextBuffer {
+    id: u64,
     buffer: TextBuffer,
+}
+
+static NEXT_TEXT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_text_buffer_id() -> u64 {
+    NEXT_TEXT_BUFFER_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Opaque Rust-owned snapshot of a line range's text. The text is length-counted
@@ -220,7 +228,10 @@ fn finish_open(
             // of the Box transfers to the caller, reclaimed by
             // locus_text_buffer_free.
             unsafe {
-                *out_buffer = Box::into_raw(Box::new(LocusTextBuffer { buffer }));
+                *out_buffer = Box::into_raw(Box::new(LocusTextBuffer {
+                    id: next_text_buffer_id(),
+                    buffer,
+                }));
             }
             LOCUS_STATUS_OK
         }
@@ -372,7 +383,9 @@ pub unsafe extern "C" fn locus_text_buffer_mark_saved_and_clear_history(
 /// truncating it. The content is streamed through a buffered writer, so even a
 /// multi-gigabyte document is written without being assembled in memory. The
 /// caller is responsible for any atomic-rename / symlink policy (this writes
-/// directly to `path`).
+/// directly to `path`). This reads the live buffer and therefore must not
+/// overlap edits on the same handle; use the save-snapshot API for background
+/// saves while editing continues.
 ///
 /// # Safety
 /// `buffer` must be NULL or a live handle. `path` must be a NUL-terminated UTF-8
@@ -425,6 +438,7 @@ pub unsafe extern "C" fn locus_text_buffer_write_path(
 /// user keeps editing the live buffer. Release it exactly once with
 /// `locus_text_buffer_snapshot_free`.
 pub struct LocusTextBufferSnapshot {
+    save_origin_id: Option<u64>,
     snapshot: app_core::text_buffer::TextSnapshot,
 }
 
@@ -462,7 +476,10 @@ pub unsafe extern "C" fn locus_text_buffer_take_save_snapshot(
     let snapshot = handle.buffer.snapshot_for_save();
     // SAFETY: out_snapshot is non-null (checked above).
     unsafe {
-        *out_snapshot = Box::into_raw(Box::new(LocusTextBufferSnapshot { snapshot }));
+        *out_snapshot = Box::into_raw(Box::new(LocusTextBufferSnapshot {
+            save_origin_id: Some(handle.id),
+            snapshot,
+        }));
     }
     LOCUS_STATUS_OK
 }
@@ -471,7 +488,8 @@ pub unsafe extern "C" fn locus_text_buffer_take_save_snapshot(
 /// truncating it, streamed through a buffered writer (no full-document buffer).
 /// The snapshot is immutable and `Send + Sync`, so this may run on a background
 /// thread while the originating buffer is edited. The caller owns any
-/// atomic-rename / symlink policy (this writes directly to `path`).
+/// atomic-rename / symlink policy (this writes directly to `path`). The caller
+/// must keep `snapshot` alive until this call returns.
 ///
 /// # Safety
 /// `snapshot` must be NULL or a live handle. `path` must be a NUL-terminated UTF-8
@@ -520,7 +538,7 @@ pub unsafe extern "C" fn locus_text_buffer_snapshot_write_path(
 ///
 /// # Safety
 /// `buffer` must be NULL or a live handle. `snapshot` must be NULL or a live
-/// handle from `locus_text_buffer_take_save_snapshot`.
+/// handle from `locus_text_buffer_take_save_snapshot` for the same buffer.
 #[no_mangle]
 pub unsafe extern "C" fn locus_text_buffer_mark_saved_snapshot(
     buffer: *mut LocusTextBuffer,
@@ -537,6 +555,10 @@ pub unsafe extern "C" fn locus_text_buffer_mark_saved_snapshot(
         set_last_error_message("snapshot must not be NULL");
         return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
     };
+    if snapshot.save_origin_id != Some(handle.id) {
+        set_last_error_message("snapshot does not belong to this buffer save");
+        return LOCUS_TEXT_STATUS_INVALID_ARGUMENT;
+    }
     handle.buffer.mark_saved_snapshot(&snapshot.snapshot);
     LOCUS_STATUS_OK
 }
@@ -544,7 +566,8 @@ pub unsafe extern "C" fn locus_text_buffer_mark_saved_snapshot(
 /// Releases a save snapshot. NULL is a no-op.
 ///
 /// # Safety
-/// `snapshot` must be NULL or a live handle that has not been freed.
+/// `snapshot` must be NULL or a live handle that has not been freed and is not
+/// being used by another snapshot call.
 #[no_mangle]
 pub unsafe extern "C" fn locus_text_buffer_snapshot_free(snapshot: *mut LocusTextBufferSnapshot) {
     if snapshot.is_null() {
@@ -597,7 +620,10 @@ pub unsafe extern "C" fn locus_text_buffer_take_snapshot(
     let snapshot = handle.buffer.snapshot();
     // SAFETY: out_snapshot is non-null (checked above).
     unsafe {
-        *out_snapshot = Box::into_raw(Box::new(LocusTextBufferSnapshot { snapshot }));
+        *out_snapshot = Box::into_raw(Box::new(LocusTextBufferSnapshot {
+            save_origin_id: None,
+            snapshot,
+        }));
     }
     LOCUS_STATUS_OK
 }
@@ -1698,6 +1724,53 @@ mod tests {
             LOCUS_STATUS_OK
         );
         assert!(!unsafe { locus_text_buffer_is_dirty(handle) });
+
+        unsafe { locus_text_buffer_snapshot_free(snapshot) };
+        unsafe { locus_text_buffer_free(handle) };
+    }
+
+    #[test]
+    fn mark_saved_snapshot_rejects_snapshot_from_another_buffer() {
+        let source = open("");
+        let target = open("");
+
+        let source_text = CString::new("source").unwrap();
+        let target_text = CString::new("target").unwrap();
+        unsafe { locus_text_buffer_insert(source, 0, source_text.as_ptr()) };
+        unsafe { locus_text_buffer_insert(target, 0, target_text.as_ptr()) };
+
+        let mut snapshot: *mut LocusTextBufferSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe { locus_text_buffer_take_save_snapshot(source, &mut snapshot) },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(
+            unsafe { locus_text_buffer_mark_saved_snapshot(target, snapshot) },
+            LOCUS_TEXT_STATUS_INVALID_ARGUMENT
+        );
+        assert!(unsafe { locus_text_buffer_is_dirty(target) });
+
+        unsafe { locus_text_buffer_snapshot_free(snapshot) };
+        unsafe { locus_text_buffer_free(source) };
+        unsafe { locus_text_buffer_free(target) };
+    }
+
+    #[test]
+    fn mark_saved_snapshot_rejects_read_only_snapshot() {
+        let handle = open("");
+        let text = CString::new("draft").unwrap();
+        unsafe { locus_text_buffer_insert(handle, 0, text.as_ptr()) };
+
+        let mut snapshot: *mut LocusTextBufferSnapshot = ptr::null_mut();
+        assert_eq!(
+            unsafe { locus_text_buffer_take_snapshot(handle, &mut snapshot) },
+            LOCUS_STATUS_OK
+        );
+        assert_eq!(
+            unsafe { locus_text_buffer_mark_saved_snapshot(handle, snapshot) },
+            LOCUS_TEXT_STATUS_INVALID_ARGUMENT
+        );
+        assert!(unsafe { locus_text_buffer_is_dirty(handle) });
 
         unsafe { locus_text_buffer_snapshot_free(snapshot) };
         unsafe { locus_text_buffer_free(handle) };

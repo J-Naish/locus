@@ -165,6 +165,7 @@ pub struct TextBuffer {
     /// if saved while empty). The buffer is dirty when the current top differs.
     saved_seq: Option<u64>,
     revision: u64,
+    history_byte_len: usize,
     history_byte_limit: usize,
     /// Set by [`snapshot_for_save`](Self::snapshot_for_save) so the next insert
     /// starts a fresh undo record instead of coalescing into the snapshotted run.
@@ -218,6 +219,7 @@ impl TextBuffer {
             seq_counter: 0,
             saved_seq: None,
             revision: 0,
+            history_byte_len: 0,
             history_byte_limit: DEFAULT_HISTORY_BYTE_LIMIT,
             seal_coalescing: false,
         })
@@ -260,11 +262,7 @@ impl TextBuffer {
     /// process-retained memory higher, but this is stable enough for caps and UI
     /// diagnostics.
     pub fn history_byte_len(&self) -> usize {
-        self.undo_stack
-            .iter()
-            .chain(self.redo_stack.iter())
-            .map(EditRecord::retained_byte_len)
-            .sum()
+        self.history_byte_len
     }
 
     /// Sets the best-effort retained-history budget and immediately prunes old
@@ -287,6 +285,7 @@ impl TextBuffer {
     pub fn mark_saved_and_clear_history(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.history_byte_len = 0;
         self.saved_seq = None;
         self.seal_coalescing = false;
     }
@@ -399,7 +398,7 @@ impl TextBuffer {
         let at_byte = self.utf16_to_byte(at_utf16)?;
         let inserted = Node::from_str(text);
         self.splice(at_byte, 0, inserted.clone());
-        self.redo_stack.clear();
+        self.clear_redo_stack();
 
         // A save snapshot seals the current run: the next insert starts a fresh
         // undo record instead of extending it, so the snapshot's captured `seq`
@@ -416,6 +415,7 @@ impl TextBuffer {
                     && top.at_byte + top.inserted.byte_len() == at_byte
                     && Some(top.seq) != saved_seq
                 {
+                    self.history_byte_len += inserted.byte_len();
                     top.inserted = Node::concat(top.inserted.clone(), inserted);
                     self.prune_history_to_limit();
                     return Ok(());
@@ -424,7 +424,7 @@ impl TextBuffer {
         }
 
         let seq = self.next_seq();
-        self.undo_stack.push(EditRecord {
+        self.push_undo_record(EditRecord {
             seq,
             at_byte,
             removed: Node::empty(),
@@ -451,10 +451,10 @@ impl TextBuffer {
         // The removed sub-rope is `Arc` pointers into the existing leaves, so even
         // a huge delete copies no content.
         let removed = self.splice(start_byte, end_byte - start_byte, Node::empty());
-        self.redo_stack.clear();
+        self.clear_redo_stack();
 
         let seq = self.next_seq();
-        self.undo_stack.push(EditRecord {
+        self.push_undo_record(EditRecord {
             seq,
             at_byte: start_byte,
             removed,
@@ -490,10 +490,10 @@ impl TextBuffer {
         // One splice: drop the old range and put the new sub-rope in its place,
         // capturing the removed sub-rope for a single undo record.
         let removed = self.splice(start_byte, end_byte - start_byte, inserted.clone());
-        self.redo_stack.clear();
+        self.clear_redo_stack();
 
         let seq = self.next_seq();
-        self.undo_stack.push(EditRecord {
+        self.push_undo_record(EditRecord {
             seq,
             at_byte: start_byte,
             removed,
@@ -577,14 +577,31 @@ impl TextBuffer {
         self.seq_counter
     }
 
+    fn push_undo_record(&mut self, record: EditRecord) {
+        self.history_byte_len += record.retained_byte_len();
+        self.undo_stack.push(record);
+    }
+
+    fn clear_redo_stack(&mut self) {
+        let redo_byte_len = self
+            .redo_stack
+            .iter()
+            .map(EditRecord::retained_byte_len)
+            .sum::<usize>();
+        self.history_byte_len -= redo_byte_len;
+        self.redo_stack.clear();
+    }
+
     fn prune_history_to_limit(&mut self) {
-        while self.history_byte_len() > self.history_byte_limit {
+        while self.history_byte_len > self.history_byte_limit {
             if self.undo_stack.len() > 1 {
-                self.undo_stack.remove(0);
+                let removed = self.undo_stack.remove(0);
+                self.history_byte_len -= removed.retained_byte_len();
                 continue;
             }
             if self.redo_stack.len() > 1 {
-                self.redo_stack.remove(0);
+                let removed = self.redo_stack.remove(0);
+                self.history_byte_len -= removed.retained_byte_len();
                 continue;
             }
             break;
