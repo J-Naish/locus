@@ -512,6 +512,22 @@ fn contiguous_typing_coalesces_into_one_undo_step() {
 }
 
 #[test]
+fn newline_insert_seals_typing_coalescing() {
+    let mut buffer = buffer("");
+    buffer.insert(0, "a").expect("insert");
+    buffer.insert(1, "\n").expect("insert");
+    buffer.insert(2, "b").expect("insert");
+    assert_eq!(contents(&buffer), "a\nb");
+
+    assert!(buffer.undo().is_some());
+    assert_eq!(contents(&buffer), "a\n");
+    assert!(buffer.undo().is_some());
+    assert_eq!(contents(&buffer), "a");
+    assert!(buffer.undo().is_some());
+    assert_eq!(contents(&buffer), "");
+}
+
+#[test]
 fn non_contiguous_inserts_are_separate_undo_steps() {
     let mut buffer = buffer("..");
     buffer.insert(0, "a").expect("insert");

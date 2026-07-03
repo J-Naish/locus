@@ -413,6 +413,8 @@ impl TextBuffer {
             if let Some(top) = self.undo_stack.last_mut() {
                 if top.removed.byte_len() == 0
                     && top.at_byte + top.inserted.byte_len() == at_byte
+                    && top.inserted.summary().line_breaks == 0
+                    && inserted.summary().line_breaks == 0
                     && Some(top.seq) != saved_seq
                 {
                     self.history_byte_len += inserted.byte_len();
