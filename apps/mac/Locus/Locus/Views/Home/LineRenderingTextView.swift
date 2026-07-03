@@ -119,13 +119,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         removeAllMarkdownVideoViews()
       }
       invalidateVisibleArea()
+      refreshHoverCursor()
     }
   }
 
   var showsMarkdownViewModeToggleCursorRect = false {
     didSet {
       guard showsMarkdownViewModeToggleCursorRect != oldValue else { return }
-      window?.invalidateCursorRects(for: self)
+      refreshHoverCursor()
     }
   }
 
@@ -1991,36 +1992,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   // every scroll instead, which stays correct.
   override class var isCompatibleWithResponsiveScrolling: Bool { false }
 
-  // Text-editing I-beam over the text body, like a typical editor; the
-  // line-number gutter keeps the default arrow. Cursor rects are declarative —
-  // AppKit switches the cursor automatically as the pointer crosses the region
-  // boundary and re-evaluates them even when the pointer is already inside, so
-  // the cursor is correct without depending on a scroll to refresh it. The
-  // gutter is pinned to the left of the visible area (it tracks horizontal
-  // scroll), so its right edge sits at the scroll origin plus the gutter width;
-  // the I-beam covers the visible band to the right of it. `viewportDidScroll`
-  // and `updateLayout` invalidate these rects so the boundary stays aligned as
-  // the document scrolls horizontally or the gutter width changes.
-  //
-  // Fragile foundation, measured 2026-06-12: a SwiftUI `.clipShape` around this
-  // editor used to suppress these cursor rects — they registered with correct
-  // window geometry, yet the arrow won until the clip was removed. The document
-  // card now clips again so the glass field can show through its rounded
-  // corners; keep this cursor contract under manual review when changing the
-  // card chrome.
-  override func resetCursorRects() {
-    for region in hoverCursorRegions() {
-      addCursorRect(region.rect, cursor: region.cursor.nsCursor)
-    }
-  }
-
-  // Cursor rects alone go stale on two paths: after the pointer visits the
-  // titlebar tab strip, whose SwiftUI pointer handling resets the cursor to
-  // the arrow after the rect's enter event has already fired, and under the
-  // SwiftUI card clip used to make the glass field show through rounded
-  // corners. Correcting on every mouse move/cursor update inside the editor is
-  // self-healing regardless of where the pointer came from.
-  private enum HoverCursor {
+  // Cursor handling is driven only by the tracking-area layer. AppKit cursor
+  // rects are intentionally not used: they competed with this view's manual
+  // self-healing cursor updates, and a 2026-06-12 measurement showed SwiftUI
+  // `.clipShape` around the document card could suppress rects entirely. Regions
+  // come from `hoverCursorRegions()`; later regions win over earlier broad
+  // regions. Mouse events apply the cursor directly, and `refreshHoverCursor`
+  // re-applies it when regions move under a stationary pointer (scroll, layout,
+  // mode switches, edits).
+  enum HoverCursor: Equatable {
     case iBeam, arrow, pointingHand
 
     var nsCursor: NSCursor {
@@ -2055,6 +2035,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private var cursorCorrectionTrackingArea: NSTrackingArea?
+  private var refreshHoverCursorHookForTesting: (() -> Void)?
 
   override func mouseEntered(with event: NSEvent) {
     super.mouseEntered(with: event)
@@ -2066,8 +2047,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     applyHoverCursor(for: event)
   }
 
+  override func mouseExited(with event: NSEvent) {
+    super.mouseExited(with: event)
+    guard NSEvent.pressedMouseButtons == 0 else { return }
+    NSCursor.arrow.set()
+  }
+
   override func cursorUpdate(with event: NSEvent) {
-    super.cursorUpdate(with: event)
     applyHoverCursor(for: event)
   }
 
@@ -2077,6 +2063,20 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // ancestors can reset the cursor between move/update events while our local
     // desired state is unchanged.
     desired.nsCursor.set()
+  }
+
+  /// Re-applies the hover cursor from the current pointer position without
+  /// waiting for a mouse event — the regions can move under a stationary
+  /// pointer (scroll, layout, view-mode switches, edits). No-op when the window
+  /// is not key, a mouse button is down (mid-drag), or the pointer is outside
+  /// the visible band.
+  private func refreshHoverCursor() {
+    refreshHoverCursorHookForTesting?()
+    guard let window, window.isKeyWindow, NSApp.isActive else { return }
+    guard NSEvent.pressedMouseButtons == 0 else { return }
+    let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+    guard visibleRect.contains(point) else { return }
+    hoverCursor(at: point).nsCursor.set()
   }
 
   private func hoverCursor(at point: NSPoint) -> HoverCursor {
@@ -2203,6 +2203,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       scrollView.reflectScrolledClipView(scrollView.contentView)
     }
     invalidateVisibleArea()
+    refreshHoverCursor()
   }
 
   /// Marks only the visible portion for redisplay. Invalidating the whole view
@@ -2221,9 +2222,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   func viewportDidScroll() {
     syncMarkdownVideoViewsIfNeeded()
     invalidateVisibleArea()
-    // The gutter is viewport-pinned, so its right edge (the I-beam boundary)
-    // shifts with horizontal scroll; re-establish the cursor rects for it.
-    window?.invalidateCursorRects(for: self)
+    refreshHoverCursor()
   }
 
   // MARK: Accessibility
@@ -3963,6 +3962,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     invalidateVisibleArea()
     notifyDirtyChanged()
+    refreshHoverCursor()
   }
 
   /// Clamps the selection endpoints into the current document bounds, since
@@ -4206,6 +4206,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     invalidateVisibleArea()
     notifyDirtyChanged()
+    refreshHoverCursor()
   }
 
   /// Reports the buffer's current dirty state to the host (after an edit/undo).
@@ -4455,9 +4456,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         scrollView.scrollerInsets.left = horizontalScrollerInset
       }
     }
-    // The visible band and gutter width may have changed; re-establish the
-    // I-beam cursor rect so its boundary stays aligned with the gutter edge.
-    window?.invalidateCursorRects(for: self)
+    refreshHoverCursor()
   }
 
   private func attributedBandLines(for buffer: any TextDocumentReading, range: Range<Int>)
@@ -6730,6 +6729,22 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     lastVideoSyncKey = nil
   }
 
+  func setRefreshHoverCursorHookForTesting(_ hook: (() -> Void)?) {
+    refreshHoverCursorHookForTesting = hook
+  }
+
+  func hoverCursorForTesting(at point: NSPoint) -> HoverCursor {
+    hoverCursor(at: point)
+  }
+
+  func hoverCursorRegionsForTesting() -> [(rect: NSRect, cursor: HoverCursor)] {
+    hoverCursorRegions().map { ($0.rect, $0.cursor) }
+  }
+
+  func markdownViewModeToggleCursorRectForTesting() -> NSRect? {
+    markdownViewModeToggleCursorRect()
+  }
+
   func syncMarkdownVideoViewsIfNeededForTesting() {
     syncMarkdownVideoViewsIfNeeded()
   }
@@ -6908,6 +6923,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     inLineRange range: Range<Int>
   ) -> [MarkdownTaskCheckboxTarget] {
     markdownTaskCheckboxTargets(inLineRange: range)
+  }
+
+  func markdownLinkTargetRectsForTesting(inLineRange range: Range<Int>) -> [NSRect] {
+    markdownLinkTargets(inLineRange: range).map(\.rect)
   }
 
   func handleMarkdownTaskCheckboxClickForTesting(at point: NSPoint) -> Bool {

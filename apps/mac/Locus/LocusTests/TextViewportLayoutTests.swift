@@ -2815,6 +2815,86 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testHoverCursorResolutionUsesExplicitRegionPrecedence() throws {
+    let view = try makeEditableViewer(
+      """
+      [Open](https://example.com)
+
+      ```swift
+      print("x")
+      ```
+      """)
+    view.syntax = .markdown
+    view.setFrameSize(NSSize(width: 520, height: 260))
+    let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: 260))
+    scrollView.documentView = view
+    view.updateLayout()
+
+    XCTAssertEqual(view.hoverCursorForTesting(at: NSPoint(x: 5, y: 12)), .arrow)
+    XCTAssertEqual(view.hoverCursorForTesting(at: NSPoint(x: 120, y: 36)), .iBeam)
+    let linkRect = try XCTUnwrap(
+      view.markdownLinkTargetRectsForTesting(inLineRange: 0..<view.lineCount).first)
+    XCTAssertEqual(
+      view.hoverCursorForTesting(at: NSPoint(x: linkRect.midX, y: linkRect.midY)),
+      .pointingHand)
+
+    let copyTarget = try XCTUnwrap(
+      view.markdownCodeCopyTargets(inLineRange: 0..<view.lineCount).first)
+    XCTAssertEqual(
+      view.hoverCursorForTesting(
+        at: NSPoint(x: copyTarget.buttonRect.midX, y: copyTarget.buttonRect.midY)),
+      .pointingHand)
+
+    view.showsMarkdownViewModeToggleCursorRect = true
+    let toggleRegion = try XCTUnwrap(view.hoverCursorRegionsForTesting().last)
+    XCTAssertEqual(toggleRegion.cursor, .pointingHand)
+    let toggleRect = toggleRegion.rect.insetBy(dx: 2, dy: 2)
+    let togglePoint = NSPoint(x: toggleRect.midX, y: toggleRect.midY)
+
+    XCTAssertEqual(view.hoverCursorForTesting(at: togglePoint), .pointingHand)
+
+    view.showsMarkdownViewModeToggleCursorRect = false
+
+    XCTAssertNotEqual(view.hoverCursorForTesting(at: togglePoint), .pointingHand)
+  }
+
+  @MainActor
+  func testRefreshHoverCursorRunsWhenCursorRegionsCanMove() throws {
+    let view = try makeEditableViewer("[Open](https://example.com)")
+    view.syntax = .markdown
+    view.setFrameSize(NSSize(width: 420, height: 200))
+    let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 200))
+    scrollView.documentView = view
+    view.updateLayout()
+    var refreshCount = 0
+    view.setRefreshHoverCursorHookForTesting { refreshCount += 1 }
+
+    func assertRefresh(_ description: String, _ action: () -> Void) {
+      let before = refreshCount
+      action()
+      XCTAssertGreaterThan(refreshCount, before, description)
+    }
+
+    assertRefresh("scroll") {
+      view.viewportDidScroll()
+    }
+    assertRefresh("toggle visibility") {
+      view.showsMarkdownViewModeToggleCursorRect = true
+    }
+    assertRefresh("view mode") {
+      view.markdownViewMode = .source
+    }
+    let replacement = try TextBuffer.open(bytes: Data("Replacement".utf8))
+    assertRefresh("document swap") {
+      view.setBuffer(replacement)
+    }
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 0))
+    assertRefresh("edit") {
+      view.insertText("Draft ")
+    }
+  }
+
+  @MainActor
   func testMarkdownCopyWholeRenderedBoldLineIncludesRawMarkers() throws {
     let view = try makeViewer("**bold**")
     view.syntax = .markdown
