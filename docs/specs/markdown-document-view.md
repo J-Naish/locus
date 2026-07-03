@@ -100,11 +100,11 @@ variable-height rows:
 | Element | Font | Tracking | Air above/below |
 | --- | --- | --- | --- |
 | Body | 15 regular | — | 24 pt row |
-| H1 | 28 bold | −0.4 | 22 / 6 |
-| H2 | 22 bold | −0.2 | 18 / 5 |
-| H3 | 19 semibold | — | 14 / 4 |
-| H4 | 16 semibold | — | 10 / 3 |
-| H5 | 14 semibold | — | 8 / 2 |
+| H1 | 30 bold | −0.4 | 22 / 6 |
+| H2 | 24 bold | −0.2 | 18 / 5 |
+| H3 | 21 semibold | — | 14 / 4 |
+| H4 | 18 semibold | — | 10 / 3 |
+| H5 | 15 semibold | — | 8 / 2 |
 | H6 | 13 semibold secondary | — | 8 / 2 |
 
 Heading rows are glyph-height rows with sectional air applied once per
@@ -234,18 +234,24 @@ content. Wrap width per line = measure − indent.
   are local-file only; remote video URLs show the quiet unavailable card
   instead of streaming arbitrary media inside the app.
 - **Inline**: bold/italic/bold-italic/strike (asterisk and underscore
-  forms), inline code chips, links (label in accent; Cmd+click opens
-  `http`/`https`), **reference links** `[text][label]` resolved through
-  a document-wide definitions map (`[label]: url` definition lines render
-  as small muted mono; unresolved references render plain), **autolinks**
+  forms), inline code chips, links (label in accent; plain click opens
+  valid `http`/`https`/`mailto`/`tel` destinations or local file paths
+  inside Locus; invalid destinations use the invalid-link tint),
+  **fragment anchors** (`#section`) styled as valid but inert until
+  document anchors exist, **reference links** `[text][label]` resolved
+  through a document-wide definitions map (`[label]: url` definition
+  lines render as small muted mono; unresolved references stay plain
+  literal text with no invalid tint and no target), **autolinks**
   `<https://…>` (URL as the visible label, brackets removed; clickable
-  per the scheme rule) and email autolinks (brackets removed, rendered
-  as plain text — not a link, nothing pretends to be clickable that is
-  not), in-paragraph images as secondary alt text (image-only lines
-  render as image blocks — see Images above), escapes render the escaped
-  character with the backslash removed. Inline constructs nest: code
-  spans and links inside emphasis render both (code binds tighter than
-  emphasis).
+  per the scheme rule) and email autolinks (plain non-link text with
+  brackets dropped), in-paragraph images as secondary alt text
+  (image-only lines render as image blocks — see Images above), escapes
+  render the escaped character with the backslash removed. Inline
+  constructs nest one level: code spans and links inside emphasis render
+  both (code binds tighter than emphasis), and one nested emphasis span
+  inside a same-line emphasis span is supported. Standalone dunder names
+  like `__init__` follow CommonMark/GitHub/Notion and render as strong;
+  use backticks for literal identifiers.
 - **Inline HTML**: a curated allowlist renders by reusing the same
   typographic attributes as the markdown equivalents — `<b>`/`<strong>`
   bold, `<i>`/`<em>`/`<cite>` italic, `<s>`/`<strike>`/`<del>`
@@ -310,9 +316,9 @@ prefix.
    Peel is state-guarded (never inside fences/frontmatter). A setext
    heading peels by deleting its underline line (one undo step); Backspace
    on the underline row itself does the same. Forward-delete at line end
-   removes the newline only; a merged prefix re-renders as literal text
-   (it no longer parses at line start — visible, honest). Word deletes
-   clamp at content start.
+   cleanly merges the next line and absorbs the next line's concealed
+   prefix when that prefix would otherwise become synthetic visible text.
+   Word deletes clamp at content start.
 5. **Span integrity.** Deleting a span's last visible character also
    removes its markers (no `****` litter), as a pre-expansion of the same
    buffer edit — one undo step. For links and images this removes the
@@ -353,11 +359,13 @@ prefix.
    multi-line selections. Cut = the same raw copy plus the mapped delete.
 10. **Checkbox click toggles** `[ ]`↔`[x]` as a normal buffer edit (hit
     area = marker cell × row height; mouse-down-drag falls through to
-    selection). **Links: plain click places the caret; Cmd+click opens**
-    (`http`/`https` only) — this is an editor, the cursor must tell the
-    truth, and label typos must be clickable. The pointing hand shows
-    only while Cmd is held over a link span. A quiet link editor, Cmd+K,
-    and paste-URL-over-selection are named deferrals.
+    selection). **Links: plain click opens valid destinations**:
+    external `http`/`https`/`mailto`/`tel` URLs leave Locus through the
+    system opener, local file paths open in Locus, `#fragment` anchors
+    are styled but inert, and invalid links do not open. The pointing
+    hand shows over all link spans; validity affects activation and tint,
+    not the cursor. A quiet link editor, Cmd+K, and
+    paste-URL-over-selection are named deferrals.
 11. **Accessibility reads the rendered document**; ranges convert through
     the map. VoiceOver editing announcements follow the buffer edits.
 12. **Tab** indents/outdents only at list-item starts (rule in Phase E4)
@@ -375,14 +383,16 @@ colors).
 
 ## Implementation plan
 
-The current round (editing restoration) is sequenced in
+The current rendering/editing status is summarized in
 [markdown-rendered-view-milestone.md](markdown-rendered-view-milestone.md).
-Phase A (variable row heights, full type scale), typeset tables, image
-blocks, and the code card (language label, copy control, comments/strings tint) have
-shipped. Later: Phase R (optional raw editor surface), Phase B
-(Rust-core classification), polish backlog (theme slots,
-find-in-document with mapped highlights, link editor, copy-as-rich-text,
-in-paragraph inline images, animated GIFs).
+Phase A (variable row heights, full type scale), typeset tables with
+cell wrapping and table-local horizontal scroll, image/video blocks,
+clickable links, task checkbox toggles, and the code card (language
+label, copy control, comments/strings tint) have shipped. Later:
+Phase R (optional raw editor surface), Phase B (Rust-core
+classification), polish backlog (theme slots, find-in-document with
+mapped highlights, link editor, copy-as-rich-text, richer in-paragraph
+media, animated GIF playback).
 
 ## Performance
 

@@ -71,7 +71,7 @@ Indented code inside a list:
 
       key: value
       list:
-        - this stays code
+        - list continuation, not code, in Locus
 
 - Item after code
 

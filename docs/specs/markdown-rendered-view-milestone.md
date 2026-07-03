@@ -1,92 +1,52 @@
-# Markdown Rendered View — Slim Marker Rows (Per-Line Row Heights)
+# Markdown Rendered View — Current Milestone Status
 
-Execution plan for the engine's first variable-row-height capability:
-lines may carry a custom row height, and the table delimiter row becomes
-a ~6 pt slim row, so the header→body gap (today a fixed 24 pt source row
-plus insets ≈ 31 pt) shrinks to ≈ 13 pt — the user's accepted target.
-This is the geometry half of the long-deferred Phase A, scoped to
-per-LINE heights (all wrapped visual rows of a line share its height; no
-per-row heights, no heading paddings yet — but the machinery enables
-both later).
+This document records the current shipped state of the rendered Markdown
+surface. Earlier versions of this file described the first variable-row-
+height implementation plan; that work has now landed and the document is
+kept as a compact status reference for follow-up implementation.
 
-User approval: explicit ("可変行高を実装する(推奨)" selected,
-2026-06-13). Slim set v1 = **table separator rows only**
-(`tableSeparatorRowHeight = 6`); the mechanism is general
-(`markdownRowHeight(for state)`), so setext underlines, fence closers,
-frontmatter delimiters, and hr rows can be slimmed later by extending
-one function.
+## Shipped
 
-Standing rules: failing test first, smallest change, suite green after
-every consumer conversion, `scripts/perf-smoke.sh` at the end, feel in
-Release. 616 tests green at start.
+- **Display-space editing**: rendered text is edited through a display
+  map back to raw Markdown source. Block markers, inline markers, media
+  syntax, and structural table tabs are hidden or synthesized in display
+  space while edits remain plain buffer edits.
+- **Variable row geometry**: the viewport supports per-line heights and
+  y-prefix geometry. Slim marker rows now cover table delimiter rows,
+  setext underlines, fence/frontmatter delimiters, and other marker-only
+  rows. Markdown rows with media, tables, frontmatter, headings, and code
+  cards can carry their own measured heights.
+- **Type scale**: headings use the current document scale from
+  `MarkdownDocumentMetrics` (H1 30, H2 24, H3 21, H4 18, H5 15, H6 13
+  secondary). Body text remains 15 pt; table cells use compact 13 pt
+  text with a 20 pt cell line height.
+- **Tables**: pipe tables render as quiet booktab-style tables. Columns
+  are measured from styled content, capped at 200 pt, and long cells wrap
+  inside their column. Wide tables scroll horizontally inside the table
+  block only; the prose document measure stays fixed. Table scroll state
+  and row-layout caches are kept out of IME-sensitive edit paths.
+- **Media blocks**: image and local video references render as media
+  blocks with captions and unavailable-state cards. Reference-style
+  images and images inside links share the image-block renderer.
+- **Links and tasks**: valid external links and local file paths open on
+  click; invalid destinations use the invalid-link tint. Task
+  checkboxes toggle the source marker with a normal undoable edit.
+- **Code cards and frontmatter**: fenced and indented code render in
+  quiet cards. YAML frontmatter renders as a soft metadata panel with
+  vertical key/value layout, wrapped chips, and block scalar value cards.
 
-## Architecture
+## Follow-Up Notes
 
-- `WrapIndex` today stores per-line prefix sums of visual ROW COUNTS
-  (`rowOffsets`: line → first visual row), spliced on edit. Add the
-  parallel **y-geometry**: per-line `height(line)` (from
-  `markdownRowHeight(for state)`; uniform `layout.lineHeight` for
-  non-markdown and for any line without a custom height) and prefix sums
-  `yOffsets[line]` = cumulative height of all rows before the line.
-  `y(line, rowInLine) = yOffsets[line] + rowInLine × height(line)`;
-  content height = `yOffsets[last] + rows(last) × height(last)`;
-  `line(forY:)` = binary search. **Uniform fast path**: when no line has
-  a custom height (non-markdown, or markdown with no slim rows), keep
-  the existing `row × lineHeight` O(1) arithmetic — assert parity in
-  tests.
-- Maintained in the same three places row counts are maintained: the
-  synchronous build, the detached worker build (heights derive from the
-  states the worker already computes), and the per-edit splice.
-- While `wrapIndex == nil` (background-build window), geometry falls
-  back to uniform — a transient, already-accepted state.
-
-## Consumer conversion checklist (the known inventory)
-
-Every `CGFloat(row) * layout.lineHeight` and `y / lineHeight` site:
-
-1. `visibleVisualRowRange(in:)` (dirty-rect → rows) and
-   `accessibilityVisibleCharacterRange`.
-2. `TextViewportLayout.frameHeight` incl. the overscroll tail (tail uses
-   the LAST row's actual height).
-3. Draw: `drawVisualRows` y, huge-row draw, selection highlight rects,
-   caret rect (height = its line's row height), composition caret.
-4. Hit-testing: `endpoint(at:)` y→row resolution, `columnUTF16(forX:)`
-   unaffected (x only), `characterIndex(for:)` via endpoint.
-5. `scrollCaretToVisible` rect; `firstRectInViewCoordinates` (IME
-   candidate window) y + height.
-6. Margin line numbers (skip drawing numbers on rows shorter than the
-   number's natural height — slim rows are unnumbered, like wrapped
-   continuation rows).
-7. Markdown chrome: table frame/rule ys (mid rule = slim separator row's
-   vertical center), fence/frontmatter card spans, quote bar y/height,
-   hr rule y, bullet/ordered/checkbox marker y (all already take y from
-   row math — they convert mechanically once y(line) exists).
-8. Huge-line branches (grid path) — exempt: huge lines keep uniform
-   height by policy.
-9. Vertical caret travel (`moveVertically` goal-x) — row-based, only the
-   y lookup changes.
-
-## Sequence
-
-1. Pure geometry core + tests: extend `WrapIndex` (or a sibling
-   `RowGeometry` struct it owns) with heights + y prefix sums + binary
-   search + splice; parity tests (uniform doc: y == row×h for every row;
-   slim doc: hand-computed ys; splice == full rebuild).
-2. `markdownRowHeight(for state)` (+ constant
-   `tableSeparatorRowHeight: CGFloat = 6` in `MarkdownDocumentMetrics`);
-   heights threaded into the three build paths.
-3. Convert consumers in the checklist order, full suite after each
-   group; the table-rule/spacing tests updated last (header→body gap
-   assertion ≈ 13 pt: 24 + 6/2 for the mid rule y, etc.).
-4. `scripts/perf-smoke.sh` + scroll feel in Release (binary search
-   replaces O(1) row math only on markdown documents with slim rows).
-
-## Risks
-
-- The caret can land on a 6 pt row (arrow down through the separator) —
-  honest, visible as a short caret; acceptable.
-- Any consumer missed = misaligned drawing/hit-testing on documents with
-  tables; the checklist above is the inventory established by three
-  prior reviews — trust it over re-derivation.
-- Scroll perf: y→row becomes O(log lines) per event on affected docs;
-  budgets verified by perf-smoke.
+- Some rendered constructs intentionally remain conservative: unsupported
+  Markdown/HTML stays literal, and fragment anchors are styled but inert
+  until document anchors exist.
+- Aggregated YAML sequence chips are still display-oriented because a
+  line-local display map cannot directly edit values sourced from hidden
+  sibling lines. Bracket arrays and block scalars remain editable through
+  real source ranges.
+- The rendered/source mode toggle is deliberately local to the document
+  surface. Source mode reuses the plain-text presentation rather than a
+  separate Markdown-specific raw renderer.
+- Before large table or media changes, re-run the markdown layout tests
+  plus `scripts/perf-smoke.sh`; row height, table scroll, and viewport
+  anchoring are the sensitive paths.
