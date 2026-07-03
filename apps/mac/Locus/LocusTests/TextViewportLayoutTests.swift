@@ -2755,6 +2755,20 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testMarkdownCopyRoundTripsNestedEmphasisAndLinkLabel() throws {
+    // Copy returns raw markdown, so nested emphasis inside bold and emphasis
+    // inside a link label round-trip byte-for-byte (the rendered view conceals the
+    // markers, but the copied text must be the exact source).
+    let source = "**bold with *italic* inside**\n[**bold** label](url)"
+    let view = try makeViewer(source)
+    view.syntax = .markdown
+
+    view.selectAll(nil)
+
+    XCTAssertEqual(view.selectedText(), source)
+  }
+
+  @MainActor
   func testMarkdownSourceModeShowsRawMarkers() throws {
     let view = try makeViewer("# Title")
     view.syntax = .markdown
@@ -3536,6 +3550,203 @@ final class TextViewportLayoutTests: XCTestCase {
     view.moveToDocumentEdge(end: false, extend: false)
     view.doCommand(by: #selector(NSStandardKeyBindingResponding.moveRight(_:)))
     XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 1))
+  }
+
+  // MARK: Markdown-aware editing (Tab, newline, backspace seam)
+
+  /// An editable Markdown viewer, laid out wide enough that table cells fit one
+  /// visual row (so cell content-start columns are stable).
+  @MainActor
+  private func makeEditableMarkdownViewer(_ contents: String, width: CGFloat = 600) throws
+    -> LineRenderingTextView
+  {
+    let view = try makeEditableViewer(contents)
+    view.syntax = .markdown
+    view.frame = NSRect(x: 0, y: 0, width: width, height: 400)
+    view.updateLayout()
+    return view
+  }
+
+  @MainActor
+  func testMarkdownTableTabNavigatesCellsAndWrapsBothDirections() throws {
+    // A header + separator + two body rows, three columns. The rendered row uses
+    // a tab between cells, so each cell's content starts at column 0 or just after
+    // a tab. Tab is pure caret movement here — it must never mutate the buffer.
+    let table = """
+      | Name | Age | City |
+      | --- | --- | --- |
+      | Alice | 30 | NYC |
+      | Bob | 25 | LA |
+      """
+    let view = try makeEditableMarkdownViewer(table)
+    let originalBytes = content(of: view)
+
+    // Cell content-start columns for a rendered row, derived from its tab
+    // positions ("Alice\t30\tNYC" → [0, 6, 9]). Body rows differ in width, so this
+    // is computed per line rather than shared.
+    func cellStarts(line: Int) -> [Int] {
+      let row = view.attributedLineStringForTesting(line: line) as NSString
+      var starts = [0]
+      for index in 0..<row.length where row.character(at: index) == 9 {
+        starts.append(index + 1)
+      }
+      return starts
+    }
+    let row2 = cellStarts(line: 2)  // line 2: "Alice\t30\tNYC"
+    let row3 = cellStarts(line: 3)  // line 3: "Bob\t25\tLA"
+
+    func tab() { view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertTab(_:))) }
+    func shiftTab() {
+      view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertBacktab(_:)))
+    }
+
+    // Tab from the first cell steps to each following cell's content start.
+    view.beginCaretSelection(at: .init(line: 2, columnUTF16: row2[0]))
+    tab()
+    XCTAssertEqual(view.selection?.head, .init(line: 2, columnUTF16: row2[1]))
+    tab()
+    XCTAssertEqual(view.selection?.head, .init(line: 2, columnUTF16: row2[2]))
+    // At a row's last cell, Tab wraps to the next row's first cell.
+    tab()
+    XCTAssertEqual(view.selection?.head, .init(line: 3, columnUTF16: row3[0]))
+    // At the very last cell of the table, Tab is a no-op.
+    let lastRow = view.attributedLineStringForTesting(line: 3) as NSString
+    view.beginCaretSelection(at: .init(line: 3, columnUTF16: lastRow.length))
+    tab()
+    XCTAssertEqual(view.selection?.head, .init(line: 3, columnUTF16: lastRow.length))
+
+    // Shift+Tab reverses, INCLUDING wrapping from a row's first cell back to the
+    // previous row's last cell.
+    view.beginCaretSelection(at: .init(line: 3, columnUTF16: row3[2]))
+    shiftTab()
+    XCTAssertEqual(view.selection?.head, .init(line: 3, columnUTF16: row3[1]))
+    shiftTab()
+    XCTAssertEqual(view.selection?.head, .init(line: 3, columnUTF16: row3[0]))
+    shiftTab()  // wrap from row 3 first cell to row 2 (the previous table row) last cell
+    XCTAssertEqual(view.selection?.head, .init(line: 2, columnUTF16: row2[2]))
+
+    // Pure caret movement: the buffer bytes are unchanged throughout.
+    XCTAssertEqual(content(of: view), originalBytes)
+  }
+
+  @MainActor
+  func testMarkdownEnterContinuesCheckedTaskAsUncheckedItem() throws {
+    // A checked task item continues as an unchecked item, preserving the marker
+    // and indent, when Enter is pressed at the item's display end.
+    let view = try makeEditableMarkdownViewer("- [x] done")
+    let displayEnd = (view.attributedLineStringForTesting(line: 0) as NSString).length
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: displayEnd))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+
+    XCTAssertEqual(content(of: view), "- [x] done\n- [ ] ")
+  }
+
+  @MainActor
+  func testMarkdownEnterOnEmptyNestedItemOutdentsOneStepWithSingleUndo() throws {
+    // Enter on an empty nested item outdents exactly one 2-space step (no newline
+    // added), and the whole outdent is a single undo step.
+    let view = try makeEditableMarkdownViewer("- a\n  - ")
+    view.beginCaretSelection(at: .init(line: 1, columnUTF16: 0))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+
+    XCTAssertEqual(content(of: view), "- a\n- ")
+    XCTAssertEqual(view.editableBuffer?.lineCount, 2)  // no newline was added
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 0))
+
+    XCTAssertTrue(view.undoEdit())
+    XCTAssertEqual(content(of: view), "- a\n  - ")  // one undo restores the indent
+  }
+
+  @MainActor
+  func testMarkdownBackspaceAtLineAfterClosedFrontMatterMovesCaretWithoutEditing() throws {
+    // A closing front-matter `---` renders as a concealed delimiter row. Backspace
+    // at the start of the paragraph below it must not delete into or merge the
+    // concealed row; it moves the caret to the previous editable line's end and
+    // leaves the buffer unchanged (mirrors the fence-seam behavior).
+    let text = "---\ntitle: x\n---\npara"
+    let view = try makeEditableMarkdownViewer(text)
+    view.beginCaretSelection(at: .init(line: 3, columnUTF16: 0))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), text)
+    // The previous editable line is the front-matter field; its display end is the
+    // end of the rendered `title\nx` value run.
+    let previousDisplayEnd = (view.attributedLineStringForTesting(line: 1) as NSString).length
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: previousDisplayEnd))
+  }
+
+  @MainActor
+  func testMarkdownTypingAfterCmdEndLandsOnLastCodeLineNotClosingFence() throws {
+    // Cmd+End on a document ending in a closed fence parks the caret at the end of
+    // the last code line (the closing fence is a concealed row). Typing there must
+    // extend the code line, not the closing ``` line.
+    let view = try makeEditableMarkdownViewer("```\ncode\n```")
+
+    view.moveToDocumentEdge(end: true, extend: false)
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: "code".utf16.count))
+
+    view.insertText("x")
+
+    XCTAssertEqual(content(of: view), "```\ncodex\n```")
+  }
+
+  @MainActor
+  func testMarkdownTabInsideFenceInsertsLiteralTab() throws {
+    // Inside a fenced code block the editor is code-like: Tab inserts a literal
+    // tab at the caret rather than indenting a list or moving a table cell.
+    let view = try makeEditableMarkdownViewer("```\ncode\n```")
+    view.beginCaretSelection(at: .init(line: 1, columnUTF16: 0))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertTab(_:)))
+
+    XCTAssertEqual(content(of: view), "```\n\tcode\n```")
+  }
+
+  @MainActor
+  func testMarkedTextInTableCellUsesTableCellFont() throws {
+    // Composing (IME) inside a table body cell inherits the 13pt table cell font,
+    // matching the surrounding rendered cell text.
+    let table = "| Name | Age |\n| --- | --- |\n| Alice | 30 |"
+    let view = try makeEditableMarkdownViewer(table)
+    view.beginCaretSelection(at: .init(line: 2, columnUTF16: 0))  // start of "Alice"
+    view.setMarkedText(
+      "かな", selectedRange: NSRange(location: 2, length: 0), replacementRange: Self.noReplacement)
+
+    let composed = view.composedLineForTesting(forLine: 2)
+    let composedFont = try XCTUnwrap(
+      composed.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+
+    XCTAssertEqual(
+      composedFont.pointSize, MarkdownDocumentMetrics.tableCellFontSize, accuracy: 0.01)
+  }
+
+  // MARK: Markdown block decorations (bullets, ordered markers, quote bar)
+
+  @MainActor
+  func testMarkdownBulletGlyphCyclesByDepthAndOrderedMarkerKeepsDelimiter() throws {
+    // Bullet items cycle through •/◦/▪ by nesting depth; an ordered item keeps its
+    // own delimiter (`2)` stays `2)`, not normalized to `2.`).
+    let view = try makeEditableMarkdownViewer("- one\n  - two\n    - three\n2) ordered")
+
+    XCTAssertEqual(view.markdownListMarkerGlyphForTesting(forLine: 0), "•")
+    XCTAssertEqual(view.markdownListMarkerGlyphForTesting(forLine: 1), "◦")
+    XCTAssertEqual(view.markdownListMarkerGlyphForTesting(forLine: 2), "▪")
+    XCTAssertEqual(view.markdownListMarkerGlyphForTesting(forLine: 3), "2)")
+  }
+
+  @MainActor
+  func testMarkdownQuoteBarDrawsWithQuoteBarColorConstant() {
+    // The quote bar is drawn with the quiet label-family ink, derived from the
+    // marker color at reduced alpha — not an accent color.
+    XCTAssertEqual(
+      LineRenderingTextView.markdownQuoteBarFillColorForTesting,
+      MarkdownDocumentMetrics.quoteBarColor)
+    XCTAssertEqual(
+      MarkdownDocumentMetrics.quoteBarColor,
+      MarkdownDocumentMetrics.markerColor.withAlphaComponent(0.42))
   }
 
   // MARK: Undo / redo / cut / paste

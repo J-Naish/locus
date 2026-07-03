@@ -7373,6 +7373,30 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     composedLineForDisplay(line: line, base: attributedLine(forLine: line))
   }
 
+  /// The list-marker glyph the block-decoration pass would draw for `line`: the
+  /// depth-cycled bullet glyph (`•`/`◦`/`▪`) for a bullet item, or the ordered
+  /// marker string (e.g. `2)`) for an ordered item. `nil` for lines that draw no
+  /// list marker (paragraphs, tasks, rules, fences).
+  func markdownListMarkerGlyphForTesting(forLine line: Int) -> String? {
+    guard let buffer = reader else { return nil }
+    let state = markdownLineState(forLine: line, in: buffer)
+    switch markdownBlockDecoration(for: rawLineText(line), state: state) {
+    case .bullet(let depth):
+      return MarkdownDocumentMetrics.bulletGlyphsByDepth[
+        max(0, depth - 1) % MarkdownDocumentMetrics.bulletGlyphsByDepth.count]
+    case .ordered(let marker):
+      return marker
+    default:
+      return nil
+    }
+  }
+
+  /// The fill color the quote-bar decoration draws with, so a test can assert the
+  /// drawn bar uses the documented quiet-ink constant.
+  static var markdownQuoteBarFillColorForTesting: NSColor {
+    MarkdownDocumentMetrics.quoteBarColor
+  }
+
   func resetRowLayoutComputationCountsForTesting() {
     rowStartComputationCount = 0
     rowSizeComputationCount = 0

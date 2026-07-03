@@ -429,6 +429,17 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertLessThan(elapsed, 0.5, "unterminated <a line should render in linear time")
   }
 
+  func testMarkdownEmphasisMarkerFloodIsLinearTimeNotReDoS() {
+    // A line that is a long run of emphasis markers is a classic backtracking
+    // trap for the underscore/asterisk rules. ~20k `_` must still render in
+    // linear time (same budget as the unterminated-tag guard above).
+    let line = String(repeating: "_", count: 20_000)
+    let start = Date()
+    _ = htmlRendered(line)
+    let elapsed = Date().timeIntervalSince(start)
+    XCTAssertLessThan(elapsed, 0.5, "an emphasis-marker flood should render in linear time")
+  }
+
   func testMarkdownNumericEntitiesRejectInvisibleFormatControls() {
     // U+061C (Arabic letter mark), zero-width space, BOM, soft hyphen, word
     // joiner — all invisible/format controls — stay literal, not decoded.
@@ -795,6 +806,27 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       accuracy: 0.01)
   }
 
+  func testMarkdownInlineCodeScalesInsideH3Heading() throws {
+    // Inline code tracks the heading's display font at every level, not just H1:
+    // inside an H3 it takes the H3-relative inline-code size (~0.85× the H3 font).
+    let source = "### Use `value`"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [source])[0]
+    let line = TextDocumentSyntaxHighlighter.highlightedLine(
+      source,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: state)
+
+    XCTAssertEqual(line.string, "Use value")
+    let expected = MarkdownDocumentMetrics.inlineCodeFont(
+      forDisplayFont: MarkdownDocumentMetrics.headingFont(level: 3)
+    ).pointSize
+    XCTAssertEqual(
+      try XCTUnwrap(line.resolvedFont(in: line.string, matching: "value")).pointSize,
+      expected,
+      accuracy: 0.01)
+  }
+
   func testMarkdownRenderedEscapesRemoveBackslashWithoutStyling() {
     let line = TextDocumentSyntaxHighlighter.highlightedLine(
       #"Use \*literal* marker"#,
@@ -915,6 +947,27 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
         MarkdownLinkTarget(
           displayRange: (rendered as NSString).range(of: "Brief"),
           destination: "docs/brief.md"),
+      ])
+  }
+
+  func testMarkdownInlineLinkDestinationKeepsBalancedParentheses() {
+    // A destination containing balanced parentheses (e.g. a Wikipedia URL ending
+    // in `(bar)`) is captured whole: exactly one link target whose destination is
+    // the full URL including the parenthesized suffix, and no stray `)` leaks into
+    // the rendered text.
+    let line = "[x](https://en.wikipedia.org/wiki/Foo_(bar))"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+    let rendered = TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+      line, font: TextDocumentSyntax.markdown.font, state: state)
+    let targets = TextDocumentSyntaxHighlighter.markdownLinkTargets(for: line, state: state)
+
+    XCTAssertEqual(rendered, "x")
+    XCTAssertEqual(
+      targets,
+      [
+        MarkdownLinkTarget(
+          displayRange: (rendered as NSString).range(of: "x"),
+          destination: "https://en.wikipedia.org/wiki/Foo_(bar)")
       ])
   }
 
@@ -1841,6 +1894,40 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertEqual(obliqueness, MarkdownDocumentMetrics.syntheticItalicObliqueness, accuracy: 0.001)
   }
 
+  func testMarkdownAsteriskEmphasisAppliesSyntheticObliquenessToJapaneseInRenderedPath() throws {
+    // The asterisk form of emphasis also gets synthetic obliqueness for scripts
+    // without a real italic (Japanese), through the rendered document path.
+    let rendered = TextDocumentSyntaxHighlighter.highlightedLine(
+      "これは*強調*です",
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font)
+
+    XCTAssertEqual(rendered.string, "これは強調です")
+    let obliqueness = try XCTUnwrap(rendered.obliqueness(in: rendered.string, matching: "強調"))
+    XCTAssertEqual(obliqueness, MarkdownDocumentMetrics.syntheticItalicObliqueness, accuracy: 0.001)
+  }
+
+  func testMarkdownLatinEmphasisUsesRealItalicNotSyntheticObliqueness() throws {
+    // Latin text has a real italic face, so emphasis tilts via the italic font
+    // trait and carries NO synthetic obliqueness (which is reserved for scripts
+    // that lack an italic).
+    let rendered = TextDocumentSyntaxHighlighter.highlightedLine(
+      "Use *emphasis* now",
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font)
+
+    XCTAssertEqual(rendered.string, "Use emphasis now")
+    XCTAssertEqual(
+      rendered.resolvedFont(in: rendered.string, matching: "emphasis")?.fontDescriptor
+        .symbolicTraits.contains(.italic),
+      true)
+    XCTAssertNil(
+      rendered.attribute(
+        .obliqueness,
+        at: (rendered.string as NSString).range(of: "emphasis").location,
+        effectiveRange: nil))
+  }
+
   func testMarkdownClosedATXHeadingStripsTrailingMarkerRun() {
     let line = "## Title ##"
     let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
@@ -1864,6 +1951,23 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertEqual(
       line.foregroundColor(in: line.string, matching: "Done"),
       NSColor.secondaryLabelColor)
+  }
+
+  func testMarkdownUncheckedTaskTextKeepsPrimaryLabelColor() {
+    // Only a *checked* task dims to secondary; an unchecked item stays primary
+    // label ink so pending work reads at full contrast.
+    let source = "- [ ] Todo"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [source])[0]
+    let line = TextDocumentSyntaxHighlighter.highlightedLine(
+      source,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: state)
+
+    XCTAssertEqual(line.string, "Todo")
+    XCTAssertEqual(
+      line.foregroundColor(in: line.string, matching: "Todo"),
+      NSColor.labelColor)
   }
 
   func testMarkdownDoubleBacktickSpanAllowsSingleBacktickInside() {
@@ -2014,6 +2118,39 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
         markdownLineState: states[5]
       ).resolvedFont(at: 0)?.pointSize,
       MarkdownDocumentMetrics.headingFont(level: 1).pointSize)
+  }
+
+  func testMarkdownFrontMatterValueFontsEmphasizeOnlyTheNameField() throws {
+    // Scalar front-matter values render at 13pt: the title-like `name` value is
+    // semibold to read as the document's name, while ordinary values (e.g.
+    // `title`) stay 13pt regular.
+    let markdown = """
+      ---
+      name: Alice
+      title: Draft
+      ---
+      body
+      """
+    let lines = markdown.components(separatedBy: "\n")
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let nameLine = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[1], syntax: .markdown, font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[1])
+    let titleLine = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[2], syntax: .markdown, font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[2])
+
+    XCTAssertEqual(nameLine.string, "name\nAlice")
+    XCTAssertEqual(titleLine.string, "title\nDraft")
+
+    let nameValueFont = try XCTUnwrap(nameLine.resolvedFont(in: nameLine.string, matching: "Alice"))
+    XCTAssertEqual(nameValueFont.pointSize, 13, accuracy: 0.01)
+    XCTAssertTrue(nameValueFont.fontDescriptor.symbolicTraits.contains(.bold))
+
+    let titleValueFont = try XCTUnwrap(
+      titleLine.resolvedFont(in: titleLine.string, matching: "Draft"))
+    XCTAssertEqual(titleValueFont.pointSize, 13, accuracy: 0.01)
+    XCTAssertFalse(titleValueFont.fontDescriptor.symbolicTraits.contains(.bold))
   }
 
   func testMarkdownFrontMatterSequenceValuesRenderAsCollectedChips() {

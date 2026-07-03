@@ -4701,9 +4701,9 @@ enum TextDocumentSyntaxHighlighter {
   private static let markdownInlineBracketRegexMaximumLength = 4_096
   private static let markdownInlineAutolinkRegexMaximumLength = 8_192
   private static let linkExpression = markdownRegex(
-    #"(?<!!)\[([^\]\n]+)\]\((https?://(?:[^\)\n]|\([^\)\n]*\))+)\)"#)
+    #"(?<!!)\[([^\]\n]+)\]\((https?://(?:[^()\n]|\([^()\n]*\))+)\)"#)
   private static let renderedLinkExpression = markdownRegex(
-    #"(?<!!)\[([^\]\n]+)\]\(((?:[^\)\n]|\([^\)\n]*\))+)\)"#)
+    #"(?<!!)\[([^\]\n]+)\]\(((?:[^()\n]|\([^()\n]*\))+)\)"#)
   private static let referenceLinkExpression = markdownRegex(#"(?<!!)\[([^\]\n]+)\]\[([^\]\n]*)\]"#)
   private static let referenceDefinitionExpression = markdownRegex(
     #"^\s{0,3}\[(?!\^)[^\]\n]+\]:\s+\S+"#)
