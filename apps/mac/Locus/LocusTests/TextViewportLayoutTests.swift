@@ -1385,7 +1385,6 @@ final class TextViewportLayoutTests: XCTestCase {
     view.syntax = .markdown
     view.updateLayout()
 
-    let body = view.layout.lineHeight
     let air = MarkdownDocumentMetrics.codeBlockAir
     let slim = MarkdownDocumentMetrics.slimMarkerRowHeight
     let header = LineRenderingTextView.codeLabelRowHeight
@@ -1396,11 +1395,11 @@ final class TextViewportLayoutTests: XCTestCase {
         - (try XCTUnwrap(view.endpointYForTesting(line: 1))),
       air + header,
       accuracy: 0.5)
-    // Interior body row stays the uniform height — code is already open.
+    // Interior body row uses the tighter code-slab line height.
     XCTAssertEqual(
       try XCTUnwrap(view.endpointYForTesting(line: 3))
         - (try XCTUnwrap(view.endpointYForTesting(line: 2))),
-      body,
+      MarkdownDocumentMetrics.codeRowHeight,
       accuracy: 0.5)
     // Closer is a slim row carrying the block air below it.
     XCTAssertEqual(
@@ -3124,6 +3123,182 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testMarkdownBoldCommandUnwrapsExactRenderedSpanSelection() throws {
+    let view = try makeEditableViewer("Use **summary** now")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 4))
+    view.extendSelection(to: .init(line: 0, columnUTF16: 11))
+
+    view.toggleMarkdownEmphasis(marker: "**")
+
+    XCTAssertEqual(content(of: view), "Use summary now")
+    XCTAssertEqual(view.selection?.start, .init(line: 0, columnUTF16: 4))
+    XCTAssertEqual(view.selection?.end, .init(line: 0, columnUTF16: 11))
+  }
+
+  @MainActor
+  func testMarkdownBoldCommandMergesAdjacentRenderedSelectionIntoOneSpan() throws {
+    let view = try makeEditableViewer("Use **summary** now")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 4))
+    view.extendSelection(to: .init(line: 0, columnUTF16: 15))
+
+    view.toggleMarkdownEmphasis(marker: "**")
+
+    XCTAssertEqual(content(of: view), "Use **summary now**")
+    XCTAssertEqual(view.selection?.start, .init(line: 0, columnUTF16: 4))
+    XCTAssertEqual(view.selection?.end, .init(line: 0, columnUTF16: 15))
+  }
+
+  @MainActor
+  func testMarkdownBoldCommandUnwrapsWholeRawLineSelection() throws {
+    let view = try makeEditableViewer("**bold**")
+    view.syntax = .markdown
+    view.selectAll(nil)
+
+    view.toggleMarkdownEmphasis(marker: "**")
+
+    XCTAssertEqual(content(of: view), "bold")
+    XCTAssertEqual(view.selection?.start, .init(line: 0, columnUTF16: 0))
+    XCTAssertEqual(view.selection?.end, .init(line: 0, columnUTF16: 4))
+    XCTAssertTrue(view.undoEdit())
+    XCTAssertEqual(content(of: view), "**bold**")
+  }
+
+  @MainActor
+  func testMarkdownBoldCommandUnwrapsWhenCaretIsInsideSpan() throws {
+    let view = try makeEditableViewer("**bold**")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 2))
+
+    view.toggleMarkdownEmphasis(marker: "**")
+
+    XCTAssertEqual(content(of: view), "bold")
+    XCTAssertEqual(view.selection?.start, .init(line: 0, columnUTF16: 0))
+    XCTAssertEqual(view.selection?.end, .init(line: 0, columnUTF16: 4))
+  }
+
+  @MainActor
+  func testMarkdownBoldCommandWithEmptySelectionAtPlainTextIsNoOp() throws {
+    let view = try makeEditableViewer("plain")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 2))
+    let revision = try XCTUnwrap(view.editableBuffer?.revision)
+    let dirty = try XCTUnwrap(view.editableBuffer?.isDirty)
+
+    view.toggleMarkdownEmphasis(marker: "**")
+
+    XCTAssertEqual(content(of: view), "plain")
+    XCTAssertEqual(view.editableBuffer?.revision, revision)
+    XCTAssertEqual(view.editableBuffer?.isDirty, dirty)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 2))
+  }
+
+  @MainActor
+  func testDeletingOnlyVisibleBoldContentRemovesMarkdownMarkers() throws {
+    let view = try makeEditableViewer("**b**")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 1))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), "")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+    XCTAssertTrue(view.undoEdit())
+    XCTAssertEqual(content(of: view), "**b**")
+  }
+
+  @MainActor
+  func testDeletingOnlyVisibleLinkLabelRemovesEntireMarkdownLink() throws {
+    let view = try makeEditableViewer("[t](https://example.com)")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 1))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), "")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+    XCTAssertTrue(view.undoEdit())
+    XCTAssertEqual(content(of: view), "[t](https://example.com)")
+  }
+
+  @MainActor
+  func testDeletingOnlyVisibleImageCaptionRemovesEntireMarkdownImage() throws {
+    let view = try makeEditableViewer("![x](image.png)")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 1))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), "")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+    XCTAssertTrue(view.undoEdit())
+    XCTAssertEqual(content(of: view), "![x](image.png)")
+  }
+
+  @MainActor
+  func testDeletingRenderedSelectionInsideLiteralUnderscoresDoesNotSwallowUnderscores() throws {
+    let view = try makeEditableViewer("FILE_NAME_MAX")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 5))
+    view.extendSelection(to: .init(line: 0, columnUTF16: 9))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), "FILE__MAX")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 5))
+  }
+
+  @MainActor
+  func testDeletingSelectionInsideCodeFenceDoesNotExpandMarkdownMarkers() throws {
+    let view = try makeEditableViewer("```swift\nprint(\"**bold**\")\n```")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 1, columnUTF16: 9))
+    view.extendSelection(to: .init(line: 1, columnUTF16: 13))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), "```swift\nprint(\"****\")\n```")
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 9))
+  }
+
+  @MainActor
+  func testDeletingAllVisibleNestedBoldContentRemovesOuterMarkers() throws {
+    let view = try makeEditableViewer("**a *b* c**")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 0))
+    view.extendSelection(to: .init(line: 0, columnUTF16: 5))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), "")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testInlineCodeChipRectsUseAttributedTextColumns() {
+    let attributed = NSMutableAttributedString(
+      string: "Use code now",
+      attributes: [.font: TextDocumentSyntax.markdown.font])
+    let codeRange = NSRange(location: 4, length: 4)
+    attributed.addAttributes([.locusMarkdownInlineCodeChip: true], range: codeRange)
+
+    let rects = LineRenderingTextView.markdownInlineCodeChipRects(
+      in: attributed,
+      textX: 40,
+      y: 80,
+      rowHeight: 24)
+
+    XCTAssertEqual(rects.count, 1)
+    let beforeCode = attributed.attributedSubstring(from: NSRange(location: 0, length: 4)).size()
+      .width
+    let codeWidth = attributed.attributedSubstring(from: codeRange).size().width
+    XCTAssertEqual(rects[0].minX, 40 + beforeCode, accuracy: 0.5)
+    XCTAssertEqual(rects[0].width, codeWidth, accuracy: 0.5)
+    XCTAssertEqual(rects[0].minY, 80 + MarkdownDocumentMetrics.inlineCodeChipYOffset, accuracy: 0.5)
+  }
+
+  @MainActor
   func testDeleteForwardRemovesNextCharacter() throws {
     let view = try makeEditableViewer("abc")
     view.moveToDocumentEdge(end: false, extend: false)  // caret (0,0)
@@ -3188,6 +3363,38 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertTrue(view.hasMarkedText())
     XCTAssertEqual(content(of: view), "ab")  // composing text is not in the buffer yet
     XCTAssertEqual(view.markedRange(), NSRange(location: 1, length: 1))
+  }
+
+  @MainActor
+  func testMarkedTextInheritsRenderedMarkdownHeadingFont() throws {
+    let view = try makeEditableViewer("# Title")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 0))
+    view.setMarkedText(
+      "かな", selectedRange: NSRange(location: 2, length: 0), replacementRange: Self.noReplacement)
+
+    let composed = view.composedLineForTesting(forLine: 0)
+    let base = view.attributedLineForTesting(forLine: 0)
+    let composedFont = try XCTUnwrap(
+      composed.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+    let baseFont = try XCTUnwrap(base.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+
+    XCTAssertEqual(composedFont.pointSize, baseFont.pointSize, accuracy: 0.01)
+  }
+
+  @MainActor
+  func testMarkedTextKeepsPlainParagraphFont() throws {
+    let view = try makeEditableViewer("plain")
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 0))
+    view.setMarkedText(
+      "かな", selectedRange: NSRange(location: 2, length: 0), replacementRange: Self.noReplacement)
+
+    let composed = view.composedLineForTesting(forLine: 0)
+    let composedFont = try XCTUnwrap(
+      composed.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+
+    XCTAssertEqual(
+      composedFont.pointSize, TextDocumentSyntax.plainText.font.pointSize, accuracy: 0.01)
   }
 
   @MainActor
@@ -3451,6 +3658,34 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertEqual(content(of: view), "abc")
     view.redo(nil)
     XCTAssertEqual(content(of: view), "abcX")
+  }
+
+  @MainActor
+  func testUndoAndRedoRestoreCaretToChangedSpan() throws {
+    let view = try makeEditableViewer("abc")
+    view.moveToDocumentEdge(end: true, extend: false)
+    view.insertText("X")
+
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 4))
+    XCTAssertTrue(view.undoEdit())
+    XCTAssertEqual(content(of: view), "abc")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 3))
+    XCTAssertTrue(view.redoEdit())
+    XCTAssertEqual(content(of: view), "abcX")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 4))
+  }
+
+  @MainActor
+  func testUndoAfterTypingAcrossNewlineRemovesOnlyLastLineTypingRun() throws {
+    let view = try makeEditableViewer("")
+    view.insertText("a")
+    view.insertText("\n")
+    view.insertText("b")
+
+    XCTAssertEqual(content(of: view), "a\nb")
+    XCTAssertTrue(view.undoEdit())
+    XCTAssertEqual(content(of: view), "a\n")
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 0))
   }
 
   @MainActor

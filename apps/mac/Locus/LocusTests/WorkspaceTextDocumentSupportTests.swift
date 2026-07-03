@@ -140,7 +140,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertLessThan(kern ?? 0, 0)
   }
 
-  func testMarkdownH6UsesSameTextColorAsOtherHeadings() {
+  func testMarkdownH6UsesSecondaryHeadingTextColor() {
     let line = "###### Small Section"
     let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
     let rendered = TextDocumentSyntaxHighlighter.highlightedLine(
@@ -150,10 +150,10 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       applyRules: true,
       markdownLineState: state)
 
-    XCTAssertEqual(rendered.foregroundColor(at: 0), NSColor.labelColor)
+    XCTAssertEqual(rendered.foregroundColor(at: 0), NSColor.secondaryLabelColor)
   }
 
-  func testMarkdownSourceFallbackH6UsesHeadingTextColor() {
+  func testMarkdownSourceFallbackH6UsesSecondaryHeadingTextColor() {
     let storage = NSTextStorage(string: "###### Small Section")
 
     TextDocumentSyntaxHighlighter.apply(
@@ -165,7 +165,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
 
     XCTAssertEqual(
       storage.foregroundColor(in: storage.string, matching: "Small"),
-      NSColor.labelColor)
+      NSColor.secondaryLabelColor)
   }
 
   func testProseDocumentsSoftWrap() {
@@ -728,6 +728,73 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       true)
   }
 
+  func testMarkdownNestedEmphasisRendersOneLevelInsideBold() {
+    let line = TextDocumentSyntaxHighlighter.highlightedLine(
+      "Use **bold with *italic* inside** now",
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertEqual(line.string, "Use bold with italic inside now")
+    XCTAssertEqual(
+      line.resolvedFont(in: line.string, matching: "bold")?.fontDescriptor.symbolicTraits
+        .contains(.bold),
+      true)
+    let italicTraits = line.resolvedFont(in: line.string, matching: "italic")?.fontDescriptor
+      .symbolicTraits
+    XCTAssertEqual(italicTraits?.contains(.bold), true)
+    XCTAssertEqual(italicTraits?.contains(.italic), true)
+  }
+
+  func testMarkdownLinkLabelsCanContainEmphasis() {
+    let line = TextDocumentSyntaxHighlighter.highlightedLine(
+      "Open [**important** doc](docs/brief.md)",
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertEqual(line.string, "Open important doc")
+    XCTAssertEqual(
+      line.resolvedFont(in: line.string, matching: "important")?.fontDescriptor.symbolicTraits
+        .contains(.bold),
+      true)
+    XCTAssertEqual(
+      line.foregroundColor(in: line.string, matching: "important"),
+      NSColor.linkColor)
+  }
+
+  func testMarkdownInlineCodeUsesChipAttributeInsteadOfBackgroundColor() {
+    let line = TextDocumentSyntaxHighlighter.highlightedLine(
+      "Use `value` here",
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+    let range = (line.string as NSString).range(of: "value")
+
+    XCTAssertNotNil(
+      line.attribute(.locusMarkdownInlineCodeChip, at: range.location, effectiveRange: nil))
+    XCTAssertNil(line.attribute(.backgroundColor, at: range.location, effectiveRange: nil))
+  }
+
+  func testMarkdownInlineCodeScalesInsideHeading() throws {
+    let source = "# Use `value`"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [source])[0]
+    let line = TextDocumentSyntaxHighlighter.highlightedLine(
+      source,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: state)
+
+    XCTAssertEqual(line.string, "Use value")
+    let expected = MarkdownDocumentMetrics.inlineCodeFont(
+      forDisplayFont: MarkdownDocumentMetrics.headingFont(level: 1)
+    ).pointSize
+    XCTAssertEqual(
+      try XCTUnwrap(line.resolvedFont(in: line.string, matching: "value")).pointSize,
+      expected,
+      accuracy: 0.01)
+  }
+
   func testMarkdownRenderedEscapesRemoveBackslashWithoutStyling() {
     let line = TextDocumentSyntaxHighlighter.highlightedLine(
       #"Use \*literal* marker"#,
@@ -757,11 +824,51 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertEqual(
       TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
         lines[1], font: TextDocumentSyntax.markdown.font, state: states[1]),
-      "")
+      "[product-brief]: docs/product/brief.md")
     XCTAssertEqual(
       TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
         lines[2], font: TextDocumentSyntax.markdown.font, state: states[2]),
       "https://example.com/roadmap")
+  }
+
+  func testMarkdownReferenceLinksResolveTargetsAndUnresolvedStayLiteral() {
+    let lines = [
+      "Read [Product brief][product-brief] and [Missing][missing].",
+      "[product-brief]: docs/product/brief.md",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let rendered = TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+      lines[0], font: TextDocumentSyntax.markdown.font, state: states[0])
+    let targets = TextDocumentSyntaxHighlighter.markdownLinkTargets(for: lines[0], state: states[0])
+
+    XCTAssertEqual(rendered, "Read Product brief and [Missing][missing].")
+    XCTAssertEqual(
+      targets,
+      [
+        MarkdownLinkTarget(
+          displayRange: (rendered as NSString).range(of: "Product brief"),
+          destination: "docs/product/brief.md")
+      ])
+  }
+
+  func testMarkdownFootnoteDefinitionsRemainVisibleLiteralText() {
+    let lines = [
+      "A footnote marker [^1].",
+      "[^1]: note text",
+      "    continuation stays prose",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertFalse(states[1].isReferenceDefinition)
+    XCTAssertFalse(states[2].isIndentedCodeBlock)
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[1], font: TextDocumentSyntax.markdown.font, state: states[1]),
+      "[^1]: note text")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[2], font: TextDocumentSyntax.markdown.font, state: states[2]),
+      "    continuation stays prose")
   }
 
   func testMarkdownRenderedLinkTargetsExposeDisplayedRangesAndDestinations() {
@@ -785,6 +892,29 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
         MarkdownLinkTarget(
           displayRange: (rendered as NSString).range(of: "Skill"),
           destination: "docs/skill.md"),
+      ])
+  }
+
+  func testMarkdownBareURLAutolinkTargetsExcludeTrailingPunctuationAndInlineCode() {
+    let line =
+      #"Visit https://example.com/reports/q2. Code `https://example.com/code` and [Brief](docs/brief.md)."#
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+    let rendered = TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+      line, font: TextDocumentSyntax.markdown.font, state: state)
+    let targets = TextDocumentSyntaxHighlighter.markdownLinkTargets(for: line, state: state)
+
+    XCTAssertEqual(
+      rendered,
+      "Visit https://example.com/reports/q2. Code https://example.com/code and Brief.")
+    XCTAssertEqual(
+      targets,
+      [
+        MarkdownLinkTarget(
+          displayRange: (rendered as NSString).range(of: "https://example.com/reports/q2"),
+          destination: "https://example.com/reports/q2"),
+        MarkdownLinkTarget(
+          displayRange: (rendered as NSString).range(of: "Brief"),
+          destination: "docs/brief.md"),
       ])
   }
 
@@ -837,6 +967,10 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertEqual(
       MarkdownLinkNavigation.visualState(for: "tel:+15551234567", baseFileURL: base),
       .valid)
+    XCTAssertEqual(
+      MarkdownLinkNavigation.visualState(for: "#overview", baseFileURL: base),
+      .valid)
+    XCTAssertNil(MarkdownLinkNavigation.openRequest(for: "#overview", baseFileURL: base))
   }
 
   func testMarkdownImageOnlyLineIsClassifiedWithSourceAndAlt() {
@@ -1240,6 +1374,32 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       false)
   }
 
+  func testMarkdownIndentedFenceInsideListPreservesListContext() {
+    let lines = [
+      "- Parent",
+      "  ```swift",
+      "  let value = 1",
+      "  ```",
+      "  - Child",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let renderedChild = TextDocumentSyntaxHighlighter.highlightedLine(
+      lines[4],
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: states[4]
+    )
+
+    XCTAssertEqual(states[1].listDepth, 1)
+    XCTAssertEqual(states[2].listDepth, 1)
+    XCTAssertEqual(states[3].listDepth, 1)
+    XCTAssertEqual(states[4].listDepth, 2)
+    XCTAssertEqual(renderedChild.string, "Child")
+    XCTAssertEqual(
+      renderedChild.resolvedFont(at: 0)?.fontDescriptor.symbolicTraits.contains(.monoSpace),
+      false)
+  }
+
   func testMarkdownTablesRenderRowsWithoutPipeSyntax() {
     let lines = [
       "| Metric | Delta | Status |",
@@ -1276,6 +1436,36 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertEqual(paragraphStyle?.tabStops.count, 2)
     XCTAssertEqual(paragraphStyle?.tabStops.first?.alignment, .right)
     XCTAssertEqual(paragraphStyle?.tabStops.last?.alignment, .center)
+  }
+
+  func testQuotedMarkdownTableUsesQuoteBodyForCellsAndRawColumnsForCopy() {
+    let lines = [
+      "> | First | Second |",
+      "> | --- | --- |",
+      "> | a | b |",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(states[0].isTableHeader, true)
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[0], font: TextDocumentSyntax.markdown.font, state: states[0]),
+      "First\tSecond")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[2], font: TextDocumentSyntax.markdown.font, state: states[2]),
+      "a\tb")
+
+    let map = TextDocumentSyntaxHighlighter.markdownDisplayMap(for: lines[2], state: states[2])
+    XCTAssertEqual(map.displayText, "a\tb")
+    XCTAssertEqual(
+      map.bufferRange(forDisplayStart: 0, end: 1, includeWholeLineMarkers: false),
+      NSRange(location: 4, length: 1))
+    XCTAssertEqual(
+      map.bufferRange(
+        forDisplayStart: 0, end: (map.displayText as NSString).length, includeWholeLineMarkers: true
+      ),
+      NSRange(location: 0, length: (lines[2] as NSString).length))
   }
 
   func testMarkdownTableEscapedPipesStayInsideCells() {
@@ -1330,7 +1520,7 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       NSColor.secondaryLabelColor)
     XCTAssertEqual(
       body.resolvedFont(in: body.string, matching: "Sales")?.pointSize,
-      TextDocumentSyntax.markdown.font.pointSize)
+      MarkdownDocumentMetrics.tableCellFontSize)
   }
 
   func testMarkdownTableColumnWidthsMeasureStyledCells() throws {
@@ -1343,10 +1533,12 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     let columns = states[2].tableColumns
     XCTAssertEqual(columns.count, 2)
 
+    var cellState = MarkdownLineStyleState()
+    cellState.isTableRow = true
     let styled = TextDocumentSyntaxHighlighter.markdownMeasurementLine(
       "`status: draft`",
       font: TextDocumentSyntax.markdown.font,
-      state: .plain,
+      state: cellState,
       typography: MarkdownTypography(baseFont: TextDocumentSyntax.markdown.font))
     let expected = max(
       MarkdownDocumentMetrics.tableColumnMinimumWidth, ceil(styled.size().width))
@@ -1600,6 +1792,132 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertEqual(font?.fontDescriptor.symbolicTraits.contains(.italic), true)
     XCTAssertLessThanOrEqual(
       storage.foregroundColor(in: storage.string, matching: "***")?.alphaComponent ?? 1, 0.01)
+  }
+
+  func testMarkdownUnderscoreEmphasisStylesWithoutTouchingIntrawordNames() {
+    let storage = NSTextStorage(
+      string: "Use _em_ and __strong__ and ___both___, but keep snake_case and __init__.")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    XCTAssertEqual(
+      storage.resolvedFont(in: storage.string, matching: "em")?.fontDescriptor.symbolicTraits
+        .contains(.italic),
+      true)
+    XCTAssertEqual(
+      storage.resolvedFont(in: storage.string, matching: "strong")?.fontDescriptor.symbolicTraits
+        .contains(.bold),
+      true)
+    let both = storage.resolvedFont(in: storage.string, matching: "both")?.fontDescriptor
+      .symbolicTraits
+    XCTAssertEqual(both?.contains(.bold), true)
+    XCTAssertEqual(both?.contains(.italic), true)
+    XCTAssertEqual(
+      storage.resolvedFont(in: storage.string, matching: "case")?.fontDescriptor.symbolicTraits
+        .contains(.italic),
+      false)
+    XCTAssertEqual(
+      storage.resolvedFont(in: storage.string, matching: "init")?.fontDescriptor.symbolicTraits
+        .contains(.bold),
+      true)
+  }
+
+  func testMarkdownUnderscoreEmphasisSupportsJapaneseText() throws {
+    let storage = NSTextStorage(string: "これは_強調_です")
+
+    TextDocumentSyntaxHighlighter.apply(
+      to: storage,
+      text: storage.string,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font
+    )
+
+    let obliqueness = try XCTUnwrap(storage.obliqueness(in: storage.string, matching: "強調"))
+    XCTAssertEqual(obliqueness, MarkdownDocumentMetrics.syntheticItalicObliqueness, accuracy: 0.001)
+  }
+
+  func testMarkdownClosedATXHeadingStripsTrailingMarkerRun() {
+    let line = "## Title ##"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        line, font: TextDocumentSyntax.markdown.font, state: state),
+      "Title")
+  }
+
+  func testMarkdownCheckedTaskTextUsesSecondaryColor() {
+    let source = "- [x] Done"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [source])[0]
+    let line = TextDocumentSyntaxHighlighter.highlightedLine(
+      source,
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font,
+      markdownLineState: state)
+
+    XCTAssertEqual(line.string, "Done")
+    XCTAssertEqual(
+      line.foregroundColor(in: line.string, matching: "Done"),
+      NSColor.secondaryLabelColor)
+  }
+
+  func testMarkdownDoubleBacktickSpanAllowsSingleBacktickInside() {
+    let rendered = TextDocumentSyntaxHighlighter.highlightedLine(
+      "Use ``a `b` c`` now",
+      syntax: .markdown,
+      font: TextDocumentSyntax.markdown.font)
+
+    XCTAssertEqual(rendered.string, "Use a `b` c now")
+    XCTAssertEqual(
+      rendered.resolvedFont(in: rendered.string, matching: "a `b` c")?.fontDescriptor.symbolicTraits
+        .contains(.monoSpace),
+      true)
+  }
+
+  func testMarkdownEmailAutolinkDropsAnglesWithoutCreatingLinkTarget() {
+    let line = "Contact <agent@example.com> today"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+    let rendered = TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+      line, font: TextDocumentSyntax.markdown.font, state: state)
+    let targets = TextDocumentSyntaxHighlighter.markdownLinkTargets(for: rendered, state: state)
+
+    XCTAssertEqual(rendered, "Contact agent@example.com today")
+    XCTAssertTrue(targets.isEmpty)
+  }
+
+  func testMarkdownBackslashHardBreakHidesTrailingSlash() {
+    let line = #"Line with hard break\"#
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [line])[0]
+
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        line, font: TextDocumentSyntax.markdown.font, state: state),
+      "Line with hard break")
+  }
+
+  func testMarkdownShortTableDelimiterCellsAreAccepted() {
+    let lines = ["| Left | Right | Center |", "| - | --: | :-: |", "| A | 1 | yes |"]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(states[0].tableColumns.map(\.alignment), [.left, .right, .center])
+    XCTAssertTrue(states[1].isTableSeparator)
+    XCTAssertTrue(states[2].isTableRow)
+  }
+
+  @MainActor
+  func testMarkdownInvalidTaskMarkerStaysLiteralBulletText() throws {
+    let view = LineRenderingTextView()
+    view.syntax = .markdown
+    view.frame = NSRect(x: 0, y: 0, width: 360, height: 160)
+    view.setBuffer(try TextBuffer.open(bytes: Data("- [-] maybe".utf8)))
+
+    XCTAssertTrue(
+      view.markdownTaskCheckboxTargetsForTesting(inLineRange: 0..<view.lineCount).isEmpty)
   }
 
   func testMarkdownSourceFallbackStrikethroughStylesContentAndConcealsMarkers() {
@@ -2058,6 +2376,12 @@ extension NSAttributedString {
     let range = (text as NSString).range(of: substring)
     XCTAssertNotEqual(range.location, NSNotFound)
     return resolvedFont(at: range.location)
+  }
+
+  fileprivate func obliqueness(in text: String, matching substring: String) -> CGFloat? {
+    let range = (text as NSString).range(of: substring)
+    XCTAssertNotEqual(range.location, NSNotFound)
+    return attribute(.obliqueness, at: range.location, effectiveRange: nil) as? CGFloat
   }
 
   fileprivate func paragraphStyle(at location: Int) -> NSParagraphStyle? {

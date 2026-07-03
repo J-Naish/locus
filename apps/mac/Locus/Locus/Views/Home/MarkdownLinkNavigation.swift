@@ -23,6 +23,9 @@ enum MarkdownLinkNavigation {
     guard let cleaned = primaryDestination(in: destination) else {
       return nil
     }
+    if isAnchorDestination(cleaned) {
+      return nil
+    }
 
     if let url = externalURL(for: cleaned) {
       return .external(url)
@@ -45,6 +48,10 @@ enum MarkdownLinkNavigation {
   ) -> MarkdownLinkVisualState {
     guard let cleaned = primaryDestination(in: destination) else {
       return .invalid
+    }
+
+    if isAnchorDestination(cleaned) {
+      return .valid
     }
 
     if externalURL(for: cleaned) != nil {
@@ -127,5 +134,9 @@ enum MarkdownLinkNavigation {
     let prefix = destination[..<colon]
     if prefix.contains("/") || prefix.contains("#") || prefix.contains("?") { return false }
     return prefix.lowercased() != "file"
+  }
+
+  private static func isAnchorDestination(_ destination: String) -> Bool {
+    destination.hasPrefix("#") && destination.dropFirst().isEmpty == false
   }
 }

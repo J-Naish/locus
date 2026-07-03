@@ -1120,8 +1120,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Per-line metrics for a code-slab line: empty fence delimiters collapse to
   /// slim rows (so the slab never carries a full empty row at its edge), a
   /// labeled opener gets a caption band, and the first/last line of the run
-  /// gains the block air that detaches the slab from surrounding prose. Body
-  /// rows keep the uniform row height. Returns nil when nothing diverges.
+  /// gains the block air that detaches the slab from surrounding prose.
+  /// Interior code rows use the code row height. Returns nil when nothing
+  /// diverges.
   private func markdownCodeRunLineMetrics(
     state: MarkdownLineStyleState, isFirst: Bool, isLast: Bool, isDocumentTop: Bool
   ) -> LineRowMetrics? {
@@ -1138,6 +1139,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       // The `---` lines render empty; a slim row keeps them as quiet padding
       // instead of a full empty row at the card's top and bottom.
       rowHeight = MarkdownDocumentMetrics.slimMarkerRowHeight
+    } else if state.insideFence || state.isIndentedCodeBlock {
+      rowHeight = MarkdownDocumentMetrics.codeRowHeight
     }
     // A code block at the very top of the document sits at the page top (the
     // scroll inset already breathes) — no extra air above, matching headings.
@@ -3262,7 +3265,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       #selector(NSStandardKeyBindingResponding.insertParagraphSeparator(_:)):
       insertMarkdownAwareNewline()
     case #selector(NSStandardKeyBindingResponding.insertTab(_:)):
-      insertText("\t")
+      insertMarkdownAwareTab(backward: false)
+    case #selector(NSStandardKeyBindingResponding.insertBacktab(_:)):
+      insertMarkdownAwareTab(backward: true)
     case #selector(NSStandardKeyBindingResponding.deleteBackward(_:)):
       deleteBackward()
     case #selector(NSStandardKeyBindingResponding.deleteForward(_:)):
@@ -3339,7 +3344,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   func moveToDocumentEdge(end: Bool, extend: Bool) {
     let line = end ? max(0, lineCount - 1) : 0
     applyMovedHead(
-      TextSelection.Endpoint(line: line, columnUTF16: end ? lineLengthUTF16(line) : 0),
+      steppedOffConcealedLine(
+        TextSelection.Endpoint(line: line, columnUTF16: end ? lineLengthUTF16(line) : 0),
+        forward: end),
       extend: extend)
   }
 
@@ -3582,10 +3589,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Inserts `string`, replacing the current selection if any, and leaves the
   /// caret after the inserted text. A no-op when read-only, empty, or absent.
   func insertText(_ string: String) {
-    let activeSelection = selection ?? TextSelection(caretAt: navigationHead)
-    guard isEditable, !string.isEmpty, let range = currentSelectionUTF16Range() else {
+    var activeSelection = selection ?? TextSelection(caretAt: navigationHead)
+    guard isEditable, !string.isEmpty, currentSelectionUTF16Range() != nil else {
       return
     }
+    if syntax == .markdown, activeSelection.isEmpty,
+      isConcealedDelimiterLine(activeSelection.head.line)
+    {
+      let target = steppedOffConcealedLine(activeSelection.head, forward: false)
+      activeSelection = TextSelection(caretAt: target)
+      selection = activeSelection
+    }
+    guard let range = currentSelectionUTF16Range() else { return }
     guard !selectionTouchesCollectedFrontMatterChips(activeSelection) else {
       NSSound.beep()
       return
@@ -3602,6 +3617,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   @discardableResult
   private func replace(globalStart start: Int, globalEnd end: Int, with string: String) -> Bool {
     guard let buffer = editableBuffer else { return false }
+    let anchor = viewportAnchor()
+    let oldStartPosition = try? buffer.position(forUTF16: start)
+    let oldEndPosition = try? buffer.position(forUTF16: end)
+    let shouldHoldCaretLine =
+      oldStartPosition?.line == oldEndPosition?.line
+      && !string.contains("\n")
     do {
       if end > start {
         try buffer.replace(string, fromUTF16: start, toUTF16: end)
@@ -3621,7 +3642,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         startUTF16: start,
         oldLengthUTF16: max(0, end - start),
         newLengthUTF16: newLengthUTF16
-      )
+      ),
+      viewportAnchor: anchor,
+      caretLineViewportHold: shouldHoldCaretLine ? oldStartPosition?.line : nil
     )
     return true
   }
@@ -3635,6 +3658,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       return
     }
     let caret = navigationHead
+    if caret.columnUTF16 == 0, caret.line > 0, isConcealedDelimiterLine(caret.line - 1) {
+      let target = steppedOffConcealedLine(
+        TextSelection.Endpoint(line: caret.line - 1, columnUTF16: lineLengthUTF16(caret.line - 1)),
+        forward: false)
+      selection = TextSelection(caretAt: target)
+      showCaretSolid()
+      scrollCaretToVisible(target)
+      invalidateVisibleArea()
+      return
+    }
     if peelMarkdownBlockPrefixIfNeeded(at: caret) {
       return
     }
@@ -3647,16 +3680,99 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     value == 45 || value == 42 || value == 43
   }
 
+  private let markdownListIndentStep = 2
+
+  private struct MarkdownNewlineEdit {
+    var start: Int
+    var end: Int
+    var replacement: String
+  }
+
+  private struct MarkdownListMarkerInfo {
+    var leadingSpaceLength: Int
+    var markerRange: NSRange
+    var taskRange: NSRange
+    var contentStart: Int
+    var orderedNumber: Int?
+    var orderedDelimiter: Character?
+  }
+
+  private struct MarkdownDelimitedSpan {
+    let matchRange: NSRange
+    let contentRange: NSRange
+    let markerLength: Int
+
+    var openingMarkerRange: NSRange {
+      NSRange(location: matchRange.location, length: markerLength)
+    }
+
+    var closingMarkerRange: NSRange {
+      NSRange(location: NSMaxRange(contentRange), length: markerLength)
+    }
+  }
+
+  private struct MarkdownConcealedSpanCandidate {
+    var fullRange: NSRange
+    var visibleSourceRange: NSRange
+  }
+
+  private static let markdownLinkLikeDeletionExpressions: [NSRegularExpression] = [
+    try! NSRegularExpression(pattern: #"(?<!!)\[([^\]\n]+)\]\((?:[^\)\n]|\([^\)\n]*\))+\)"#),
+    try! NSRegularExpression(pattern: #"(?<!!)\[([^\]\n]+)\]\[[^\]\n]*\]"#),
+    try! NSRegularExpression(pattern: #"!\[([^\]\n]*)\]\((?:[^\)\n]|\([^\)\n]*\))+\)"#),
+    try! NSRegularExpression(pattern: #"!\[([^\]\n]*)\]\[[^\]\n]*\]"#),
+  ]
+
   /// Inserts a newline. In rendered Markdown, a list item continues with the same
   /// raw prefix so the next visual line still starts at column zero.
   private func insertMarkdownAwareNewline() {
-    guard syntax == .markdown, isEditable, editableBuffer != nil, selection?.isEmpty != false,
-      let prefix = markdownContinuationPrefix(at: navigationHead)
+    guard syntax == .markdown, isEditable, editableBuffer != nil, selection?.isEmpty != false
     else {
       insertText("\n")
       return
     }
-    insertText("\n" + prefix)
+    let caret = navigationHead
+    if let edit = markdownNewlineEdit(at: caret) {
+      replace(globalStart: edit.start, globalEnd: edit.end, with: edit.replacement)
+      return
+    }
+    insertText("\n")
+  }
+
+  private func insertMarkdownAwareTab(backward: Bool) {
+    guard syntax == .markdown else {
+      if !backward { insertText("\t") }
+      return
+    }
+    guard isEditable, editableBuffer != nil, selection?.isEmpty != false else { return }
+    let caret = navigationHead
+    guard caret.line >= 0, caret.line < lineCount,
+      let buffer = reader,
+      let states = markdownLineStates(for: buffer),
+      caret.line < states.count
+    else { return }
+    let state = states[caret.line]
+    if state.insideFence, !state.isFenceDelimiter {
+      if !backward { insertText("\t") }
+      return
+    }
+    if state.isTableRow, moveMarkdownTableCell(from: caret, backward: backward) {
+      return
+    }
+    guard let list = markdownListMarker(in: rawLineText(caret.line)),
+      let lineStart = globalUTF16Offset(line: caret.line, column: 0)
+    else {
+      return
+    }
+    if backward {
+      let remove = min(markdownListIndentStep, list.leadingSpaceLength)
+      guard remove > 0 else { return }
+      replace(globalStart: lineStart, globalEnd: lineStart + remove, with: "")
+    } else {
+      replace(
+        globalStart: lineStart, globalEnd: lineStart,
+        with: String(repeating: " ", count: markdownListIndentStep))
+    }
   }
 
   /// Wraps or unwraps the current display-space selection with Markdown emphasis
@@ -3665,8 +3781,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   func toggleMarkdownEmphasis(marker: String) {
     guard syntax == .markdown, isEditable, let buffer = editableBuffer,
       marker == "*" || marker == "**",
-      let selection, !selection.isEmpty,
-      let range = currentSelectionUTF16Range(), range.end > range.start
+      let selection,
+      let range = currentSelectionUTF16Range()
     else {
       return
     }
@@ -3696,7 +3812,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       replacement = selected
       selectedStartAfterEdit = editStart
       selectedEndAfterEdit = editStart + (selected as NSString).length
+    } else if let merged = markdownMergedEmphasisEdit(
+      marker: marker,
+      selection: selection,
+      rawRange: range
+    ) {
+      editStart = merged.start
+      editEnd = merged.end
+      replacement = merged.replacement
+      selectedStartAfterEdit = editStart + merged.selectionStartInReplacement
+      selectedEndAfterEdit = selectedStartAfterEdit + (merged.visibleText as NSString).length
     } else {
+      guard !selected.isEmpty else { return }
       editStart = range.start
       editEnd = range.end
       replacement = marker + selected + marker
@@ -3704,6 +3831,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       selectedEndAfterEdit = selectedStartAfterEdit + (selected as NSString).length
     }
 
+    guard buffer.text(fromUTF16: editStart, toUTF16: editEnd) != replacement else {
+      return
+    }
+    let anchor = viewportAnchor()
     do {
       try buffer.replace(replacement, fromUTF16: editStart, toUTF16: editEnd)
     } catch {
@@ -3717,9 +3848,119 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         startUTF16: editStart,
         oldLengthUTF16: max(0, editEnd - editStart),
         newLengthUTF16: (replacement as NSString).length
-      )
+      ),
+      viewportAnchor: anchor
     )
     setSelection(globalStart: selectedStartAfterEdit, globalEnd: selectedEndAfterEdit)
+  }
+
+  private func markdownMergedEmphasisEdit(
+    marker: String,
+    selection: TextSelection,
+    rawRange: (start: Int, end: Int)
+  ) -> (
+    start: Int,
+    end: Int,
+    replacement: String,
+    visibleText: String,
+    selectionStartInReplacement: Int
+  )? {
+    guard selection.start.line == selection.end.line,
+      let lineStart = globalUTF16Offset(line: selection.start.line, column: 0)
+    else {
+      return nil
+    }
+    let line = rawLineText(selection.start.line)
+    let nsLine = line as NSString
+    let local = NSRange(
+      location: max(0, rawRange.start - lineStart),
+      length: max(0, rawRange.end - rawRange.start))
+    guard NSMaxRange(local) <= nsLine.length else { return nil }
+
+    let spans = markdownDelimitedSpans(marker: marker, in: line).filter { span in
+      local.location <= NSMaxRange(span.matchRange) && NSMaxRange(local) >= span.matchRange.location
+    }
+    guard !spans.isEmpty else { return nil }
+
+    let editLocation = min(local.location, spans.map(\.matchRange.location).min() ?? local.location)
+    let editEnd = max(
+      NSMaxRange(local), spans.map { NSMaxRange($0.matchRange) }.max() ?? NSMaxRange(local))
+    let removedMarkerRanges = spans.flatMap { [$0.openingMarkerRange, $0.closingMarkerRange] }
+      .filter { range in range.location >= editLocation && NSMaxRange(range) <= editEnd }
+      .sorted { $0.location < $1.location }
+
+    var cursor = editLocation
+    var visibleText = ""
+    for removed in removedMarkerRanges {
+      if removed.location > cursor {
+        visibleText += nsLine.substring(
+          with: NSRange(location: cursor, length: removed.location - cursor))
+      }
+      cursor = NSMaxRange(removed)
+    }
+    if editEnd > cursor {
+      visibleText += nsLine.substring(with: NSRange(location: cursor, length: editEnd - cursor))
+    }
+    guard !visibleText.isEmpty else { return nil }
+    let existing = nsLine.substring(
+      with: NSRange(location: editLocation, length: editEnd - editLocation))
+    let wrappedReplacement = marker + visibleText + marker
+    let replacement = wrappedReplacement == existing ? visibleText : wrappedReplacement
+    let selectionStart = replacement == visibleText ? 0 : (marker as NSString).length
+    return (
+      lineStart + editLocation,
+      lineStart + editEnd,
+      replacement,
+      visibleText,
+      selectionStart
+    )
+  }
+
+  private func markdownDelimitedSpans(marker: String, in line: String) -> [MarkdownDelimitedSpan] {
+    let escaped = NSRegularExpression.escapedPattern(for: marker)
+    let pattern = #"(?<!\\)\#(escaped)([^\n]+?)\#(escaped)"#
+    guard let expression = try? NSRegularExpression(pattern: pattern) else { return [] }
+    let nsLine = line as NSString
+    return expression.matches(in: line, range: NSRange(location: 0, length: nsLine.length))
+      .compactMap { match in
+        guard match.numberOfRanges > 1 else { return nil }
+        let span = MarkdownDelimitedSpan(
+          matchRange: match.range,
+          contentRange: match.range(at: 1),
+          markerLength: (marker as NSString).length)
+        guard markdownDelimitedSpanUsesExactMarker(span, marker: marker, in: nsLine) else {
+          return nil
+        }
+        return span
+      }
+  }
+
+  private func markdownDelimitedSpanUsesExactMarker(
+    _ span: MarkdownDelimitedSpan,
+    marker: String,
+    in nsLine: NSString
+  ) -> Bool {
+    guard marker == "*" else { return true }
+    let opening = span.openingMarkerRange
+    let closing = span.closingMarkerRange
+    let markerCode = unichar(42)
+    if opening.location > 0, nsLine.character(at: opening.location - 1) == markerCode {
+      return false
+    }
+    if NSMaxRange(opening) < nsLine.length,
+      nsLine.character(at: NSMaxRange(opening)) == markerCode
+    {
+      return false
+    }
+    if closing.location > 0, nsLine.character(at: closing.location - 1) == markerCode {
+      return false
+    }
+    if NSMaxRange(closing) < nsLine.length,
+      nsLine.character(at: NSMaxRange(closing)) == markerCode
+    {
+      return false
+    }
+    return true
   }
 
   private func peelMarkdownBlockPrefixIfNeeded(at caret: TextSelection.Endpoint) -> Bool {
@@ -3752,23 +3993,72 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return false
   }
 
-  private func markdownContinuationPrefix(at caret: TextSelection.Endpoint) -> String? {
+  private func markdownNewlineEdit(at caret: TextSelection.Endpoint) -> MarkdownNewlineEdit? {
     guard caret.line >= 0, caret.line < lineCount,
       let buffer = reader,
       let states = markdownLineStates(for: buffer),
       caret.line < states.count,
       !states[caret.line].insideFence,
-      !states[caret.line].insideFrontMatter
+      !states[caret.line].insideFrontMatter,
+      let lineStart = globalUTF16Offset(line: caret.line, column: 0)
     else {
       return nil
     }
+
     let line = rawLineText(caret.line)
-    guard caret.columnUTF16 >= lineLengthUTF16(caret.line),
-      let prefix = markdownListContinuationPrefix(in: line)
-    else {
+    let rawColumn =
+      markdownDisplayMap(forLine: caret.line)?.bufferColumn(forDisplayColumn: caret.columnUTF16)
+      ?? caret.columnUTF16
+    if let list = markdownListMarker(in: line) {
+      let contentLength = max(0, (line as NSString).length - list.contentStart)
+      if contentLength == 0, caret.columnUTF16 == 0 {
+        if list.leadingSpaceLength >= markdownListIndentStep {
+          return MarkdownNewlineEdit(
+            start: lineStart,
+            end: lineStart + markdownListIndentStep,
+            replacement: "")
+        }
+        return MarkdownNewlineEdit(
+          start: lineStart,
+          end: lineStart + list.contentStart,
+          replacement: "")
+      }
+      if caret.columnUTF16 == 0 {
+        return MarkdownNewlineEdit(start: lineStart, end: lineStart, replacement: "\n")
+      }
+      guard let prefix = markdownListContinuationPrefix(in: line) else { return nil }
+      if rawColumn >= list.contentStart {
+        return MarkdownNewlineEdit(
+          start: lineStart + rawColumn,
+          end: lineStart + rawColumn,
+          replacement: "\n" + prefix)
+      }
       return nil
     }
-    return prefix
+    if caret.columnUTF16 == 0, markdownHasConcealedBlockPrefix(in: line) {
+      return MarkdownNewlineEdit(start: lineStart, end: lineStart, replacement: "\n")
+    }
+    return nil
+  }
+
+  private func markdownHasConcealedBlockPrefix(in line: String) -> Bool {
+    let nsLine = line as NSString
+    let index = markdownLeadingSpaceLength(in: nsLine)
+    if index < nsLine.length, nsLine.character(at: index) == 62 {
+      return true
+    }
+    var headingLevel = 0
+    while index + headingLevel < nsLine.length, headingLevel < 6,
+      nsLine.character(at: index + headingLevel) == 35
+    {
+      headingLevel += 1
+    }
+    if headingLevel > 0, index + headingLevel < nsLine.length,
+      nsLine.character(at: index + headingLevel) == 32
+    {
+      return true
+    }
+    return markdownListMarker(in: line) != nil
   }
 
   private func markdownMarkerTouchesSameMarker(
@@ -3822,16 +4112,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private func markdownListContinuationPrefix(in line: String) -> String? {
     guard let list = markdownListMarker(in: line) else { return nil }
     let nsLine = line as NSString
+    let leading = nsLine.substring(with: NSRange(location: 0, length: list.leadingSpaceLength))
     let marker = nsLine.substring(with: list.markerRange)
     if list.taskRange.length > 0 {
-      return marker + "[ ] "
+      return leading + marker + "[ ] "
     }
-    return marker
+    if let number = list.orderedNumber, let delimiter = list.orderedDelimiter {
+      return leading + "\(number + 1)\(delimiter) "
+    }
+    return leading + marker
   }
 
-  private func markdownListMarker(in line: String) -> (
-    markerRange: NSRange, taskRange: NSRange
-  )? {
+  private func markdownListMarker(in line: String) -> MarkdownListMarkerInfo? {
     let nsLine = line as NSString
     let index = markdownLeadingSpaceLength(in: nsLine)
     guard index < nsLine.length else { return nil }
@@ -3848,9 +4140,21 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         if taskEnd < nsLine.length, nsLine.character(at: taskEnd) == 32 {
           taskEnd += 1
         }
-        return (markerRange, NSRange(location: taskStart, length: taskEnd - taskStart))
+        return MarkdownListMarkerInfo(
+          leadingSpaceLength: index,
+          markerRange: markerRange,
+          taskRange: NSRange(location: taskStart, length: taskEnd - taskStart),
+          contentStart: taskEnd,
+          orderedNumber: nil,
+          orderedDelimiter: nil)
       }
-      return (markerRange, NSRange(location: 0, length: 0))
+      return MarkdownListMarkerInfo(
+        leadingSpaceLength: index,
+        markerRange: markerRange,
+        taskRange: NSRange(location: 0, length: 0),
+        contentStart: NSMaxRange(markerRange),
+        orderedNumber: nil,
+        orderedDelimiter: nil)
     }
 
     var digitEnd = index
@@ -3863,13 +4167,104 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if digitEnd > index, digitEnd + 1 < nsLine.length {
       let delimiter = nsLine.character(at: digitEnd)
       if delimiter == 46 || delimiter == 41, nsLine.character(at: digitEnd + 1) == 32 {
-        return (
-          NSRange(location: index, length: digitEnd + 2 - index),
-          NSRange(location: 0, length: 0)
+        let markerRange = NSRange(location: index, length: digitEnd + 2 - index)
+        let number = Int(nsLine.substring(with: NSRange(location: index, length: digitEnd - index)))
+        return MarkdownListMarkerInfo(
+          leadingSpaceLength: index,
+          markerRange: markerRange,
+          taskRange: NSRange(location: 0, length: 0),
+          contentStart: NSMaxRange(markerRange),
+          orderedNumber: number,
+          orderedDelimiter: Character(UnicodeScalar(delimiter)!)
         )
       }
     }
     return nil
+  }
+
+  private func moveMarkdownTableCell(from caret: TextSelection.Endpoint, backward: Bool) -> Bool {
+    let text = attributedLine(forLine: caret.line).string as NSString
+    guard text.length > 0 else { return false }
+    let column = min(max(0, caret.columnUTF16), text.length)
+    if backward {
+      var tabBeforeCurrent = NSNotFound
+      if column > 0 {
+        var index = column - 1
+        while index >= 0 {
+          if text.character(at: index) == 9 {
+            tabBeforeCurrent = index
+            break
+          }
+          index -= 1
+        }
+      }
+      if tabBeforeCurrent == NSNotFound {
+        var previousLine = caret.line - 1
+        while previousLine >= 0 {
+          guard let buffer = reader else { return false }
+          let state = markdownLineState(forLine: previousLine, in: buffer)
+          if state.isTableRow {
+            let previousText = attributedLine(forLine: previousLine).string as NSString
+            applyMovedHead(
+              .init(
+                line: previousLine,
+                columnUTF16: Self.markdownTableLastCellStart(in: previousText)),
+              extend: false)
+            return true
+          }
+          if !state.isTableSeparator { break }
+          previousLine -= 1
+        }
+        return false
+      }
+      var previousStart = 0
+      if tabBeforeCurrent > 0 {
+        var index = tabBeforeCurrent - 1
+        while index >= 0 {
+          if text.character(at: index) == 9 {
+            previousStart = index + 1
+            break
+          }
+          index -= 1
+        }
+      }
+      applyMovedHead(.init(line: caret.line, columnUTF16: previousStart), extend: false)
+      return true
+    }
+
+    var index = column
+    while index < text.length {
+      if text.character(at: index) == 9 {
+        applyMovedHead(
+          .init(line: caret.line, columnUTF16: min(text.length, index + 1)), extend: false)
+        return true
+      }
+      index += 1
+    }
+    var nextLine = caret.line + 1
+    while nextLine < lineCount {
+      guard let buffer = reader else { return false }
+      let state = markdownLineState(forLine: nextLine, in: buffer)
+      if state.isTableRow {
+        applyMovedHead(.init(line: nextLine, columnUTF16: 0), extend: false)
+        return true
+      }
+      if !state.isTableSeparator { break }
+      nextLine += 1
+    }
+    return false
+  }
+
+  private static func markdownTableLastCellStart(in text: NSString) -> Int {
+    guard text.length > 0 else { return 0 }
+    var index = text.length - 1
+    while index >= 0 {
+      if text.character(at: index) == 9 {
+        return min(text.length, index + 1)
+      }
+      index -= 1
+    }
+    return 0
   }
 
   private func markdownLeadingSpaceLength(in line: NSString) -> Int {
@@ -3902,6 +4297,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       return
     }
     let caret = navigationHead
+    guard !(caret.columnUTF16 == 0 && caret.line > 0 && isConcealedDelimiterLine(caret.line - 1))
+    else { return }
     let previous = steppedWordEndpoint(from: caret, forward: false)
     guard previous != caret else { return }
     deleteRange(from: previous, to: caret)
@@ -3953,7 +4350,14 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     maxObservedLineWidth = 0
     verticalGoalX = nil
     updateWrapIndex(afterChange: change)
-    clampSelectionToBounds()
+    if let buffer = reader,
+      let position = try? buffer.position(forUTF16: change.startUTF16 + change.newLengthUTF16)
+    {
+      selection = TextSelection(
+        caretAt: steppedOffConcealedLine(displayEndpoint(for: position), forward: true))
+    } else {
+      clampSelectionToBounds()
+    }
     showCaretSolid()
     updateLayout()
     syncMarkdownVideoViewsIfNeeded()
@@ -3992,19 +4396,102 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     else {
       return
     }
+    let deletionRange = markdownExpandedDeletionRange(for: selection, rawRange: range) ?? range
+    let anchor = viewportAnchor()
     do {
-      try buffer.delete(fromUTF16: range.start, toUTF16: range.end)
+      try buffer.delete(fromUTF16: deletionRange.start, toUTF16: deletionRange.end)
       finishEdit(
-        caretUTF16: range.start,
+        caretUTF16: deletionRange.start,
         change: TextChange(
-          startUTF16: range.start,
-          oldLengthUTF16: range.end - range.start,
+          startUTF16: deletionRange.start,
+          oldLengthUTF16: deletionRange.end - deletionRange.start,
           newLengthUTF16: 0
-        )
+        ),
+        viewportAnchor: anchor
       )
     } catch {
       NSSound.beep()
     }
+  }
+
+  private func markdownExpandedDeletionRange(
+    for selection: TextSelection,
+    rawRange: (start: Int, end: Int)
+  ) -> (start: Int, end: Int)? {
+    guard syntax == .markdown, selection.start.line == selection.end.line,
+      let lineStart = globalUTF16Offset(line: selection.start.line, column: 0),
+      let map = markdownDisplayMap(forLine: selection.start.line)
+    else {
+      return nil
+    }
+    let line = rawLineText(selection.start.line)
+    let nsLine = line as NSString
+    let local = NSRange(
+      location: max(0, rawRange.start - lineStart),
+      length: max(0, rawRange.end - rawRange.start))
+    guard local.length > 0, NSMaxRange(local) <= nsLine.length else { return nil }
+
+    let displayStart = min(selection.start.columnUTF16, selection.end.columnUTF16)
+    let displayEnd = max(selection.start.columnUTF16, selection.end.columnUTF16)
+    let selectedDisplayRange = NSRange(location: displayStart, length: displayEnd - displayStart)
+    guard selectedDisplayRange.length > 0 else { return nil }
+
+    for candidate in markdownConcealedSpanDeletionCandidates(in: line) {
+      guard candidate.visibleSourceRange.location == local.location,
+        candidate.visibleSourceRange.length == local.length,
+        markdownDisplayMap(map, collapses: candidate, to: selectedDisplayRange)
+      else {
+        continue
+      }
+      return (
+        lineStart + candidate.fullRange.location,
+        lineStart + NSMaxRange(candidate.fullRange)
+      )
+    }
+    return nil
+  }
+
+  private func markdownConcealedSpanDeletionCandidates(
+    in line: String
+  ) -> [MarkdownConcealedSpanCandidate] {
+    let nsLine = line as NSString
+    let fullRange = NSRange(location: 0, length: nsLine.length)
+    var candidates: [MarkdownConcealedSpanCandidate] = []
+    for marker in ["***", "**", "*", "___", "__", "_", "~~"] {
+      candidates.append(
+        contentsOf: markdownDelimitedSpans(marker: marker, in: line).map {
+          MarkdownConcealedSpanCandidate(
+            fullRange: $0.matchRange,
+            visibleSourceRange: $0.contentRange)
+        })
+    }
+    for expression in Self.markdownLinkLikeDeletionExpressions {
+      for match in expression.matches(in: line, range: fullRange) where match.numberOfRanges > 1 {
+        let visible = match.range(at: 1)
+        guard visible.location != NSNotFound else { continue }
+        candidates.append(
+          MarkdownConcealedSpanCandidate(fullRange: match.range, visibleSourceRange: visible))
+      }
+    }
+    return candidates.sorted {
+      if $0.fullRange.location != $1.fullRange.location {
+        return $0.fullRange.location < $1.fullRange.location
+      }
+      return $0.fullRange.length > $1.fullRange.length
+    }
+  }
+
+  private func markdownDisplayMap(
+    _ map: MarkdownDisplayMap,
+    collapses candidate: MarkdownConcealedSpanCandidate,
+    to selectedDisplayRange: NSRange
+  ) -> Bool {
+    guard let fullDisplayRange = map.displayRange(forSourceRange: candidate.fullRange),
+      let visibleDisplayRange = map.displayRange(forSourceRange: candidate.visibleSourceRange)
+    else {
+      return false
+    }
+    return fullDisplayRange == selectedDisplayRange && visibleDisplayRange == selectedDisplayRange
   }
 
   private func selectionTouchesCollectedFrontMatterChips(_ selection: TextSelection) -> Bool {
@@ -4185,7 +4672,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// and geometry (the buffer revision changed), re-measures the document, and
   /// repaints the visible band. `change` is the span the edit rewrote; the wrap
   /// index is spliced for just those lines.
-  private func finishEdit(caretUTF16 offset: Int, change: TextChange) {
+  private func finishEdit(
+    caretUTF16 offset: Int,
+    change: TextChange,
+    viewportAnchor anchor: (line: Int, offset: CGFloat)? = nil,
+    caretLineViewportHold heldCaretLine: Int? = nil
+  ) {
     resetLineRenderCache()
     invalidateMarkdownLineStateCacheAfterContentChange()
     verticalGoalX = nil
@@ -4197,9 +4689,25 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       selection = TextSelection(
         caretAt: steppedOffConcealedLine(displayEndpoint(for: position), forward: true))
     }
+    let caretHoldYBefore: CGFloat?
+    if let heldCaretLine, selection?.head.line == heldCaretLine {
+      caretHoldYBefore = yOffset(ofLine: heldCaretLine)
+    } else {
+      caretHoldYBefore = nil
+    }
     updateWrapIndex(afterChange: change)
     showCaretSolid()
     updateLayout()
+    if let anchor {
+      restoreViewportAnchor(anchor)
+    }
+    if let heldCaretLine, let caretHoldYBefore, selection?.head.line == heldCaretLine {
+      let delta = yOffset(ofLine: heldCaretLine) - caretHoldYBefore
+      if abs(delta) > 0.5, let scrollView = enclosingScrollView {
+        let visible = scrollView.contentView.bounds
+        scrollViewport(toY: visible.origin.y + delta)
+      }
+    }
     syncMarkdownVideoViewsIfNeeded()
     if let head = selection?.head {
       scrollCaretToVisible(head)
@@ -4791,6 +5299,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   /// Horizontal offset (relative to the text's left edge) of UTF-16 `column`.
   private func xOffset(forColumn column: Int, in attributed: NSAttributedString) -> CGFloat {
+    Self.xOffset(forColumn: column, in: attributed)
+  }
+
+  nonisolated private static func xOffset(
+    forColumn column: Int,
+    in attributed: NSAttributedString
+  ) -> CGFloat {
     let clamped = max(0, min(column, attributed.length))
     let ctLine = CTLineCreateWithAttributedString(attributed)
     return CTLineGetOffsetForStringIndex(ctLine, clamped, nil)
@@ -4847,6 +5362,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     if usesMarkdownDocumentLayout {
       drawMarkdownBlockDecorations(
         lines: lines, range: range, textX: textX, visibleRows: rows, buffer: buffer)
+      drawMarkdownInlineCodeChipBackgrounds(lines: lines, range: range, visibleRows: rows)
     }
 
     if let selection, !selection.isEmpty {
@@ -4962,6 +5478,86 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
   }
 
+  private func drawMarkdownInlineCodeChipBackgrounds(
+    lines: [NSAttributedString],
+    range: Range<Int>,
+    visibleRows: Range<Int>
+  ) {
+    guard usesMarkdownDocumentLayout else { return }
+    for (offset, attributedLine) in lines.enumerated() {
+      let line = range.lowerBound + offset
+      guard !isHugeLine(line) else { continue }
+      let attributed = composedLineForDisplay(line: line, base: attributedLine)
+      let didClip = beginMarkdownTableClipIfNeeded(forLine: line, visibleRows: visibleRows)
+      defer {
+        if didClip {
+          NSGraphicsContext.restoreGraphicsState()
+        }
+      }
+      let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
+      let rowsTop = yOffset(ofLine: line) + leadingInset(forLine: line)
+      let height = rowHeight(forLine: line)
+      for rowIndex in starts.indices {
+        let globalRow = firstVisualRow(ofLine: line) + rowIndex
+        guard visibleRows.contains(globalRow) else { continue }
+        let bounds = rowRange(rowIndex, starts: starts, length: attributed.length)
+        let rowText = attributed.attributedSubstring(
+          from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
+        let natural = rowText.size()
+        let y =
+          rowsTop + CGFloat(rowIndex) * height
+          + Self.rowVerticalInset(rowHeight: height, naturalHeight: natural.height)
+        drawMarkdownInlineCodeChips(
+          in: rowText, textX: lineTextColumnX(forLine: line), y: y, rowHeight: height)
+      }
+    }
+  }
+
+  private func drawMarkdownInlineCodeChips(
+    in rowText: NSAttributedString,
+    textX: CGFloat,
+    y: CGFloat,
+    rowHeight: CGFloat
+  ) {
+    for rect in Self.markdownInlineCodeChipRects(
+      in: rowText, textX: textX, y: y, rowHeight: rowHeight)
+    {
+      MarkdownDocumentMetrics.inlineCodeBackground.setFill()
+      NSBezierPath(
+        roundedRect: backingAlignedRect(rect, options: .alignAllEdgesNearest),
+        xRadius: MarkdownDocumentMetrics.inlineCodeCornerRadius,
+        yRadius: MarkdownDocumentMetrics.inlineCodeCornerRadius
+      )
+      .fill()
+    }
+  }
+
+  nonisolated static func markdownInlineCodeChipRects(
+    in rowText: NSAttributedString,
+    textX: CGFloat,
+    y: CGFloat,
+    rowHeight: CGFloat
+  ) -> [NSRect] {
+    guard rowText.length > 0 else { return [] }
+    let fullRange = NSRange(location: 0, length: rowText.length)
+    var rects: [NSRect] = []
+    rowText.enumerateAttribute(.locusMarkdownInlineCodeChip, in: fullRange) { value, range, _ in
+      guard value != nil, range.length > 0 else { return }
+      let xStart = textX + Self.xOffset(forColumn: range.location, in: rowText)
+      let xEnd = textX + Self.xOffset(forColumn: NSMaxRange(range), in: rowText)
+      let runHeight = rowText.attributedSubstring(from: range).size().height
+      rects.append(
+        NSRect(
+          x: xStart,
+          y: y + MarkdownDocumentMetrics.inlineCodeChipYOffset,
+          width: max(1, xEnd - xStart),
+          height: min(
+            rowHeight,
+            runHeight + MarkdownDocumentMetrics.inlineCodeChipVerticalOutset)))
+    }
+    return rects
+  }
+
   private func markdownTableClipFrame(
     forLine line: Int,
     visibleRows requestedVisibleRows: Range<Int>
@@ -4996,7 +5592,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private enum MarkdownBlockDecoration: Equatable {
-    case bullet
+    case bullet(depth: Int)
     case ordered(String)
     case task(checked: Bool)
     case rule
@@ -5052,9 +5648,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         continue
       }
       switch decoration {
-      case .bullet:
+      case .bullet(let depth):
         guard visibleRows.contains(firstRow) else { continue }
         drawMarkdownBullet(
+          depth: depth,
           markerX: lineTextX - MarkdownDocumentMetrics.markerColumnWidth,
           y: lineY)
       case .ordered(let marker):
@@ -5188,12 +5785,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     .fill()
   }
 
-  private func drawMarkdownBullet(markerX: CGFloat, y: CGFloat) {
+  private func drawMarkdownBullet(depth: Int, markerX: CGFloat, y: CGFloat) {
     let attributes: [NSAttributedString.Key: Any] = [
-      .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-      .foregroundColor: NSColor.secondaryLabelColor.withAlphaComponent(0.75),
+      .font: MarkdownDocumentMetrics.bulletMarkerFont,
+      .foregroundColor: MarkdownDocumentMetrics.markerColor,
     ]
-    let bullet = NSAttributedString(string: "•", attributes: attributes)
+    let bullet = NSAttributedString(
+      string: MarkdownDocumentMetrics.bulletGlyphsByDepth[
+        max(0, depth - 1) % MarkdownDocumentMetrics.bulletGlyphsByDepth.count],
+      attributes: attributes)
     let centeredY =
       y + Self.rowVerticalInset(rowHeight: layout.lineHeight, naturalHeight: bullet.size().height)
     bullet.draw(
@@ -5205,8 +5805,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let paragraphStyle = NSMutableParagraphStyle()
     paragraphStyle.alignment = .right
     let attributes: [NSAttributedString.Key: Any] = [
-      .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
-      .foregroundColor: NSColor.secondaryLabelColor.withAlphaComponent(0.75),
+      .font: MarkdownDocumentMetrics.orderedMarkerFont,
+      .foregroundColor: MarkdownDocumentMetrics.markerColor,
       .paragraphStyle: paragraphStyle,
     ]
     let number = NSAttributedString(string: marker, attributes: attributes)
@@ -5223,13 +5823,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       roundedRect: rect,
       xRadius: 3,
       yRadius: 3)
-    (checked ? MarkdownDocumentMetrics.accentColor : NSColor.secondaryLabelColor)
-      .withAlphaComponent(checked ? 0.75 : 0.5)
-      .setStroke()
-    path.lineWidth = 1.4
-    path.stroke()
-    guard checked else { return }
-    MarkdownDocumentMetrics.accentColor.setStroke()
+    if checked {
+      MarkdownDocumentMetrics.accentColor.setFill()
+      path.fill()
+    } else {
+      MarkdownDocumentMetrics.markerColor.setStroke()
+      path.lineWidth = 1.4
+      path.stroke()
+      return
+    }
+    NSColor.white.setStroke()
     let mark = NSBezierPath()
     mark.lineWidth = 1.6
     mark.lineCapStyle = .round
@@ -5373,7 +5976,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
 
   private func drawMarkdownQuoteBar(depth: Int, textX: CGFloat, y: CGFloat, height: CGFloat) {
-    MarkdownDocumentMetrics.accentColor.setFill()
+    // Structural markers use quiet label-family ink; interactive confirmations
+    // remain accent-colored.
+    MarkdownDocumentMetrics.quoteBarColor.setFill()
     for level in 0..<max(1, min(depth, 3)) {
       NSRect(
         x: textX + CGFloat(level) * MarkdownDocumentMetrics.quoteIndentWidth
@@ -5418,7 +6023,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       if let checkbox = markdownTaskCheckboxInfo(in: line, state: state) {
         return .task(checked: checkbox.checked)
       }
-      return .bullet
+      return .bullet(depth: state.listDepth)
     }
     var digitEnd = index
     while digitEnd < nsLine.length {
@@ -5431,7 +6036,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       nsLine.character(at: digitEnd + 1) == 32
     {
       let number = nsLine.substring(with: NSRange(location: index, length: digitEnd - index))
-      return .ordered("\(number).")
+      let delimiter = nsLine.character(at: digitEnd) == 41 ? ")" : "."
+      return .ordered("\(number)\(delimiter)")
     }
     return nil
   }
@@ -5459,6 +6065,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       return nil
     }
     let value = nsLine.character(at: index + 3)
+    guard value == 32 || value == 120 || value == 88 else { return nil }
     return (checked: value == 120 || value == 88, checkColumnUTF16: index + 3)
   }
 
@@ -6762,6 +7369,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     attributedLine(forLine: line)
   }
 
+  func composedLineForTesting(forLine line: Int) -> NSAttributedString {
+    composedLineForDisplay(line: line, base: attributedLine(forLine: line))
+  }
+
   func resetRowLayoutComputationCountsForTesting() {
     rowStartComputationCount = 0
     rowSizeComputationCount = 0
@@ -7078,14 +7689,31 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     result.append(
       NSAttributedString(
         string: composition.text,
-        attributes: [
-          .font: font,
-          .foregroundColor: NSColor.textColor,
-          .underlineStyle: NSUnderlineStyle.single.rawValue,
-        ]))
+        attributes: compositionAttributes(base: base, column: column)))
     result.append(
       base.attributedSubstring(from: NSRange(location: column, length: base.length - column)))
     return result
+  }
+
+  private func compositionAttributes(base: NSAttributedString, column: Int)
+    -> [NSAttributedString.Key: Any]
+  {
+    var attributes: [NSAttributedString.Key: Any] = [
+      .font: font,
+      .foregroundColor: NSColor.textColor,
+      .underlineStyle: NSUnderlineStyle.single.rawValue,
+    ]
+    guard base.length > 0 else { return attributes }
+    let index = max(0, min(column, base.length - 1))
+    if let resolvedFont = base.attribute(.font, at: index, effectiveRange: nil) as? NSFont {
+      attributes[.font] = resolvedFont
+    }
+    if let resolvedColor = base.attribute(.foregroundColor, at: index, effectiveRange: nil)
+      as? NSColor
+    {
+      attributes[.foregroundColor] = resolvedColor
+    }
+    return attributes
   }
 
   /// Draws the line-number gutter pinned to the left of the visible viewport, on
@@ -7252,7 +7880,11 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
     }
     actualRange?.pointee = intersection
     let local = NSRange(location: intersection.location - anchor, length: intersection.length)
-    return NSAttributedString(string: markedText.substring(with: local), attributes: [.font: font])
+    let base = attributedLine(forLine: composition.anchor.line)
+    let column = max(0, min(composition.anchor.columnUTF16, base.length))
+    return NSAttributedString(
+      string: markedText.substring(with: local),
+      attributes: compositionAttributes(base: base, column: column))
   }
 
   // The view draws marked text with its own underline, so no IME-provided marked

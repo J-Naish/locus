@@ -668,20 +668,19 @@ final class TextWrapTests: XCTestCase {
     XCTAssertGreaterThan(view.visualRowCount, 3)
   }
 
-  /// A viewer whose frame is set *before* the buffer, so soft wrap is active.
-  /// Detached viewers use viewport-fill fallback until placed in an NSScrollView.
-  @MainActor
   // MARK: I-beam cursor region
 
   // The editor shows the text I-beam right of the pinned gutter and the arrow
   // over the gutter itself, via cursor rects built from this pure region math
   // (`resetCursorRects` feeds it the visible band and the gutter's right edge).
+  @MainActor
   func testIBeamCursorRectCoversVisibleBandRightOfGutter() {
     let rect = LineRenderingTextView.iBeamCursorRect(
       visible: NSRect(x: 0, y: 0, width: 600, height: 400), gutterEdge: 42)
     XCTAssertEqual(rect, NSRect(x: 42, y: 0, width: 558, height: 400))
   }
 
+  @MainActor
   func testIBeamCursorRectFollowsTheScrolledVisibleBand() {
     // Scrolled 100pt right and 300pt down: the gutter is viewport-pinned, so
     // its edge moves with the scroll origin and the band tracks the viewport.
@@ -690,6 +689,7 @@ final class TextWrapTests: XCTestCase {
     XCTAssertEqual(rect, NSRect(x: 142, y: 300, width: 558, height: 400))
   }
 
+  @MainActor
   func testIBeamCursorRectIsNilWhenNothingIsVisibleOrGutterCoversTheBand() {
     XCTAssertNil(
       LineRenderingTextView.iBeamCursorRect(visible: .zero, gutterEdge: 0))
@@ -732,6 +732,9 @@ final class TextWrapTests: XCTestCase {
     XCTAssertEqual(scrollView.contentView.bounds.origin.y, -10, accuracy: 0.5)
   }
 
+  /// A viewer whose frame is set *before* the buffer, so soft wrap is active.
+  /// Detached viewers use viewport-fill fallback until placed in an NSScrollView.
+  @MainActor
   private func makeWrappingViewer(_ contents: String, width: CGFloat) throws
     -> LineRenderingTextView
   {
@@ -747,10 +750,12 @@ final class TextWrapTests: XCTestCase {
     (0..<count).map { "line \($0)" }.joined(separator: "\n")
   }
 
+  @MainActor
   private func contentHeight(of view: LineRenderingTextView) -> CGFloat {
     CGFloat(max(view.visualRowCount, 1)) * view.layout.lineHeight
   }
 
+  @MainActor
   private func maxScrollPastEndOffset(of view: LineRenderingTextView) -> CGFloat {
     max(0, contentHeight(of: view) - view.layout.lineHeight)
   }
@@ -880,6 +885,112 @@ final class TextWrapTests: XCTestCase {
     view.moveToDocumentEdge(end: true, extend: false)
     for _ in 0..<6 { view.deleteBackward() }  // 25 - 6 = 19 ≤ 20
     XCTAssertFalse(view.isSoftWrapping)  // back to horizontal scroll
+  }
+
+  @MainActor
+  func testMarkdownEnterContinuesOrderedListWithNextNumber() throws {
+    let view = try makeEditableMarkdownViewer("3. first")
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: "first".utf16.count))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+
+    XCTAssertEqual(content(of: view), "3. first\n4. ")
+  }
+
+  @MainActor
+  func testMarkdownEnterPreservesNestedListIndent() throws {
+    let view = try makeEditableMarkdownViewer("  - first")
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: "first".utf16.count))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+
+    XCTAssertEqual(content(of: view), "  - first\n  - ")
+  }
+
+  @MainActor
+  func testMarkdownEnterOnEmptyListItemExitsWithoutAddingLine() throws {
+    let view = try makeEditableMarkdownViewer("- ")
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 0))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+
+    XCTAssertEqual(content(of: view), "")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testMarkdownEnterAtHeadingContentStartPushesHeadingDownIntact() throws {
+    let view = try makeEditableMarkdownViewer("# Title")
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 0))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+
+    XCTAssertEqual(content(of: view), "\n# Title")
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testMarkdownEnterMidListItemCarriesRemainderIntoNewItem() throws {
+    let view = try makeEditableMarkdownViewer("- foobar")
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: "foo".utf16.count))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+
+    XCTAssertEqual(content(of: view), "- foo\n- bar")
+  }
+
+  @MainActor
+  func testMarkdownBackspaceAtLineAfterFenceDoesNotConcealParagraph() throws {
+    let text = """
+      ```
+      code
+      ```
+      next
+      """
+    let view = try makeEditableMarkdownViewer(text)
+    view.beginCaretSelection(at: .init(line: 3, columnUTF16: 0))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), text)
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: "code".utf16.count))
+  }
+
+  @MainActor
+  func testMarkdownCmdEndSkipsTrailingFenceCloser() throws {
+    let text = """
+      ```
+      code
+      ```
+      """
+    let view = try makeEditableMarkdownViewer(text)
+
+    view.moveToDocumentEdge(end: true, extend: false)
+
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: "code".utf16.count))
+  }
+
+  @MainActor
+  func testMarkdownTabInParagraphDoesNothing() throws {
+    let view = try makeEditableMarkdownViewer("plain")
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 2))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertTab(_:)))
+
+    XCTAssertEqual(content(of: view), "plain")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 2))
+  }
+
+  @MainActor
+  func testMarkdownTabIndentsAndShiftTabOutdentsListItem() throws {
+    let view = try makeEditableMarkdownViewer("- item")
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 0))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertTab(_:)))
+    XCTAssertEqual(content(of: view), "  - item")
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertBacktab(_:)))
+    XCTAssertEqual(content(of: view), "- item")
   }
 
   @MainActor
@@ -1238,5 +1349,17 @@ final class TextWrapTests: XCTestCase {
   private func content(of view: LineRenderingTextView) -> String {
     guard let buffer = view.editableBuffer else { return "" }
     return buffer.text(forLineRange: 0, count: buffer.lineCount)
+  }
+
+  @MainActor
+  private func makeEditableMarkdownViewer(_ text: String, width: CGFloat = 400) throws
+    -> LineRenderingTextView
+  {
+    let view = LineRenderingTextView()
+    view.syntax = .markdown
+    view.frame = NSRect(x: 0, y: 0, width: width, height: 400)
+    view.isEditable = true
+    view.setBuffer(try TextBuffer.open(bytes: Data(text.utf8)))
+    return view
   }
 }
