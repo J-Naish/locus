@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('core/Cargo.lock') }}
+
+      - name: Rust format
+        run: cargo fmt --check
+        working-directory: core
+
+      - name: Rust clippy
+        run: cargo clippy --manifest-path core/Cargo.toml --all-targets --all-features -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --manifest-path core/Cargo.toml
+
+      - name: Swift unit tests
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project apps/mac/Locus/Locus.xcodeproj \
+            -scheme Locus \
+            -destination 'platform=macOS' \
+            -only-testing:LocusTests \
+            CODE_SIGN_IDENTITY=- \
+            | tail -200
+
+      - name: Perf smoke
+        env:
+          # Shared macOS runners are noisier than local machines; timing budgets
+          # get 4x CI headroom while deterministic size budgets stay strict.
+          LOCUS_PERF_LIST_BUDGET_MS: 200
+          LOCUS_PERF_LIST_MAX_BUDGET_MS: 600
+          LOCUS_PERF_SYMLINK_LIST_BUDGET_MS: 200
+          LOCUS_PERF_SYMLINK_LIST_MAX_BUDGET_MS: 600
+          LOCUS_PERF_BUFFER_OPEN_BUDGET_MS: 200
+          LOCUS_PERF_BUFFER_SCROLL_BUDGET_MS: 80
+          LOCUS_PERF_BUFFER_EDIT_BUDGET_MS: 200
+        run: scripts/perf-smoke.sh
