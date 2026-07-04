@@ -4120,6 +4120,165 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testSpliceFallsBackWhenEditCompletesFencePairAbove() throws {
+    // An unclosed fence opener and the lines it swallows carry NO parser flags
+    // (they stay `.plain` because the pairing pass only stamps a block once it
+    // finds a closer). Typing the closing backtick BELOW the anchor completes the
+    // pair, which restyles those flag-invisible lines — including line 2, ABOVE
+    // the edit. Only a full recompute sees that; the splice must fall back.
+    let lines =
+      [
+        "Intro paragraph",
+        "",
+        "````",  // four backticks: an unclosed opener today
+        "Fenced filler line",
+        "",
+        "```",  // three backticks: made a valid closer by the edit below
+      ] + (0..<20).map { "Tail paragraph \($0)" }
+    let view = try makeEditableMarkdownViewer(lines.joined(separator: "\n"), width: 720)
+    _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let editedLine = 5
+    let offset = try buffer.position(
+      forLine: editedLine,
+      columnUTF16: (lines[editedLine] as NSString).length
+    ).utf16
+    view.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset)
+    view.insertText("`")  // "```" -> "````", now closes the line-2 opener
+
+    let actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    let expected = try coldMarkdownLineStates(of: view)
+    // Sanity: the cold parse really does pair the block now (guards the fixture).
+    XCTAssertTrue(expected[2].isFenceDelimiter)
+    assertMarkdownLineStates(actual, equalTo: expected, step: 0, edit: "complete fence pair above")
+  }
+
+  @MainActor
+  func testSpliceFallsBackWhenEditCreatesFrontMatterCloser() throws {
+    // A top `---` with no closer opens no front matter — every line stays
+    // `.plain`. Typing the closing `---` far below creates the document's FIRST
+    // front-matter closer, which restyles lines 0..closer as front matter. Those
+    // lines are flag-invisible in the old cache, so the splice must fall back.
+    // The `--` sits after a blank line so it renders as a plain paragraph (not a
+    // setext underline), keeping the edit on a plainly-mapped display line.
+    let lines =
+      ["---"]
+      + (0..<30).map { "Filler paragraph \($0)." }
+      + ["", "--"]  // becomes the first front-matter closer once a "-" is typed
+      + ["Tail one", "Tail two", "Tail three"]
+    let closerLine = lines.count - 4  // the "--" line
+    let view = try makeEditableMarkdownViewer(lines.joined(separator: "\n"), width: 720)
+    _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let offset = try buffer.position(
+      forLine: closerLine,
+      columnUTF16: (lines[closerLine] as NSString).length
+    ).utf16
+    view.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset)
+    view.insertText("-")  // "--" -> "---": the first front-matter closer
+
+    let actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    let expected = try coldMarkdownLineStates(of: view)
+    // Sanity: the cold parse really does open front matter at the top now.
+    XCTAssertTrue(expected[0].insideFrontMatter)
+    assertMarkdownLineStates(actual, equalTo: expected, step: 0, edit: "create front-matter closer")
+  }
+
+  @MainActor
+  func testSpliceFallsBackWhenEditDestroysBlockingFenceOpener() throws {
+    // A four-backtick opener with no matching four-backtick closer swallows the
+    // rest of the document into an unclosed fence — but flag-invisibly (all
+    // `.plain`). Deleting one backtick turns it into a three-backtick line that
+    // now pairs with the first `` ``` `` below, repartitioning the fenced region.
+    // The splice must fall back; if an existing guard already catches this it is
+    // kept as a permanent regression regardless.
+    let lines =
+      [
+        "Intro paragraph",
+        "````",  // four backticks: an unclosed opener that swallows everything below
+      ]
+      + (0..<5).map { "Filler above \($0)." }
+      + ["```"]  // a three-backtick line, currently swallowed
+      + (0..<70).map { "Filler between \($0)." }
+      + ["```"]  // its would-be partner, also swallowed today
+      + ["Tail one", "Tail two"]
+    let view = try makeEditableMarkdownViewer(lines.joined(separator: "\n"), width: 720)
+    _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let editedLine = 1  // the "````" line
+    let offset = try buffer.position(forLine: editedLine, columnUTF16: 3).utf16
+    view.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset + 1)
+    view.deleteBackward()  // "````" -> "```", repartitioning the fenced region
+
+    let actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    let expected = try coldMarkdownLineStates(of: view)
+    assertMarkdownLineStates(
+      actual, equalTo: expected, step: 0, edit: "destroy blocking fence opener")
+  }
+
+  @MainActor
+  func testSpliceResumesAfterUnpairedFenceOpenerIsClosed() throws {
+    // Lifecycle: a document with an unpaired fence opener is globally unstable, so
+    // paragraph edits fall back. Closing the fence is itself a marker-writing edit
+    // (Layer B fallback) that clears the instability. A later paragraph edit on the
+    // now-stable document splices again.
+    let lines =
+      [
+        "Intro paragraph",
+        "",
+        "```",  // unclosed opener: the whole tail is a latent fence
+        "let value = 1",
+      ] + (0..<20).map { "Tail paragraph \($0)" }
+    let view = try makeEditableMarkdownViewer(lines.joined(separator: "\n"), width: 720)
+    _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+
+    // Edit 1: type in a tail paragraph. The unpaired opener makes the document
+    // globally unstable, so this falls back to a full recompute.
+    let buffer1 = try XCTUnwrap(view.editableBuffer)
+    let offset1 = try buffer1.position(forLine: 10, columnUTF16: 3).utf16
+    view.setSelectionForTesting(globalStartUTF16: offset1, globalEndUTF16: offset1)
+    view.insertText("x")
+    var actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    var expected = try coldMarkdownLineStates(of: view)
+    assertMarkdownLineStates(
+      actual, equalTo: expected, step: 0, edit: "paragraph typing (unstable)")
+    XCTAssertFalse(
+      view.markdownLineStateLastRecomputeWasSpliceForTesting(),
+      "Edit on a doc with an unpaired fence opener must fall back")
+
+    // Edit 2: insert a closing fence right after the single code line, leaving the
+    // tail paragraphs as plain text below the now-closed fence. Writing a marker
+    // line takes the Layer B fallback and, via the full recompute, clears the
+    // instability bit (all fences now pair).
+    let buffer2 = try XCTUnwrap(view.editableBuffer)
+    let closerInsert = try buffer2.position(forLine: 4, columnUTF16: 0).utf16
+    view.setSelectionForTesting(globalStartUTF16: closerInsert, globalEndUTF16: closerInsert)
+    view.insertText("```\n")
+    actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    expected = try coldMarkdownLineStates(of: view)
+    assertMarkdownLineStates(actual, equalTo: expected, step: 1, edit: "close the fence")
+    XCTAssertFalse(
+      view.markdownLineStateLastRecomputeWasSpliceForTesting(),
+      "Writing a marker line must fall back")
+
+    // Edit 3: type in a plain paragraph well below the (now closed) fence. The
+    // document is stable, so the splice resumes.
+    let buffer3 = try XCTUnwrap(view.editableBuffer)
+    let offset3 = try buffer3.position(forLine: 15, columnUTF16: 3).utf16
+    view.setSelectionForTesting(globalStartUTF16: offset3, globalEndUTF16: offset3)
+    view.insertText("y")
+    actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    expected = try coldMarkdownLineStates(of: view)
+    assertMarkdownLineStates(actual, equalTo: expected, step: 2, edit: "paragraph typing (stable)")
+    XCTAssertTrue(
+      view.markdownLineStateLastRecomputeWasSpliceForTesting(),
+      "Once the fence is closed, paragraph edits should splice again")
+  }
+
+  @MainActor
   func testSpliceHandlesLineInsertionAndDeletionShifts() throws {
     let view = try makeEditableMarkdownViewer("alpha\nbeta\ngamma\ndelta")
     _ = try XCTUnwrap(view.markdownLineStatesForTesting())

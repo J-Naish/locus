@@ -226,6 +226,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private var rowStartComputationCount = 0
   private var rowSizeComputationCount = 0
   private var markdownLineStateCache: (revision: UInt64, states: [MarkdownLineStyleState])?
+  /// Global-instability bit for the cached line states (Layer A). Set when the
+  /// full parse observed a fence-marker-shaped line the parser left unpaired
+  /// (an unclosed opener and the lines it silently swallows carry NO flags) or a
+  /// top `---` with no closer (a latent front-matter opener, also flag-invisible).
+  /// The document-global fence-pairing and front-matter-closer passes can restyle
+  /// such flag-invisible lines arbitrarily far from an edit — including above the
+  /// splice anchor — so while this bit is set every edit takes the full-recompute
+  /// path. A steady-state document (all fences closed, top `---` is real front
+  /// matter, or no such markers) clears it and splicing resumes. Kept in lockstep
+  /// with `markdownLineStateCache`; nil cache leaves it meaningless (no splice
+  /// runs without a cache).
+  private var markdownLineStateGlobalPairingUnsafe = false
   private struct MarkdownLineStateSpliceMetadata {
     let change: TextChange
   }
@@ -390,6 +402,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   private func resetMarkdownLineStateCache() {
     markdownLineStateCache = nil
+    markdownLineStateGlobalPairingUnsafe = false
     pendingMarkdownLineStateSplice = nil
     markdownLineStateRestyledRange = nil
     markdownLineStateRestyledLineDelta = 0
@@ -1417,6 +1430,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     var longLineCount: Int
     var hugeLines: [Int: HugeLineInfo]
     var markdownLineStates: [MarkdownLineStyleState]?
+    /// Layer A global-instability bit for `markdownLineStates`, computed on the
+    /// worker where the source lines are still in hand. Carried so a wrap build
+    /// that lands the state cache for a small document sets the bit correctly and
+    /// a following edit's splice attempt reads a truthful value.
+    var markdownGlobalPairingUnsafe: Bool = false
     /// False when the (re)scanned non-prose document holds no long line — the
     /// document stays horizontally scrolling and `rowCounts` is empty.
     var wraps: Bool
@@ -1510,6 +1528,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     longLineDecisionValid = true
     if let markdownLineStates = outcome.markdownLineStates {
       markdownLineStateCache = (revision, markdownLineStates)
+      markdownLineStateGlobalPairingUnsafe = outcome.markdownGlobalPairingUnsafe
       pendingMarkdownLineStateSplice = nil
       markdownLineStateRestyledRange = nil
       markdownLineStateRestyledLineDelta = 0
@@ -1691,6 +1710,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       longLineCount: longLineCount,
       hugeLines: hugeLines,
       markdownLineStates: states,
+      markdownGlobalPairingUnsafe: markdownLineStatesGlobalPairingUnsafe(
+        lines: lines, states: states),
       wraps: true)
   }
 
@@ -5212,8 +5233,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     revision: UInt64,
     fellBackFromSplice: Bool
   ) -> [MarkdownLineStyleState] {
-    var states = TextDocumentSyntaxHighlighter.markdownLineStates(
-      for: markdownSourceLines(for: buffer, range: 0..<buffer.lineCount))
+    let lines = markdownSourceLines(for: buffer, range: 0..<buffer.lineCount)
+    var states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    // Recompute the Layer A global-instability bit from the fresh full parse: a
+    // document whose fences all close and whose top `---` is real front matter
+    // clears it here, so splicing resumes on the next edit.
+    markdownLineStateGlobalPairingUnsafe = Self.markdownLineStatesGlobalPairingUnsafe(
+      lines: lines, states: states)
     while states.count < buffer.lineCount {
       states.append(.plain)
     }
@@ -5262,10 +5288,32 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let newCount = buffer.lineCount
     guard oldCount > 0, newCount > 0 else { return nil }
 
+    // Layer A: the document has a flag-invisible global pairing (an unpaired
+    // fence opener, or a top `---` with no closer). Both parser passes that own
+    // these are document-global and can restyle lines the splice's flag-based
+    // guards cannot see — including above the anchor — so every edit on such a
+    // document takes the full-recompute path (which recomputes this bit and lets
+    // splicing resume once the document is stable). Designed perf consequence:
+    // edits on documents with an unpaired fence opener are non-incremental.
+    if markdownLineStateGlobalPairingUnsafe {
+      return nil
+    }
+
     // Documents with reference definitions are non-incremental for now: every
     // state carries the defs map and parse-derived fields (imageSource) depend
     // on it; defs-aware splicing is future work.
     if old.first?.referenceDefinitions.isEmpty == false {
+      return nil
+    }
+
+    // Layer B: the edit rewrote a marker line into the band. Typing a fence
+    // marker or a `---` can CREATE a pairing partner (closing a distant opener,
+    // or a front-matter/ setext underline), which restyles flag-invisible lines
+    // outside the band. Perturbing a marker line inside an already-paired block
+    // is caught here too. Conservative full recompute; this also flips the
+    // instability bit forward correctly, since the recompute recomputes it.
+    // Designed perf consequence: edits that write marker lines are non-incremental.
+    if markdownEditBandWritesMarkerLine(band: band, newCount: newCount, buffer: buffer) {
       return nil
     }
 
@@ -5366,6 +5414,27 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return states
   }
 
+  /// Layer B predicate: whether the edit's rewritten band (new coordinates)
+  /// contains any fence-marker or front-matter/thematic `---` line. Such a line
+  /// can create or destroy a document-global pairing partner whose effect reaches
+  /// flag-invisible lines outside the band, so writing one forces a full
+  /// recompute. The band is small (the lines the edit rewrote), so this fetch is
+  /// cheap relative to a full document parse.
+  private func markdownEditBandWritesMarkerLine(
+    band: RewrittenLineBand,
+    newCount: Int,
+    buffer: any TextDocumentReading
+  ) -> Bool {
+    let lower = max(0, band.startLine)
+    let upper = min(newCount, band.editEndNew + 1)
+    guard lower < upper else { return false }
+    let bandLines = markdownSourceLines(for: buffer, range: lower..<upper)
+    return bandLines.contains { line in
+      TextDocumentSyntaxHighlighter.isMarkdownFenceLine(line)
+        || TextDocumentSyntaxHighlighter.isMarkdownFrontMatterDelimiter(line)
+    }
+  }
+
   private func guardedMarkdownLineStateSpliceAnchor(
     _ proposedAnchor: Int,
     oldStates: [MarkdownLineStyleState],
@@ -5411,6 +5480,43 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       || TextDocumentSyntaxHighlighter.isMarkdownFenceLine(line)
   }
 
+  /// Whether a fully-parsed document has a latent, flag-invisible global pairing
+  /// (Layer A). O(n) string-prefix scan pairing each line with its own state by
+  /// index — run at the full-parse sites where `lines` and `states` are already
+  /// in hand, so it adds no FFI fetch. Two conditions, both invisible to every
+  /// state-flag-based guard:
+  ///   * A fence-marker-shaped line the parser did NOT mark as a delimiter. That
+  ///     is an unpaired opener (or a line swallowed under one); completing or
+  ///     destroying its partner elsewhere restyles it and everything it swallows.
+  ///   * A top `---` the parser did NOT open front matter on — a latent
+  ///     front-matter opener whose closer, once typed anywhere below, restyles
+  ///     the whole region from line 0.
+  private nonisolated static func markdownLineStatesGlobalPairingUnsafe(
+    lines: [String],
+    states: [MarkdownLineStyleState]
+  ) -> Bool {
+    for index in lines.indices where index < states.count {
+      if TextDocumentSyntaxHighlighter.isMarkdownFenceLine(lines[index]),
+        !states[index].isFenceDelimiter
+      {
+        return true
+      }
+    }
+    if let first = lines.first, index0IsLatentFrontMatterOpener(first: first, states: states) {
+      return true
+    }
+    return false
+  }
+
+  private nonisolated static func index0IsLatentFrontMatterOpener(
+    first: String,
+    states: [MarkdownLineStyleState]
+  ) -> Bool {
+    guard TextDocumentSyntaxHighlighter.isMarkdownFrontMatterDelimiter(first) else { return false }
+    guard let firstState = states.first else { return false }
+    return !firstState.isFrontMatterDelimiter && !firstState.insideFrontMatter
+  }
+
   private func scheduleMarkdownLineStateBuild(revision: UInt64) {
     guard markdownLineStateBuildTargetRevision != revision else { return }
     guard let source = editableBuffer?.takeReadSnapshot() else { return }
@@ -5454,6 +5560,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     markdownLineStateBuildTargetRevision = nil
     guard let states, reader?.revision == revision else { return }
     markdownLineStateCache = (revision, states)
+    // The >4,096-line background tier never splices (edits in that tier reset the
+    // pending splice and rebuild in the background). If the document later shrinks
+    // below the synchronous limit, the first splice attempt must not trust a bit
+    // this path did not compute, so mark it unsafe: the next edit will then take
+    // one full recompute that establishes the real bit. Conservative, not a cost.
+    markdownLineStateGlobalPairingUnsafe = true
     resetLineRenderCache()
     invalidateVisibleArea()
   }
