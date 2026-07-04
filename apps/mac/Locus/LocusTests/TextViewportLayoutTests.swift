@@ -180,6 +180,108 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testLineRenderCachePreservesUnchangedMarkdownLinesAfterParagraphEdit() throws {
+    let markdown = (0..<140)
+      .map { "Paragraph \($0) with **bold**, _italic_, and `code`." }
+      .joined(separator: "\n")
+    let view = try makeEditableMarkdownViewer(markdown, width: 720)
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let range = 80..<120
+    let before = view.attributedBandLineObjectsForTesting(buffer: buffer, range: range)
+    _ = view.visualRowStartOffsetsForTesting(forLine: 110)
+
+    let offset = try buffer.position(forLine: 100, columnUTF16: 12).utf16
+    view.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset)
+    view.insertText("x")
+
+    let afterBuffer = try XCTUnwrap(view.editableBuffer)
+    let after = view.attributedBandLineObjectsForTesting(buffer: afterBuffer, range: range)
+    let restyledRange = try XCTUnwrap(view.markdownLineStateRestyledRangeForTesting())
+    XCTAssertFalse(view.markdownLineStateLastSpliceFellBackForTesting())
+    XCTAssertEqual(view.markdownLineStateRestyledLineDeltaForTesting(), 0)
+    for line in range where !restyledRange.contains(line) {
+      XCTAssertTrue(
+        before[line - range.lowerBound] === after[line - range.lowerBound],
+        "Expected unchanged line \(line) to keep its attributed cache object")
+    }
+
+    view.resetRowLayoutComputationCountsForTesting()
+    _ = view.visualRowStartOffsetsForTesting(forLine: 110)
+    XCTAssertEqual(view.rowStartComputationCountForTesting(), 0)
+  }
+
+  @MainActor
+  func testLineRenderCacheShiftsTailObjectsAfterMarkdownLineInsertion() throws {
+    let markdown = (0..<140)
+      .map { "Paragraph \($0) with **bold**, _italic_, and `code`." }
+      .joined(separator: "\n")
+    let view = try makeEditableMarkdownViewer(markdown, width: 720)
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let range = 60..<100
+    let before = view.attributedBandLineObjectsForTesting(buffer: buffer, range: range)
+    let preservedLineBeforeEdit = 85
+    let preservedObject = before[preservedLineBeforeEdit - range.lowerBound]
+
+    let offset = try buffer.position(forLine: 70, columnUTF16: 0).utf16
+    view.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset)
+    view.insertText("Inserted paragraph\n")
+
+    let afterBuffer = try XCTUnwrap(view.editableBuffer)
+    let afterRange = 60..<101
+    let after = view.attributedBandLineObjectsForTesting(buffer: afterBuffer, range: afterRange)
+    XCTAssertFalse(view.markdownLineStateLastSpliceFellBackForTesting())
+    XCTAssertEqual(view.markdownLineStateRestyledLineDeltaForTesting(), 1)
+    XCTAssertTrue(
+      preservedObject === after[preservedLineBeforeEdit + 1 - afterRange.lowerBound],
+      "Expected cached tail line to move by the inserted line delta")
+  }
+
+  @MainActor
+  func testLineRenderCacheSpliceMatchesColdMarkdownRenderingAfterEdits() throws {
+    let markdown = markdownStateOracleFixture()
+    let cachedView = try makeEditableMarkdownViewer(markdown, width: 720)
+    let edits: [(line: Int, column: Int, text: String)] = [
+      (65, 8, "x"),
+      (72, 0, "Inserted cache test line\n"),
+      (48, 12, " updated"),
+    ]
+
+    for (step, edit) in edits.enumerated() {
+      let buffer = try XCTUnwrap(cachedView.editableBuffer)
+      _ = cachedView.attributedBandLineObjectsForTesting(
+        buffer: buffer,
+        range: 40..<min(95, buffer.lineCount))
+      let offset = try buffer.position(forLine: edit.line, columnUTF16: edit.column).utf16
+      cachedView.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset)
+      cachedView.insertText(edit.text)
+
+      let editedBuffer = try XCTUnwrap(cachedView.editableBuffer)
+      let coldView = try makeEditableMarkdownViewer(content(of: cachedView), width: 720)
+      let coldBuffer = try XCTUnwrap(coldView.editableBuffer)
+      let ranges = [
+        0..<min(24, editedBuffer.lineCount),
+        40..<min(90, editedBuffer.lineCount),
+        max(0, editedBuffer.lineCount - 36)..<editedBuffer.lineCount,
+      ]
+      for range in ranges where !range.isEmpty {
+        coldView.resetLineRenderCacheForTesting()
+        let actual = cachedView.attributedBandLineObjectsForTesting(
+          buffer: editedBuffer,
+          range: range)
+        let expected = coldView.attributedBandLineObjectsForTesting(
+          buffer: coldBuffer,
+          range: range)
+        XCTAssertEqual(actual.count, expected.count)
+        for index in actual.indices {
+          XCTAssertTrue(
+            actual[index].isEqual(to: expected[index]),
+            "Mismatch after edit \(step), band \(range), offset \(index)")
+        }
+      }
+    }
+  }
+
+  @MainActor
   func testLineRenderCacheRevisionChangeDropsAndRefetchesBand() throws {
     let document = try makeSpyDocument(lineCount: 40)
     let view = LineRenderingTextView()

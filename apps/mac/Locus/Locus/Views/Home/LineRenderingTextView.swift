@@ -237,6 +237,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   }
   private var pendingMarkdownLineStateSplice: MarkdownLineStateSpliceMetadata?
   private var markdownLineStateRestyledRange: Range<Int>?
+  private var markdownLineStateRestyledLineDelta = 0
   private var markdownLineStateLastSpliceFellBack = false
   private struct MarkdownLinkVisualStateCacheKey: Hashable {
     let baseFilePath: String?
@@ -316,10 +317,78 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     lastVideoSyncKey = nil
   }
 
+  private func spliceLineRenderCacheAfterContentChange(change _: TextChange) {
+    guard lineRenderCache != nil else { return }
+    guard usesMarkdownDocumentLayout, syntax == .markdown, let buffer = reader else {
+      resetLineRenderCache()
+      return
+    }
+
+    _ = markdownLineStates(for: buffer)
+    guard !markdownLineStateLastSpliceFellBack,
+      let restyledRange = markdownLineStateRestyledRange,
+      var cache = lineRenderCache,
+      cache.revision &+ 1 == buffer.revision,
+      cache.width == wrapContentWidth
+    else {
+      resetLineRenderCache()
+      return
+    }
+
+    let oldRangeUpper = restyledRange.upperBound - markdownLineStateRestyledLineDelta
+    guard oldRangeUpper >= restyledRange.lowerBound else {
+      resetLineRenderCache()
+      return
+    }
+    let oldRange = restyledRange.lowerBound..<oldRangeUpper
+    cache.raw = Self.splicedLineRenderEntries(
+      cache.raw,
+      dropping: oldRange,
+      shiftingFrom: oldRangeUpper,
+      lineDelta: markdownLineStateRestyledLineDelta)
+    cache.attributed = Self.splicedLineRenderEntries(
+      cache.attributed,
+      dropping: oldRange,
+      shiftingFrom: oldRangeUpper,
+      lineDelta: markdownLineStateRestyledLineDelta)
+    cache.rowStarts = Self.splicedLineRenderEntries(
+      cache.rowStarts,
+      dropping: oldRange,
+      shiftingFrom: oldRangeUpper,
+      lineDelta: markdownLineStateRestyledLineDelta)
+    cache.rowSizes = Self.splicedLineRenderEntries(
+      cache.rowSizes,
+      dropping: oldRange,
+      shiftingFrom: oldRangeUpper,
+      lineDelta: markdownLineStateRestyledLineDelta)
+    cache.revision = buffer.revision
+    lineRenderCache = cache
+    lastVideoSyncKey = nil
+  }
+
+  private static func splicedLineRenderEntries<Value>(
+    _ entries: [Int: Value],
+    dropping oldRange: Range<Int>,
+    shiftingFrom oldSuffixStart: Int,
+    lineDelta: Int
+  ) -> [Int: Value] {
+    guard !entries.isEmpty else { return entries }
+    var spliced: [Int: Value] = [:]
+    spliced.reserveCapacity(entries.count)
+    for (line, value) in entries {
+      guard !oldRange.contains(line) else { continue }
+      let newLine = line >= oldSuffixStart ? line + lineDelta : line
+      guard newLine >= 0 else { continue }
+      spliced[newLine] = value
+    }
+    return spliced
+  }
+
   private func resetMarkdownLineStateCache() {
     markdownLineStateCache = nil
     pendingMarkdownLineStateSplice = nil
     markdownLineStateRestyledRange = nil
+    markdownLineStateRestyledLineDelta = 0
     markdownLineStateLastSpliceFellBack = false
   }
 
@@ -1439,6 +1508,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       markdownLineStateCache = (revision, markdownLineStates)
       pendingMarkdownLineStateSplice = nil
       markdownLineStateRestyledRange = nil
+      markdownLineStateRestyledLineDelta = 0
       markdownLineStateLastSpliceFellBack = false
       markdownLineStateBuildTargetRevision = nil
       markdownLineStateBuildTask?.cancel()
@@ -4376,8 +4446,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// re-measure, and repaint. `change` is the span the step rewrote, so the
   /// wrap index can be updated for just those lines.
   private func afterUndoRedo(change: TextChange) {
-    resetLineRenderCache()
     invalidateMarkdownLineStateCacheAfterContentChange(change: change)
+    spliceLineRenderCacheAfterContentChange(change: change)
     maxObservedLineWidth = 0
     verticalGoalX = nil
     updateWrapIndex(afterChange: change)
@@ -4709,8 +4779,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     viewportAnchor anchor: (line: Int, offset: CGFloat)? = nil,
     caretLineViewportHold heldCaretLine: Int? = nil
   ) {
-    resetLineRenderCache()
     invalidateMarkdownLineStateCacheAfterContentChange(change: change)
+    spliceLineRenderCacheAfterContentChange(change: change)
     verticalGoalX = nil
     // The widest-line high-water mark can only shrink via an edit (deleting or
     // splitting a long line), so reset it and let `draw` re-measure the visible
@@ -5145,6 +5215,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     pendingMarkdownLineStateSplice = nil
     markdownLineStateRestyledRange = nil
+    markdownLineStateRestyledLineDelta = 0
     markdownLineStateLastSpliceFellBack = fellBackFromSplice
     markdownLineStateCache = (revision, states)
     return states
@@ -5262,6 +5333,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
     pendingMarkdownLineStateSplice = nil
     markdownLineStateRestyledRange = anchor..<spliceEnd
+    markdownLineStateRestyledLineDelta = lineDelta
     markdownLineStateLastSpliceFellBack = false
     markdownLineStateCache = (revision, states)
     return states
@@ -5368,10 +5440,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       }
       pendingMarkdownLineStateSplice = MarkdownLineStateSpliceMetadata(change: change)
       markdownLineStateRestyledRange = nil
+      markdownLineStateRestyledLineDelta = 0
       markdownLineStateLastSpliceFellBack = false
     } else {
       pendingMarkdownLineStateSplice = nil
       markdownLineStateRestyledRange = nil
+      markdownLineStateRestyledLineDelta = 0
       markdownLineStateLastSpliceFellBack = false
       if markdownLineStateCache?.revision != revision {
         markdownLineStateCache = nil
@@ -7655,6 +7729,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   func markdownLineStateRestyledRangeForTesting() -> Range<Int>? {
     markdownLineStateRestyledRange
+  }
+
+  func markdownLineStateRestyledLineDeltaForTesting() -> Int {
+    markdownLineStateRestyledLineDelta
   }
 
   func markdownLineStateLastSpliceFellBackForTesting() -> Bool {
