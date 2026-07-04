@@ -1491,6 +1491,25 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertEqual(paragraphStyle?.tabStops.last?.alignment, .center)
   }
 
+  func testTableColumnCacheDistinguishesSeparatorAlignments() {
+    TextDocumentSyntaxHighlighter.resetTableColumnsCacheForTesting()
+
+    _ = TextDocumentSyntaxHighlighter.markdownLineStates(
+      for: [
+        "| A | B |",
+        "| --- | --- |",
+        "| x | y |",
+      ])
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(
+      for: [
+        "| A | B |",
+        "| :---: | ---: |",
+        "| x | y |",
+      ])
+
+    XCTAssertEqual(states[0].tableColumns.map(\.alignment), [.center, .right])
+  }
+
   func testQuotedMarkdownTableUsesQuoteBodyForCellsAndRawColumnsForCopy() {
     let lines = [
       "> | First | Second |",

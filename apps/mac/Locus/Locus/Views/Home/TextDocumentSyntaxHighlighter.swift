@@ -3226,10 +3226,11 @@ enum TextDocumentSyntaxHighlighter {
 
   private static func markdownTableColumns(
     rowBodies: [String],
+    separatorBody: String,
     alignments: [MarkdownTableColumnAlignment]
   ) -> [MarkdownTableColumn] {
     guard !alignments.isEmpty else { return [] }
-    let cacheKey = rowBodies.joined(separator: "\n")
+    let cacheKey = ([separatorBody] + rowBodies).joined(separator: "\n")
     if let cached = tableColumnsCache.columns(for: cacheKey) {
       return cached
     }
@@ -3452,6 +3453,7 @@ enum TextDocumentSyntaxHighlighter {
       }
       let columns = markdownTableColumns(
         rowBodies: tableRowIndices.map { markdownLineContext(in: lines[$0]).body },
+        separatorBody: markdownLineContext(in: lines[index]).body,
         alignments: alignments)
       states[index].tableColumns = columns
       for tableRow in tableRowIndices {
