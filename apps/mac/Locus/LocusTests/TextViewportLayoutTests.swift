@@ -3751,8 +3751,14 @@ final class TextViewportLayoutTests: XCTestCase {
       "| --- | --- |",
       "| x | y |",
       "",
+      "---",
+      "Paragraph between thematic breaks for anchor coverage.",
+      "",
+      "---",
+      "",
       "Paragraph with [inline link](https://example.com) and ![Alt](../media/valid/images/locus-fixture.svg).",
       "Paragraph using [label] and another [missing][unknown].",
+      "Reference image: ![Oracle image][oracle-image].",
       "",
       "[^note]: Footnote starts here",
       "    continued footnote line",
@@ -3768,6 +3774,76 @@ final class TextViewportLayoutTests: XCTestCase {
     }
     lines.append("[label]: https://example.com/reference")
     lines.append("[other]: ../docs/requirements.md")
+    lines.append("[oracle-image]: https://example.com/oracle.png")
+    return lines.joined(separator: "\n")
+  }
+
+  private func markdownStateOracleDefsFreeFixture() -> String {
+    var lines = [
+      "---",
+      "title: Markdown defs-free oracle",
+      "tags:",
+      "  - markdown",
+      "  - splice",
+      "description: |",
+      "  This block scalar keeps front matter active.",
+      "  It also gives the parser continuation lines.",
+      "---",
+      "# Heading 1",
+      "## Heading 2",
+      "",
+      "Setext Heading One",
+      "===",
+      "Setext Heading Two",
+      "---",
+      "",
+      "- bullet one",
+      "  - nested bullet",
+      "    - [ ] nested task",
+      "1. ordered one",
+      "   1. ordered child",
+      "      - mixed child",
+      "",
+      "> Quote level one",
+      "> > Quote level two",
+      "",
+      "```swift",
+      "let value = 42",
+      "```",
+      "",
+      "    indented code line",
+      "    second indented code line",
+      "",
+      "| Name | Status | Notes |",
+      "| :--- | ---: | :---: |",
+      "| Alpha | 1 | *emphasis* and inline [link](https://example.com/a) |",
+      "| Beta | 200 | `code` with **bold** |",
+      "",
+      "| Wide | Column | Alignment |",
+      "| --- | :---: | ---: |",
+      "| a long value that wraps eventually | center | 123.45 |",
+      "| another row | middle | 987.65 |",
+      "",
+      "| Short | Table |",
+      "| --- | --- |",
+      "| x | y |",
+      "",
+      "---",
+      "Paragraph between thematic breaks for anchor coverage.",
+      "",
+      "---",
+      "",
+      "Paragraph with inline ![Alt](../media/valid/images/locus-fixture.svg) image.",
+      "",
+      "* * *",
+      "",
+    ]
+    for index in 0..<72 {
+      lines.append("Plain paragraph \(index) with **bold**, _italic_, and `code`.")
+      if index.isMultiple(of: 9) {
+        lines.append("")
+      }
+    }
     return lines.joined(separator: "\n")
   }
 
@@ -3812,12 +3888,16 @@ final class TextViewportLayoutTests: XCTestCase {
   @discardableResult
   private func applyRandomMarkdownOracleEdit(
     to view: LineRenderingTextView,
-    rng: inout MarkdownOracleRNG
+    rng: inout MarkdownOracleRNG,
+    allowReferenceDefinitionTrigger: Bool = true
   ) throws -> String {
     let buffer = try XCTUnwrap(view.editableBuffer)
-    let triggerStrings = ["```", "---", "## ", "| a | b |", "[label]: https://x"]
+    let triggerStrings =
+      allowReferenceDefinitionTrigger
+      ? ["```", "---", "## ", "| a | b |", "[label]: https://x"]
+      : ["---", "## ", "| a | b |"]
     let insertCharacters = [
-      "#", "-", "|", "`", ">", "*", "_", "[", "]", ":", " ", "\n", "a", "あ",
+      "#", "-", "|", "`", ">", "*", "_", "[", "]", ":", "!", " ", "\n", "a", "あ",
     ]
     let editKind = rng.integer(in: 0..<3)
     switch editKind {
@@ -3848,6 +3928,7 @@ final class TextViewportLayoutTests: XCTestCase {
   func testMarkdownLineStatesIncrementalMatchesFullRecomputeUnderRandomEdits() throws {
     let view = try makeEditableMarkdownViewer(markdownStateOracleFixture(), width: 720)
     _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+    view.resetMarkdownLineStateRecomputeCountersForTesting()
 
     var rng = MarkdownOracleRNG()
     for step in 0..<400 {
@@ -3855,7 +3936,42 @@ final class TextViewportLayoutTests: XCTestCase {
       let actual = try XCTUnwrap(view.markdownLineStatesForTesting())
       let expected = try coldMarkdownLineStates(of: view)
       assertMarkdownLineStates(actual, equalTo: expected, step: step, edit: edit)
+      XCTAssertFalse(
+        view.markdownLineStateLastRecomputeWasSpliceForTesting(),
+        "Reference-definition fixture should fall back at step \(step)")
     }
+    XCTAssertEqual(view.markdownLineStateSpliceCountForTesting(), 0)
+    XCTAssertEqual(view.markdownLineStateFallbackCountForTesting(), 400)
+  }
+
+  @MainActor
+  func testMarkdownLineStatesIncrementalMatchesFullRecomputeWithoutReferenceDefinitions()
+    throws
+  {
+    let view = try makeEditableMarkdownViewer(markdownStateOracleDefsFreeFixture(), width: 720)
+    _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+    view.resetMarkdownLineStateRecomputeCountersForTesting()
+
+    var rng = MarkdownOracleRNG(state: 0x4445_4653_4652_4545)
+    var splicedSteps = 0
+    var splicedAnchorAboveZero = 0
+    for step in 0..<400 {
+      let edit = try applyRandomMarkdownOracleEdit(
+        to: view,
+        rng: &rng,
+        allowReferenceDefinitionTrigger: false)
+      let actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+      let expected = try coldMarkdownLineStates(of: view)
+      assertMarkdownLineStates(actual, equalTo: expected, step: step, edit: edit)
+      if view.markdownLineStateLastRecomputeWasSpliceForTesting() {
+        splicedSteps += 1
+        if (view.markdownLineStateLastSpliceAnchorForTesting() ?? 0) > 0 {
+          splicedAnchorAboveZero += 1
+        }
+      }
+    }
+    XCTAssertGreaterThanOrEqual(splicedSteps, 100)
+    XCTAssertGreaterThanOrEqual(splicedAnchorAboveZero, 20)
   }
 
   @MainActor
@@ -3952,6 +4068,55 @@ final class TextViewportLayoutTests: XCTestCase {
     XCTAssertGreaterThanOrEqual(
       TextDocumentSyntaxHighlighter.lineStateParseCountForTesting,
       try XCTUnwrap(view.editableBuffer?.lineCount))
+  }
+
+  @MainActor
+  func testSpliceDoesNotFabricateFrontMatterAtMidDocumentRule() throws {
+    let lines =
+      [
+        "Intro paragraph",
+        "",
+        "---",
+        "Edit this paragraph",
+        "",
+        "---",
+        "",
+      ] + (0..<20).map { "Tail paragraph \($0)" }
+    let view = try makeEditableMarkdownViewer(lines.joined(separator: "\n"), width: 720)
+    _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let editedLine = 3
+    let offset = try buffer.position(
+      forLine: editedLine,
+      columnUTF16: (lines[editedLine] as NSString).length
+    ).utf16
+    view.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset)
+    view.insertText("!")
+
+    let actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    let expected = try coldMarkdownLineStates(of: view)
+    assertMarkdownLineStates(actual, equalTo: expected, step: 0, edit: "mid-document rule")
+  }
+
+  @MainActor
+  func testSpliceKeepsReferenceImageSourceWhenDefinitionIsOutsideWindow() throws {
+    let lines =
+      ["![shot][pic]"]
+      + (0..<170).map { "Filler paragraph \($0)." }
+      + ["[pic]: https://example.com/x.png"]
+    let view = try makeEditableMarkdownViewer(lines.joined(separator: "\n"), width: 720)
+    _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let editLine = 30
+    let offset = try buffer.position(forLine: editLine, columnUTF16: 10).utf16
+    view.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset)
+    view.insertText("!")
+
+    let actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    let expected = try coldMarkdownLineStates(of: view)
+    assertMarkdownLineStates(actual, equalTo: expected, step: 0, edit: "reference image")
   }
 
   @MainActor

@@ -1035,6 +1035,10 @@ enum TextDocumentSyntaxHighlighter {
     markdownFenceInfo(in: line) != nil
   }
 
+  static func isMarkdownFrontMatterDelimiter(_ line: String) -> Bool {
+    markdownFrontMatterDelimiter(in: line)
+  }
+
   private struct MarkdownRenderedBlock {
     var text: String
     var fonts: MarkdownFontSet
