@@ -2124,11 +2124,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   // Cursor handling is driven only by the tracking-area layer. AppKit cursor
   // rects are intentionally not used: they competed with this view's manual
   // self-healing cursor updates, and a 2026-06-12 measurement showed SwiftUI
-  // `.clipShape` around the document card could suppress rects entirely. Regions
-  // come from `hoverCursorRegions()`; later regions win over earlier broad
-  // regions. Mouse events apply the cursor directly, and `refreshHoverCursor`
-  // re-applies it when regions move under a stationary pointer (scroll, layout,
-  // mode switches, edits).
+  // `.clipShape` around the document card could suppress rects entirely. The
+  // tracking area uses `.inVisibleRect` and must be created once: recreating it
+  // during scroll relayout can synthesize spurious exit/enter events, producing
+  // visible arrow/I-beam flicker. Regions come from `hoverCursorRegions()`;
+  // later regions win over earlier broad regions. Mouse events apply the cursor
+  // directly, and `refreshHoverCursor` re-applies it when regions move under a
+  // stationary pointer (scroll, layout, mode switches, edits). Genuine exits
+  // hand off to the arrow; spurious exits inside the visible band reassert the
+  // current hover cursor.
   enum HoverCursor: Equatable {
     case iBeam, arrow, pointingHand
 
@@ -2148,8 +2152,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   override func updateTrackingAreas() {
     super.updateTrackingAreas()
-    if let cursorCorrectionTrackingArea {
-      removeTrackingArea(cursorCorrectionTrackingArea)
+    if let cursorCorrectionTrackingArea,
+      trackingAreas.contains(cursorCorrectionTrackingArea)
+    {
+      return
     }
     let area = NSTrackingArea(
       rect: .zero,
@@ -2179,7 +2185,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   override func mouseExited(with event: NSEvent) {
     super.mouseExited(with: event)
     guard NSEvent.pressedMouseButtons == 0 else { return }
-    NSCursor.arrow.set()
+    let point = window.map { convert($0.mouseLocationOutsideOfEventStream, from: nil) }
+    if shouldHandOffCursorOnExit(pointerInView: point) {
+      NSCursor.arrow.set()
+    } else if let point {
+      hoverCursor(at: point).nsCursor.set()
+    }
   }
 
   override func cursorUpdate(with event: NSEvent) {
@@ -2192,6 +2203,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     // ancestors can reset the cursor between move/update events while our local
     // desired state is unchanged.
     desired.nsCursor.set()
+  }
+
+  func shouldHandOffCursorOnExit(pointerInView point: NSPoint?) -> Bool {
+    guard let point else { return true }
+    return !visibleRect.contains(point)
   }
 
   /// Re-applies the hover cursor from the current pointer position without

@@ -3010,6 +3010,62 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testUpdateTrackingAreasKeepsTheSameCursorTrackingArea() throws {
+    let view = try makeEditableViewer("one\ntwo\nthree")
+    view.setFrameSize(NSSize(width: 420, height: 200))
+    let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 200))
+    scrollView.documentView = view
+    scrollView.layoutSubtreeIfNeeded()
+
+    view.updateTrackingAreas()
+    let first = try XCTUnwrap(cursorCorrectionTrackingArea(in: view))
+
+    view.updateTrackingAreas()
+    let second = try XCTUnwrap(cursorCorrectionTrackingArea(in: view))
+    XCTAssertTrue(first === second)
+
+    view.updateTrackingAreas()
+    let third = try XCTUnwrap(cursorCorrectionTrackingArea(in: view))
+    XCTAssertTrue(first === third)
+    XCTAssertEqual(cursorCorrectionTrackingAreaCount(in: view), 1)
+  }
+
+  @MainActor
+  func testCursorExitOnlyHandsOffWhenPointerLeavesVisibleBand() throws {
+    let view = try makeEditableViewer("one\ntwo\nthree")
+    view.setFrameSize(NSSize(width: 420, height: 200))
+    let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 200))
+    scrollView.documentView = view
+    scrollView.layoutSubtreeIfNeeded()
+
+    XCTAssertFalse(
+      view.shouldHandOffCursorOnExit(pointerInView: NSPoint(x: 120, y: 40)))
+    XCTAssertTrue(
+      view.shouldHandOffCursorOnExit(pointerInView: NSPoint(x: -10, y: 40)))
+    XCTAssertTrue(view.shouldHandOffCursorOnExit(pointerInView: nil))
+  }
+
+  private func cursorCorrectionTrackingArea(in view: LineRenderingTextView) -> NSTrackingArea? {
+    view.trackingAreas.first { area in
+      area.options.contains(.mouseMoved)
+        && area.options.contains(.mouseEnteredAndExited)
+        && area.options.contains(.cursorUpdate)
+        && area.options.contains(.activeInKeyWindow)
+        && area.options.contains(.inVisibleRect)
+    }
+  }
+
+  private func cursorCorrectionTrackingAreaCount(in view: LineRenderingTextView) -> Int {
+    view.trackingAreas.filter { area in
+      area.options.contains(.mouseMoved)
+        && area.options.contains(.mouseEnteredAndExited)
+        && area.options.contains(.cursorUpdate)
+        && area.options.contains(.activeInKeyWindow)
+        && area.options.contains(.inVisibleRect)
+    }.count
+  }
+
+  @MainActor
   func testMarkdownCopyWholeRenderedBoldLineIncludesRawMarkers() throws {
     let view = try makeViewer("**bold**")
     view.syntax = .markdown
