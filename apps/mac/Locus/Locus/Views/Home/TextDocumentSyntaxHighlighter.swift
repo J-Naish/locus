@@ -766,6 +766,89 @@ enum TextDocumentSyntaxHighlighter {
   // it stays highlighted regardless of total file size).
   static let maximumHighlightedUTF16Length = 200_000
 
+  private final class MarkdownTableColumnCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var columnsBySource: [String: [MarkdownTableColumn]] = [:]
+    private var order: [String] = []
+    private var measurementCount = 0
+    private let limit = 64
+
+    func columns(for source: String) -> [MarkdownTableColumn]? {
+      lock.lock()
+      defer { lock.unlock() }
+      return columnsBySource[source]
+    }
+
+    func insert(_ columns: [MarkdownTableColumn], for source: String) {
+      lock.lock()
+      defer { lock.unlock() }
+      guard columnsBySource[source] == nil else {
+        columnsBySource[source] = columns
+        return
+      }
+      columnsBySource[source] = columns
+      order.append(source)
+      while order.count > limit {
+        let removed = order.removeFirst()
+        columnsBySource.removeValue(forKey: removed)
+      }
+    }
+
+    func recordMeasurement() {
+      lock.lock()
+      defer { lock.unlock() }
+      measurementCount += 1
+    }
+
+    func resetForTesting() {
+      lock.lock()
+      defer { lock.unlock() }
+      columnsBySource.removeAll()
+      order.removeAll()
+      measurementCount = 0
+    }
+
+    func resetMeasurementCountForTesting() {
+      lock.lock()
+      defer { lock.unlock() }
+      measurementCount = 0
+    }
+
+    var countForTesting: Int {
+      lock.lock()
+      defer { lock.unlock() }
+      return columnsBySource.count
+    }
+
+    var measurementCountForTesting: Int {
+      lock.lock()
+      defer { lock.unlock() }
+      return measurementCount
+    }
+  }
+
+  /// Measured column layouts keyed by the table block's exact source text.
+  /// Markdown typography is process-constant today, so content is sufficient;
+  /// the cache is bounded so pathological documents cannot grow it without
+  /// limit.
+  private static let tableColumnsCache = MarkdownTableColumnCache()
+
+  static var tableColumnMeasurementCountForTesting: Int {
+    tableColumnsCache.measurementCountForTesting
+  }
+
+  static var tableColumnsCacheCountForTesting: Int {
+    tableColumnsCache.countForTesting
+  }
+
+  static func resetTableColumnsCacheForTesting() {
+    tableColumnsCache.resetForTesting()
+  }
+
+  static func resetTableColumnMeasurementCountForTesting() {
+    tableColumnsCache.resetMeasurementCountForTesting()
+  }
+
   static func apply(
     to textStorage: NSTextStorage?,
     text: String,
@@ -3110,6 +3193,12 @@ enum TextDocumentSyntaxHighlighter {
     alignments: [MarkdownTableColumnAlignment]
   ) -> [MarkdownTableColumn] {
     guard !alignments.isEmpty else { return [] }
+    let cacheKey = rowBodies.joined(separator: "\n")
+    if let cached = tableColumnsCache.columns(for: cacheKey) {
+      return cached
+    }
+
+    tableColumnsCache.recordMeasurement()
     let font = TextDocumentSyntax.markdown.font
     let typography = MarkdownTypography.measurement(baseFont: font)
     var widths = Array(
@@ -3134,9 +3223,11 @@ enum TextDocumentSyntaxHighlighter {
       }
     }
 
-    return zip(widths, alignments).map { width, alignment in
+    let columns = zip(widths, alignments).map { width, alignment in
       MarkdownTableColumn(width: width, alignment: alignment)
     }
+    tableColumnsCache.insert(columns, for: cacheKey)
+    return columns
   }
 
   private static func markdownListMarkerPrefixLength(

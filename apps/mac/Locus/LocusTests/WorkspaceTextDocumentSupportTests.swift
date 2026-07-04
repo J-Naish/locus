@@ -1599,6 +1599,60 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertEqual(exampleColumn.width, expected, accuracy: 1)
   }
 
+  func testEditingParagraphDoesNotRemeasureUnchangedTable() {
+    TextDocumentSyntaxHighlighter.resetTableColumnsCacheForTesting()
+    let lines = markdownTableMeasurementFixture(paragraph: "Intro paragraph.")
+    _ = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    TextDocumentSyntaxHighlighter.resetTableColumnMeasurementCountForTesting()
+    var edited = lines
+    edited[0] = "Intro paragraph changed."
+    _ = TextDocumentSyntaxHighlighter.markdownLineStates(for: edited)
+
+    XCTAssertEqual(TextDocumentSyntaxHighlighter.tableColumnMeasurementCountForTesting, 0)
+  }
+
+  func testEditingTableRowRemeasuresOnlyThatTable() {
+    TextDocumentSyntaxHighlighter.resetTableColumnsCacheForTesting()
+    let firstTable = [
+      "| Name | Value |",
+      "| --- | --- |",
+      "| Alpha | One |",
+      "| Beta | Two |",
+    ]
+    let secondTable = [
+      "| Metric | Status |",
+      "| --- | --- |",
+      "| Open | Green |",
+      "| Closed | Blue |",
+    ]
+    let lines = firstTable + ["", "Between tables."] + secondTable
+    _ = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    TextDocumentSyntaxHighlighter.resetTableColumnMeasurementCountForTesting()
+    var edited = lines
+    edited[2] = "| Alpha | One edited |"
+    _ = TextDocumentSyntaxHighlighter.markdownLineStates(for: edited)
+
+    XCTAssertEqual(TextDocumentSyntaxHighlighter.tableColumnMeasurementCountForTesting, 1)
+  }
+
+  func testMarkdownTableColumnMeasurementCacheStaysBounded() {
+    TextDocumentSyntaxHighlighter.resetTableColumnsCacheForTesting()
+
+    for index in 0..<70 {
+      let lines = [
+        "| Name | Value |",
+        "| --- | --- |",
+        "| Row \(index) | \(index) |",
+      ]
+      _ = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    }
+
+    XCTAssertLessThanOrEqual(TextDocumentSyntaxHighlighter.tableColumnsCacheCountForTesting, 64)
+    XCTAssertEqual(TextDocumentSyntaxHighlighter.tableColumnMeasurementCountForTesting, 70)
+  }
+
   func testMarkdownWideTableColumnsAreNotScaledIntoProseWidth() {
     let lines = [
       "| Team | Owner | Region | Priority | Status | Budget | Actual | Delta | Risk | Next Step |",
@@ -2491,6 +2545,19 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       modified: nil,
       isReadOnly: false
     )
+  }
+
+  private func markdownTableMeasurementFixture(paragraph: String) -> [String] {
+    var lines = [
+      paragraph,
+      "",
+      "| Name | Owner | Status |",
+      "| --- | --- | --- |",
+    ]
+    for index in 0..<20 {
+      lines.append("| Item \(index) | Owner \(index % 3) | Ready \(index) |")
+    }
+    return lines
   }
 }
 
