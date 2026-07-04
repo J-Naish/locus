@@ -67,7 +67,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     didSet {
       guard syntax != oldValue else { return }
       resetLineRenderCache()
-      markdownLineStateCache = nil
+      resetMarkdownLineStateCache()
       invalidateMarkdownLinkVisualStateCache()
       cancelMarkdownLineStateBuild()
       markdownTableScrollOffsets.removeAll()
@@ -100,7 +100,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       pendingMarkdownViewModeSelection = nil
       pendingMarkdownViewModeViewportAnchor = nil
       resetLineRenderCache()
-      markdownLineStateCache = nil
+      resetMarkdownLineStateCache()
       invalidateMarkdownLinkVisualStateCache()
       cancelMarkdownLineStateBuild()
       markdownTableScrollOffsets.removeAll()
@@ -226,6 +226,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private var rowStartComputationCount = 0
   private var rowSizeComputationCount = 0
   private var markdownLineStateCache: (revision: UInt64, states: [MarkdownLineStyleState])?
+  private struct MarkdownLineStateSpliceMetadata {
+    let change: TextChange
+  }
+  private struct RewrittenLineBand {
+    let startLine: Int
+    let insertedBreaks: Int
+
+    var editEndNew: Int { startLine + insertedBreaks }
+  }
+  private var pendingMarkdownLineStateSplice: MarkdownLineStateSpliceMetadata?
+  private var markdownLineStateRestyledRange: Range<Int>?
+  private var markdownLineStateLastSpliceFellBack = false
   private struct MarkdownLinkVisualStateCacheKey: Hashable {
     let baseFilePath: String?
     let destination: String
@@ -302,6 +314,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private func resetLineRenderCache() {
     lineRenderCache = nil
     lastVideoSyncKey = nil
+  }
+
+  private func resetMarkdownLineStateCache() {
+    markdownLineStateCache = nil
+    pendingMarkdownLineStateSplice = nil
+    markdownLineStateRestyledRange = nil
+    markdownLineStateLastSpliceFellBack = false
   }
 
   /// Coalesces image-store updates into one relayout per main-actor turn —
@@ -1418,6 +1437,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     longLineDecisionValid = true
     if let markdownLineStates = outcome.markdownLineStates {
       markdownLineStateCache = (revision, markdownLineStates)
+      pendingMarkdownLineStateSplice = nil
+      markdownLineStateRestyledRange = nil
+      markdownLineStateLastSpliceFellBack = false
       markdownLineStateBuildTargetRevision = nil
       markdownLineStateBuildTask?.cancel()
       markdownLineStateBuildTask = nil
@@ -1626,31 +1648,40 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       .count
   }
 
+  private func rewrittenLineBand(
+    afterChange change: TextChange,
+    in buffer: any TextDocumentReading
+  ) -> RewrittenLineBand? {
+    // Resolve the rewritten line band [startLine, startLine + insertedBreaks]
+    // in the new document. The prefix before the change is identical on both
+    // sides, so `startLine` is also where the old band began.
+    guard let startPosition = try? buffer.position(forUTF16: change.startUTF16),
+      let newEndPosition = try? buffer.position(
+        forUTF16: change.startUTF16 + change.newLengthUTF16)
+    else {
+      return nil
+    }
+    return RewrittenLineBand(
+      startLine: startPosition.line,
+      insertedBreaks: newEndPosition.line - startPosition.line)
+  }
+
   /// Recomputes the wrap index for just the lines a change rewrote, splicing
   /// their new row counts into place rather than re-wrapping the whole document
   /// — the difference between an instant Return/paste/undo and a hitch that
   /// grows with the file. `change` is in post-edit coordinates. Falls back to a
   /// full rebuild whenever the splice is not provably safe.
   private func updateWrapIndex(afterChange change: TextChange) {
-    // Resolve the rewritten line band [startLine, startLine + insertedBreaks]
-    // in the new document. The prefix before the change is identical on both
-    // sides, so `startLine` is also where the old band began.
-    guard let buffer = reader,
-      let startPosition = try? buffer.position(forUTF16: change.startUTF16),
-      let newEndPosition = try? buffer.position(
-        forUTF16: change.startUTF16 + change.newLengthUTF16)
-    else {
+    guard let buffer = reader, let band = rewrittenLineBand(afterChange: change, in: buffer) else {
       rebuildWrapIndex()
       return
     }
-    let startLine = startPosition.line
-    let insertedBreaks = newEndPosition.line - startLine
     if let counts = wrapRowCounts {
       spliceWrapIndex(
-        counts, startLine: startLine, insertedBreaks: insertedBreaks,
+        counts, startLine: band.startLine, insertedBreaks: band.insertedBreaks,
         utf16Delta: change.newLengthUTF16 - change.oldLengthUTF16)
     } else {
-      updateNoWrapDecision(startLine: startLine, insertedBreaks: insertedBreaks)
+      updateNoWrapDecision(startLine: band.startLine, insertedBreaks: band.insertedBreaks)
     }
   }
 
@@ -2175,7 +2206,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// so a reused scroll view does not keep the previous file's position.
   private func didSetDocument() {
     resetLineRenderCache()
-    markdownLineStateCache = nil
+    resetMarkdownLineStateCache()
     invalidateMarkdownLinkVisualStateCache()
     cancelMarkdownLineStateBuild()
     markdownTableScrollOffsets.removeAll()
@@ -4346,7 +4377,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// wrap index can be updated for just those lines.
   private func afterUndoRedo(change: TextChange) {
     resetLineRenderCache()
-    invalidateMarkdownLineStateCacheAfterContentChange()
+    invalidateMarkdownLineStateCacheAfterContentChange(change: change)
     maxObservedLineWidth = 0
     verticalGoalX = nil
     updateWrapIndex(afterChange: change)
@@ -4679,7 +4710,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     caretLineViewportHold heldCaretLine: Int? = nil
   ) {
     resetLineRenderCache()
-    invalidateMarkdownLineStateCacheAfterContentChange()
+    invalidateMarkdownLineStateCacheAfterContentChange(change: change)
     verticalGoalX = nil
     // The widest-line high-water mark can only shrink via an edit (deleting or
     // splitting a long line), so reset it and let `draw` re-measure the visible
@@ -5092,19 +5123,176 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       }
       return nil
     }
-    let lines = buffer.text(
-      forLineRange: 0,
-      count: buffer.lineCount,
-      maxBytesPerLine: maximumFetchedBytesPerLine
-    )
-    .components(separatedBy: "\n")
+    let hadPendingSplice = pendingMarkdownLineStateSplice != nil
+    if let states = splicedMarkdownLineStates(for: buffer, revision: revision) {
+      return states
+    }
+    return rebuildMarkdownLineStateCache(
+      for: buffer,
+      revision: revision,
+      fellBackFromSplice: hadPendingSplice)
+  }
+
+  private func rebuildMarkdownLineStateCache(
+    for buffer: any TextDocumentReading,
+    revision: UInt64,
+    fellBackFromSplice: Bool
+  ) -> [MarkdownLineStyleState] {
     var states = TextDocumentSyntaxHighlighter.markdownLineStates(
-      for: Array(lines.prefix(buffer.lineCount)))
+      for: markdownSourceLines(for: buffer, range: 0..<buffer.lineCount))
     while states.count < buffer.lineCount {
       states.append(.plain)
     }
+    pendingMarkdownLineStateSplice = nil
+    markdownLineStateRestyledRange = nil
+    markdownLineStateLastSpliceFellBack = fellBackFromSplice
     markdownLineStateCache = (revision, states)
     return states
+  }
+
+  private func markdownSourceLines(
+    for buffer: any TextDocumentReading,
+    range: Range<Int>
+  ) -> [String] {
+    guard !range.isEmpty else { return [] }
+    return Array(
+      buffer.text(
+        forLineRange: range.lowerBound,
+        count: range.count,
+        maxBytesPerLine: maximumFetchedBytesPerLine
+      )
+      .components(separatedBy: "\n")
+      .prefix(range.count))
+  }
+
+  private func splicedMarkdownLineStates(
+    for buffer: any TextDocumentReading,
+    revision: UInt64
+  ) -> [MarkdownLineStyleState]? {
+    guard let pending = pendingMarkdownLineStateSplice,
+      let cache = markdownLineStateCache,
+      cache.revision &+ 1 == revision,
+      let band = rewrittenLineBand(afterChange: pending.change, in: buffer)
+    else {
+      return nil
+    }
+
+    let old = cache.states
+    let oldCount = old.count
+    let newCount = buffer.lineCount
+    guard oldCount > 0, newCount > 0 else { return nil }
+
+    if band.startLine == 0
+      || markdownFrontMatterTouchesLineAroundEdit(
+        oldStates: old,
+        startLine: band.startLine)
+    {
+      return nil
+    }
+
+    let lineDelta = newCount - oldCount
+    var anchor = min(band.startLine, oldCount)
+    while anchor > 0 && !Self.markdownLineStateIsNeutral(old[anchor - 1]) {
+      anchor -= 1
+    }
+    if anchor > 0 {
+      anchor -= 1
+    }
+    anchor = min(anchor, newCount)
+
+    var cut = min(newCount, max(anchor + 1, band.editEndNew + 64))
+    var parsedSlice: [MarkdownLineStyleState] = []
+    var spliceEnd = newCount
+    while true {
+      parsedSlice = TextDocumentSyntaxHighlighter.markdownLineStates(
+        for: markdownSourceLines(for: buffer, range: anchor..<cut))
+      let searchStart = max(anchor, band.editEndNew + 1)
+      var foundConvergence: Int?
+      if searchStart < cut {
+        for candidate in searchStart..<cut {
+          let oldIndex = candidate - lineDelta
+          guard oldIndex >= 0, oldIndex < oldCount else { continue }
+          let newState = parsedSlice[candidate - anchor]
+          let oldState = old[oldIndex]
+          if Self.markdownLineStateIsNeutral(newState)
+            && Self.markdownLineStatesMatchForConvergence(newState, oldState)
+          {
+            foundConvergence = candidate
+            break
+          }
+        }
+      }
+      if let foundConvergence {
+        spliceEnd = foundConvergence
+        break
+      }
+      if cut == newCount {
+        spliceEnd = newCount
+        break
+      }
+      cut = min(newCount, anchor + max(1, (cut - anchor) * 2))
+    }
+
+    let oldSuffixStart = spliceEnd - lineDelta
+    guard oldSuffixStart >= anchor, oldSuffixStart <= oldCount else { return nil }
+    let parsedCount = spliceEnd - anchor
+    guard parsedCount >= 0, parsedCount <= parsedSlice.count else { return nil }
+
+    let oldAffectedRange = min(anchor, oldCount)..<min(oldCount, oldSuffixStart)
+    let newSlice = Array(parsedSlice.prefix(parsedCount))
+    guard !old[oldAffectedRange].contains(where: { $0.isReferenceDefinition }),
+      !newSlice.contains(where: { $0.isReferenceDefinition })
+    else {
+      return nil
+    }
+
+    let referenceDefinitions = old.first?.referenceDefinitions ?? [:]
+    let normalizedSlice = newSlice.map { state in
+      var copy = state
+      copy.referenceDefinitions = referenceDefinitions
+      return copy
+    }
+
+    var states: [MarkdownLineStyleState] = []
+    states.reserveCapacity(newCount)
+    states.append(contentsOf: old.prefix(anchor))
+    states.append(contentsOf: normalizedSlice)
+    states.append(contentsOf: old.suffix(from: oldSuffixStart))
+    guard states.count == newCount else { return nil }
+
+    pendingMarkdownLineStateSplice = nil
+    markdownLineStateRestyledRange = anchor..<spliceEnd
+    markdownLineStateLastSpliceFellBack = false
+    markdownLineStateCache = (revision, states)
+    return states
+  }
+
+  private func markdownFrontMatterTouchesLineAroundEdit(
+    oldStates: [MarkdownLineStyleState],
+    startLine: Int
+  ) -> Bool {
+    guard !oldStates.isEmpty else { return false }
+    let lower = max(0, startLine - 1)
+    let upper = min(oldStates.count, startLine + 2)
+    guard lower < upper else { return false }
+    return oldStates[lower..<upper].contains { state in
+      state.insideFrontMatter || state.isFrontMatterDelimiter
+    }
+  }
+
+  private static func markdownLineStatesMatchForConvergence(
+    _ lhs: MarkdownLineStyleState,
+    _ rhs: MarkdownLineStyleState
+  ) -> Bool {
+    var left = lhs
+    var right = rhs
+    left.referenceDefinitions = [:]
+    right.referenceDefinitions = [:]
+    return left == right
+  }
+
+  private static func markdownLineStateIsNeutral(_ state: MarkdownLineStyleState) -> Bool {
+    state == .plain
   }
 
   private func scheduleMarkdownLineStateBuild(revision: UInt64) {
@@ -5161,18 +5349,30 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     markdownLineStateBuildTask = nil
   }
 
-  private func invalidateMarkdownLineStateCacheAfterContentChange() {
+  private func invalidateMarkdownLineStateCacheAfterContentChange(change: TextChange? = nil) {
     invalidateMarkdownLinkVisualStateCache()
     guard usesMarkdownDocumentLayout, let buffer = reader else {
-      markdownLineStateCache = nil
+      resetMarkdownLineStateCache()
       cancelMarkdownLineStateBuild()
       return
     }
     let revision = buffer.revision
     if buffer.lineCount <= markdownSynchronousLineStateLimit {
-      markdownLineStateCache = nil
       cancelMarkdownLineStateBuild()
+      guard let change,
+        markdownLineStateCache != nil,
+        pendingMarkdownLineStateSplice == nil
+      else {
+        resetMarkdownLineStateCache()
+        return
+      }
+      pendingMarkdownLineStateSplice = MarkdownLineStateSpliceMetadata(change: change)
+      markdownLineStateRestyledRange = nil
+      markdownLineStateLastSpliceFellBack = false
     } else {
+      pendingMarkdownLineStateSplice = nil
+      markdownLineStateRestyledRange = nil
+      markdownLineStateLastSpliceFellBack = false
       if markdownLineStateCache?.revision != revision {
         markdownLineStateCache = nil
       }
@@ -7433,6 +7633,32 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   func setSelectionForTesting(anchor: TextSelection.Endpoint, head: TextSelection.Endpoint) {
     selection = TextSelection(anchor: anchor, head: head)
+  }
+
+  func setSelectionForTesting(globalStartUTF16: Int, globalEndUTF16: Int) {
+    guard let buffer = reader,
+      let start = try? buffer.position(forUTF16: globalStartUTF16),
+      let end = try? buffer.position(forUTF16: globalEndUTF16)
+    else {
+      selection = nil
+      return
+    }
+    selection = TextSelection(
+      anchor: displayEndpoint(for: start),
+      head: displayEndpoint(for: end))
+  }
+
+  func markdownLineStatesForTesting() -> [MarkdownLineStyleState]? {
+    guard let buffer = reader else { return nil }
+    return markdownLineStates(for: buffer)
+  }
+
+  func markdownLineStateRestyledRangeForTesting() -> Range<Int>? {
+    markdownLineStateRestyledRange
+  }
+
+  func markdownLineStateLastSpliceFellBackForTesting() -> Bool {
+    markdownLineStateLastSpliceFellBack
   }
 
   static func markdownViewModeToggleCursorRectForTesting(in visible: NSRect) -> NSRect {

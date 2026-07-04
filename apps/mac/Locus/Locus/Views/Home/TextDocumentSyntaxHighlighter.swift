@@ -827,11 +827,35 @@ enum TextDocumentSyntaxHighlighter {
     }
   }
 
+  private final class MarkdownLineStateParseCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var parsedLineCount = 0
+
+    func record(_ count: Int) {
+      lock.lock()
+      defer { lock.unlock() }
+      parsedLineCount += count
+    }
+
+    func reset() {
+      lock.lock()
+      defer { lock.unlock() }
+      parsedLineCount = 0
+    }
+
+    var count: Int {
+      lock.lock()
+      defer { lock.unlock() }
+      return parsedLineCount
+    }
+  }
+
   /// Measured column layouts keyed by the table block's exact source text.
   /// Markdown typography is process-constant today, so content is sufficient;
   /// the cache is bounded so pathological documents cannot grow it without
   /// limit.
   private static let tableColumnsCache = MarkdownTableColumnCache()
+  private static let lineStateParseCounter = MarkdownLineStateParseCounter()
 
   static var tableColumnMeasurementCountForTesting: Int {
     tableColumnsCache.measurementCountForTesting
@@ -847,6 +871,14 @@ enum TextDocumentSyntaxHighlighter {
 
   static func resetTableColumnMeasurementCountForTesting() {
     tableColumnsCache.resetMeasurementCountForTesting()
+  }
+
+  static var lineStateParseCountForTesting: Int {
+    lineStateParseCounter.count
+  }
+
+  static func resetLineStateParseCountForTesting() {
+    lineStateParseCounter.reset()
   }
 
   static func apply(
@@ -3274,6 +3306,7 @@ enum TextDocumentSyntaxHighlighter {
   }
 
   static func markdownLineStates(for lines: [String]) -> [MarkdownLineStyleState] {
+    lineStateParseCounter.record(lines.count)
     var states = Array(repeating: MarkdownLineStyleState.plain, count: lines.count)
     guard !lines.isEmpty else { return states }
 

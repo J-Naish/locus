@@ -3567,6 +3567,314 @@ final class TextViewportLayoutTests: XCTestCase {
     return view
   }
 
+  private struct MarkdownOracleRNG {
+    var state: UInt64 = 0x4D41_524B_444F_574E
+
+    mutating func next() -> UInt64 {
+      state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+      return state
+    }
+
+    mutating func integer(in range: Range<Int>) -> Int {
+      precondition(!range.isEmpty)
+      let width = UInt64(range.upperBound - range.lowerBound)
+      return range.lowerBound + Int(next() % width)
+    }
+
+    mutating func integer(in range: ClosedRange<Int>) -> Int {
+      precondition(!range.isEmpty)
+      let width = UInt64(range.upperBound - range.lowerBound + 1)
+      return range.lowerBound + Int(next() % width)
+    }
+  }
+
+  private func markdownStateOracleFixture() -> String {
+    var lines = [
+      "---",
+      "title: Markdown incremental oracle",
+      "tags:",
+      "  - markdown",
+      "  - cache",
+      "description: |",
+      "  This block scalar keeps front matter active.",
+      "  It also gives the parser continuation lines.",
+      "---",
+      "# Heading 1",
+      "## Heading 2",
+      "### Heading 3",
+      "#### Heading 4",
+      "##### Heading 5",
+      "###### Heading 6",
+      "",
+      "Setext Heading One",
+      "===",
+      "Setext Heading Two",
+      "---",
+      "",
+      "- bullet one",
+      "  - nested bullet",
+      "    - [ ] nested task",
+      "1. ordered one",
+      "   1. ordered child",
+      "      - mixed child",
+      "",
+      "> Quote level one",
+      "> > Quote level two",
+      "> | Quoted | Table |",
+      "> | --- | --- |",
+      "> | alpha | beta |",
+      "",
+      "```swift",
+      "let value = 42",
+      "```",
+      "",
+      "```",
+      "bare fence",
+      "```",
+      "",
+      "    indented code line",
+      "    second indented code line",
+      "",
+      "| Name | Status | Notes |",
+      "| :--- | ---: | :---: |",
+      "| Alpha | 1 | [ref][label] and *emphasis* |",
+      "| Beta | 200 | `code` with **bold** |",
+      "",
+      "| Wide | Column | Alignment |",
+      "| --- | :---: | ---: |",
+      "| a long value that wraps eventually | center | 123.45 |",
+      "| another row | middle | 987.65 |",
+      "",
+      "| Short | Table |",
+      "| --- | --- |",
+      "| x | y |",
+      "",
+      "Paragraph with [inline link](https://example.com) and ![Alt](../media/valid/images/locus-fixture.svg).",
+      "Paragraph using [label] and another [missing][unknown].",
+      "",
+      "[^note]: Footnote starts here",
+      "    continued footnote line",
+      "",
+      "* * *",
+      "",
+    ]
+    for index in 0..<48 {
+      lines.append("Plain paragraph \(index) with **bold**, _italic_, and `code`.")
+      if index.isMultiple(of: 8) {
+        lines.append("")
+      }
+    }
+    lines.append("[label]: https://example.com/reference")
+    lines.append("[other]: ../docs/requirements.md")
+    return lines.joined(separator: "\n")
+  }
+
+  @MainActor
+  private func coldMarkdownLineStates(of view: LineRenderingTextView) throws
+    -> [MarkdownLineStyleState]
+  {
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let lines = buffer.text(forLineRange: 0, count: buffer.lineCount)
+      .components(separatedBy: "\n")
+    var states = TextDocumentSyntaxHighlighter.markdownLineStates(
+      for: Array(lines.prefix(buffer.lineCount)))
+    while states.count < buffer.lineCount {
+      states.append(.plain)
+    }
+    return states
+  }
+
+  private func assertMarkdownLineStates(
+    _ actual: [MarkdownLineStyleState],
+    equalTo expected: [MarkdownLineStyleState],
+    step: Int,
+    edit: String,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) {
+    guard actual.count == expected.count else {
+      XCTFail(
+        "Line-state count mismatch after step \(step) (\(edit)): actual \(actual.count), expected \(expected.count)",
+        file: file, line: line)
+      return
+    }
+    for index in actual.indices where actual[index] != expected[index] {
+      XCTFail(
+        "Line-state mismatch after step \(step) (\(edit)) at line \(index)",
+        file: file, line: line)
+      return
+    }
+  }
+
+  @MainActor
+  @discardableResult
+  private func applyRandomMarkdownOracleEdit(
+    to view: LineRenderingTextView,
+    rng: inout MarkdownOracleRNG
+  ) throws -> String {
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let triggerStrings = ["```", "---", "## ", "| a | b |", "[label]: https://x"]
+    let insertCharacters = [
+      "#", "-", "|", "`", ">", "*", "_", "[", "]", ":", " ", "\n", "a", "あ",
+    ]
+    let editKind = rng.integer(in: 0..<3)
+    switch editKind {
+    case 0:
+      let text = insertCharacters[rng.integer(in: 0..<insertCharacters.count)]
+      let offset = rng.integer(in: 0...buffer.utf16Length)
+      view.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset)
+      view.insertText(text)
+      return "insert \(String(reflecting: text)) at \(offset)"
+    case 1 where buffer.utf16Length > 0:
+      let start = rng.integer(in: 0..<buffer.utf16Length)
+      let maximumLength = min(5, buffer.utf16Length - start)
+      let length = rng.integer(in: 1...maximumLength)
+      view.setSelectionForTesting(globalStartUTF16: start, globalEndUTF16: start + length)
+      view.deleteBackward()
+      return "delete \(length) at \(start)"
+    default:
+      let text = triggerStrings[rng.integer(in: 0..<triggerStrings.count)]
+      let line = rng.integer(in: 0..<max(1, buffer.lineCount))
+      let offset = try buffer.position(forLine: line, columnUTF16: 0).utf16
+      view.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset)
+      view.insertText(text)
+      return "insert trigger \(String(reflecting: text)) at line \(line)"
+    }
+  }
+
+  @MainActor
+  func testMarkdownLineStatesIncrementalMatchesFullRecomputeUnderRandomEdits() throws {
+    let view = try makeEditableMarkdownViewer(markdownStateOracleFixture(), width: 720)
+    _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+
+    var rng = MarkdownOracleRNG()
+    for step in 0..<400 {
+      let edit = try applyRandomMarkdownOracleEdit(to: view, rng: &rng)
+      let actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+      let expected = try coldMarkdownLineStates(of: view)
+      assertMarkdownLineStates(actual, equalTo: expected, step: step, edit: edit)
+    }
+  }
+
+  @MainActor
+  func testTypingInParagraphReusesStatesOutsideWindow() throws {
+    var lines = (0..<200).map { "Paragraph \($0) with stable text." }
+    lines.insert(
+      """
+      | Name | Value | Notes |
+      | --- | ---: | --- |
+      | Alpha | 1 | table before edit |
+      | Beta | 2 | table before edit |
+      """,
+      at: 20)
+    let view = try makeEditableMarkdownViewer(lines.joined(separator: "\n"), width: 720)
+    _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+
+    TextDocumentSyntaxHighlighter.resetLineStateParseCountForTesting()
+    TextDocumentSyntaxHighlighter.resetTableColumnMeasurementCountForTesting()
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let offset = try buffer.position(forLine: 120, columnUTF16: 10).utf16
+    view.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset)
+    view.insertText("x")
+
+    let actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    let parsedLines = TextDocumentSyntaxHighlighter.lineStateParseCountForTesting
+    let measuredTables = TextDocumentSyntaxHighlighter.tableColumnMeasurementCountForTesting
+    let expected = try coldMarkdownLineStates(of: view)
+    assertMarkdownLineStates(actual, equalTo: expected, step: 0, edit: "paragraph typing")
+    XCTAssertLessThan(parsedLines, 80)
+    XCTAssertEqual(measuredTables, 0)
+    XCTAssertFalse(view.markdownLineStateLastSpliceFellBackForTesting())
+  }
+
+  @MainActor
+  func testOpeningFenceCascadesBelow() throws {
+    let view = try makeEditableMarkdownViewer(
+      """
+      paragraph
+      line one
+      line two
+      ```
+      after
+      """)
+    _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let offset = try buffer.position(forLine: 0, columnUTF16: 0).utf16
+    view.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset)
+    view.insertText("```\n")
+
+    let actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    let expected = try coldMarkdownLineStates(of: view)
+    assertMarkdownLineStates(actual, equalTo: expected, step: 0, edit: "opening fence")
+    XCTAssertTrue(actual[1].insideFence)
+    XCTAssertTrue(actual[2].insideFence)
+  }
+
+  @MainActor
+  func testSetextUnderlineRestylesLineAbove() throws {
+    let view = try makeEditableMarkdownViewer("Title\n\nAfter")
+    _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let offset = try buffer.position(forLine: 1, columnUTF16: 0).utf16
+    view.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset)
+    view.insertText("---")
+
+    let actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    let expected = try coldMarkdownLineStates(of: view)
+    assertMarkdownLineStates(actual, equalTo: expected, step: 0, edit: "setext underline")
+    XCTAssertEqual(actual[0].setextHeadingLevel, 2)
+    XCTAssertEqual(actual[0].headingLevel, 2)
+  }
+
+  @MainActor
+  func testEditingReferenceDefinitionTriggersFullRestyle() throws {
+    let text =
+      (["Paragraph with [label]."] + (0..<80).map { "Filler \($0)" }
+      + ["[label]: https://example.com/old"]).joined(separator: "\n")
+    let view = try makeEditableMarkdownViewer(text)
+    _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+
+    TextDocumentSyntaxHighlighter.resetLineStateParseCountForTesting()
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let definitionLine = buffer.lineCount - 1
+    let offset = try buffer.position(forLine: definitionLine, columnUTF16: 30).utf16
+    view.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset + 3)
+    view.insertText("new")
+
+    let actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    let expected = try coldMarkdownLineStates(of: view)
+    assertMarkdownLineStates(actual, equalTo: expected, step: 0, edit: "reference definition")
+    XCTAssertTrue(view.markdownLineStateLastSpliceFellBackForTesting())
+    XCTAssertGreaterThanOrEqual(
+      TextDocumentSyntaxHighlighter.lineStateParseCountForTesting,
+      try XCTUnwrap(view.editableBuffer?.lineCount))
+  }
+
+  @MainActor
+  func testSpliceHandlesLineInsertionAndDeletionShifts() throws {
+    let view = try makeEditableMarkdownViewer("alpha\nbeta\ngamma\ndelta")
+    _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+
+    var buffer = try XCTUnwrap(view.editableBuffer)
+    let insertOffset = try buffer.position(forLine: 1, columnUTF16: 4).utf16
+    view.setSelectionForTesting(globalStartUTF16: insertOffset, globalEndUTF16: insertOffset)
+    view.insertText("\nnew")
+    var actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    var expected = try coldMarkdownLineStates(of: view)
+    assertMarkdownLineStates(actual, equalTo: expected, step: 0, edit: "insert newline")
+
+    buffer = try XCTUnwrap(view.editableBuffer)
+    let deleteStart = insertOffset
+    let deleteEnd = min(buffer.utf16Length, insertOffset + 4)
+    view.setSelectionForTesting(globalStartUTF16: deleteStart, globalEndUTF16: deleteEnd)
+    view.deleteBackward()
+    actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    expected = try coldMarkdownLineStates(of: view)
+    assertMarkdownLineStates(actual, equalTo: expected, step: 1, edit: "delete inserted newline")
+  }
+
   @MainActor
   func testMarkdownTableTabNavigatesCellsAndWrapsBothDirections() throws {
     // A header + separator + two body rows, three columns. The rendered row uses
