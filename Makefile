@@ -10,7 +10,7 @@ DEST    := platform=macOS,arch=arm64
 
 .DEFAULT_GOAL := help
 
-.PHONY: help run run-release build build-release install test unit perf core-test core-lint clean
+.PHONY: help run run-release build build-release install test unit check perf core-fmt core-clippy core-test core-lint swift-unit clean
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -34,17 +34,26 @@ install: ## Build (Release) and install Locus.app to /Applications
 test: core-test ## Run Rust core tests and the full macOS test suite (unit + UI)
 	xcodebuild test -project $(PROJECT) -scheme $(SCHEME) -destination '$(DEST)'
 
-unit: core-test ## Run Rust core tests and only the macOS unit tests (fast)
+unit: core-test swift-unit ## Run Rust core tests and only the macOS unit tests (fast)
+
+check: core-fmt core-clippy core-test swift-unit perf ## Run the full local pre-push check suite
+
+swift-unit:
 	xcodebuild test -project $(PROJECT) -scheme $(SCHEME) -destination '$(DEST)' -only-testing:LocusTests
 
 perf: ## Run the speed/size smoke budgets
 	scripts/perf-smoke.sh
 
-core-test: ## Run the Rust core tests
-	cd core && cargo test
+core-fmt:
+	cd core && cargo fmt --check
 
-core-lint: ## Check Rust formatting and clippy (warnings as errors)
-	cd core && cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings
+core-clippy:
+	cargo clippy --manifest-path core/Cargo.toml --all-targets --all-features -- -D warnings
+
+core-test: ## Run the Rust core tests
+	cargo test --manifest-path core/Cargo.toml
+
+core-lint: core-fmt core-clippy ## Check Rust formatting and clippy (warnings as errors)
 
 clean: ## Remove the Xcode build products
 	rm -rf .build/xcode-derived
