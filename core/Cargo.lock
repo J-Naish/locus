@@ -19,3 +19,7 @@ version = "0.1.0"
 dependencies = [
  "app-core",
 ]
+
+[[package]]
+name = "terminal"
+version = "0.1.0"

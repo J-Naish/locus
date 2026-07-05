@@ -3,6 +3,7 @@ members = [
     "crates/app-core",
     "crates/app-ffi",
     "crates/app-cli",
+    "crates/terminal",
 ]
 resolver = "2"
 
