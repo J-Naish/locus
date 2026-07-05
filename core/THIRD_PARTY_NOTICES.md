@@ -29,3 +29,10 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## X11 RGB color-name table
+
+`core/crates/terminal/src/x11_color/rgb.txt` is the X11 color-name table from
+the X.Org project, sourced via Ghostty from
+https://gitlab.freedesktop.org/xorg/app/rgb. It is distributed under the
+MIT/X11 license, with provenance distinct from the Ghostty terminal-core port.
