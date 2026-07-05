@@ -116,7 +116,7 @@ pub enum Action<'a> {
     Execute(u8),
     CsiDispatch(Csi<'a>),
     EscDispatch(Esc<'a>),
-    OscDispatch(crate::osc::Command),
+    OscDispatch(crate::osc::Command<'a>),
     DcsHook(Dcs<'a>),
     DcsPut(u8),
     DcsUnhook,
@@ -136,11 +136,12 @@ pub struct Parser {
     param_acc: u16,
     param_acc_digits: u8,
     osc_parser: crate::osc::Parser,
+    suppress_st_final: bool,
 }
 
 enum ExitKind {
     None,
-    Osc(Option<crate::osc::Command>),
+    OscEnd,
     DcsUnhook,
     ApcEnd,
 }
@@ -173,6 +174,7 @@ impl Parser {
             param_acc: 0,
             param_acc_digits: 0,
             osc_parser: crate::osc::Parser::default(),
+            suppress_st_final: false,
         }
     }
 
@@ -207,7 +209,11 @@ impl Parser {
 
         let exit = if state_changing {
             match self.state {
-                State::OscString => ExitKind::Osc(self.osc_parser.end(byte)),
+                State::OscString => {
+                    self.osc_parser.end(Some(byte));
+                    self.suppress_st_final = byte == 0x1B;
+                    ExitKind::OscEnd
+                }
                 State::DcsPassthrough => ExitKind::DcsUnhook,
                 State::SosPmApcString => ExitKind::ApcEnd,
                 _ => ExitKind::None,
@@ -274,7 +280,15 @@ impl Parser {
                     TransitionKind::EmitCsi
                 }
             }
-            TransitionAction::EscDispatch => TransitionKind::EmitEsc,
+            TransitionAction::EscDispatch => {
+                if self.suppress_st_final && byte == b'\\' {
+                    self.suppress_st_final = false;
+                    TransitionKind::Nothing
+                } else {
+                    self.suppress_st_final = false;
+                    TransitionKind::EmitEsc
+                }
+            }
             TransitionAction::Put => TransitionKind::DcsPut,
             TransitionAction::ApcPut => TransitionKind::ApcPut,
         }
@@ -322,7 +336,7 @@ impl Parser {
     fn materialize_exit(&self, exit: ExitKind) -> Option<Action<'_>> {
         match exit {
             ExitKind::None => None,
-            ExitKind::Osc(command) => command.map(Action::OscDispatch),
+            ExitKind::OscEnd => self.osc_parser.command().map(Action::OscDispatch),
             ExitKind::DcsUnhook => Some(Action::DcsUnhook),
             ExitKind::ApcEnd => Some(Action::ApcEnd),
         }
@@ -848,9 +862,188 @@ mod tests {
         assert_eq!(parser.state(), State::Ground);
     }
 
-    // Deferred until phase T3 ports the full OSC parser:
-    // - ghostty: "osc: change window title" (Parser.zig:844)
-    // - ghostty: "osc: change window title (end in esc)" (Parser.zig:867)
-    // - ghostty: "osc: 112 incomplete sequence" (Parser.zig:893)
-    // - ghostty: "osc: 104 empty" (Parser.zig:929)
+    // ghostty: "osc: change window title" (Parser.zig:844)
+    #[test]
+    fn osc_change_window_title_ends_on_bel() {
+        let mut parser = Parser::new();
+        feed_no_actions(&mut parser, b"\x1b]0;abc");
+        let actions = parser.next(0x07);
+        let Some(Action::OscDispatch(crate::osc::Command::ChangeWindowTitle(title))) = actions[0]
+        else {
+            panic!("expected title dispatch, got {:?}", actions[0]);
+        };
+        assert_eq!(title, b"abc");
+        assert_eq!(parser.state(), State::Ground);
+    }
+
+    // ghostty: "osc: change window title (end in esc)" (Parser.zig:867)
+    #[test]
+    fn osc_change_window_title_ends_on_esc_st() {
+        let mut parser = Parser::new();
+        feed_no_actions(&mut parser, b"\x1b]0;abc");
+        let actions = parser.next(0x1B);
+        let Some(Action::OscDispatch(crate::osc::Command::ChangeWindowTitle(title))) = actions[0]
+        else {
+            panic!("expected title dispatch, got {:?}", actions[0]);
+        };
+        assert_eq!(title, b"abc");
+        assert_no_actions(parser.next(b'\\'));
+        assert_eq!(parser.state(), State::Ground);
+    }
+
+    // ghostty: "osc: 112 incomplete sequence" (Parser.zig:893)
+    #[test]
+    fn osc_112_incomplete_sequence_dispatches_cursor_reset() {
+        let mut parser = Parser::new();
+        feed_no_actions(&mut parser, b"\x1b]112");
+        let actions = parser.next(0x07);
+        let Some(Action::OscDispatch(crate::osc::Command::ColorOperation {
+            kind,
+            requests,
+            terminator,
+        })) = actions[0]
+        else {
+            panic!("expected color dispatch, got {:?}", actions[0]);
+        };
+        assert_eq!(
+            kind,
+            crate::osc::parsers::color_operation::ColorOperationKind::Osc112
+        );
+        assert_eq!(
+            requests,
+            &[crate::osc::parsers::color_operation::ColorRequest::Reset(
+                crate::osc::ColorTarget::Dynamic(crate::color::Dynamic::Cursor)
+            )]
+        );
+        assert_eq!(terminator, crate::osc::Terminator::Bel);
+    }
+
+    // ghostty: "osc: 104 empty" (Parser.zig:929)
+    #[test]
+    fn osc_104_empty_dispatches_palette_reset() {
+        let mut parser = Parser::new();
+        feed_no_actions(&mut parser, b"\x1b]104");
+        let actions = parser.next(0x07);
+        let Some(Action::OscDispatch(crate::osc::Command::ColorOperation {
+            kind,
+            requests,
+            terminator,
+        })) = actions[0]
+        else {
+            panic!("expected color dispatch, got {:?}", actions[0]);
+        };
+        assert_eq!(
+            kind,
+            crate::osc::parsers::color_operation::ColorOperationKind::Osc104
+        );
+        assert_eq!(
+            requests,
+            &[crate::osc::parsers::color_operation::ColorRequest::ResetPalette]
+        );
+        assert_eq!(terminator, crate::osc::Terminator::Bel);
+    }
+
+    #[test]
+    fn osc_8_dispatches_hyperlink_start() {
+        let mut parser = Parser::new();
+        feed_no_actions(&mut parser, b"\x1b]8;id=abc;https://example.test");
+        let actions = parser.next(0x07);
+        let Some(Action::OscDispatch(crate::osc::Command::HyperlinkStart { id, uri })) = actions[0]
+        else {
+            panic!("expected hyperlink start, got {:?}", actions[0]);
+        };
+        assert_eq!(id, Some(&b"abc"[..]));
+        assert_eq!(uri, b"https://example.test");
+    }
+
+    #[test]
+    fn osc_8_dispatches_hyperlink_end() {
+        let mut parser = Parser::new();
+        feed_no_actions(&mut parser, b"\x1b]8;;");
+        let actions = parser.next(0x07);
+        assert!(matches!(
+            actions[0],
+            Some(Action::OscDispatch(crate::osc::Command::HyperlinkEnd))
+        ));
+    }
+
+    #[test]
+    fn osc_52_dispatches_clipboard_contents() {
+        let mut parser = Parser::new();
+        feed_no_actions(&mut parser, b"\x1b]52;c;SGVsbG8=");
+        let actions = parser.next(0x07);
+        let Some(Action::OscDispatch(crate::osc::Command::ClipboardContents { kind, data })) =
+            actions[0]
+        else {
+            panic!("expected clipboard contents, got {:?}", actions[0]);
+        };
+        assert_eq!(kind, b'c');
+        assert_eq!(data, b"SGVsbG8=");
+    }
+
+    #[test]
+    fn osc_7_dispatches_report_pwd() {
+        let mut parser = Parser::new();
+        feed_no_actions(&mut parser, b"\x1b]7;file://host/tmp/project");
+        let actions = parser.next(0x07);
+        let Some(Action::OscDispatch(crate::osc::Command::ReportPwd { value })) = actions[0] else {
+            panic!("expected report pwd, got {:?}", actions[0]);
+        };
+        assert_eq!(value, b"file://host/tmp/project");
+    }
+
+    #[test]
+    fn osc_66_dispatches_kitty_text_sizing() {
+        let mut parser = Parser::new();
+        feed_no_actions(&mut parser, b"\x1b]66;s=2:w=3:v=2:h=1;wide text");
+        let actions = parser.next(0x07);
+        let Some(Action::OscDispatch(crate::osc::Command::KittyTextSizing(command))) = actions[0]
+        else {
+            panic!("expected kitty text sizing, got {:?}", actions[0]);
+        };
+        assert_eq!(command.scale, 2);
+        assert_eq!(command.width, 3);
+        assert_eq!(command.valign, crate::osc::KittyTextVAlign::Center);
+        assert_eq!(command.halign, crate::osc::KittyTextHAlign::Right);
+        assert_eq!(command.text, b"wide text");
+    }
+
+    #[test]
+    fn osc_3008_dispatches_context_signal() {
+        let mut parser = Parser::new();
+        feed_no_actions(
+            &mut parser,
+            b"\x1b]3008;start=ctx-1;type=command;cwd=/tmp;pid=42",
+        );
+        let actions = parser.next(0x07);
+        let Some(Action::OscDispatch(crate::osc::Command::ContextSignal(command))) = actions[0]
+        else {
+            panic!("expected context signal, got {:?}", actions[0]);
+        };
+        assert_eq!(
+            command.action,
+            crate::osc::parsers::context_signal::ContextAction::Start
+        );
+        assert_eq!(command.id, b"ctx-1");
+        assert_eq!(
+            command.read_type(),
+            Some(crate::osc::parsers::context_signal::ContextType::Command)
+        );
+        assert_eq!(command.read_cwd(), Some(&b"/tmp"[..]));
+        assert_eq!(command.read_pid(), Some(42));
+    }
+
+    #[test]
+    fn osc_1337_dispatches_iterm2_copy_as_clipboard_contents() {
+        let mut parser = Parser::new();
+        feed_no_actions(&mut parser, b"\x1b]1337;Copy=:SGVsbG8=");
+        let actions = parser.next(0x07);
+        let Some(Action::OscDispatch(crate::osc::Command::ClipboardContents { kind, data })) =
+            actions[0]
+        else {
+            panic!("expected iTerm2 copy, got {:?}", actions[0]);
+        };
+        assert_eq!(kind, b'c');
+        assert_eq!(data, b"SGVsbG8=");
+    }
 }

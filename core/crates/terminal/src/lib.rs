@@ -5,6 +5,7 @@
 //! phases) terminal state, screen storage, and render snapshots. It is pure
 //! logic: no I/O, no PTY, no FFI — those live in other crates.
 
+pub mod apc;
 pub mod charsets;
 pub mod color;
 pub mod dcs;
