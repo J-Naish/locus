@@ -845,6 +845,61 @@ impl Page {
         }
     }
 
+    pub(crate) fn clone_row_from_page(
+        &mut self,
+        dst_y: CellCountInt,
+        source: &Page,
+        src_y: CellCountInt,
+    ) {
+        self.clone_partial_row_from(
+            CloneSource::Other(source),
+            dst_y,
+            src_y,
+            0,
+            source.size.cols.min(self.size.cols),
+        );
+    }
+
+    pub(crate) fn clear_row(&mut self, y: CellCountInt) {
+        self.clear_cells(y, 0, self.size.cols);
+    }
+
+    pub(crate) fn rotate_rows_left_once(&mut self, start: CellCountInt, end: CellCountInt) {
+        debug_assert!(start < end);
+        debug_assert!(end <= self.size.rows);
+        if end.saturating_sub(start) <= 1 {
+            return;
+        }
+        let first = self.row(start);
+        for y in start..end - 1 {
+            let next = self.row(y + 1);
+            self.set_row(y, next);
+        }
+        self.set_row(end - 1, first);
+    }
+
+    pub(crate) fn swap_rows(&mut self, left: CellCountInt, right: CellCountInt) {
+        debug_assert!(left < self.size.rows);
+        debug_assert!(right < self.size.rows);
+        if left == right {
+            return;
+        }
+        let left_row = self.row(left);
+        let right_row = self.row(right);
+        self.set_row(left, right_row);
+        self.set_row(right, left_row);
+    }
+
+    pub(crate) fn has_text_any(&self, y: CellCountInt) -> bool {
+        (0..self.size.cols).any(|x| self.cell(y, x).has_text())
+    }
+
+    pub(crate) fn set_row_dirty(&mut self, y: CellCountInt, dirty: bool) {
+        let mut row = self.row(y);
+        row.set_dirty(dirty);
+        self.set_row(y, row);
+    }
+
     pub fn exact_row_capacity(&self, y: CellCountInt) -> Capacity {
         self.exact_row_capacity_range(y, 1)
     }

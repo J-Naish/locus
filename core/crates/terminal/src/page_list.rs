@@ -2,7 +2,9 @@
 //!
 //! This ports the structural subset of Ghostty's `terminal/PageList.zig`.
 
-use crate::page::{Capacity, Cell, Page, Row, SemanticPrompt, STD_CAPACITY};
+use std::collections::HashMap;
+
+use crate::page::{Capacity, Cell, CellWide, Page, PageSize, Row, SemanticPrompt, STD_CAPACITY};
 use crate::point::{Coordinate, Point, Tag};
 use crate::size::CellCountInt;
 
@@ -116,6 +118,42 @@ pub enum IncreaseCapacity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IncreaseCapacityError {
+    OutOfSpace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloneRowsError {
+    OutOfSpace,
+}
+
+pub struct CloneOptions<'a> {
+    pub top: Point,
+    pub bot: Option<Point>,
+    pub tracked_pins: Option<&'a mut HashMap<PinId, PinId>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResizeCursor {
+    pub x: CellCountInt,
+    pub y: CellCountInt,
+    pub pin: Option<PinId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResizeOptions {
+    pub cols: Option<CellCountInt>,
+    pub rows: Option<CellCountInt>,
+    pub reflow: bool,
+    pub cursor: Option<ResizeCursor>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeError {
+    OutOfSpace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitError {
     OutOfSpace,
 }
 
@@ -1205,6 +1243,782 @@ impl PageList {
         Ok(new_id)
     }
 
+    pub fn erase_history(&mut self, bottom_left: Option<Point>) {
+        self.erase_rows(Point::history(0, 0), bottom_left);
+    }
+
+    pub fn erase_active(&mut self, y: CellCountInt) {
+        debug_assert!(y < self.rows);
+        self.erase_rows(Point::active(0, 0), Some(Point::active(0, u32::from(y))));
+    }
+
+    pub fn erase_row(&mut self, point: Point) -> Result<(), CloneRowsError> {
+        let Some(pin) = self.pin(point) else {
+            return Ok(());
+        };
+        self.erase_row_at_pin(pin)
+    }
+
+    pub fn erase_row_bounded(&mut self, point: Point, limit: usize) -> Result<(), CloneRowsError> {
+        let Some(pin) = self.pin(point) else {
+            return Ok(());
+        };
+        self.erase_row_bounded_at_pin(pin, limit)
+    }
+
+    pub fn clone(&self, mut opts: CloneOptions<'_>) -> Self {
+        let mut result = PageList::new(self.cols, self.rows, Some(self.explicit_max_size));
+        result.destroy_all_nodes();
+        result.page_serial = 0;
+        result.page_serial_min = 0;
+        result.viewport = Viewport::Active;
+        result.viewport_pin_row_offset = None;
+        result.tracked_pins.clear();
+
+        let mut chunks = self.page_iterator(Direction::RightDown, opts.top, opts.bot);
+        while let Some(chunk) = chunks.next(self) {
+            let Some(source_node) = self.node(chunk.node) else {
+                continue;
+            };
+            let id = result.create_page(source_node.page.capacity());
+            let row_count = chunk.end.saturating_sub(chunk.start);
+            if let Some(node) = result.node_mut(id) {
+                node.page.set_size(PageSize {
+                    cols: source_node.page.size().cols,
+                    rows: row_count,
+                });
+                node.page
+                    .clone_rows_from(&source_node.page, chunk.start, chunk.end);
+                node.page.set_page_dirty(source_node.page.page_dirty());
+                for y in 0..row_count {
+                    node.page
+                        .set_row_dirty(y, source_node.page.row_dirty(chunk.start + y));
+                }
+            }
+            result.append_node(id);
+            result.total_rows += row_count as usize;
+
+            if let Some(map) = opts.tracked_pins.as_deref_mut() {
+                for (source_index, pin) in self.tracked_pins.iter().enumerate() {
+                    let Some(pin) = *pin else {
+                        continue;
+                    };
+                    if pin.node == chunk.node && pin.y >= chunk.start && pin.y < chunk.end {
+                        let cloned_pin = Pin {
+                            node: id,
+                            y: pin.y - chunk.start,
+                            ..pin
+                        };
+                        let cloned_id = result.track_pin(cloned_pin);
+                        map.insert(PinId(source_index), cloned_id);
+                    }
+                }
+            }
+        }
+
+        if result.first.is_none() {
+            let id = result.create_page(Self::initial_capacity(self.cols));
+            if let Some(node) = result.node_mut(id) {
+                node.page.set_size(PageSize {
+                    cols: self.cols,
+                    rows: 0,
+                });
+            }
+            result.append_node(id);
+        }
+
+        while result.total_rows < result.rows as usize {
+            let _ = result.grow();
+            if let Some(last) = result.last {
+                if let Some(node) = result.node_mut(last) {
+                    let y = node.page.size().rows.saturating_sub(1);
+                    node.page.clear_row(y);
+                }
+            }
+        }
+
+        let first = result.first_or_panic();
+        result.viewport_pin = result.track_pin(Pin::new(first));
+        result
+    }
+
+    pub fn resize_without_reflow(&mut self, opts: ResizeOptions) -> Result<(), ResizeError> {
+        let old_min = self.min_max_size;
+        let new_cols = opts.cols.unwrap_or(self.cols);
+        let new_rows = opts.rows.unwrap_or(self.rows);
+        self.min_max_size = Self::min_max_size(new_cols, new_rows);
+
+        let result = (|| {
+            if new_cols < self.cols {
+                self.shrink_cols(new_cols);
+            } else if new_cols > self.cols {
+                self.grow_cols_without_reflow(new_cols)?;
+            }
+
+            if new_rows < self.rows {
+                let delta = (self.rows - new_rows) as usize;
+                let trimmed = self.trim_trailing_blank_rows(delta);
+                self.total_rows = self.total_rows.saturating_sub(trimmed);
+                self.rows = new_rows;
+            } else if new_rows > self.rows {
+                let delta = (new_rows - self.rows) as usize;
+                let cursor_stays_in_active = opts
+                    .cursor
+                    .map(|cursor| cursor.y < self.rows.saturating_sub(1))
+                    .unwrap_or(false);
+                self.rows = new_rows;
+                if cursor_stays_in_active {
+                    for _ in 0..delta {
+                        let _ = self.grow();
+                    }
+                } else if self.total_rows < self.rows as usize {
+                    for _ in 0..self.rows as usize - self.total_rows {
+                        let _ = self.grow();
+                    }
+                }
+                if self.viewport == Viewport::Pin
+                    && self
+                        .tracked_pin(self.viewport_pin)
+                        .map(|pin| self.pin_is_active(pin))
+                        .unwrap_or(false)
+                {
+                    self.viewport = Viewport::Active;
+                }
+            }
+
+            let _ = opts.reflow;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            self.min_max_size = old_min;
+        }
+        result
+    }
+
+    pub fn compact(&mut self, id: NodeId) -> Option<NodeId> {
+        let old_node = self.node(id)?.clone();
+        if old_node.page.memory_len() <= Self::standard_size() {
+            return None;
+        }
+        let size = old_node.page.size();
+        let cap = old_node.page.exact_row_capacity_range(0, size.rows);
+        if Page::layout(cap).total_size >= old_node.page.memory_len() {
+            return None;
+        }
+
+        let new_id = self.create_page(cap);
+        if let Some(node) = self.node_mut(new_id) {
+            node.page.set_size(size);
+            node.page.clone_rows_from(&old_node.page, 0, size.rows);
+            node.page.set_page_dirty(old_node.page.page_dirty());
+        }
+        for pin in self.tracked_pins.iter_mut().flatten() {
+            if pin.node == id {
+                pin.node = new_id;
+            }
+        }
+        self.insert_before(id, new_id);
+        self.remove_node(id);
+        self.destroy_node(id);
+        Some(new_id)
+    }
+
+    pub fn split(&mut self, pin: Pin) -> Result<NodeId, SplitError> {
+        let split_pin = pin;
+        let Some(old_node) = self.node(split_pin.node).cloned() else {
+            return Err(SplitError::OutOfSpace);
+        };
+        let size = old_node.page.size();
+        if size.rows <= 1 {
+            return Err(SplitError::OutOfSpace);
+        }
+        if split_pin.y == 0 {
+            return Ok(split_pin.node);
+        }
+        if split_pin.y >= size.rows {
+            return Err(SplitError::OutOfSpace);
+        }
+
+        let new_id = self.create_page(old_node.page.capacity());
+        let moved = size.rows - split_pin.y;
+        if let Some(node) = self.node_mut(new_id) {
+            node.page.set_size(PageSize {
+                cols: size.cols,
+                rows: moved,
+            });
+            node.page
+                .clone_rows_from(&old_node.page, split_pin.y, size.rows);
+            node.page.set_page_dirty(old_node.page.page_dirty());
+        }
+
+        for pin in self.tracked_pins.iter_mut().flatten() {
+            if pin.node == split_pin.node && pin.y >= split_pin.y {
+                pin.node = new_id;
+                pin.y -= split_pin.y;
+            }
+        }
+
+        if let Some(node) = self.node_mut(split_pin.node) {
+            for y in split_pin.y..size.rows {
+                node.page.clear_row(y);
+            }
+            node.page.set_size_rows(split_pin.y);
+        }
+        self.insert_after(split_pin.node, new_id);
+        Ok(new_id)
+    }
+
+    fn erase_row_at_pin(&mut self, pin: Pin) -> Result<(), CloneRowsError> {
+        self.erase_row_at_pin_with_behavior(pin, true, true)
+    }
+
+    fn erase_row_at_pin_with_behavior(
+        &mut self,
+        pin: Pin,
+        fixup_viewport: bool,
+        strict_pin_shift: bool,
+    ) -> Result<(), CloneRowsError> {
+        let mut current = pin.node;
+        if let Some(node) = self.node_mut(current) {
+            let rows = node.page.size().rows;
+            node.page.rotate_rows_left_once(pin.y, rows);
+            node.page.set_page_dirty(true);
+        }
+
+        for tracked in self.tracked_pins.iter_mut().flatten() {
+            if tracked.node == pin.node {
+                let should_shift = if strict_pin_shift {
+                    tracked.y > pin.y
+                } else {
+                    tracked.y >= pin.y
+                };
+                if should_shift {
+                    if tracked.y == 0 {
+                        tracked.x = 0;
+                    } else {
+                        tracked.y -= 1;
+                    }
+                }
+            }
+        }
+        if fixup_viewport {
+            self.fixup_viewport(1);
+        }
+
+        // Ghostty's cloneRowFrom can fail mid-cascade and propagate over pages
+        // it has already shifted. The Rust page clone operations degrade
+        // infallibly on capacity exhaustion, so this cascade cannot tear; the
+        // Result is kept to match the ported API shape.
+        while let Some(next) = self.node(current).and_then(|node| node.next) {
+            let source = self
+                .node(next)
+                .map(|node| node.page.clone())
+                .ok_or(CloneRowsError::OutOfSpace)?;
+            if let Some(node) = self.node_mut(current) {
+                let last_y = node.page.size().rows.saturating_sub(1);
+                node.page.clone_row_from_page(last_y, &source, 0);
+            }
+
+            let next_rows = self
+                .node(next)
+                .map(|node| node.page.size().rows)
+                .ok_or(CloneRowsError::OutOfSpace)?;
+            if let Some(node) = self.node_mut(next) {
+                node.page.rotate_rows_left_once(0, next_rows);
+                node.page.set_page_dirty(true);
+            }
+            let previous = current;
+            let previous_last_y = self
+                .node(previous)
+                .map(|node| node.page.size().rows.saturating_sub(1))
+                .unwrap_or(0);
+            for tracked in self.tracked_pins.iter_mut().flatten() {
+                if tracked.node == next {
+                    if tracked.y == 0 {
+                        tracked.node = previous;
+                        tracked.y = previous_last_y;
+                    } else {
+                        tracked.y -= 1;
+                    }
+                }
+            }
+            current = next;
+        }
+
+        if let Some(node) = self.node_mut(current) {
+            let last_y = node.page.size().rows.saturating_sub(1);
+            node.page.clear_row(last_y);
+        }
+        Ok(())
+    }
+
+    fn erase_row_bounded_at_pin(&mut self, pin: Pin, limit: usize) -> Result<(), CloneRowsError> {
+        if limit == 0 {
+            if let Some(node) = self.node_mut(pin.node) {
+                node.page.clear_row(pin.y);
+                node.page.set_page_dirty(true);
+            }
+            for tracked in self.tracked_pins.iter_mut().flatten() {
+                if tracked.node == pin.node && tracked.y == pin.y {
+                    tracked.x = 0;
+                }
+            }
+            return Ok(());
+        }
+
+        let Some(rows) = self
+            .node(pin.node)
+            .map(|node| node.page.size().rows as usize)
+        else {
+            return Ok(());
+        };
+        let local_remaining = rows.saturating_sub(pin.y as usize);
+        if local_remaining > limit {
+            let target_y = pin.y.saturating_add(limit as CellCountInt);
+            if let Some(node) = self.node_mut(pin.node) {
+                node.page.clear_row(target_y);
+                node.page
+                    .rotate_rows_left_once(pin.y, target_y.saturating_add(1));
+                node.page.set_page_dirty(true);
+            }
+            self.adjust_viewport_cache_for_bounded_row(pin.node, pin.y, limit);
+            self.shift_pins_for_bounded_row(pin.node, pin.y, limit);
+            return Ok(());
+        }
+
+        let mut current = pin.node;
+        let mut shifted = local_remaining;
+        if let Some(node) = self.node_mut(current) {
+            let rows = node.page.size().rows;
+            node.page.rotate_rows_left_once(pin.y, rows);
+            node.page.set_page_dirty(true);
+        }
+        if self.viewport == Viewport::Pin {
+            let viewport_pin = self.tracked_pin(self.viewport_pin);
+            if let (Some(pin_cache), Some(offset)) =
+                (viewport_pin, self.viewport_pin_row_offset.as_mut())
+            {
+                if pin_cache.node == current && pin_cache.y >= pin.y && pin_cache.y != 0 {
+                    *offset = offset.saturating_sub(1);
+                }
+            }
+        }
+        for tracked in self.tracked_pins.iter_mut().flatten() {
+            if tracked.node == current && tracked.y >= pin.y {
+                if tracked.y == 0 {
+                    tracked.x = 0;
+                } else {
+                    tracked.y -= 1;
+                }
+            }
+        }
+
+        while let Some(next) = self.node(current).and_then(|node| node.next) {
+            let source = self
+                .node(next)
+                .map(|node| node.page.clone())
+                .ok_or(CloneRowsError::OutOfSpace)?;
+            if let Some(node) = self.node_mut(current) {
+                let last_y = node.page.size().rows.saturating_sub(1);
+                node.page.clone_row_from_page(last_y, &source, 0);
+            }
+
+            let next_rows = self
+                .node(next)
+                .map(|node| node.page.size().rows)
+                .ok_or(CloneRowsError::OutOfSpace)?;
+            let shifted_limit = limit.saturating_sub(shifted);
+            if usize::from(next_rows) > shifted_limit {
+                let shifted_limit_y = shifted_limit as CellCountInt;
+                if let Some(node) = self.node_mut(next) {
+                    node.page.clear_row(0);
+                    node.page
+                        .rotate_rows_left_once(0, shifted_limit_y.saturating_add(1));
+                    node.page.set_page_dirty(true);
+                }
+                if self.viewport == Viewport::Pin {
+                    let viewport_pin = self.tracked_pin(self.viewport_pin);
+                    if let (Some(pin_cache), Some(offset)) =
+                        (viewport_pin, self.viewport_pin_row_offset.as_mut())
+                    {
+                        if pin_cache.node == next && pin_cache.y <= shifted_limit_y {
+                            *offset = offset.saturating_sub(1);
+                        }
+                    }
+                }
+                let previous = current;
+                let previous_last_y = self
+                    .node(previous)
+                    .map(|node| node.page.size().rows.saturating_sub(1))
+                    .unwrap_or(0);
+                for tracked in self.tracked_pins.iter_mut().flatten() {
+                    if tracked.node == next && tracked.y <= shifted_limit_y {
+                        if tracked.y == 0 {
+                            tracked.node = previous;
+                            tracked.y = previous_last_y;
+                        } else {
+                            tracked.y -= 1;
+                        }
+                    }
+                }
+                return Ok(());
+            }
+
+            if let Some(node) = self.node_mut(next) {
+                node.page.rotate_rows_left_once(0, next_rows);
+                node.page.set_page_dirty(true);
+            }
+            shifted = shifted.saturating_add(next_rows as usize);
+            if self.viewport == Viewport::Pin {
+                let viewport_pin = self.tracked_pin(self.viewport_pin);
+                if let (Some(pin_cache), Some(offset)) =
+                    (viewport_pin, self.viewport_pin_row_offset.as_mut())
+                {
+                    if pin_cache.node == next {
+                        *offset = offset.saturating_sub(1);
+                    }
+                }
+            }
+            let previous = current;
+            let previous_last_y = self
+                .node(previous)
+                .map(|node| node.page.size().rows.saturating_sub(1))
+                .unwrap_or(0);
+            for tracked in self.tracked_pins.iter_mut().flatten() {
+                if tracked.node == next {
+                    if tracked.y == 0 {
+                        tracked.node = previous;
+                        tracked.y = previous_last_y;
+                    } else {
+                        tracked.y -= 1;
+                    }
+                }
+            }
+            current = next;
+        }
+
+        if let Some(node) = self.node_mut(current) {
+            let last_y = node.page.size().rows.saturating_sub(1);
+            node.page.clear_row(last_y);
+        }
+        Ok(())
+    }
+
+    fn erase_rows(&mut self, top_left: Point, bottom_left: Option<Point>) {
+        let mut chunks = Vec::new();
+        let mut iterator = self.page_iterator(Direction::RightDown, top_left, bottom_left);
+        while let Some(chunk) = iterator.next(self) {
+            chunks.push(chunk);
+        }
+
+        let mut erased = 0usize;
+        for chunk in chunks {
+            let Some(size) = self.node(chunk.node).map(|node| node.page.size()) else {
+                continue;
+            };
+            let count = chunk.end.saturating_sub(chunk.start);
+            if count == 0 {
+                continue;
+            }
+            erased += count as usize;
+
+            if chunk.start == 0 && chunk.end >= size.rows {
+                if self.first == Some(chunk.node) && self.last == Some(chunk.node) {
+                    let cols = self.cols;
+                    if let Some(node) = self.node_mut(chunk.node) {
+                        node.page.reinit();
+                        node.page.set_size(PageSize { cols, rows: 0 });
+                    }
+                    break;
+                }
+                self.erase_page(chunk.node);
+                continue;
+            }
+
+            let scroll_amount = size.rows.saturating_sub(chunk.end);
+            if let Some(node) = self.node_mut(chunk.node) {
+                for y in 0..scroll_amount {
+                    let dst = chunk.start + y;
+                    let src = chunk.end + y;
+                    node.page.swap_rows(dst, src);
+                    node.page.set_row_dirty(dst, true);
+                }
+                let new_rows = size.rows.saturating_sub(count);
+                for y in new_rows..size.rows {
+                    node.page.clear_row(y);
+                }
+                node.page.set_size_rows(new_rows);
+            }
+            for pin in self.tracked_pins.iter_mut().flatten() {
+                if pin.node == chunk.node {
+                    if pin.y >= chunk.end {
+                        pin.y -= count;
+                    } else if pin.y >= chunk.start {
+                        pin.y = chunk.start;
+                        pin.x = 0;
+                    }
+                }
+            }
+        }
+
+        self.total_rows = self.total_rows.saturating_sub(erased);
+        if top_left.tag() == Tag::Active {
+            for _ in 0..erased {
+                let _ = self.grow();
+            }
+        }
+        self.fixup_viewport(erased);
+    }
+
+    fn erase_page(&mut self, id: NodeId) {
+        let Some(node) = self.node(id).cloned() else {
+            return;
+        };
+        if node.prev.is_none() && node.next.is_none() {
+            return;
+        }
+        debug_assert!(node.prev.is_none() || node.next.is_none());
+        let target = node.prev.or(node.next);
+        if node.prev.is_none() {
+            if let Some(next) = node.next {
+                if let Some(next_serial) = self.node(next).map(|node| node.serial) {
+                    self.page_serial_min = next_serial;
+                }
+            }
+        }
+        if let Some(target) = target {
+            for pin in self.tracked_pins.iter_mut().flatten() {
+                if pin.node == id {
+                    pin.node = target;
+                    pin.y = 0;
+                    pin.x = 0;
+                    pin.garbage = false;
+                }
+            }
+        }
+        self.remove_node(id);
+        self.destroy_node(id);
+    }
+
+    fn adjust_viewport_cache_for_bounded_row(
+        &mut self,
+        node: NodeId,
+        erased_y: CellCountInt,
+        limit: usize,
+    ) {
+        if self.viewport != Viewport::Pin {
+            return;
+        }
+        let Some(pin) = self.tracked_pin(self.viewport_pin) else {
+            return;
+        };
+        if pin.node == node
+            && pin.y >= erased_y
+            && pin.y <= erased_y.saturating_add(limit as CellCountInt)
+            && pin.y != 0
+        {
+            if let Some(offset) = &mut self.viewport_pin_row_offset {
+                *offset = offset.saturating_sub(1);
+            }
+        }
+    }
+
+    fn shift_pins_for_bounded_row(&mut self, node: NodeId, erased_y: CellCountInt, limit: usize) {
+        let end_y = erased_y.saturating_add(limit as CellCountInt);
+        for pin in self.tracked_pins.iter_mut().flatten() {
+            if pin.node == node && pin.y >= erased_y && pin.y <= end_y {
+                if pin.y == 0 {
+                    pin.x = 0;
+                } else {
+                    pin.y -= 1;
+                }
+            }
+        }
+    }
+
+    fn shrink_cols(&mut self, cols: CellCountInt) {
+        for id in self.iter_node_ids().collect::<Vec<_>>() {
+            if let Some(node) = self.node_mut(id) {
+                let size = node.page.size();
+                for y in 0..size.rows {
+                    node.page.clear_cells(y, cols, size.cols);
+                }
+                node.page.set_size_cols(cols);
+            }
+        }
+        for pin in self.tracked_pins.iter_mut().flatten() {
+            if pin.x >= cols {
+                pin.x = cols.saturating_sub(1);
+            }
+        }
+        self.cols = cols;
+    }
+
+    fn grow_cols_without_reflow(&mut self, cols: CellCountInt) -> Result<(), ResizeError> {
+        let ids = self.iter_node_ids().collect::<Vec<_>>();
+        for id in ids {
+            let Some(node) = self.node(id).cloned() else {
+                continue;
+            };
+            let size = node.page.size();
+            let cap = node.page.capacity();
+            let has_spacer_head_at_old_edge = size.cols > 0
+                && (0..size.rows).any(|y| {
+                    matches!(
+                        node.page.cell(y, size.cols - 1).wide(),
+                        CellWide::SpacerHead
+                    )
+                });
+            if cap.cols >= cols && !has_spacer_head_at_old_edge {
+                if let Some(node) = self.node_mut(id) {
+                    node.page.set_size_cols(cols);
+                }
+                continue;
+            }
+
+            let new_cap = Page::adjust(cap, cols);
+            let mut start: CellCountInt = 0;
+            let mut insert_after_id = node.prev;
+
+            if let Some(prev_id) = node.prev {
+                let spare = self
+                    .node(prev_id)
+                    .map(|prev| {
+                        let prev_size = prev.page.size();
+                        if prev.page.capacity().cols == cols
+                            && prev.page.capacity().rows > prev_size.rows
+                        {
+                            prev.page.capacity().rows - prev_size.rows
+                        } else {
+                            0
+                        }
+                    })
+                    .unwrap_or(0);
+                let take = spare.min(size.rows);
+                if take > 0 {
+                    let prev_start = self
+                        .node(prev_id)
+                        .map(|prev| prev.page.size().rows)
+                        .unwrap_or(0);
+                    if let Some(prev) = self.node_mut(prev_id) {
+                        prev.page.set_size_rows(prev_start + take);
+                        for offset in 0..take {
+                            prev.page
+                                .clone_row_from_page(prev_start + offset, &node.page, offset);
+                            Self::sanitize_grown_row(
+                                &mut prev.page,
+                                prev_start + offset,
+                                size.cols,
+                            );
+                        }
+                    }
+                    self.retarget_pins_between(id, 0, take, prev_id, prev_start, cols);
+                    start = take;
+                    insert_after_id = Some(prev_id);
+                }
+            }
+
+            while start < size.rows {
+                let take = new_cap.rows.min(size.rows - start);
+                let new_id = self.create_page(new_cap);
+                if let Some(new_node) = self.node_mut(new_id) {
+                    new_node.page.set_size(PageSize { cols, rows: take });
+                    new_node
+                        .page
+                        .clone_rows_from(&node.page, start, start + take);
+                    new_node.page.set_page_dirty(node.page.page_dirty());
+                    for offset in 0..take {
+                        Self::sanitize_grown_row(&mut new_node.page, offset, size.cols);
+                    }
+                }
+                self.retarget_pins_between(id, start, start + take, new_id, 0, cols);
+                if let Some(after) = insert_after_id {
+                    self.insert_after(after, new_id);
+                } else {
+                    self.insert_before(id, new_id);
+                }
+                insert_after_id = Some(new_id);
+                start += take;
+            }
+
+            self.remove_node(id);
+            self.destroy_node(id);
+        }
+        self.cols = cols;
+        Ok(())
+    }
+
+    fn sanitize_grown_row(page: &mut Page, y: CellCountInt, old_cols: CellCountInt) {
+        if old_cols == 0 || old_cols > page.size().cols {
+            return;
+        }
+        let edge = old_cols - 1;
+        if matches!(page.cell(y, edge).wide(), CellWide::SpacerHead) {
+            page.clear_cells(y, edge, edge.saturating_add(1));
+            let mut row = page.row(y);
+            row.set_wrap(false);
+            page.set_row(y, row);
+        }
+    }
+
+    fn retarget_pins_between(
+        &mut self,
+        source_node: NodeId,
+        source_start: CellCountInt,
+        source_end: CellCountInt,
+        target_node: NodeId,
+        target_start: CellCountInt,
+        cols: CellCountInt,
+    ) {
+        for pin in self.tracked_pins.iter_mut().flatten() {
+            if pin.node == source_node && pin.y >= source_start && pin.y < source_end {
+                pin.node = target_node;
+                pin.y = target_start + (pin.y - source_start);
+                if pin.x >= cols {
+                    pin.x = cols.saturating_sub(1);
+                }
+            }
+        }
+    }
+
+    fn trim_trailing_blank_rows(&mut self, limit: usize) -> usize {
+        let mut trimmed = 0usize;
+        while trimmed < limit {
+            let Some(last) = self.last else {
+                break;
+            };
+            let Some(size) = self.node(last).map(|node| node.page.size()) else {
+                break;
+            };
+            if size.rows == 0 {
+                break;
+            }
+            let y = size.rows - 1;
+            let has_text = self
+                .node(last)
+                .map(|node| node.page.has_text_any(y))
+                .unwrap_or(false);
+            let has_pin = self
+                .tracked_pins
+                .iter()
+                .flatten()
+                .any(|pin| pin.node == last && pin.y == y);
+            if has_text || has_pin {
+                break;
+            }
+            if let Some(node) = self.node_mut(last) {
+                node.page.clear_row(y);
+                node.page.set_size_rows(y);
+            }
+            trimmed += 1;
+            if y == 0 && self.first != self.last {
+                self.erase_page(last);
+            }
+        }
+        trimmed
+    }
+
     pub fn page_iterator(
         &self,
         direction: Direction,
@@ -1985,6 +2799,8 @@ impl PromptIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::Rgb;
+    use crate::style::PackedStyle;
 
     fn cap_with_rows_below(rows: CellCountInt) -> Capacity {
         let mut cols: CellCountInt = 50;
@@ -2009,6 +2825,48 @@ mod tests {
         }
         let second = list.grow().unwrap();
         (first, second)
+    }
+
+    fn grow_by_standard_page_multiples(list: &mut PageList, multiples: usize) {
+        let cap_rows = list.node_capacity(list.last_node().unwrap()).unwrap().rows as usize;
+        list.grow_rows(cap_rows * multiples);
+    }
+
+    fn set_screen_cell(list: &mut PageList, x: CellCountInt, y: u32, ch: char) {
+        assert!(list.set_cell(Point::screen(x, y), Cell::new(ch)));
+    }
+
+    fn screen_cell(list: &PageList, x: CellCountInt, y: u32) -> Cell {
+        list.get_cell(Point::screen(x, y)).unwrap()
+    }
+
+    fn node_cell(list: &PageList, id: NodeId, y: CellCountInt, x: CellCountInt) -> Cell {
+        list.node(id).unwrap().page.cell(y, x)
+    }
+
+    fn write_node_row_marker(list: &mut PageList, id: NodeId, y: CellCountInt, ch: char) {
+        if let Some(node) = list.node_mut(id) {
+            node.page.set_cell(y, 0, Cell::new(ch));
+        }
+    }
+
+    fn fill_all_rows_text(list: &mut PageList, ch: char) {
+        let ids = list.iter_node_ids().collect::<Vec<_>>();
+        for id in ids {
+            let size = list.node_page_size(id).unwrap();
+            if let Some(node) = list.node_mut(id) {
+                for y in 0..size.rows {
+                    node.page.set_cell(y, 0, Cell::new(ch));
+                }
+            }
+        }
+    }
+
+    fn assert_all_rows_have_cols(list: &PageList, cols: CellCountInt) {
+        for id in list.iter_node_ids() {
+            let node = list.node(id).unwrap();
+            assert_eq!(node.page.size().cols, cols);
+        }
     }
 
     #[test]
@@ -2523,8 +3381,8 @@ mod tests {
     #[test]
     fn prompt_scrolling_finds_prompt_rows_and_skips_continuations() {
         // ghostty: "PageList: jump zero prompts" (PageList.zig:6871)
-        // ghostty: "PageList: jump one prompt" (PageList.zig:6899)
-        // ghostty: "PageList: jump prompt skips continuation" (PageList.zig:6968)
+        // ghostty: "Screen: jump back one prompt" (PageList.zig:6899)
+        // ghostty: "Screen: jump forward prompt skips multiline continuation" (PageList.zig:6968)
         let mut list = PageList::new(5, 3, None);
         list.grow_rows(6);
         let prompt = list.pin(Point::screen(0, 1)).unwrap();
@@ -2550,10 +3408,10 @@ mod tests {
 
     #[test]
     fn increase_capacity_doubles_dimensions_and_preserves_contents() {
-        // ghostty: "PageList increaseCapacity styles" (PageList.zig:7444)
-        // ghostty: "PageList increaseCapacity grapheme bytes" (PageList.zig:7495)
-        // ghostty: "PageList increaseCapacity hyperlink bytes" (PageList.zig:7539)
-        // ghostty: "PageList increaseCapacity string bytes" (PageList.zig:7583)
+        // ghostty: "PageList increaseCapacity to increase styles" (PageList.zig:7444)
+        // ghostty: "PageList increaseCapacity to increase graphemes" (PageList.zig:7495)
+        // ghostty: "PageList increaseCapacity to increase hyperlinks" (PageList.zig:7539)
+        // ghostty: "PageList increaseCapacity to increase string_bytes" (PageList.zig:7583)
         let mut list = PageList::new(10, 4, None);
         let id = list.first_node().unwrap();
         assert!(list.set_cell(Point::screen(0, 0), Cell::new('x')));
@@ -2595,8 +3453,8 @@ mod tests {
 
     #[test]
     fn increase_capacity_retargets_pins_and_preserves_dirty() {
-        // ghostty: "PageList increaseCapacity tracked pin" (PageList.zig:7627)
-        // ghostty: "PageList increaseCapacity preserves dirty bits" (PageList.zig:7739)
+        // ghostty: "PageList increaseCapacity tracked pins" (PageList.zig:7627)
+        // ghostty: "PageList increaseCapacity preserves dirty flag" (PageList.zig:7739)
         let mut list = PageList::new(10, 4, None);
         let id = list.first_node().unwrap();
         let pin = list.pin(Point::screen(2, 1)).unwrap();
@@ -2618,14 +3476,14 @@ mod tests {
 
     #[test]
     fn page_and_cell_iterators_cover_expected_chunks() {
-        // ghostty: "PageList iterator active no history" (PageList.zig:7770)
-        // ghostty: "PageList iterator active with history" (PageList.zig:7793)
-        // ghostty: "PageList iterator screen no history" (PageList.zig:7829)
-        // ghostty: "PageList iterator reverse active no history" (PageList.zig:7859)
-        // ghostty: "PageList iterator reverse active with history" (PageList.zig:7882)
-        // ghostty: "PageList iterator reverse screen" (PageList.zig:7922)
-        // ghostty: "PageList cell iterator 2x2" (PageList.zig:7952)
-        // ghostty: "PageList cell iterator 2x2 reverse" (PageList.zig:8002)
+        // ghostty: "PageList pageIterator single page" (PageList.zig:7770)
+        // ghostty: "PageList pageIterator two pages" (PageList.zig:7793)
+        // ghostty: "PageList pageIterator history two pages" (PageList.zig:7829)
+        // ghostty: "PageList pageIterator reverse single page" (PageList.zig:7859)
+        // ghostty: "PageList pageIterator reverse two pages" (PageList.zig:7882)
+        // ghostty: "PageList pageIterator reverse history two pages" (PageList.zig:7922)
+        // ghostty: "PageList cellIterator" (PageList.zig:7952)
+        // ghostty: "PageList cellIterator reverse" (PageList.zig:8002)
         let mut list = PageList::new(2, 2, None);
         let mut cells = Vec::new();
         let mut iter = list.cell_iterator(Direction::RightDown, Point::screen(0, 0), None);
@@ -3078,13 +3936,1662 @@ mod tests {
         assert_eq!(list.node_capacity(second).unwrap().styles, second_styles);
     }
 
-    // Deferred to T5b: eraseRows/eraseRow/eraseRowBounded viewport-cache tests.
-    // ghostty: "PageList eraseRows viewport pin cache row before" (PageList.zig:7196)
-    // ghostty: "PageList eraseRows viewport pin cache row after" (PageList.zig:7236)
-    // ghostty: "PageList eraseRows viewport pin cache row in range" (PageList.zig:7275)
-    // ghostty: "PageList eraseRow viewport pin cache row before" (PageList.zig:7315)
-    // ghostty: "PageList eraseRow viewport pin cache row after" (PageList.zig:7356)
-    // ghostty: "PageList eraseRowBounded viewport pin cache in range" (PageList.zig:7399)
+    #[test]
+    fn erase_rows_invalidates_viewport_offset_cache() {
+        // ghostty: "PageList eraseRows invalidates viewport offset cache" (PageList.zig:7196)
+        let mut list = PageList::new(80, 24, None);
+        let cap_rows = list.node_capacity(list.last_node().unwrap()).unwrap().rows as usize;
+        for _ in 0..cap_rows * 3 {
+            let _ = list.grow();
+        }
+        let pin_y = cap_rows;
+        list.scroll(Scroll::Pin(
+            list.pin(Point::screen(0, pin_y as u32)).unwrap(),
+        ));
+        assert_eq!(list.viewport(), Viewport::Pin);
+        assert_eq!(
+            list.scrollbar(),
+            Scrollbar {
+                total: list.total_rows(),
+                offset: pin_y,
+                len: 24
+            }
+        );
+        list.erase_history(Some(Point::history(0, (cap_rows / 2 - 1) as u32)));
+        assert_eq!(
+            list.scrollbar(),
+            Scrollbar {
+                total: list.total_rows(),
+                offset: pin_y - cap_rows / 2,
+                len: 24
+            }
+        );
+    }
+
+    #[test]
+    fn erase_row_invalidates_viewport_offset_cache() {
+        // ghostty: "PageList eraseRow invalidates viewport offset cache" (PageList.zig:7236)
+        let mut list = PageList::new(80, 24, None);
+        let cap_rows = list.node_capacity(list.last_node().unwrap()).unwrap().rows as usize;
+        for _ in 0..cap_rows * 3 {
+            let _ = list.grow();
+        }
+        let pin_y = cap_rows;
+        list.scroll(Scroll::Pin(
+            list.pin(Point::screen(0, pin_y as u32)).unwrap(),
+        ));
+        assert_eq!(list.viewport(), Viewport::Pin);
+        assert_eq!(
+            list.scrollbar(),
+            Scrollbar {
+                total: list.total_rows(),
+                offset: pin_y,
+                len: 24
+            }
+        );
+        list.erase_row(Point::history(0, 0)).unwrap();
+        assert_eq!(
+            list.scrollbar(),
+            Scrollbar {
+                total: list.total_rows(),
+                offset: pin_y - 1,
+                len: 24
+            }
+        );
+    }
+
+    #[test]
+    fn erase_row_bounded_invalidates_viewport_offset_cache() {
+        // ghostty: "PageList eraseRowBounded invalidates viewport offset cache" (PageList.zig:7275)
+        let mut list = PageList::new(80, 24, None);
+        let cap_rows = list.node_capacity(list.last_node().unwrap()).unwrap().rows as usize;
+        for _ in 0..cap_rows * 3 {
+            let _ = list.grow();
+        }
+        let pin_y = 4;
+        list.scroll(Scroll::Pin(
+            list.pin(Point::screen(0, pin_y as u32)).unwrap(),
+        ));
+        assert_eq!(list.viewport(), Viewport::Pin);
+        assert_eq!(
+            list.scrollbar(),
+            Scrollbar {
+                total: list.total_rows(),
+                offset: pin_y,
+                len: 24
+            }
+        );
+        list.erase_row_bounded(Point::history(0, 0), 10).unwrap();
+        assert_eq!(
+            list.scrollbar(),
+            Scrollbar {
+                total: list.total_rows(),
+                offset: 3,
+                len: 24
+            }
+        );
+    }
+
+    #[test]
+    fn erase_row_bounded_multi_page_invalidates_viewport_offset_cache() {
+        // ghostty: "PageList eraseRowBounded multi-page invalidates viewport offset cache" (PageList.zig:7315)
+        let mut list = PageList::new(80, 24, None);
+        let cap_rows = list.node_capacity(list.last_node().unwrap()).unwrap().rows as usize;
+        for _ in 0..cap_rows * 3 {
+            let _ = list.grow();
+        }
+        let pin_y = cap_rows + 1;
+        list.scroll(Scroll::Pin(
+            list.pin(Point::screen(0, pin_y as u32)).unwrap(),
+        ));
+        assert_eq!(list.viewport(), Viewport::Pin);
+        assert_eq!(
+            list.scrollbar(),
+            Scrollbar {
+                total: list.total_rows(),
+                offset: pin_y,
+                len: 24
+            }
+        );
+        list.erase_row_bounded(Point::history(0, 0), cap_rows + 10)
+            .unwrap();
+        assert_eq!(
+            list.scrollbar(),
+            Scrollbar {
+                total: list.total_rows(),
+                offset: pin_y - 1,
+                len: 24
+            }
+        );
+    }
+
+    #[test]
+    fn erase_row_bounded_full_page_shift_invalidates_viewport_offset_cache() {
+        // ghostty: "PageList eraseRowBounded full page shift invalidates viewport offset cache" (PageList.zig:7356)
+        let mut list = PageList::new(80, 24, None);
+        let cap_rows = list.node_capacity(list.last_node().unwrap()).unwrap().rows as usize;
+        for _ in 0..cap_rows * 4 {
+            let _ = list.grow();
+        }
+        let pin_y = 5;
+        list.scroll(Scroll::Pin(
+            list.pin(Point::screen(0, pin_y as u32)).unwrap(),
+        ));
+        assert_eq!(list.viewport(), Viewport::Pin);
+        assert_eq!(
+            list.scrollbar(),
+            Scrollbar {
+                total: list.total_rows(),
+                offset: pin_y,
+                len: 24
+            }
+        );
+        list.erase_row_bounded(Point::history(0, 0), cap_rows * 2 + 10)
+            .unwrap();
+        assert_eq!(
+            list.scrollbar(),
+            Scrollbar {
+                total: list.total_rows(),
+                offset: 4,
+                len: 24
+            }
+        );
+    }
+
+    #[test]
+    fn erase_row_bounded_exhausts_pages_invalidates_viewport_offset_cache() {
+        // ghostty: "PageList eraseRowBounded exhausts pages invalidates viewport offset cache" (PageList.zig:7399)
+        let mut list = PageList::new(80, 24, None);
+        let cap_rows = list.node_capacity(list.last_node().unwrap()).unwrap().rows as usize;
+        for _ in 0..cap_rows * 3 {
+            let _ = list.grow();
+        }
+        let total_before = list.total_rows();
+        assert!(total_before > 24);
+        let pin_y = cap_rows * 2 + 10;
+        list.scroll(Scroll::Pin(
+            list.pin(Point::screen(0, pin_y as u32)).unwrap(),
+        ));
+        assert_eq!(list.viewport(), Viewport::Pin);
+        assert_eq!(
+            list.scrollbar(),
+            Scrollbar {
+                total: list.total_rows(),
+                offset: pin_y,
+                len: 24
+            }
+        );
+        list.erase_row_bounded(Point::history(0, 0), total_before * 2)
+            .unwrap();
+        assert_eq!(
+            list.scrollbar(),
+            Scrollbar {
+                total: list.total_rows(),
+                offset: pin_y - 1,
+                len: 24
+            }
+        );
+    }
+
+    #[test]
+    fn erase_history_removes_scrollback_pages() {
+        // ghostty: "PageList erase" (PageList.zig:9376)
+        let mut list = PageList::new(80, 24, None);
+        grow_by_standard_page_multiples(&mut list, 5);
+        assert_eq!(list.total_pages(), 6);
+        assert!(list.total_rows() > list.rows as usize);
+        list.erase_history(None);
+        assert_eq!(list.total_rows(), list.rows as usize);
+        assert_eq!(list.total_pages(), 1);
+    }
+
+    #[test]
+    fn erase_history_reaccounts_page_size() {
+        // ghostty: "PageList erase reaccounts page size" (PageList.zig:9410)
+        let mut list = PageList::new(80, 24, None);
+        let start = list.page_size();
+        grow_by_standard_page_multiples(&mut list, 5);
+        assert_eq!(list.total_pages(), 6);
+        assert!(list.page_size() > start);
+        list.erase_history(None);
+        assert_eq!(list.page_size(), start);
+    }
+
+    #[test]
+    fn erase_history_resets_tracked_pin_to_first_page() {
+        // ghostty: "PageList erase row with tracked pin resets to top-left" (PageList.zig:9437)
+        let mut list = PageList::new(80, 24, None);
+        grow_by_standard_page_multiples(&mut list, 5);
+        assert_eq!(list.total_pages(), 6);
+        let pin = list.track_pin(list.pin(Point::history(0, 0)).unwrap());
+        list.erase_history(None);
+        let tracked = list.tracked_pin(pin).unwrap();
+        assert_eq!(tracked.node, list.first_node().unwrap());
+        assert_eq!((tracked.x, tracked.y), (0, 0));
+    }
+
+    #[test]
+    fn erase_active_shifts_pin_after_erased_rows_preserving_x() {
+        // ghostty: "PageList erase row with tracked pin shifts" (PageList.zig:9474)
+        let mut list = PageList::new(80, 24, None);
+        let pin = list.track_pin(list.pin(Point::active(2, 4)).unwrap());
+        list.erase_active(3);
+        let tracked = list.tracked_pin(pin).unwrap();
+        assert_eq!(tracked.node, list.first_node().unwrap());
+        assert_eq!((tracked.x, tracked.y), (2, 0));
+    }
+
+    #[test]
+    fn erase_active_resets_pin_inside_erased_rows() {
+        // ghostty: "PageList erase row with tracked pin is erased" (PageList.zig:9495)
+        let mut list = PageList::new(80, 24, None);
+        let pin = list.track_pin(list.pin(Point::active(2, 2)).unwrap());
+        list.erase_active(3);
+        let tracked = list.tracked_pin(pin).unwrap();
+        assert_eq!((tracked.x, tracked.y), (0, 0));
+    }
+
+    #[test]
+    fn erase_history_top_viewport_moves_to_active_when_history_removed() {
+        // ghostty: "PageList erase resets viewport to active if moves within active" (PageList.zig:9516)
+        let mut list = PageList::new(80, 24, None);
+        list.grow_rows(80);
+        list.scroll(Scroll::Top);
+        list.erase_history(None);
+        assert_eq!(list.viewport(), Viewport::Active);
+    }
+
+    #[test]
+    fn erase_partial_history_keeps_top_viewport() {
+        // ghostty: "PageList erase resets viewport if inside erased page but not active" (PageList.zig:9545)
+        let mut list = PageList::new(80, 24, None);
+        list.grow_rows(80);
+        list.scroll(Scroll::Top);
+        list.erase_history(Some(Point::history(0, 2)));
+        assert_eq!(list.viewport(), Viewport::Top);
+    }
+
+    #[test]
+    fn erase_history_top_inside_active_becomes_active() {
+        // ghostty: "PageList erase resets viewport to active if top is inside active" (PageList.zig:9574)
+        let mut list = PageList::new(80, 24, None);
+        list.grow_rows(80);
+        list.scroll(Scroll::Top);
+        list.erase_history(None);
+        assert_eq!(list.viewport(), Viewport::Active);
+    }
+
+    #[test]
+    fn erase_active_regrows_to_full_rows() {
+        // ghostty: "PageList erase active regrows automatically" (PageList.zig:9602)
+        let mut list = PageList::new(80, 24, None);
+        list.erase_active(10);
+        assert_eq!(list.total_rows(), list.rows as usize);
+    }
+
+    #[test]
+    fn erase_active_single_row_reinitializes_and_clears_cell() {
+        // ghostty: "PageList erase a one-row active" (PageList.zig:9613)
+        let mut list = PageList::new(10, 1, None);
+        set_screen_cell(&mut list, 0, 0, 'A');
+        list.erase_active(0);
+        assert_eq!(list.total_rows(), 1);
+        assert_eq!(screen_cell(&list, 0, 0), Cell::default());
+    }
+
+    #[test]
+    fn erase_row_bounded_moves_pins_at_erased_row_with_asymmetry() {
+        // ghostty: "PageList eraseRowBounded less than full row" (PageList.zig:9641)
+        let mut list = PageList::new(80, 10, None);
+        let first = list.first_node().unwrap();
+        let p_top = list.track_pin(list.pin(Point::active(0, 5)).unwrap());
+        let p_bot = list.track_pin(list.pin(Point::active(0, 8)).unwrap());
+        let p_out = list.track_pin(list.pin(Point::active(0, 9)).unwrap());
+        list.erase_row_bounded(Point::active(0, 5), 3).unwrap();
+        assert_eq!(list.total_rows(), list.rows as usize);
+        let top = list.tracked_pin(p_top).unwrap();
+        assert_eq!(top.node, first);
+        assert_eq!((top.x, top.y), (0, 4));
+        let bottom = list.tracked_pin(p_bot).unwrap();
+        assert_eq!(bottom.node, first);
+        assert_eq!((bottom.x, bottom.y), (0, 7));
+        let outside = list.tracked_pin(p_out).unwrap();
+        assert_eq!(outside.node, first);
+        assert_eq!((outside.x, outside.y), (0, 9));
+        assert!(list.pin_is_dirty(list.pin(Point::active(0, 5)).unwrap()));
+        assert!(list.pin_is_dirty(list.pin(Point::active(0, 6)).unwrap()));
+        assert!(list.pin_is_dirty(list.pin(Point::active(0, 7)).unwrap()));
+    }
+
+    #[test]
+    fn erase_row_bounded_pin_at_top_resets_x() {
+        // ghostty: "PageList eraseRowBounded with pin at top" (PageList.zig:9678)
+        let mut list = PageList::new(80, 10, None);
+        let pin = list.track_pin(list.pin(Point::active(5, 0)).unwrap());
+        list.erase_row_bounded(Point::active(0, 0), 3).unwrap();
+        let tracked = list.tracked_pin(pin).unwrap();
+        assert_eq!((tracked.x, tracked.y), (0, 0));
+    }
+
+    #[test]
+    fn erase_row_bounded_beyond_single_page_shifts_all_pins_after_row() {
+        // ghostty: "PageList eraseRowBounded full rows single page" (PageList.zig:9703)
+        let mut list = PageList::new(80, 10, None);
+        let p_in = list.track_pin(list.pin(Point::active(0, 7)).unwrap());
+        let p_out = list.track_pin(list.pin(Point::active(0, 9)).unwrap());
+        list.erase_row_bounded(Point::active(0, 5), 10).unwrap();
+        assert_eq!(list.tracked_pin(p_in).unwrap().y, 6);
+        assert_eq!(list.tracked_pin(p_out).unwrap().y, 8);
+    }
+
+    #[test]
+    fn erase_row_bounded_two_page_straddle_updates_pins_by_region() {
+        // ghostty: "PageList eraseRowBounded full rows two pages" (PageList.zig:9736)
+        let mut list = PageList::new(80, 10, None);
+        let first = list.last_node().unwrap();
+        let cap_rows = list.node_capacity(first).unwrap().rows;
+        while node_rows(&list, first) < cap_rows {
+            assert_eq!(list.grow(), None);
+        }
+        list.grow_rows(5);
+        assert_eq!(list.total_pages(), 2);
+        let second = list.last_node().unwrap();
+        let p_first = list.track_pin(list.pin(Point::active(0, 4)).unwrap());
+        let p_first_out = list.track_pin(list.pin(Point::active(0, 3)).unwrap());
+        let p_in = list.track_pin(list.pin(Point::active(0, 8)).unwrap());
+        let p_out = list.track_pin(list.pin(Point::active(0, 9)).unwrap());
+        assert_eq!(list.tracked_pin(p_first).unwrap().node, first);
+        assert_eq!(list.tracked_pin(p_first).unwrap().y, cap_rows - 1);
+        assert_eq!(list.tracked_pin(p_first_out).unwrap().node, first);
+        assert_eq!(list.tracked_pin(p_first_out).unwrap().y, cap_rows - 2);
+        assert_eq!(list.tracked_pin(p_in).unwrap().node, second);
+        assert_eq!(list.tracked_pin(p_in).unwrap().y, 3);
+        assert_eq!(list.tracked_pin(p_out).unwrap().node, second);
+        assert_eq!(list.tracked_pin(p_out).unwrap().y, 4);
+
+        list.erase_row_bounded(Point::active(0, 4), 4).unwrap();
+        assert_eq!(list.tracked_pin(p_first).unwrap().node, first);
+        assert_eq!(list.tracked_pin(p_first).unwrap().y, cap_rows - 2);
+        assert_eq!(list.tracked_pin(p_first_out).unwrap().node, first);
+        assert_eq!(list.tracked_pin(p_first_out).unwrap().y, cap_rows - 2);
+        assert_eq!(list.tracked_pin(p_in).unwrap().node, second);
+        assert_eq!(list.tracked_pin(p_in).unwrap().y, 2);
+        assert_eq!(list.tracked_pin(p_out).unwrap().y, 4);
+    }
+
+    #[test]
+    fn clone_full_keeps_total_rows() {
+        // ghostty: "PageList clone" (PageList.zig:9812)
+        let list = PageList::new(80, 24, None);
+        let cloned = list.clone(CloneOptions {
+            top: Point::screen(0, 0),
+            bot: None,
+            tracked_pins: None,
+        });
+        assert_eq!(cloned.total_rows(), list.total_rows());
+        assert_eq!(cloned.rows, list.rows);
+        assert_eq!(cloned.viewport(), Viewport::Active);
+    }
+
+    #[test]
+    fn clone_partial_trimmed_right() {
+        // ghostty: "PageList clone partial trimmed right" (PageList.zig:9827)
+        let mut list = PageList::new(80, 20, None);
+        list.grow_rows(30);
+        let cloned = list.clone(CloneOptions {
+            top: Point::screen(0, 0),
+            bot: Some(Point::screen(0, 39)),
+            tracked_pins: None,
+        });
+        assert_eq!(cloned.total_rows(), 40);
+    }
+
+    #[test]
+    fn clone_partial_trimmed_left() {
+        // ghostty: "PageList clone partial trimmed left" (PageList.zig:9844)
+        let mut list = PageList::new(80, 20, None);
+        list.grow_rows(30);
+        let cloned = list.clone(CloneOptions {
+            top: Point::screen(0, 10),
+            bot: None,
+            tracked_pins: None,
+        });
+        assert_eq!(cloned.total_rows(), 40);
+    }
+
+    #[test]
+    fn clone_partial_trimmed_left_reclaims_styles() {
+        // ghostty: "PageList clone partial trimmed left reclaims styles" (PageList.zig:9860)
+        let mut list = PageList::new(80, 20, None);
+        list.grow_rows(30);
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            let style = node.page.add_style(PackedStyle(7)).unwrap();
+            for y in 0..10 {
+                node.page.set_cell(y, 0, Cell::new('A'));
+                node.page.set_style_id_raw(y, 0, style);
+                node.page.use_style(style);
+            }
+            node.page.release_style(style);
+            assert_eq!(node.page.style_count(), 1);
+        }
+        let cloned = list.clone(CloneOptions {
+            top: Point::screen(0, 10),
+            bot: None,
+            tracked_pins: None,
+        });
+        assert_eq!(cloned.total_rows(), 40);
+        assert_eq!(
+            cloned
+                .node(cloned.first_node().unwrap())
+                .unwrap()
+                .page
+                .style_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn clone_partial_trimmed_both() {
+        // ghostty: "PageList clone partial trimmed both" (PageList.zig:9909)
+        let mut list = PageList::new(80, 20, None);
+        list.grow_rows(30);
+        let cloned = list.clone(CloneOptions {
+            top: Point::screen(0, 10),
+            bot: Some(Point::screen(0, 35)),
+            tracked_pins: None,
+        });
+        assert_eq!(cloned.total_rows(), 26);
+    }
+
+    #[test]
+    fn clone_less_than_active_pads_to_active_rows() {
+        // ghostty: "PageList clone less than active" (PageList.zig:9926)
+        let list = PageList::new(80, 24, None);
+        let cloned = list.clone(CloneOptions {
+            top: Point::active(0, 5),
+            bot: None,
+            tracked_pins: None,
+        });
+        assert_eq!(cloned.total_rows(), 24);
+    }
+
+    #[test]
+    fn clone_remaps_tracked_pin_inside_region() {
+        // ghostty: "PageList clone remap tracked pin" (PageList.zig:9941)
+        let mut list = PageList::new(80, 24, None);
+        let pin = list.track_pin(list.pin(Point::active(0, 6)).unwrap());
+        let mut map = std::collections::HashMap::new();
+        let cloned = list.clone(CloneOptions {
+            top: Point::active(0, 5),
+            bot: None,
+            tracked_pins: Some(&mut map),
+        });
+        let cloned_id = map.get(&pin).copied().unwrap();
+        assert_eq!(
+            cloned.point_from_pin(Tag::Active, cloned.tracked_pin(cloned_id).unwrap()),
+            Some(Point::active(0, 1))
+        );
+    }
+
+    #[test]
+    fn clone_omits_tracked_pin_outside_region() {
+        // ghostty: "PageList clone remap tracked pin not in cloned area" (PageList.zig:9969)
+        let mut list = PageList::new(80, 24, None);
+        let pin = list.track_pin(list.pin(Point::active(0, 3)).unwrap());
+        let mut map = std::collections::HashMap::new();
+        let _cloned = list.clone(CloneOptions {
+            top: Point::active(0, 5),
+            bot: None,
+            tracked_pins: Some(&mut map),
+        });
+        assert!(!map.contains_key(&pin));
+    }
+
+    #[test]
+    fn clone_full_preserves_row_dirty_pattern() {
+        // ghostty: "PageList clone full dirty" (PageList.zig:9993)
+        let mut list = PageList::new(80, 24, None);
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            for y in 0..24 {
+                node.page.set_row_dirty(y, false);
+            }
+        }
+        for y in [0, 12, 23] {
+            let pin = list.pin(Point::active(0, y)).unwrap();
+            list.mark_dirty(pin);
+        }
+        let cloned = list.clone(CloneOptions {
+            top: Point::screen(0, 0),
+            bot: None,
+            tracked_pins: None,
+        });
+        let first = cloned.first_node().unwrap();
+        let page = &cloned.node(first).unwrap().page;
+        assert!(page.row_dirty(0));
+        assert!(!page.row_dirty(1));
+        assert!(page.row_dirty(12));
+        assert!(!page.row_dirty(14));
+        assert!(page.row_dirty(23));
+    }
+
+    #[test]
+    fn resize_without_reflow_more_rows() {
+        // ghostty: "PageList resize (no reflow) more rows" (PageList.zig:10020)
+        let mut list = PageList::new(10, 3, Some(0));
+        let pin = list.track_pin(list.pin(Point::active(0, 2)).unwrap());
+        list.resize_without_reflow(ResizeOptions {
+            cols: None,
+            rows: Some(10),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.rows, 10);
+        assert_eq!(list.total_rows(), 10);
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(0, 2))
+        );
+        assert_eq!(
+            list.point_from_pin(Tag::Screen, list.get_top_left(Tag::Active)),
+            Some(Point::screen(0, 0))
+        );
+    }
+
+    #[test]
+    fn resize_without_reflow_more_rows_with_history_pulls_scrollback_down() {
+        // ghostty: "PageList resize (no reflow) more rows with history" (PageList.zig:10053)
+        let mut list = PageList::new(10, 3, None);
+        list.grow_rows(50);
+        assert_eq!(
+            list.point_from_pin(Tag::Screen, list.get_top_left(Tag::Active)),
+            Some(Point::screen(0, 50))
+        );
+        let pin = list.track_pin(list.pin(Point::active(0, 2)).unwrap());
+        list.resize_without_reflow(ResizeOptions {
+            cols: None,
+            rows: Some(5),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.rows, 5);
+        assert_eq!(list.total_rows(), 53);
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(0, 4))
+        );
+        assert_eq!(
+            list.point_from_pin(Tag::Screen, list.get_top_left(Tag::Active)),
+            Some(Point::screen(0, 48))
+        );
+    }
+
+    #[test]
+    fn resize_without_reflow_less_rows_keeps_non_blank_scrollback() {
+        // ghostty: "PageList resize (no reflow) less rows" (PageList.zig:10092)
+        let mut list = PageList::new(10, 10, Some(0));
+        fill_all_rows_text(&mut list, 'A');
+        list.resize_without_reflow(ResizeOptions {
+            cols: None,
+            rows: Some(5),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.rows, 5);
+        assert_eq!(list.total_rows(), 10);
+        assert_eq!(
+            list.point_from_pin(Tag::Screen, list.get_top_left(Tag::Active)),
+            Some(Point::screen(0, 5))
+        );
+    }
+
+    #[test]
+    fn resize_without_reflow_one_row_keeps_non_blank_scrollback() {
+        // ghostty: "PageList resize (no reflow) one rows" (PageList.zig:10126)
+        let mut list = PageList::new(10, 10, Some(0));
+        fill_all_rows_text(&mut list, 'A');
+        list.resize_without_reflow(ResizeOptions {
+            cols: None,
+            rows: Some(1),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.rows, 1);
+        assert_eq!(list.total_rows(), 10);
+        assert_eq!(
+            list.point_from_pin(Tag::Screen, list.get_top_left(Tag::Active)),
+            Some(Point::screen(0, 9))
+        );
+    }
+
+    #[test]
+    fn resize_without_reflow_less_rows_cursor_on_bottom_stays_active_bottom() {
+        // ghostty: "PageList resize (no reflow) less rows cursor on bottom" (PageList.zig:10160)
+        let mut list = PageList::new(10, 10, Some(0));
+        for y in 0..10 {
+            set_screen_cell(&mut list, 0, y, char::from(b'0' + y as u8));
+        }
+        let pin = list.track_pin(list.pin(Point::active(0, 9)).unwrap());
+        list.resize_without_reflow(ResizeOptions {
+            cols: None,
+            rows: Some(5),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(0, 4))
+        );
+        assert_eq!(
+            list.point_from_pin(Tag::Screen, list.get_top_left(Tag::Active)),
+            Some(Point::screen(0, 5))
+        );
+    }
+
+    #[test]
+    fn resize_without_reflow_less_rows_cursor_in_scrollback() {
+        // ghostty: "PageList resize (no reflow) less rows cursor in scrollback" (PageList.zig:10212)
+        let mut list = PageList::new(10, 10, Some(0));
+        for y in 0..10 {
+            set_screen_cell(&mut list, 0, y, char::from(b'0' + y as u8));
+        }
+        let pin = list.track_pin(list.pin(Point::active(0, 2)).unwrap());
+        list.resize_without_reflow(ResizeOptions {
+            cols: None,
+            rows: Some(5),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        let tracked = list.tracked_pin(pin).unwrap();
+        assert_eq!(list.point_from_pin(Tag::Active, tracked), None);
+        assert_eq!(
+            list.point_from_pin(Tag::Screen, tracked),
+            Some(Point::screen(0, 2))
+        );
+    }
+
+    #[test]
+    fn resize_without_reflow_less_rows_trims_bg_only_blank_lines() {
+        // ghostty: "PageList resize (no reflow) less rows trims blank lines" (PageList.zig:10266)
+        let mut list = PageList::new(10, 5, Some(0));
+        set_screen_cell(&mut list, 0, 0, 'A');
+        if let Some(node) = list.node_mut(list.first_node().unwrap()) {
+            for y in 1..5 {
+                node.page.set_cell(
+                    y,
+                    0,
+                    Cell::bg_rgb(Rgb {
+                        r: 0xFF,
+                        g: 0,
+                        b: 0,
+                    }),
+                );
+            }
+        }
+        let pin = list.track_pin(list.pin(Point::active(0, 0)).unwrap());
+        list.resize_without_reflow(ResizeOptions {
+            cols: None,
+            rows: Some(2),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.rows, 2);
+        assert_eq!(list.total_rows(), 2);
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(0, 0))
+        );
+    }
+
+    #[test]
+    fn resize_without_reflow_pin_on_blank_row_blocks_trim() {
+        // ghostty: "PageList resize (no reflow) less rows trims blank lines cursor in blank line" (PageList.zig:10325)
+        let mut list = PageList::new(10, 5, Some(0));
+        set_screen_cell(&mut list, 0, 0, 'A');
+        let pin = list.track_pin(list.pin(Point::active(0, 3)).unwrap());
+        list.resize_without_reflow(ResizeOptions {
+            cols: None,
+            rows: Some(2),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.rows, 2);
+        assert_eq!(list.total_rows(), 4);
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(0, 1))
+        );
+    }
+
+    #[test]
+    fn resize_without_reflow_trim_erases_emptied_second_page() {
+        // ghostty: "PageList resize (no reflow) less rows trims blank lines erases pages" (PageList.zig:10368)
+        let mut list = PageList::new(100, 5, Some(0));
+        let first = list.first_node().unwrap();
+        let cap_rows = list.node_capacity(first).unwrap().rows;
+        list.resize_without_reflow(ResizeOptions {
+            cols: None,
+            rows: Some(cap_rows + 10),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.total_pages(), 2);
+        set_screen_cell(&mut list, 0, 0, 'A');
+        list.resize_without_reflow(ResizeOptions {
+            cols: None,
+            rows: Some(5),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.rows, 5);
+        assert_eq!(list.total_rows(), 5);
+        assert_eq!(list.total_pages(), 1);
+    }
+
+    #[test]
+    fn resize_without_reflow_more_rows_extends_blank_lines() {
+        // ghostty: "PageList resize (no reflow) more rows extends blank lines" (PageList.zig:10401)
+        let mut list = PageList::new(10, 3, Some(0));
+        set_screen_cell(&mut list, 0, 0, 'A');
+        list.resize_without_reflow(ResizeOptions {
+            cols: None,
+            rows: Some(7),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.rows, 7);
+        assert_eq!(list.total_rows(), 7);
+        assert_eq!(
+            list.point_from_pin(Tag::Screen, list.get_top_left(Tag::Active)),
+            Some(Point::screen(0, 0))
+        );
+    }
+
+    #[test]
+    fn resize_without_reflow_more_rows_keeps_top_viewport_contained() {
+        // ghostty: "PageList resize (no reflow) more rows contains viewport" (PageList.zig:10441)
+        let mut list = PageList::new(5, 5, Some(1));
+        let _ = list.grow();
+        list.scroll(Scroll::DeltaRow(-1));
+        assert_eq!(list.viewport(), Viewport::Top);
+        list.resize_without_reflow(ResizeOptions {
+            cols: None,
+            rows: Some(7),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.rows, 7);
+        assert_eq!(list.total_rows(), 7);
+        assert_eq!(list.viewport(), Viewport::Top);
+    }
+
+    #[test]
+    fn resize_without_reflow_less_cols() {
+        // ghostty: "PageList resize (no reflow) less cols" (PageList.zig:10473)
+        let mut list = PageList::new(10, 10, Some(0));
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(5),
+            rows: None,
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.cols, 5);
+        assert_all_rows_have_cols(&list, 5);
+    }
+
+    #[test]
+    fn resize_without_reflow_less_cols_clamps_pins() {
+        // ghostty: "PageList resize (no reflow) less cols pin in trimmed cols" (PageList.zig:10493)
+        let mut list = PageList::new(10, 10, Some(0));
+        let pin = list.track_pin(list.pin(Point::active(8, 2)).unwrap());
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(5),
+            rows: None,
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.tracked_pin(pin).unwrap().x, 4);
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(4, 2))
+        );
+    }
+
+    #[test]
+    fn resize_without_reflow_less_cols_frees_graphemes() {
+        // ghostty: "PageList resize (no reflow) less cols clears graphemes" (PageList.zig:10522)
+        let mut list = PageList::new(10, 10, Some(0));
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            node.page.set_cell(0, 9, Cell::new('A'));
+            node.page.append_grapheme(0, 9, 'A' as u32).unwrap();
+            assert_eq!(node.page.grapheme_count(), 1);
+        }
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(5),
+            rows: None,
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        for id in list.iter_node_ids() {
+            assert_eq!(list.node(id).unwrap().page.grapheme_count(), 0);
+        }
+    }
+
+    #[test]
+    fn resize_without_reflow_more_cols() {
+        // ghostty: "PageList resize (no reflow) more cols" (PageList.zig:10552)
+        let mut list = PageList::new(5, 3, Some(0));
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(10),
+            rows: None,
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.cols, 10);
+        assert_eq!(list.total_rows(), 3);
+        assert_all_rows_have_cols(&list, 10);
+    }
+
+    #[test]
+    fn resize_without_reflow_more_cols_with_spacer_head_uses_slow_path() {
+        // ghostty: "PageList resize (no reflow) more cols with spacer head" (PageList.zig:10572)
+        let mut list = PageList::new(2, 3, Some(0));
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            let mut row0 = node.page.row(0);
+            row0.set_wrap(true);
+            node.page.set_row(0, row0);
+            node.page.set_cell(0, 0, Cell::new('x'));
+            let mut head = Cell::default();
+            head.set_wide(CellWide::SpacerHead);
+            node.page.set_cell(0, 1, head);
+            let mut wide = Cell::new('😀');
+            wide.set_wide(CellWide::Wide);
+            node.page.set_cell(1, 0, wide);
+            let mut tail = Cell::default();
+            tail.set_wide(CellWide::SpacerTail);
+            node.page.set_cell(1, 1, tail);
+        }
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(3),
+            rows: None,
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        let first = list.first_node().unwrap();
+        let page = &list.node(first).unwrap().page;
+        assert_eq!(page.cell(0, 0), Cell::new('x'));
+        assert_eq!(page.cell(0, 1).wide(), CellWide::Narrow);
+        assert!(!page.row(0).wrap());
+        assert_eq!(page.cell(1, 0).wide(), CellWide::Wide);
+        assert_eq!(page.cell(1, 1).wide(), CellWide::SpacerTail);
+    }
+
+    #[test]
+    fn resize_without_reflow_grow_cols_fast_path_rejects_spacer_head() {
+        // ghostty: "PageList resize (no reflow) grow cols fast path with spacer head" (PageList.zig:10649)
+        let mut list = PageList::new(10, 3, Some(0));
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(5),
+            rows: None,
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            for y in [0, 1] {
+                let mut head = Cell::default();
+                head.set_wide(CellWide::SpacerHead);
+                node.page.set_cell(y, 4, head);
+                let mut row = node.page.row(y);
+                row.set_wrap(true);
+                node.page.set_row(y, row);
+            }
+        }
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(10),
+            rows: None,
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        let page = &list.node(list.first_node().unwrap()).unwrap().page;
+        assert_eq!(page.cell(0, 4).wide(), CellWide::Narrow);
+        assert_eq!(page.cell(1, 4).wide(), CellWide::Narrow);
+        assert!(!page.row(0).wrap());
+        assert!(!page.row(1).wrap());
+    }
+
+    #[test]
+    fn resize_without_reflow_more_cols_forces_smaller_page_capacity() {
+        // ghostty: "PageList resize (no reflow) more cols forces less rows per page" (PageList.zig:10724)
+        let rows: CellCountInt = 150;
+        let mut list = PageList::new(5, rows, Some(0));
+        let mut new_cols: CellCountInt = 50;
+        while PageList::initial_capacity(new_cols).rows >= rows {
+            new_cols += 50;
+        }
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(new_cols),
+            rows: None,
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.total_rows(), rows as usize);
+        for id in list.iter_node_ids() {
+            if Some(id) != list.last_node() {
+                let node = list.node(id).unwrap();
+                assert_eq!(node.page.size().rows, node.page.capacity().rows);
+            }
+        }
+
+        let current_first_size_rows = list
+            .node_page_size(list.first_node().unwrap())
+            .unwrap()
+            .rows;
+        let mut new_cols2 = new_cols + 50;
+        while PageList::initial_capacity(new_cols2).rows >= current_first_size_rows {
+            new_cols2 += 50;
+        }
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(new_cols2),
+            rows: None,
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.cols, new_cols2);
+        assert_eq!(list.total_rows(), rows as usize);
+        for id in list.iter_node_ids() {
+            if Some(id) != list.last_node() {
+                let node = list.node(id).unwrap();
+                assert_eq!(node.page.size().rows, node.page.capacity().rows);
+            }
+        }
+    }
+
+    #[test]
+    fn resize_without_reflow_less_cols_then_more_cols_fast_path() {
+        // ghostty: "PageList resize (no reflow) less cols then more cols" (PageList.zig:10793)
+        let mut list = PageList::new(5, 3, Some(0));
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(5),
+            rows: None,
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.total_rows(), 3);
+        assert_all_rows_have_cols(&list, 5);
+    }
+
+    #[test]
+    fn resize_without_reflow_less_rows_and_cols() {
+        // ghostty: "PageList resize (no reflow) less rows and cols" (PageList.zig:10817)
+        let mut list = PageList::new(10, 10, Some(0));
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(5),
+            rows: Some(7),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!((list.cols, list.rows), (5, 7));
+        assert_all_rows_have_cols(&list, 5);
+    }
+
+    // T5c deferred: the reflow-dispatching resize() entry and true reflow
+    // behavior are intentionally not ported in T5b.
+    // ghostty: "PageList resize less rows and cols cursor at bottom" (PageList.zig:10837)
+    // ghostty: "PageList resize less rows and cols cursor near top pushed to scrollback" (PageList.zig:10868)
+    // ghostty: "PageList resize more rows and cols doesn't fit in single std page" (PageList.zig:10941)
+
+    #[test]
+    fn resize_without_reflow_more_rows_and_less_cols() {
+        // ghostty: "PageList resize (no reflow) more rows and less cols" (PageList.zig:10920)
+        let mut list = PageList::new(10, 10, Some(0));
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(5),
+            rows: Some(20),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!((list.cols, list.rows), (5, 20));
+        assert_eq!(list.total_rows(), 20);
+        assert_all_rows_have_cols(&list, 5);
+    }
+
+    #[test]
+    fn resize_without_reflow_empty_screen() {
+        // ghostty: "PageList resize (no reflow) empty screen" (PageList.zig:10960)
+        let mut list = PageList::new(5, 5, Some(0));
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(10),
+            rows: Some(10),
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!((list.cols, list.rows), (10, 10));
+        assert_eq!(list.total_rows(), 10);
+        assert_all_rows_have_cols(&list, 10);
+    }
+
+    #[test]
+    fn resize_without_reflow_more_cols_forces_smaller_cap_and_preserves_cells() {
+        // ghostty: "PageList resize (no reflow) more cols forces smaller cap" (PageList.zig:10981)
+        let cap = PageList::initial_capacity(100);
+        let cap2 = PageList::initial_capacity(500);
+        assert!(cap2.rows < cap.rows);
+        let mut list = PageList::new(cap.cols, cap.rows, None);
+        for id in list.iter_node_ids().collect::<Vec<_>>() {
+            let size = list.node_page_size(id).unwrap();
+            if let Some(node) = list.node_mut(id) {
+                for y in 0..size.rows {
+                    node.page.set_cell(y, 0, Cell::new('A'));
+                }
+            }
+        }
+        let rows = list.total_rows();
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(cap2.cols),
+            rows: None,
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.total_rows(), rows);
+        assert_all_rows_have_cols(&list, cap2.cols);
+        for id in list.iter_node_ids() {
+            let size = list.node_page_size(id).unwrap();
+            for y in 0..size.rows {
+                assert_eq!(node_cell(&list, id, y, 0), Cell::new('A'));
+            }
+        }
+    }
+
+    #[test]
+    fn resize_without_reflow_more_rows_with_cursor_exception_keeps_cursor_active() {
+        // ghostty: "PageList resize (no reflow) more rows adds blank rows if cursor at bottom" (PageList.zig:11021)
+        let mut list = PageList::new(5, 3, None);
+        list.grow_rows(2);
+        for y in 0..list.total_rows() as u32 {
+            set_screen_cell(&mut list, 0, y, char::from(b'0' + y as u8));
+        }
+        let pin = list.track_pin(
+            list.pin(Point::active(0, u32::from(list.rows - 2)))
+                .unwrap(),
+        );
+        let original = list
+            .point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap())
+            .unwrap();
+        list.resize_without_reflow(ResizeOptions {
+            cols: None,
+            rows: Some(10),
+            reflow: false,
+            cursor: Some(ResizeCursor {
+                x: 0,
+                y: list.rows - 2,
+                pin: Some(pin),
+            }),
+        })
+        .unwrap();
+        assert_eq!(list.rows, 10);
+        assert_eq!(list.total_rows(), 12);
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(original)
+        );
+        assert_eq!(list.get_cell(Point::active(0, 0)), Some(Cell::new('2')));
+        assert_eq!(list.get_cell(Point::active(0, 1)), Some(Cell::new('3')));
+        assert_eq!(list.get_cell(Point::active(0, 2)), Some(Cell::new('4')));
+    }
+
+    #[test]
+    fn resize_without_reflow_more_cols_backfills_and_remaps_pin() {
+        // ghostty: "PageList resize (no reflow) more cols remaps pins in backfill path" (PageList.zig:14011)
+        let cols: CellCountInt = 5;
+        let cap = PageList::initial_capacity(cols);
+        let mut list = PageList::new(cols, cap.rows, None);
+        while list.first_node() == list.last_node() {
+            let _ = list.grow();
+        }
+        let first = list.first_node().unwrap();
+        let second = list.last_node().unwrap();
+        list.erase_history(Some(Point::history(0, 0)));
+        assert!(node_rows(&list, first) < list.node_capacity(first).unwrap().rows);
+        let pin = list.track_pin(Pin {
+            node: second,
+            x: 0,
+            y: 0,
+            garbage: false,
+        });
+        if let Some(node) = list.node_mut(second) {
+            node.page.set_cell(0, 0, Cell::new('X'));
+        }
+        list.resize_without_reflow(ResizeOptions {
+            cols: Some(cols + 1),
+            rows: None,
+            reflow: false,
+            cursor: None,
+        })
+        .unwrap();
+        let tracked = list.tracked_pin(pin).unwrap();
+        assert!(list.node(tracked.node).is_some());
+        assert!(tracked.y < list.node_page_size(tracked.node).unwrap().rows);
+        assert_eq!(
+            node_cell(&list, tracked.node, tracked.y, tracked.x),
+            Cell::new('X')
+        );
+    }
+
+    #[test]
+    fn compact_standard_page_returns_none() {
+        // ghostty: "PageList compact std_size page returns null" (PageList.zig:14074)
+        let mut list = PageList::new(80, 24, Some(0));
+        let first = list.first_node().unwrap();
+        assert!(list.compact(first).is_none());
+        assert_eq!(list.first_node(), Some(first));
+    }
+
+    #[test]
+    fn compact_oversized_page_preserves_content_and_pin() {
+        // ghostty: "PageList compact oversized page" (PageList.zig:14093)
+        let mut list = PageList::new(80, 24, None);
+        let first = list.first_node().unwrap();
+        let mut node = first;
+        while list.node(node).unwrap().page.memory_len() <= PageList::standard_size() {
+            node = list
+                .increase_capacity(node, Some(IncreaseCapacity::GraphemeBytes))
+                .unwrap();
+        }
+        write_node_row_marker(&mut list, node, 10, 'C');
+        let pin = list.track_pin(Pin {
+            node,
+            x: 0,
+            y: 10,
+            garbage: false,
+        });
+        let old_len = list.node(node).unwrap().page.memory_len();
+        let compacted = list.compact(node).unwrap();
+        assert!(list.node(compacted).unwrap().page.memory_len() < old_len);
+        assert_eq!(list.tracked_pin(pin).unwrap().node, compacted);
+        assert_eq!(node_cell(&list, compacted, 10, 0), Cell::new('C'));
+    }
+
+    #[test]
+    fn compact_insufficient_savings_returns_none() {
+        // ghostty: "PageList compact insufficient savings returns null" (PageList.zig:14180)
+        let mut list = PageList::new(80, 24, Some(0));
+        let first = list.first_node().unwrap();
+        let grown = list
+            .increase_capacity(first, Some(IncreaseCapacity::GraphemeBytes))
+            .unwrap();
+        if list.node(grown).unwrap().page.memory_len() <= PageList::standard_size() {
+            assert!(list.compact(grown).is_none());
+        } else if let Some(compacted) = list.compact(grown) {
+            assert!(
+                list.node(compacted).unwrap().page.memory_len()
+                    < list
+                        .node(grown)
+                        .map(|node| node.page.memory_len())
+                        .unwrap_or(usize::MAX)
+            );
+        }
+    }
+
+    #[test]
+    fn split_at_middle_row_moves_rows_to_new_page() {
+        // ghostty: "PageList split at middle row" (PageList.zig:14208)
+        let mut list = PageList::new(10, 10, Some(0));
+        let first = list.first_node().unwrap();
+        for y in 0..10 {
+            write_node_row_marker(&mut list, first, y, char::from(b'0' + y as u8));
+        }
+        let new_id = list
+            .split(Pin {
+                node: first,
+                x: 0,
+                y: 5,
+                garbage: false,
+            })
+            .unwrap();
+        assert_eq!(list.node_page_size(first).unwrap().rows, 5);
+        assert_eq!(list.node_page_size(new_id).unwrap().rows, 5);
+        assert_eq!(node_cell(&list, first, 4, 0), Cell::new('4'));
+        assert_eq!(node_cell(&list, new_id, 0, 0), Cell::new('5'));
+        assert_eq!(node_cell(&list, new_id, 4, 0), Cell::new('9'));
+    }
+
+    #[test]
+    fn split_at_row_zero_is_noop() {
+        // ghostty: "PageList split at row 0 is no-op" (PageList.zig:14255)
+        let mut list = PageList::new(10, 10, Some(0));
+        let first = list.first_node().unwrap();
+        let result = list
+            .split(Pin {
+                node: first,
+                x: 0,
+                y: 0,
+                garbage: false,
+            })
+            .unwrap();
+        assert_eq!(result, first);
+        assert_eq!(list.total_pages(), 1);
+    }
+
+    #[test]
+    fn split_at_last_row_makes_one_row_page() {
+        // ghostty: "PageList split at last row" (PageList.zig:14289)
+        let mut list = PageList::new(10, 10, Some(0));
+        let first = list.first_node().unwrap();
+        write_node_row_marker(&mut list, first, 9, 'L');
+        let new_id = list
+            .split(Pin {
+                node: first,
+                x: 0,
+                y: 9,
+                garbage: false,
+            })
+            .unwrap();
+        assert_eq!(list.node_page_size(first).unwrap().rows, 9);
+        assert_eq!(list.node_page_size(new_id).unwrap().rows, 1);
+        assert_eq!(node_cell(&list, new_id, 0, 0), Cell::new('L'));
+    }
+
+    #[test]
+    fn split_single_row_page_returns_out_of_space() {
+        // ghostty: "PageList split single row page returns OutOfSpace" (PageList.zig:14328)
+        let mut list = PageList::new(10, 1, Some(0));
+        let first = list.first_node().unwrap();
+        assert_eq!(
+            list.split(Pin {
+                node: first,
+                x: 0,
+                y: 0,
+                garbage: false
+            }),
+            Err(SplitError::OutOfSpace)
+        );
+    }
+
+    #[test]
+    fn split_moves_tracked_pins_in_split_region() {
+        // ghostty: "PageList split moves tracked pins" (PageList.zig:14342)
+        // ghostty: "PageList split tracked pin before split point unchanged" (PageList.zig:14365)
+        // ghostty: "PageList split tracked pin at split point moves to new page" (PageList.zig:14389)
+        let mut list = PageList::new(10, 10, Some(0));
+        let first = list.first_node().unwrap();
+        let before = list.track_pin(Pin {
+            node: first,
+            x: 5,
+            y: 2,
+            garbage: false,
+        });
+        let at = list.track_pin(Pin {
+            node: first,
+            x: 4,
+            y: 5,
+            garbage: false,
+        });
+        let after = list.track_pin(Pin {
+            node: first,
+            x: 3,
+            y: 7,
+            garbage: false,
+        });
+        let new_id = list
+            .split(Pin {
+                node: first,
+                x: 0,
+                y: 5,
+                garbage: false,
+            })
+            .unwrap();
+        assert_eq!(list.tracked_pin(before).unwrap().node, first);
+        assert_eq!(
+            (
+                list.tracked_pin(before).unwrap().x,
+                list.tracked_pin(before).unwrap().y
+            ),
+            (5, 2)
+        );
+        assert_eq!(list.tracked_pin(at).unwrap().node, new_id);
+        assert_eq!(
+            (
+                list.tracked_pin(at).unwrap().x,
+                list.tracked_pin(at).unwrap().y
+            ),
+            (4, 0)
+        );
+        assert_eq!(list.tracked_pin(after).unwrap().node, new_id);
+        assert_eq!(
+            (
+                list.tracked_pin(after).unwrap().x,
+                list.tracked_pin(after).unwrap().y
+            ),
+            (3, 2)
+        );
+    }
+
+    #[test]
+    fn split_multiple_tracked_pins_across_regions() {
+        // ghostty: "PageList split multiple tracked pins across regions" (PageList.zig:14414)
+        let mut list = PageList::new(10, 10, Some(0));
+        let first = list.first_node().unwrap();
+        let before = list.track_pin(Pin {
+            node: first,
+            x: 0,
+            y: 1,
+            garbage: false,
+        });
+        let at = list.track_pin(Pin {
+            node: first,
+            x: 2,
+            y: 5,
+            garbage: false,
+        });
+        let after_one = list.track_pin(Pin {
+            node: first,
+            x: 3,
+            y: 7,
+            garbage: false,
+        });
+        let after_two = list.track_pin(Pin {
+            node: first,
+            x: 8,
+            y: 9,
+            garbage: false,
+        });
+        let new_id = list
+            .split(Pin {
+                node: first,
+                x: 0,
+                y: 5,
+                garbage: false,
+            })
+            .unwrap();
+
+        let before_pin = list.tracked_pin(before).unwrap();
+        assert_eq!(before_pin.node, first);
+        assert_eq!((before_pin.x, before_pin.y), (0, 1));
+        let at_pin = list.tracked_pin(at).unwrap();
+        assert_eq!(at_pin.node, new_id);
+        assert_eq!((at_pin.x, at_pin.y), (2, 0));
+        let after_one_pin = list.tracked_pin(after_one).unwrap();
+        assert_eq!(after_one_pin.node, new_id);
+        assert_eq!((after_one_pin.x, after_one_pin.y), (3, 2));
+        let after_two_pin = list.tracked_pin(after_two).unwrap();
+        assert_eq!(after_two_pin.node, new_id);
+        assert_eq!((after_two_pin.x, after_two_pin.y), (8, 4));
+    }
+
+    #[test]
+    fn split_tracked_viewport_pin_in_split_region_moves() {
+        // ghostty: "PageList split tracked viewport_pin in split region moves correctly" (PageList.zig:14460)
+        let mut list = PageList::new(10, 10, Some(0));
+        let first = list.first_node().unwrap();
+        if let Some(pin) = list.tracked_pin_mut(list.viewport_pin_id()) {
+            pin.node = first;
+            pin.x = 6;
+            pin.y = 7;
+        }
+        let new_id = list
+            .split(Pin {
+                node: first,
+                x: 0,
+                y: 5,
+                garbage: false,
+            })
+            .unwrap();
+        let viewport_pin = list.tracked_pin(list.viewport_pin_id()).unwrap();
+        assert_eq!(viewport_pin.node, new_id);
+        assert_eq!((viewport_pin.x, viewport_pin.y), (6, 2));
+    }
+
+    #[test]
+    fn split_middle_page_preserves_linked_list_order() {
+        // ghostty: "PageList split middle page preserves linked list order" (PageList.zig:14486)
+        let mut list = PageList::new(10, 12, Some(0));
+        let first = list.first_node().unwrap();
+        let second = list
+            .split(Pin {
+                node: first,
+                x: 0,
+                y: 4,
+                garbage: false,
+            })
+            .unwrap();
+        let third = list
+            .split(Pin {
+                node: second,
+                x: 0,
+                y: 4,
+                garbage: false,
+            })
+            .unwrap();
+        assert_eq!(
+            list.iter_node_ids().collect::<Vec<_>>(),
+            vec![first, second, third]
+        );
+        assert_eq!(list.node(first).unwrap().prev, None);
+        assert_eq!(list.node(first).unwrap().next, Some(second));
+        assert_eq!(list.node(second).unwrap().prev, Some(first));
+        assert_eq!(list.node(second).unwrap().next, Some(third));
+        assert_eq!(list.node(third).unwrap().prev, Some(second));
+        assert_eq!(list.node(third).unwrap().next, None);
+        assert_eq!(list.last_node(), Some(third));
+        assert_eq!(node_rows(&list, first), 4);
+        assert_eq!(node_rows(&list, second), 4);
+        assert_eq!(node_rows(&list, third), 4);
+    }
+
+    #[test]
+    fn split_last_page_makes_new_page_last() {
+        // ghostty: "PageList split last page makes new page the last" (PageList.zig:14535)
+        let mut list = PageList::new(10, 10, Some(0));
+        let first = list.first_node().unwrap();
+        let second = list
+            .split(Pin {
+                node: first,
+                x: 0,
+                y: 5,
+                garbage: false,
+            })
+            .unwrap();
+        let third = list
+            .split(Pin {
+                node: second,
+                x: 0,
+                y: 2,
+                garbage: false,
+            })
+            .unwrap();
+        assert_eq!(list.last_node(), Some(third));
+        assert_eq!(list.node(second).unwrap().next, Some(third));
+        assert_eq!(list.node(third).unwrap().prev, Some(second));
+        assert_eq!(node_rows(&list, second), 2);
+        assert_eq!(node_rows(&list, third), 3);
+    }
+
+    #[test]
+    fn split_first_page_keeps_original_first() {
+        // ghostty: "PageList split first page keeps original as first" (PageList.zig:14566)
+        let mut list = PageList::new(10, 10, Some(0));
+        let first = list.first_node().unwrap();
+        let second = list
+            .split(Pin {
+                node: first,
+                x: 0,
+                y: 5,
+                garbage: false,
+            })
+            .unwrap();
+        let inserted = list
+            .split(Pin {
+                node: first,
+                x: 0,
+                y: 2,
+                garbage: false,
+            })
+            .unwrap();
+        assert_eq!(list.first_node(), Some(first));
+        assert_eq!(
+            list.iter_node_ids().collect::<Vec<_>>(),
+            vec![first, inserted, second]
+        );
+        assert_eq!(node_rows(&list, first), 2);
+        assert_eq!(node_rows(&list, inserted), 3);
+        assert_eq!(node_rows(&list, second), 5);
+    }
+
+    #[test]
+    fn split_preserves_wrap_flags() {
+        // ghostty: "PageList split preserves wrap flags" (PageList.zig:14600)
+        let mut list = PageList::new(10, 10, Some(0));
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            let mut row5 = node.page.row(5);
+            row5.set_wrap(true);
+            node.page.set_row(5, row5);
+            let mut row6 = node.page.row(6);
+            row6.set_wrap_continuation(true);
+            node.page.set_row(6, row6);
+            let mut row7 = node.page.row(7);
+            row7.set_wrap(true);
+            row7.set_wrap_continuation(true);
+            node.page.set_row(7, row7);
+        }
+        let second = list
+            .split(Pin {
+                node: first,
+                x: 0,
+                y: 5,
+                garbage: false,
+            })
+            .unwrap();
+        let page = &list.node(second).unwrap().page;
+        assert!(page.row(0).wrap());
+        assert!(!page.row(0).wrap_continuation());
+        assert!(!page.row(1).wrap());
+        assert!(page.row(1).wrap_continuation());
+        assert!(page.row(2).wrap());
+        assert!(page.row(2).wrap_continuation());
+    }
+
+    #[test]
+    fn split_preserves_styled_cells() {
+        // ghostty: "PageList split preserves styled cells" (PageList.zig:14654)
+        let mut list = PageList::new(10, 10, Some(0));
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            for y in 5..8 {
+                node.page.set_cell(y, 0, Cell::new('S'));
+                node.page.set_style(y, 0, PackedStyle(7)).unwrap();
+            }
+            assert_eq!(node.page.style_count(), 1);
+        }
+        let second = list
+            .split(Pin {
+                node: first,
+                x: 0,
+                y: 5,
+                garbage: false,
+            })
+            .unwrap();
+        assert_eq!(list.node(first).unwrap().page.style_count(), 0);
+        let page = &list.node(second).unwrap().page;
+        assert_eq!(page.style_count(), 1);
+        for y in 0..3 {
+            let cell = page.cell(y, 0);
+            assert_eq!(cell.codepoint(), 'S' as u32);
+            assert_ne!(cell.style_id(), 0);
+            assert!(page.row(y).styled());
+        }
+    }
+
+    #[test]
+    fn split_preserves_grapheme_clusters() {
+        // ghostty: "PageList split preserves grapheme clusters" (PageList.zig:14705)
+        let mut list = PageList::new(10, 10, Some(0));
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            node.page.set_cell(6, 0, Cell::new('👨'));
+            node.page.append_grapheme(6, 0, 0x200D).unwrap();
+            node.page.append_grapheme(6, 0, '👩' as u32).unwrap();
+            assert_eq!(node.page.grapheme_count(), 1);
+        }
+        let second = list
+            .split(Pin {
+                node: first,
+                x: 0,
+                y: 5,
+                garbage: false,
+            })
+            .unwrap();
+        assert_eq!(list.node(first).unwrap().page.grapheme_count(), 0);
+        let page = &list.node(second).unwrap().page;
+        assert_eq!(page.grapheme_count(), 1);
+        assert!(page.cell(1, 0).has_grapheme());
+        assert_eq!(page.grapheme(1, 0), Some(vec![0x200D, '👩' as u32]));
+    }
+
+    #[test]
+    fn split_preserves_hyperlinks() {
+        // ghostty: "PageList split preserves hyperlinks" (PageList.zig:14753)
+        let mut list = PageList::new(10, 10, Some(0));
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            node.page.set_cell(7, 0, Cell::new('L'));
+            node.page
+                .set_hyperlink_implicit(7, 0, 0, b"https://example.com")
+                .unwrap();
+            assert_eq!(node.page.hyperlink_count(), 1);
+        }
+        let second = list
+            .split(Pin {
+                node: first,
+                x: 0,
+                y: 5,
+                garbage: false,
+            })
+            .unwrap();
+        assert_eq!(list.node(first).unwrap().page.hyperlink_count(), 0);
+        let page = &list.node(second).unwrap().page;
+        assert_eq!(page.hyperlink_count(), 1);
+        assert_eq!(page.cell(2, 0).codepoint(), 'L' as u32);
+        assert!(page.cell(2, 0).hyperlink());
+        assert!(page.hyperlink_id(2, 0).is_some());
+    }
 
     #[test]
     fn arena_node_generation_rejects_stale_ids() {
@@ -3111,7 +5618,7 @@ mod tests {
 
     #[test]
     fn reset_invalidates_old_serial_floor_and_keeps_viewport_pin_live() {
-        // ghostty: "PageList reset invalidates refs" (PageList.zig:13640)
+        // ghostty: "PageList reset invalidates stale untracked refs even if node memory is reused" (PageList.zig:13640)
         let mut list = PageList::new(80, 24, None);
         list.grow_rows(10);
         let old_min = list.page_serial_min();
