@@ -8,9 +8,10 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::color::Name;
 use crate::hyperlink::{Hyperlink, HyperlinkId, HyperlinkIdKind};
-use crate::page::{Cell, CellWide, Page, SemanticContent};
+use crate::page::{Cell, CellWide, Page, SemanticContent, SemanticPrompt};
 use crate::page_list::{
-    CloneOptions, IncreaseCapacity, IncreaseCapacityError, PageList, Pin, PinId, Scroll,
+    CloneOptions, Direction, IncreaseCapacity, IncreaseCapacityError, PageList, Pin, PinId,
+    ResizeCursor, ResizeError, ResizeOptions, Scroll,
 };
 use crate::point::{Coordinate, Point, Tag};
 use crate::sgr::Attribute;
@@ -132,6 +133,42 @@ pub struct SavedCursor {
     pub charset: CharsetState,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PromptRedraw {
+    #[default]
+    False,
+    Last,
+    True,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resize {
+    pub cols: CellCountInt,
+    pub rows: CellCountInt,
+    pub reflow: bool,
+    pub prompt_redraw: PromptRedraw,
+}
+
+impl Resize {
+    pub const fn new(cols: CellCountInt, rows: CellCountInt) -> Self {
+        Self {
+            cols,
+            rows,
+            reflow: true,
+            prompt_redraw: PromptRedraw::False,
+        }
+    }
+
+    pub const fn without_reflow(cols: CellCountInt, rows: CellCountInt) -> Self {
+        Self {
+            cols,
+            rows,
+            reflow: false,
+            prompt_redraw: PromptRedraw::False,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
     pub cols: CellCountInt,
@@ -154,7 +191,7 @@ pub struct Screen {
     pub pages: PageList,
     pub no_scrollback: bool,
     pub cursor: Cursor,
-    pub saved_cursor: SavedCursor,
+    pub saved_cursor: Option<SavedCursor>,
     pub charset: CharsetState,
     pub semantic_prompt: ScreenSemanticPrompt,
     pub dirty: Dirty,
@@ -172,7 +209,7 @@ impl Screen {
             pages,
             no_scrollback,
             cursor: Cursor::new(cursor_pin_id),
-            saved_cursor: SavedCursor::default(),
+            saved_cursor: None,
             charset: CharsetState::default(),
             semantic_prompt: ScreenSemanticPrompt::default(),
             dirty: Dirty::default(),
@@ -405,6 +442,50 @@ impl Screen {
     pub fn scroll_clear(&mut self) {
         self.pages.scroll_clear();
         self.cursor_reload();
+    }
+
+    pub fn resize(&mut self, opts: Resize) -> Result<(), ResizeError> {
+        // ghostty: Screen.resize releases cursor page-local refs while PageList
+        // rebuilds pages, then reloads coordinates from the tracked cursor pin
+        // (Screen.zig:1655).
+        let cursor_style = self.cursor.style;
+        self.cursor.style = Style::default();
+        self.manual_style_update();
+
+        let hyperlink = self.detach_cursor_hyperlink_for_resize();
+        let saved_cursor_pin = self.track_saved_cursor_pin_for_resize();
+        self.clear_prompt_for_resize(opts.prompt_redraw);
+
+        let result = self.pages.resize(ResizeOptions {
+            cols: Some(opts.cols),
+            rows: Some(opts.rows),
+            reflow: opts.reflow,
+            cursor: Some(ResizeCursor {
+                x: self.cursor.x,
+                y: self.cursor.y,
+                pin: Some(self.cursor.pin),
+            }),
+        });
+
+        if result.is_ok() {
+            if self.no_scrollback {
+                self.pages.erase_history(None);
+            }
+            self.cursor_reload();
+            self.fix_saved_cursor_after_resize(saved_cursor_pin, opts.cols);
+            if let Some(link) = hyperlink {
+                self.reattach_cursor_hyperlink(link);
+            }
+        }
+
+        if let Some(pin_id) = saved_cursor_pin {
+            let _ = self.pages.untrack_pin(pin_id);
+        }
+
+        self.cursor.style = cursor_style;
+        self.manual_style_update();
+        self.assert_integrity();
+        result
     }
 
     pub fn clear_rows(&mut self, top: Point, bottom: Option<Point>, protected: bool) {
@@ -822,6 +903,23 @@ impl Screen {
 
     pub fn cursor_set_semantic_content(&mut self, content: SemanticContent) {
         self.cursor.semantic_content = content;
+        self.cursor.semantic_content_clear_eol = false;
+        match content {
+            SemanticContent::Prompt => {
+                self.semantic_prompt.seen = true;
+                self.set_cursor_row_semantic_prompt(SemanticPrompt::Prompt);
+            }
+            SemanticContent::Input => {
+                self.set_cursor_row_semantic_prompt(SemanticPrompt::PromptContinuation);
+            }
+            SemanticContent::Output => {}
+        }
+    }
+
+    pub fn cursor_set_semantic_input_clear_eol(&mut self) {
+        self.cursor.semantic_content = SemanticContent::Input;
+        self.cursor.semantic_content_clear_eol = true;
+        self.set_cursor_row_semantic_prompt(SemanticPrompt::PromptContinuation);
     }
 
     pub fn cursor_mark_dirty(&mut self) {
@@ -914,6 +1012,12 @@ impl Screen {
             '\n' => {
                 self.cursor_down_or_scroll();
                 self.cursor_horizontal_absolute(0);
+                self.cursor.pending_wrap = false;
+                if self.cursor.semantic_content_clear_eol {
+                    self.cursor_set_semantic_content(SemanticContent::Output);
+                } else if self.cursor.semantic_content != SemanticContent::Output {
+                    self.set_cursor_row_semantic_prompt(SemanticPrompt::PromptContinuation);
+                }
                 return;
             }
             '\r' => {
@@ -970,6 +1074,9 @@ impl Screen {
             if let Some(node) = self.pages.node_mut(pin.node) {
                 let mut row = node.page.row(pin.y);
                 row.set_wrap_continuation(true);
+                if self.cursor.semantic_content != SemanticContent::Output {
+                    row.set_semantic_prompt(SemanticPrompt::PromptContinuation);
+                }
                 node.page.set_row(pin.y, row);
             }
         }
@@ -1009,6 +1116,14 @@ impl Screen {
         if let Some(node) = self.pages.node_mut(pin.node) {
             node.page.clear_cells(pin.y, pin.x, pin.x.saturating_add(1));
             node.page.set_cell(pin.y, pin.x, cell);
+            let prompt = match self.cursor.semantic_content {
+                SemanticContent::Prompt => SemanticPrompt::Prompt,
+                SemanticContent::Input => SemanticPrompt::PromptContinuation,
+                SemanticContent::Output => SemanticPrompt::None,
+            };
+            let mut row = node.page.row(pin.y);
+            row.set_semantic_prompt(prompt);
+            node.page.set_row(pin.y, row);
             if cell.style_id() != DEFAULT_STYLE_ID {
                 node.page.use_style(cell.style_id());
             }
@@ -1049,6 +1164,116 @@ impl Screen {
                 }
             }
             self.cursor.hyperlink_id = 0;
+        }
+    }
+
+    fn detach_cursor_hyperlink_for_resize(&mut self) -> Option<Hyperlink> {
+        let hyperlink = self.cursor.hyperlink.clone();
+        if self.cursor.hyperlink_id != 0 {
+            if let Some(pin) = self.cursor_pin() {
+                if let Some(node) = self.pages.node_mut(pin.node) {
+                    node.page.release_hyperlink_id(self.cursor.hyperlink_id);
+                }
+            }
+            self.cursor.hyperlink_id = 0;
+            self.cursor.hyperlink = None;
+        }
+        hyperlink
+    }
+
+    fn reattach_cursor_hyperlink(&mut self, link: Hyperlink) {
+        let explicit_id = match &link.id {
+            HyperlinkIdKind::Explicit(id) => Some(id.as_slice()),
+            HyperlinkIdKind::Implicit(_) => None,
+        };
+        self.start_hyperlink(explicit_id, &link.uri);
+    }
+
+    fn track_saved_cursor_pin_for_resize(&mut self) -> Option<PinId> {
+        let saved = self.saved_cursor.as_ref()?;
+        let pin = self.pages.pin(Point::active(saved.x, u32::from(saved.y)))?;
+        Some(self.pages.track_pin(pin))
+    }
+
+    fn fix_saved_cursor_after_resize(
+        &mut self,
+        saved_cursor_pin: Option<PinId>,
+        new_cols: CellCountInt,
+    ) {
+        let Some(saved_cursor_pin) = saved_cursor_pin else {
+            return;
+        };
+        let point = self
+            .pages
+            .tracked_pin(saved_cursor_pin)
+            .and_then(|pin| self.pages.point_from_pin(Tag::Active, pin));
+        let Some(saved) = self.saved_cursor.as_mut() else {
+            return;
+        };
+
+        if let Some(point) = point {
+            let coord = point.coord();
+            saved.x = coord.x.min(new_cols.saturating_sub(1));
+            saved.y = coord.y as CellCountInt;
+            if saved.pending_wrap && saved.x != new_cols.saturating_sub(1) {
+                saved.pending_wrap = false;
+                saved.x = saved.x.saturating_add(1);
+            }
+        } else {
+            saved.x = 0;
+            saved.y = 0;
+            saved.pending_wrap = false;
+        }
+    }
+
+    fn clear_prompt_for_resize(&mut self, redraw: PromptRedraw) {
+        if redraw == PromptRedraw::False || self.cursor.semantic_content == SemanticContent::Output
+        {
+            return;
+        }
+
+        match redraw {
+            PromptRedraw::False => {}
+            PromptRedraw::Last => self.clear_row_at_cursor(),
+            PromptRedraw::True => self.clear_prompt_block_for_resize(),
+        }
+    }
+
+    fn clear_prompt_block_for_resize(&mut self) {
+        let Some(cursor_pin) = self.cursor_pin() else {
+            return;
+        };
+        let Some(cursor_point) = self.pages.point_from_pin(Tag::Active, cursor_pin) else {
+            return;
+        };
+        let coord = cursor_point.coord();
+        let mut prompts =
+            self.pages
+                .prompt_iterator(Direction::LeftUp, Point::active(coord.x, coord.y), None);
+        let Some(mut current) = prompts.next(&self.pages) else {
+            return;
+        };
+        current.x = 0;
+
+        loop {
+            self.clear_row(current, false);
+            if current.node == cursor_pin.node && current.y == cursor_pin.y {
+                break;
+            }
+            let Some(next) = self.pages.pin_down(current, 1) else {
+                break;
+            };
+            current = Pin { x: 0, ..next };
+        }
+    }
+
+    fn set_cursor_row_semantic_prompt(&mut self, prompt: SemanticPrompt) {
+        if let Some(pin) = self.cursor_pin() {
+            if let Some(node) = self.pages.node_mut(pin.node) {
+                let mut row = node.page.row(pin.y);
+                row.set_semantic_prompt(prompt);
+                node.page.set_row(pin.y, row);
+            }
         }
     }
 
@@ -1094,8 +1319,17 @@ impl Screen {
     }
 
     fn row_to_string(&self, page: &Page, y: CellCountInt) -> String {
+        let last_meaningful = (0..page.size().cols)
+            .rev()
+            .find(|&x| {
+                let cell = page.cell(y, x);
+                cell.has_text()
+                    || matches!(cell.wide(), CellWide::SpacerHead | CellWide::SpacerTail)
+            })
+            .map(|x| x.saturating_add(1))
+            .unwrap_or(0);
         let mut out = String::new();
-        for x in 0..page.size().cols {
+        for x in 0..last_meaningful {
             let cell = page.cell(y, x);
             match cell.wide() {
                 CellWide::SpacerTail | CellWide::SpacerHead => continue,
@@ -1122,7 +1356,7 @@ impl Screen {
                 out.push(' ');
             }
         }
-        out.trim_end_matches(' ').to_string()
+        out
     }
 }
 
@@ -1144,6 +1378,19 @@ mod tests {
 
     fn active_pin(screen: &Screen, y: CellCountInt) -> Pin {
         screen.pages.pin(Point::active(0, u32::from(y))).unwrap()
+    }
+
+    fn active_row(screen: &Screen, y: CellCountInt) -> crate::page::Row {
+        let pin = active_pin(screen, y);
+        screen.pages.row_and_cell(pin).unwrap().0
+    }
+
+    fn resize(cols: CellCountInt, rows: CellCountInt) -> Resize {
+        Resize::new(cols, rows)
+    }
+
+    fn resize_no_reflow(cols: CellCountInt, rows: CellCountInt) -> Resize {
+        Resize::without_reflow(cols, rows)
     }
 
     fn clear_all_dirty(screen: &mut Screen) {
@@ -1287,6 +1534,1302 @@ mod tests {
         screen.test_write_string("hello\nworld");
         assert_eq!(screen.dump_string_for_tag(Tag::Screen), "hello\nworld");
         assert_eq!((screen.cursor.x, screen.cursor.y), (5, 1));
+    }
+
+    #[test]
+    fn resize_no_reflow_more_rows_keeps_contents() {
+        // ghostty: "Screen: resize (no reflow) more rows" (Screen.zig:5780)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        let text = "1ABCD\n2EFGH\n3IJKL";
+        screen.test_write_string(text);
+
+        screen.resize(resize_no_reflow(10, 10)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), text);
+    }
+
+    #[test]
+    fn resize_no_reflow_less_rows_moves_active_view() {
+        // ghostty: "Screen: resize (no reflow) less rows" (Screen.zig:5798)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("1ABCD\n2EFGH\n3IJKL");
+        assert_eq!((screen.cursor.x, screen.cursor.y), (5, 2));
+
+        screen.resize(resize_no_reflow(10, 2)).unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (5, 1));
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "2EFGH\n3IJKL");
+    }
+
+    #[test]
+    fn resize_no_reflow_less_cols_clips_cells() {
+        // ghostty: "Screen: resize (no reflow) less cols" (Screen.zig:5908)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("1ABCD\n2EFGH\n3IJKL");
+
+        screen.resize(resize_no_reflow(4, 3)).unwrap();
+
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "1ABC\n2EFG\n3IJK"
+        );
+    }
+
+    #[test]
+    fn resize_no_reflow_with_scrollback_keeps_bottom_rows() {
+        // ghostty: "Screen: resize (no reflow) less rows with scrollback" (Screen.zig:5943)
+        let mut screen = Screen::new(Options {
+            cols: 7,
+            rows: 3,
+            max_scrollback: 2,
+        });
+        screen.test_write_string("1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH");
+
+        screen.resize(resize_no_reflow(7, 2)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "4ABCD\n5EFGH");
+    }
+
+    #[test]
+    fn resize_no_reflow_more_rows_preserves_wrap_flags() {
+        // ghostty: "Screen: resize (no reflow) more rows with soft wrapping" (Screen.zig:5986)
+        let mut screen = Screen::new(Options {
+            cols: 2,
+            rows: 3,
+            max_scrollback: 3,
+        });
+        screen.test_write_string("1A2B\n3C4E\n5F6G");
+        for y in 0..6 {
+            assert_eq!(
+                screen
+                    .pages
+                    .row_and_cell(screen.pages.pin(Point::screen(0, y)).unwrap())
+                    .unwrap()
+                    .0
+                    .wrap(),
+                y % 2 == 0
+            );
+        }
+
+        screen.resize(resize_no_reflow(2, 10)).unwrap();
+
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "1A\n2B\n3C\n4E\n5F\n6G"
+        );
+        for y in 0..6 {
+            assert_eq!(
+                screen
+                    .pages
+                    .row_and_cell(screen.pages.pin(Point::screen(0, y)).unwrap())
+                    .unwrap()
+                    .0
+                    .wrap(),
+                y % 2 == 0
+            );
+        }
+    }
+
+    #[test]
+    fn resize_more_rows_no_scrollback_keeps_screen_contents() {
+        // ghostty: "Screen: resize more rows no scrollback" (Screen.zig:6027)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        let text = "1ABCD\n2EFGH\n3IJKL";
+        screen.test_write_string(text);
+        let cursor = screen.cursor_copy();
+
+        screen.resize(resize(5, 10)).unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (cursor.x, cursor.y));
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+    }
+
+    #[test]
+    fn resize_more_rows_with_populated_scrollback_preserves_cursor_cell() {
+        // ghostty: "Screen: resize more rows with populated scrollback" (Screen.zig:6081)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 5,
+        });
+        screen.test_write_string("1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH");
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "3IJKL\n4ABCD\n5EFGH"
+        );
+        screen.cursor_absolute(0, 1);
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            '4' as u32
+        );
+
+        screen.resize(resize(5, 10)).unwrap();
+
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            '4' as u32
+        );
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "3IJKL\n4ABCD\n5EFGH"
+        );
+    }
+
+    #[test]
+    fn resize_more_cols_perfect_split_unwraps_soft_wrapped_rows() {
+        // ghostty: "Screen: resize more cols perfect split" (Screen.zig:6155)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("1ABCD2EFGH3IJKL");
+
+        screen.resize(resize(10, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), "1ABCD2EFGH\n3IJKL");
+    }
+
+    #[test]
+    fn resize_more_cols_preserves_semantic_prompt_rows() {
+        // ghostty: "Screen: resize more cols no reflow preserves semantic prompt" (Screen.zig:6250)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.cursor_set_semantic_content(SemanticContent::Output);
+        screen.test_write_string("1ABCD\n");
+        screen.cursor_set_semantic_content(SemanticContent::Prompt);
+        screen.test_write_string("2EFGH");
+        screen.cursor_set_semantic_content(SemanticContent::Output);
+        screen.test_write_string("\n3IJKL");
+        screen.resize(resize_no_reflow(10, 3)).unwrap();
+
+        let expected = "1ABCD\n2EFGH\n3IJKL";
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), expected);
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), expected);
+        assert_eq!(
+            active_row(&screen, 0).semantic_prompt(),
+            SemanticPrompt::None
+        );
+        assert_eq!(
+            active_row(&screen, 1).semantic_prompt(),
+            SemanticPrompt::Prompt
+        );
+        assert_eq!(
+            active_row(&screen, 2).semantic_prompt(),
+            SemanticPrompt::None
+        );
+    }
+
+    #[test]
+    fn resize_more_cols_reflows_cursor_position() {
+        // ghostty: "Screen: resize more cols with reflow that fits full width" (Screen.zig:6294)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        let text = "1ABCD2EFGH\n3IJKL";
+        screen.test_write_string(text);
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "1ABCD\n2EFGH\n3IJKL"
+        );
+        screen.cursor_absolute(0, 1);
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            '2' as u32
+        );
+
+        screen.resize(resize(10, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), text);
+        assert_eq!((screen.cursor.x, screen.cursor.y), (5, 0));
+    }
+
+    #[test]
+    fn resize_less_rows_with_full_scrollback_keeps_cursor_relative_to_bottom() {
+        // ghostty: "Screen: resize less rows with full scrollback" (Screen.zig:6784)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 3,
+        });
+        let text = "00000\n1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH";
+        screen.test_write_string(text);
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "3IJKL\n4ABCD\n5EFGH"
+        );
+        assert_eq!((screen.cursor.x, screen.cursor.y), (4, 2));
+
+        screen.resize(resize(5, 2)).unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (4, 1));
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "4ABCD\n5EFGH");
+    }
+
+    #[test]
+    fn resize_less_cols_eliminates_wide_char_without_room() {
+        // ghostty: "Screen: resize less cols to eliminate wide char" (Screen.zig:7178)
+        let mut screen = Screen::new(Options {
+            cols: 2,
+            rows: 1,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("😀");
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), "😀");
+        assert_eq!(active_cell(&screen, 0, 0).wide(), CellWide::Wide);
+
+        screen.resize(resize(1, 1)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), "");
+        assert_eq!(active_cell(&screen, 0, 0).codepoint(), 0);
+        assert_eq!(active_cell(&screen, 0, 0).wide(), CellWide::Narrow);
+    }
+
+    #[test]
+    fn resize_no_reflow_less_rows_trims_blank_lines() {
+        // ghostty: "Screen: resize (no reflow) less rows trims blank lines" (Screen.zig:5821)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("1ABCD");
+        for y in 1..screen.pages.rows {
+            assert!(screen.pages.set_cell(
+                Point::active(0, u32::from(y)),
+                Cell::bg_rgb(crate::color::Rgb {
+                    r: 0xFF,
+                    g: 0,
+                    b: 0
+                }),
+            ));
+        }
+        let cursor = screen.cursor_copy();
+
+        screen.resize(resize_no_reflow(6, 2)).unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (cursor.x, cursor.y));
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "1ABCD");
+    }
+
+    #[test]
+    fn resize_no_reflow_more_rows_trims_blank_lines() {
+        // ghostty: "Screen: resize (no reflow) more rows trims blank lines" (Screen.zig:5856)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("1ABCD");
+        for y in 1..screen.pages.rows {
+            assert!(screen.pages.set_cell(
+                Point::active(0, u32::from(y)),
+                Cell::bg_rgb(crate::color::Rgb {
+                    r: 0xFF,
+                    g: 0,
+                    b: 0
+                }),
+            ));
+        }
+        let cursor = screen.cursor_copy();
+
+        screen.resize(resize_no_reflow(10, 7)).unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (cursor.x, cursor.y));
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "1ABCD");
+    }
+
+    #[test]
+    fn resize_no_reflow_more_cols_keeps_contents() {
+        // ghostty: "Screen: resize (no reflow) more cols" (Screen.zig:5891)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        let text = "1ABCD\n2EFGH\n3IJKL";
+        screen.test_write_string(text);
+
+        screen.resize(resize_no_reflow(20, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), text);
+    }
+
+    #[test]
+    fn resize_no_reflow_more_rows_with_scrollback_cursor_end() {
+        // ghostty: "Screen: resize (no reflow) more rows with scrollback cursor end" (Screen.zig:5926)
+        let mut screen = Screen::new(Options {
+            cols: 7,
+            rows: 3,
+            max_scrollback: 2,
+        });
+        let text = "1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH";
+        screen.test_write_string(text);
+
+        screen.resize(resize_no_reflow(7, 10)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), text);
+    }
+
+    #[test]
+    fn resize_no_reflow_less_rows_with_empty_trailing() {
+        // ghostty: "Screen: resize (no reflow) less rows with empty trailing" (Screen.zig:5962)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 5,
+        });
+        screen.test_write_string("1\n2\n3\n4\n5\n6\n7\n8");
+        screen.scroll_clear();
+        screen.cursor_absolute(0, 0);
+        screen.test_write_string("A\nB");
+        let cursor = screen.cursor_copy();
+
+        screen.resize(resize_no_reflow(5, 2)).unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (cursor.x, cursor.y));
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "A\nB");
+    }
+
+    #[test]
+    fn resize_more_rows_with_empty_scrollback_keeps_contents() {
+        // ghostty: "Screen: resize more rows with empty scrollback" (Screen.zig:6054)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 10,
+        });
+        let text = "1ABCD\n2EFGH\n3IJKL";
+        screen.test_write_string(text);
+        let cursor = screen.cursor_copy();
+
+        screen.resize(resize(5, 10)).unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (cursor.x, cursor.y));
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+    }
+
+    #[test]
+    fn resize_more_cols_no_reflow_name_keeps_contents() {
+        // ghostty: "Screen: resize more cols no reflow" (Screen.zig:6126)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        let text = "1ABCD\n2EFGH\n3IJKL";
+        screen.test_write_string(text);
+        let cursor = screen.cursor_copy();
+
+        screen.resize(resize(10, 3)).unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (cursor.x, cursor.y));
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+    }
+
+    #[test]
+    fn resize_more_cols_with_scrollback_scrolled_up_keeps_cursor_bottom() {
+        // ghostty: "Screen: resize (no reflow) more cols with scrollback scrolled up" (Screen.zig:6173)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 5,
+        });
+        let text = "1\n2\n3\n4\n5\n6\n7\n8";
+        screen.test_write_string(text);
+        assert_eq!((screen.cursor.x, screen.cursor.y), (1, 2));
+        screen.scroll(Scroll::DeltaRow(-4));
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "2\n3\n4");
+
+        screen.resize(resize(8, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+        assert_eq!((screen.cursor.x, screen.cursor.y), (1, 2));
+    }
+
+    #[test]
+    fn resize_less_cols_with_scrollback_scrolled_up_keeps_active_bottom() {
+        // ghostty: "Screen: resize (no reflow) less cols with scrollback scrolled up" (Screen.zig:6206)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 5,
+        });
+        let text = "1\n2\n3\n4\n5\n6\n7\n8";
+        screen.test_write_string(text);
+        assert_eq!((screen.cursor.x, screen.cursor.y), (1, 2));
+        screen.scroll(Scroll::DeltaRow(-4));
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "2\n3\n4");
+
+        screen.resize(resize(4, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Active), "6\n7\n8");
+        assert_eq!((screen.cursor.x, screen.cursor.y), (1, 2));
+    }
+
+    #[test]
+    fn resize_more_cols_reflow_ending_in_newline_keeps_cursor_cell() {
+        // ghostty: "Screen: resize more cols with reflow that ends in newline" (Screen.zig:6334)
+        let mut screen = Screen::new(Options {
+            cols: 6,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        let text = "1ABCD2EFGH\n3IJKL";
+        screen.test_write_string(text);
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "1ABCD2\nEFGH\n3IJKL"
+        );
+        screen.cursor_absolute(0, 2);
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            '3' as u32
+        );
+
+        screen.resize(resize(10, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), text);
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            '3' as u32
+        );
+    }
+
+    #[test]
+    fn resize_more_cols_reflow_forces_more_wrapping() {
+        // ghostty: "Screen: resize more cols with reflow that forces more wrapping" (Screen.zig:6379)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("1ABCD2EFGH\n3IJKL");
+        screen.cursor_absolute(0, 1);
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            '2' as u32
+        );
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "1ABCD\n2EFGH\n3IJKL"
+        );
+
+        screen.resize(resize(7, 3)).unwrap();
+
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "1ABCD2E\nFGH\n3IJKL"
+        );
+        assert_eq!((screen.cursor.x, screen.cursor.y), (5, 0));
+    }
+
+    #[test]
+    fn resize_more_cols_reflow_unwraps_multiple_times() {
+        // ghostty: "Screen: resize more cols with reflow that unwraps multiple times" (Screen.zig:6420)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("1ABCD2EFGH3IJKL");
+        screen.cursor_absolute(0, 2);
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            '3' as u32
+        );
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "1ABCD\n2EFGH\n3IJKL"
+        );
+
+        screen.resize(resize(15, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "1ABCD2EFGH3IJKL");
+        assert_eq!((screen.cursor.x, screen.cursor.y), (10, 0));
+    }
+
+    #[test]
+    fn resize_more_cols_with_populated_scrollback() {
+        // ghostty: "Screen: resize more cols with populated scrollback" (Screen.zig:6461)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 5,
+        });
+        screen.test_write_string("1ABCD\n2EFGH\n3IJKL\n4ABCD5EFGH");
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "3IJKL\n4ABCD\n5EFGH"
+        );
+        screen.cursor_absolute(0, 2);
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            '5' as u32
+        );
+
+        screen.resize(resize(10, 3)).unwrap();
+
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "2EFGH\n3IJKL\n4ABCD5EFGH"
+        );
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            '5' as u32
+        );
+    }
+
+    #[test]
+    fn resize_more_cols_bounded_scrollback_keeps_viewport_valid() {
+        // ghostty: "Screen: resize more cols bounded scrollback keeps viewport valid" (Screen.zig:6505)
+        let mut screen = Screen::new(Options {
+            cols: 2,
+            rows: 10,
+            max_scrollback: 10_000,
+        });
+        for _ in 0..30 {
+            let _ = screen.pages.grow();
+        }
+        screen.cursor_reload();
+        assert_eq!(screen.pages.scrollbar().total, 40);
+
+        let mut chunks = Vec::new();
+        let mut iter = screen
+            .pages
+            .page_iterator(Direction::RightDown, Point::screen(0, 0), None);
+        while let Some(chunk) = iter.next(&screen.pages) {
+            chunks.push(chunk);
+        }
+        let cols = screen.pages.cols;
+        for chunk in chunks {
+            let Some(node) = screen.pages.node_mut(chunk.node) else {
+                continue;
+            };
+            for y in chunk.start..chunk.end {
+                let mut row = node.page.row(y);
+                row.set_wrap(y % 2 == 0);
+                row.set_wrap_continuation(y % 2 == 1);
+                node.page.set_row(y, row);
+                for x in 0..cols {
+                    node.page.set_cell(y, x, Cell::new('A'));
+                }
+            }
+        }
+
+        let viewport_pin = screen.pages.pin(Point::screen(0, 28)).unwrap();
+        screen.pages.scroll(Scroll::Pin(viewport_pin));
+        assert_eq!(screen.pages.viewport(), crate::page_list::Viewport::Pin);
+        assert!(screen.pages.get_bottom_right(Tag::Viewport).is_some());
+
+        screen.resize(resize(4, screen.pages.rows)).unwrap();
+
+        assert_eq!(screen.pages.cols, 4);
+        assert!(screen.pages.scrollbar().total < 40);
+        assert_eq!(screen.pages.viewport(), crate::page_list::Viewport::Active);
+        assert!(screen.pages.get_bottom_right(Tag::Viewport).is_some());
+    }
+
+    #[test]
+    fn resize_more_cols_with_reflow_and_scrollback() {
+        // ghostty: "Screen: resize more cols with reflow" (Screen.zig:6585)
+        let mut screen = Screen::new(Options {
+            cols: 2,
+            rows: 3,
+            max_scrollback: 5,
+        });
+        screen.test_write_string("1ABC\n2DEF\n3ABC\n4DEF");
+        screen.cursor_absolute(0, 2);
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            'E' as u32
+        );
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "BC\n4D\nEF");
+
+        screen.resize(resize(7, 3)).unwrap();
+
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Screen),
+            "1ABC\n2DEF\n3ABC\n4DEF"
+        );
+        assert_eq!((screen.cursor.x, screen.cursor.y), (2, 2));
+    }
+
+    #[test]
+    fn resize_more_rows_and_cols_with_wrapping() {
+        // ghostty: "Screen: resize more rows and cols with wrapping" (Screen.zig:6626)
+        let mut screen = Screen::new(Options {
+            cols: 2,
+            rows: 4,
+            max_scrollback: 0,
+        });
+        let text = "1A2B\n3C4D";
+        screen.test_write_string(text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "1A\n2B\n3C\n4D");
+
+        screen.resize(resize(5, 10)).unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (3, 1));
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+    }
+
+    #[test]
+    fn resize_less_rows_no_scrollback_keeps_cursor_position_but_trims_view() {
+        // ghostty: "Screen: resize less rows no scrollback" (Screen.zig:6659)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("1ABCD\n2EFGH\n3IJKL");
+        screen.cursor_absolute(0, 0);
+        let cursor = screen.cursor_copy();
+
+        screen.resize(resize(5, 1)).unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (cursor.x, cursor.y));
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "3IJKL");
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), "3IJKL");
+    }
+
+    #[test]
+    fn resize_less_rows_moves_cursor_with_bottom_line() {
+        // ghostty: "Screen: resize less rows moving cursor" (Screen.zig:6690)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("1ABCD\n2EFGH\n3IJKL");
+        screen.cursor_absolute(1, 2);
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            'I' as u32
+        );
+
+        screen.resize(resize(5, 1)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "3IJKL");
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), "3IJKL");
+        assert_eq!((screen.cursor.x, screen.cursor.y), (1, 0));
+    }
+
+    #[test]
+    fn resize_less_rows_with_empty_scrollback_keeps_screen_history() {
+        // ghostty: "Screen: resize less rows with empty scrollback" (Screen.zig:6730)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 10,
+        });
+        let text = "1ABCD\n2EFGH\n3IJKL";
+        screen.test_write_string(text);
+
+        screen.resize(resize(5, 1)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "3IJKL");
+    }
+
+    #[test]
+    fn resize_less_rows_with_populated_scrollback_keeps_last_row_in_view() {
+        // ghostty: "Screen: resize less rows with populated scrollback" (Screen.zig:6753)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 5,
+        });
+        let text = "1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH";
+        screen.test_write_string(text);
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "3IJKL\n4ABCD\n5EFGH"
+        );
+
+        screen.resize(resize(5, 1)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "5EFGH");
+    }
+
+    #[test]
+    fn resize_less_cols_no_reflow_name_keeps_contents() {
+        // ghostty: "Screen: resize less cols no reflow" (Screen.zig:6824)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        let text = "1AB\n2EF\n3IJ";
+        screen.test_write_string(text);
+        screen.cursor_absolute(0, 0);
+        let cursor = screen.cursor_copy();
+
+        screen.resize(resize(3, 3)).unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (cursor.x, cursor.y));
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+    }
+
+    #[test]
+    fn resize_less_cols_with_reflow_but_row_space() {
+        // ghostty: "Screen: resize less cols with reflow but row space" (Screen.zig:6853)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 1,
+        });
+        screen.test_write_string("1ABCD");
+        screen.cursor_absolute(4, 0);
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            'D' as u32
+        );
+
+        screen.resize(resize(3, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "1AB\nCD");
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), "1AB\nCD");
+        assert_eq!((screen.cursor.x, screen.cursor.y), (1, 1));
+    }
+
+    #[test]
+    fn resize_less_cols_with_reflow_trims_rows() {
+        // ghostty: "Screen: resize less cols with reflow with trimmed rows" (Screen.zig:6891)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("3IJKL\n4ABCD\n5EFGH");
+
+        screen.resize(resize(3, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "CD\n5EF\nGH");
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), "CD\n5EF\nGH");
+    }
+
+    #[test]
+    fn resize_less_cols_with_reflow_trims_rows_and_keeps_scrollback() {
+        // ghostty: "Screen: resize less cols with reflow with trimmed rows and scrollback" (Screen.zig:6915)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 1,
+        });
+        screen.test_write_string("3IJKL\n4ABCD\n5EFGH");
+
+        screen.resize(resize(3, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "CD\n5EF\nGH");
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Screen),
+            "3IJ\nKL\n4AB\nCD\n5EF\nGH"
+        );
+    }
+
+    #[test]
+    fn resize_less_cols_with_reflow_previously_wrapped() {
+        // ghostty: "Screen: resize less cols with reflow previously wrapped" (Screen.zig:6939)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("3IJKL4ABCD5EFGH");
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Screen),
+            "3IJKL\n4ABCD\n5EFGH"
+        );
+
+        screen.resize(resize(3, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), "ABC\nD5E\nFGH");
+    }
+
+    #[test]
+    fn resize_less_cols_with_reflow_and_scrollback_keeps_cursor_on_end() {
+        // ghostty: "Screen: resize less cols with reflow and scrollback" (Screen.zig:6972)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 5,
+        });
+        screen.test_write_string("1A\n2B\n3C\n4D\n5E");
+        screen.cursor_absolute(1, screen.pages.rows - 1);
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            'E' as u32
+        );
+
+        screen.resize(resize(3, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "3C\n4D\n5E");
+        assert_eq!((screen.cursor.x, screen.cursor.y), (1, 2));
+    }
+
+    #[test]
+    fn resize_less_cols_with_reflow_previously_wrapped_and_scrollback() {
+        // ghostty: "Screen: resize less cols with reflow previously wrapped and scrollback" (Screen.zig:7005)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 2,
+        });
+        screen.test_write_string("1ABCD2EFGH3IJKL4ABCD5EFGH");
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "3IJKL\n4ABCD\n5EFGH"
+        );
+        screen.cursor_absolute(screen.pages.cols - 1, screen.pages.rows - 1);
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            'H' as u32
+        );
+
+        screen.resize(resize(3, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "CD5\nEFG\nH");
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Screen),
+            "1AB\nCD2\nEFG\nH3I\nJKL\n4AB\nCD5\nEFG\nH"
+        );
+        assert_eq!((screen.cursor.x, screen.cursor.y), (0, 2));
+        assert_eq!(
+            active_cell(&screen, screen.cursor.x, screen.cursor.y).codepoint(),
+            'H' as u32
+        );
+    }
+
+    #[test]
+    fn resize_less_cols_with_scrollback_keeps_cursor_row_after_clear() {
+        // ghostty: "Screen: resize less cols with scrollback keeps cursor row" (Screen.zig:7059)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 5,
+        });
+        screen.test_write_string("1A\n2B\n3C\n4D\n5E");
+        screen.scroll_clear();
+        screen.cursor_absolute(0, 0);
+
+        screen.resize(resize(3, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "");
+        assert_eq!((screen.cursor.x, screen.cursor.y), (0, 0));
+    }
+
+    #[test]
+    fn resize_more_rows_less_cols_with_reflow_and_scrollback() {
+        // ghostty: "Screen: resize more rows, less cols with reflow with scrollback" (Screen.zig:7088)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 3,
+        });
+        screen.test_write_string("1ABCD\n2EFGH3IJKL\n4MNOP");
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Screen),
+            "1ABCD\n2EFGH\n3IJKL\n4MNOP"
+        );
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "2EFGH\n3IJKL\n4MNOP"
+        );
+
+        screen.resize(resize(2, 10)).unwrap();
+
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "BC\nD\n2E\nFG\nH3\nIJ\nKL\n4M\nNO\nP"
+        );
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Screen),
+            "1A\nBC\nD\n2E\nFG\nH3\nIJ\nKL\n4M\nNO\nP"
+        );
+    }
+
+    #[test]
+    fn resize_more_rows_then_shrink_again_is_stable() {
+        // ghostty: "Screen: resize more rows then shrink again" (Screen.zig:7129)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 10,
+        });
+        let text = "1ABC";
+        screen.test_write_string(text);
+
+        screen.resize(resize(5, 10)).unwrap();
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+
+        screen.resize(resize(5, 3)).unwrap();
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+
+        screen.resize(resize(5, 10)).unwrap();
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+    }
+
+    #[test]
+    fn resize_less_cols_wraps_wide_char() {
+        // ghostty: "Screen: resize less cols to wrap wide char" (Screen.zig:7213)
+        let mut screen = Screen::new(Options {
+            cols: 3,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        let text = "x😀";
+        screen.test_write_string(text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+        assert_eq!(active_cell(&screen, 1, 0).wide(), CellWide::Wide);
+        assert_eq!(active_cell(&screen, 1, 0).codepoint(), '😀' as u32);
+        assert_eq!(active_cell(&screen, 2, 0).wide(), CellWide::SpacerTail);
+
+        screen.resize(resize(2, 3)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), "x\n😀");
+        assert_eq!(active_cell(&screen, 1, 0).wide(), CellWide::SpacerHead);
+        assert!(active_row(&screen, 0).wrap());
+    }
+
+    #[test]
+    fn resize_less_cols_eliminates_wide_char_with_row_space() {
+        // ghostty: "Screen: resize less cols to eliminate wide char with row space" (Screen.zig:7252)
+        let mut screen = Screen::new(Options {
+            cols: 2,
+            rows: 2,
+            max_scrollback: 0,
+        });
+        let text = "😀";
+        screen.test_write_string(text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+        assert_eq!(active_cell(&screen, 0, 0).wide(), CellWide::Wide);
+        assert_eq!(active_cell(&screen, 0, 0).codepoint(), '😀' as u32);
+        assert_eq!(active_cell(&screen, 1, 0).wide(), CellWide::SpacerTail);
+
+        screen.resize(resize(1, 2)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), "");
+    }
+
+    #[test]
+    fn resize_less_cols_reflows_cursor_after_wrapped_text() {
+        // ghostty: "Screen: resize less cols reflows cursor after wrapped text" (Screen.zig:7285)
+        let mut screen = Screen::new(Options {
+            cols: 50,
+            rows: 7,
+            max_scrollback: 0,
+        });
+        for _ in 0..30 {
+            screen.test_write_string("a");
+        }
+        assert_eq!((screen.cursor.x, screen.cursor.y), (30, 0));
+
+        screen.resize(resize(25, 7)).unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (5, 1));
+    }
+
+    #[test]
+    fn resize_less_cols_reflows_cursor_after_empty_cells() {
+        // ghostty: "Screen: resize less cols reflows cursor after empty cells" (Screen.zig:7302)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("abc");
+        screen.cursor_right(6);
+        assert_eq!((screen.cursor.x, screen.cursor.y), (9, 0));
+
+        screen.resize(resize(5, 3)).unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (4, 1));
+    }
+
+    #[test]
+    fn resize_more_cols_rehomes_wide_spacer_head() {
+        // ghostty: "Screen: resize more cols with wide spacer head" (Screen.zig:7320)
+        let mut screen = Screen::new(Options {
+            cols: 3,
+            rows: 2,
+            max_scrollback: 0,
+        });
+        let text = "  😀";
+        screen.test_write_string(text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), "  \n😀");
+        assert_eq!(active_cell(&screen, 2, 0).wide(), CellWide::SpacerHead);
+        assert_eq!(active_cell(&screen, 0, 1).wide(), CellWide::Wide);
+        assert_eq!(active_cell(&screen, 1, 1).wide(), CellWide::SpacerTail);
+
+        screen.resize(resize(4, 2)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+        assert_eq!(active_cell(&screen, 2, 0).wide(), CellWide::Wide);
+        assert_eq!(active_cell(&screen, 2, 0).codepoint(), '😀' as u32);
+        assert_eq!(active_cell(&screen, 3, 0).wide(), CellWide::SpacerTail);
+    }
+
+    #[test]
+    fn resize_more_cols_rehomes_wide_spacer_head_across_multiple_lines() {
+        // ghostty: "Screen: resize more cols with wide spacer head multiple lines" (Screen.zig:7373)
+        let mut screen = Screen::new(Options {
+            cols: 3,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        let text = "xxxyy😀";
+        screen.test_write_string(text);
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), "xxx\nyy\n😀");
+        assert_eq!(active_cell(&screen, 2, 1).wide(), CellWide::SpacerHead);
+        assert_eq!(active_cell(&screen, 0, 2).wide(), CellWide::Wide);
+        assert_eq!(active_cell(&screen, 1, 2).wide(), CellWide::SpacerTail);
+
+        screen.resize(resize(8, 2)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), text);
+        assert_eq!(active_cell(&screen, 5, 0).wide(), CellWide::Wide);
+        assert_eq!(active_cell(&screen, 5, 0).codepoint(), '😀' as u32);
+        assert_eq!(active_cell(&screen, 6, 0).wide(), CellWide::SpacerTail);
+    }
+
+    #[test]
+    fn resize_more_cols_marks_required_wide_spacer_head() {
+        // ghostty: "Screen: resize more cols requiring a wide spacer head" (Screen.zig:7424)
+        let mut screen = Screen::new(Options {
+            cols: 2,
+            rows: 2,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("xx😀");
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), "xx\n😀");
+        assert_eq!(active_cell(&screen, 0, 1).wide(), CellWide::Wide);
+        assert_eq!(active_cell(&screen, 1, 1).wide(), CellWide::SpacerTail);
+
+        screen.resize(resize(3, 2)).unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Screen), "xx\n😀");
+        assert_eq!(active_cell(&screen, 2, 0).wide(), CellWide::SpacerHead);
+        assert_eq!(active_cell(&screen, 0, 1).wide(), CellWide::Wide);
+        assert_eq!(active_cell(&screen, 0, 1).codepoint(), '😀' as u32);
+        assert_eq!(active_cell(&screen, 1, 1).wide(), CellWide::SpacerTail);
+    }
+
+    #[test]
+    fn resize_rehomes_cursor_hyperlink() {
+        // port-added: mirrors Screen.resize hyperlink release/reattach around PageList resize.
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.start_hyperlink(Some(b"id"), b"https://example.com");
+        let old_id = screen.cursor.hyperlink_id;
+        assert!(old_id != 0);
+
+        screen.resize(resize(10, 3)).unwrap();
+
+        assert!(screen.cursor.hyperlink_id != 0);
+        assert_eq!(
+            screen
+                .cursor
+                .hyperlink
+                .as_ref()
+                .map(|link| link.uri.as_slice()),
+            Some(&b"https://example.com"[..])
+        );
+    }
+
+    #[test]
+    fn resize_saved_cursor_missing_before_resize_is_left_unchanged() {
+        // port-added: saved cursor state (b), no active pin before resize.
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.saved_cursor = Some(SavedCursor {
+            x: 4,
+            y: 99,
+            pending_wrap: true,
+            ..SavedCursor::default()
+        });
+
+        screen.resize(resize(10, 3)).unwrap();
+
+        let saved = screen.saved_cursor.as_ref().unwrap();
+        assert_eq!((saved.x, saved.y, saved.pending_wrap), (4, 99, true));
+    }
+
+    #[test]
+    fn resize_saved_cursor_pending_wrap_is_adjusted_after_reflow() {
+        // port-added: saved cursor state (c) success path; live pending_wrap remains untouched.
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("1ABCD2EFGH");
+        screen.saved_cursor = Some(SavedCursor {
+            x: 4,
+            y: 0,
+            pending_wrap: true,
+            ..SavedCursor::default()
+        });
+        screen.cursor.pending_wrap = true;
+
+        screen.resize(resize(10, 3)).unwrap();
+
+        let saved = screen.saved_cursor.as_ref().unwrap();
+        assert_eq!((saved.x, saved.y, saved.pending_wrap), (5, 0, false));
+        assert!(screen.cursor.pending_wrap);
+    }
+
+    #[test]
+    fn resize_prompt_redraw_true_clears_prompt_block() {
+        // ghostty: "Screen: resize more cols with cursor at prompt" (Screen.zig:7475)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 3,
+            max_scrollback: 5,
+        });
+        screen.test_write_string("ABCDE\n");
+        screen.cursor_set_semantic_content(SemanticContent::Prompt);
+        screen.test_write_string("> ");
+        screen.cursor_set_semantic_input_clear_eol();
+        screen.test_write_string("echo");
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "ABCDE\n> echo");
+
+        screen
+            .resize(Resize {
+                prompt_redraw: PromptRedraw::True,
+                ..resize(20, 3)
+            })
+            .unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (6, 1));
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "ABCDE");
+    }
+
+    #[test]
+    fn resize_prompt_redraw_last_clears_only_cursor_row() {
+        // ghostty: "Screen: resize with prompt_redraw last clears only one line" (Screen.zig:7556)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 4,
+            max_scrollback: 5,
+        });
+        screen.test_write_string("ABCDE\n");
+        screen.cursor_set_semantic_content(SemanticContent::Prompt);
+        screen.test_write_string("> ");
+        screen.cursor_set_semantic_content(SemanticContent::Input);
+        screen.test_write_string("hello\nworld");
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "ABCDE\n> hello\nworld"
+        );
+
+        screen
+            .resize(Resize {
+                prompt_redraw: PromptRedraw::Last,
+                ..resize(20, 4)
+            })
+            .unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "ABCDE\n> hello");
+    }
+
+    #[test]
+    fn resize_prompt_redraw_true_does_not_clear_after_prompt_output() {
+        // ghostty: "Screen: resize more cols with cursor not at prompt" (Screen.zig:7515)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 3,
+            max_scrollback: 5,
+        });
+        screen.test_write_string("ABCDE\n");
+        screen.cursor_set_semantic_content(SemanticContent::Prompt);
+        screen.test_write_string("> ");
+        screen.cursor_set_semantic_input_clear_eol();
+        screen.test_write_string("echo\n");
+        screen.test_write_string("output");
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "ABCDE\n> echo\noutput"
+        );
+
+        screen
+            .resize(Resize {
+                prompt_redraw: PromptRedraw::True,
+                ..resize(20, 3)
+            })
+            .unwrap();
+
+        assert_eq!((screen.cursor.x, screen.cursor.y), (6, 2));
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "ABCDE\n> echo\noutput"
+        );
+    }
+
+    #[test]
+    fn resize_prompt_redraw_last_multiline_prompt_clears_only_last_line() {
+        // ghostty: "Screen: resize with prompt_redraw last multiline prompt clears only last line" (Screen.zig:7595)
+        let mut screen = Screen::new(Options {
+            cols: 20,
+            rows: 5,
+            max_scrollback: 5,
+        });
+        screen.cursor_set_semantic_content(SemanticContent::Prompt);
+        screen.test_write_string("line1\n");
+        screen.cursor_set_semantic_content(SemanticContent::Prompt);
+        screen.test_write_string("line2\n");
+        screen.cursor_set_semantic_content(SemanticContent::Prompt);
+        screen.test_write_string("line3");
+        assert_eq!(
+            screen.dump_string_for_tag(Tag::Viewport),
+            "line1\nline2\nline3"
+        );
+
+        screen
+            .resize(Resize {
+                prompt_redraw: PromptRedraw::Last,
+                ..resize(30, 5)
+            })
+            .unwrap();
+
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "line1\nline2");
     }
 
     #[test]

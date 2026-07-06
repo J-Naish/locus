@@ -861,13 +861,15 @@ impl Page {
     ) {
         let count = end_y.saturating_sub(start_y);
         for offset in 0..count {
+            let source_y = start_y + offset;
             self.clone_partial_row_from(
                 CloneSource::Other(source),
                 offset,
-                start_y + offset,
+                source_y,
                 0,
                 source.size.cols.min(self.size.cols),
             );
+            self.clone_row_metadata_from(source, source_y, offset);
         }
     }
 
@@ -884,6 +886,15 @@ impl Page {
             0,
             source.size.cols.min(self.size.cols),
         );
+        self.clone_row_metadata_from(source, src_y, dst_y);
+    }
+
+    fn clone_row_metadata_from(&mut self, source: &Page, src_y: CellCountInt, dst_y: CellCountInt) {
+        let mut row = source.row(src_y);
+        row.set_cells(self.row(dst_y).cells());
+        row.set_dirty(true);
+        self.set_row(dst_y, row);
+        self.update_row_flags(dst_y);
     }
 
     pub(crate) fn cell_snapshot(&self, y: CellCountInt, x: CellCountInt) -> CellSnapshot {
