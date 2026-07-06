@@ -78,6 +78,12 @@ pub(crate) struct OffsetHashMap<K, V> {
 pub(crate) type AutoOffsetHashMap<K, V> = OffsetHashMap<K, V>;
 
 impl<K: BufValue + Eq, V: BufValue> OffsetHashMap<K, V> {
+    pub(crate) const BASE_ALIGN: usize = if K::ALIGN > V::ALIGN {
+        K::ALIGN
+    } else {
+        V::ALIGN
+    };
+
     pub(crate) fn layout(capacity: Size) -> Layout {
         debug_assert!(capacity == 0 || capacity.is_power_of_two());
         let cap = capacity as usize;

@@ -1,11 +1,10 @@
 //! Grid size and page offset primitives.
 
-#![expect(dead_code, reason = "Phase T4b consumes the page substrate")]
-
 use std::fmt;
 use std::marker::PhantomData;
 
 /// Maximum page size in bytes (ghostty: `max_page_size`).
+#[allow(dead_code)]
 pub(crate) const MAX_PAGE_SIZE: usize = u32::MAX as usize;
 
 /// Integer type for byte offsets inside a page buffer.
@@ -19,15 +18,19 @@ pub type CellCountInt = u16;
 /// Ghostty keeps this equal to `CellCountInt` because a single-row page can
 /// have at most one style per cell. `RefCountedSet` reserves ID 0, so the
 /// theoretical maximum is one value short.
+#[allow(dead_code)]
 pub(crate) type StyleCountInt = CellCountInt;
 
 /// Integer type for hyperlink IDs.
+#[allow(dead_code)]
 pub(crate) type HyperlinkCountInt = CellCountInt;
 
 /// Maximum byte count for grapheme backing storage.
+#[allow(dead_code)]
 pub(crate) type GraphemeBytesInt = u32;
 
 /// Maximum byte count for string backing storage.
+#[allow(dead_code)]
 pub(crate) type StringBytesInt = u32;
 
 /// Values storable inside a page buffer.
@@ -165,9 +168,47 @@ impl<T> Clone for OffsetSlice<T> {
     }
 }
 
+impl<T> fmt::Debug for OffsetSlice<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OffsetSlice")
+            .field("offset", &self.offset.offset)
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+impl<T> PartialEq for OffsetSlice<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.offset.offset == other.offset.offset && self.len == other.len
+    }
+}
+
+impl<T> Eq for OffsetSlice<T> {}
+
 impl<T> OffsetSlice<T> {
     pub(crate) const fn new(offset: Offset<T>, len: usize) -> Self {
         Self { offset, len }
+    }
+}
+
+impl<T> BufValue for OffsetSlice<T> {
+    // Ghostty stores `{ u32, usize }`, which is 16 bytes on 64-bit targets.
+    // This Rust port pins slices to `{ u32 offset, u32 len }` so page-buffer
+    // map layouts are platform-independent and self-consistent.
+    const SIZE: usize = 8;
+    const ALIGN: usize = 4;
+
+    fn read(buf: &[u8], at: usize) -> Self {
+        Self::new(
+            Offset::new(u32::read(buf, at)),
+            u32::read(buf, at + u32::SIZE) as usize,
+        )
+    }
+
+    fn write(self, buf: &mut [u8], at: usize) {
+        debug_assert!(u32::try_from(self.len).is_ok());
+        self.offset.offset.write(buf, at);
+        (self.len as u32).write(buf, at + u32::SIZE);
     }
 }
 
@@ -179,10 +220,12 @@ pub(crate) struct OffsetBuf {
 }
 
 impl OffsetBuf {
+    #[allow(dead_code)]
     pub(crate) const fn init() -> Self {
         Self { base: 0, offset: 0 }
     }
 
+    #[allow(dead_code)]
     pub(crate) const fn init_offset(base_offset: usize) -> Self {
         Self {
             base: 0,
@@ -198,6 +241,7 @@ impl OffsetBuf {
         Offset::new((self.offset + len_position) as OffsetInt)
     }
 
+    #[allow(dead_code)]
     pub(crate) const fn add(self, offset: usize) -> Self {
         Self {
             base: self.base,
@@ -205,6 +249,7 @@ impl OffsetBuf {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) const fn rebase(self, offset: usize) -> Self {
         Self {
             base: self.start() + offset,
@@ -222,6 +267,13 @@ pub(crate) const fn align_forward(value: usize, alignment: usize) -> usize {
     } else {
         value + (alignment - rem)
     }
+}
+
+/// Align `value` backward to `alignment`.
+#[allow(dead_code)]
+pub(crate) const fn align_backward(value: usize, alignment: usize) -> usize {
+    debug_assert!(alignment > 0);
+    value - (value % alignment)
 }
 
 // Ghostty's `getOffset` is pointer-identity based. This Rust port keeps only
@@ -265,5 +317,27 @@ mod tests {
         let rebased = child.rebase(8);
         assert_eq!(rebased.start(), 64);
         assert_eq!(rebased.member::<u8>(3).offset, 3);
+    }
+
+    #[test]
+    fn offset_slice_buf_value_layout_is_pinned() {
+        let slice = OffsetSlice::<u16>::new(Offset::new(0xAABB_CCDD), 0x1122_3344);
+        let mut buf = [0u8; OffsetSlice::<u16>::SIZE];
+        slice.write(&mut buf, 0);
+
+        assert_eq!(OffsetSlice::<u16>::SIZE, 8);
+        assert_eq!(OffsetSlice::<u16>::ALIGN, 4);
+        assert_eq!(buf, [0xDD, 0xCC, 0xBB, 0xAA, 0x44, 0x33, 0x22, 0x11]);
+
+        let decoded = OffsetSlice::<u16>::read(&buf, 0);
+        assert_eq!(decoded.offset.offset, 0xAABB_CCDD);
+        assert_eq!(decoded.len, 0x1122_3344);
+    }
+
+    #[test]
+    fn align_backward_rounds_down() {
+        assert_eq!(align_backward(17, 8), 16);
+        assert_eq!(align_backward(16, 8), 16);
+        assert_eq!(align_backward(7, 8), 0);
     }
 }

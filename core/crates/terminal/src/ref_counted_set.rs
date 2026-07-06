@@ -22,6 +22,10 @@ pub(crate) enum AddError {
 pub(crate) trait RefCountedSetContext<T> {
     fn hash(&self, buf: &[u8], value: &T) -> u64;
     fn eql(&self, buf: &[u8], a: &T, b: &T) -> bool;
+    fn eql_probe(&self, probe_buf: &[u8], buf: &[u8], probe: &T, stored: &T) -> bool {
+        let _ = probe_buf;
+        self.eql(buf, probe, stored)
+    }
     fn deleted(&self, _buf: &mut [u8], _value: &T) {}
 }
 
@@ -66,6 +70,14 @@ impl Layout {
             total_size,
         }
     }
+}
+
+pub(crate) const fn item_base_align<T: BufValue>() -> usize {
+    item_align::<T>()
+}
+
+pub(crate) const fn item_byte_size<T: BufValue>() -> usize {
+    item_size::<T>()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,6 +234,15 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
     }
 
     pub(crate) fn lookup(self, backing: &[u8], value: T) -> Option<Id> {
+        self.lookup_with_probe(backing, backing, value)
+    }
+
+    pub(crate) fn lookup_with_probe(
+        self,
+        backing: &[u8],
+        probe_backing: &[u8],
+        value: T,
+    ) -> Option<Id> {
         if self.layout.table_cap == 0 {
             return None;
         }
@@ -232,7 +253,10 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
             }
             if self.ref_count(backing, id) > 0 {
                 let current = read_value::<T>(backing, self.items, id);
-                if self.context.eql(backing, &value, &current) {
+                if self
+                    .context
+                    .eql_probe(probe_backing, backing, &value, &current)
+                {
                     return Some(id);
                 }
             }
@@ -307,15 +331,19 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
     }
 }
 
-fn item_align<T: BufValue>() -> usize {
-    T::ALIGN.max(Id::ALIGN)
+const fn item_align<T: BufValue>() -> usize {
+    if T::ALIGN > Id::ALIGN {
+        T::ALIGN
+    } else {
+        Id::ALIGN
+    }
 }
 
-fn value_size<T: BufValue>() -> usize {
+const fn value_size<T: BufValue>() -> usize {
     align_forward(T::SIZE, Id::ALIGN)
 }
 
-fn item_size<T: BufValue>() -> usize {
+const fn item_size<T: BufValue>() -> usize {
     value_size::<T>() + Id::SIZE + Id::SIZE + RefCountInt::SIZE
 }
 
