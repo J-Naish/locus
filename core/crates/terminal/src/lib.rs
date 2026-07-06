@@ -6,14 +6,17 @@
 //! logic: no I/O, no PTY, no FFI — those live in other crates.
 
 pub mod apc;
+pub(crate) mod bitmap_allocator;
 pub mod charsets;
 pub mod color;
 pub mod dcs;
 pub mod device_attributes;
 pub mod device_status;
 pub mod focus;
+pub(crate) mod hash_map;
 pub mod osc;
 pub mod parser;
+pub(crate) mod ref_counted_set;
 pub mod selection_codepoints;
 pub mod sgr;
 pub mod size;
