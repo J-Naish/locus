@@ -23,3 +23,10 @@ unsafe_code = "warn"
 # unwinds normally.
 [profile.release]
 panic = "abort"
+
+# The terminal port carries ghostty's capacity-stress tests (hash sets filled
+# to their layout cap), which are quadratic-probing-heavy and ~18x slower at
+# opt-level 0. Light optimization keeps the suite fast while debug_assertions
+# stay enabled.
+[profile.test]
+opt-level = 1

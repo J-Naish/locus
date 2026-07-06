@@ -828,13 +828,17 @@ impl Page {
         x_start: CellCountInt,
         x_end: CellCountInt,
     ) {
+        let same_page;
         let source_page = match source {
-            CloneSource::SamePage => self.clone(),
-            CloneSource::Other(page) => page.clone(),
+            CloneSource::SamePage => {
+                same_page = self.clone();
+                &same_page
+            }
+            CloneSource::Other(page) => page,
         };
         self.clear_cells(dst_y, x_start, x_end);
         for x in x_start..x_end.min(self.size.cols).min(source_page.size.cols) {
-            self.clone_cell_from(&source_page, src_y, x, dst_y, x);
+            self.clone_cell_from(source_page, src_y, x, dst_y, x);
         }
         if x_start == 0 && x_end >= self.size.cols {
             let mut row = source_page.row(src_y);
@@ -1049,6 +1053,20 @@ impl Page {
             self.set_row(y, next);
         }
         self.set_row(end - 1, first);
+    }
+
+    pub(crate) fn rotate_rows_right_once(&mut self, start: CellCountInt, end: CellCountInt) {
+        debug_assert!(start < end);
+        debug_assert!(end <= self.size.rows);
+        if end.saturating_sub(start) <= 1 {
+            return;
+        }
+        let last = self.row(end - 1);
+        for y in (start + 1..end).rev() {
+            let previous = self.row(y - 1);
+            self.set_row(y, previous);
+        }
+        self.set_row(start, last);
     }
 
     pub(crate) fn swap_rows(&mut self, left: CellCountInt, right: CellCountInt) {
@@ -1494,6 +1512,10 @@ impl Page {
 
     pub(crate) fn hyperlink_id(&self, y: CellCountInt, x: CellCountInt) -> Option<HyperlinkId> {
         self.hyperlink_map.get(&self.memory, self.cell_offset(y, x))
+    }
+
+    pub(crate) fn release_hyperlink_id(&mut self, id: HyperlinkId) {
+        self.hyperlink_set.release(&mut self.memory, id);
     }
 
     fn set_hyperlink_entry(

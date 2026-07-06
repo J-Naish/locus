@@ -24,11 +24,11 @@ pub struct NodeId {
 pub struct PinId(pub usize);
 
 #[derive(Debug, Clone)]
-struct PageNode {
-    prev: Option<NodeId>,
-    next: Option<NodeId>,
-    page: Page,
-    serial: u64,
+pub(crate) struct PageNode {
+    pub(crate) prev: Option<NodeId>,
+    pub(crate) next: Option<NodeId>,
+    pub(crate) page: Page,
+    pub(crate) serial: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -356,8 +356,19 @@ impl PageList {
         self.tracked_pins.get(id.0).and_then(|pin| *pin)
     }
 
-    fn tracked_pin_mut(&mut self, id: PinId) -> Option<&mut Pin> {
+    pub(crate) fn tracked_pin_mut(&mut self, id: PinId) -> Option<&mut Pin> {
         self.tracked_pins.get_mut(id.0).and_then(Option::as_mut)
+    }
+
+    pub(crate) fn set_tracked_pin(&mut self, id: PinId, pin: Pin) -> bool {
+        let Some(slot) = self.tracked_pins.get_mut(id.0) else {
+            return false;
+        };
+        if slot.is_none() {
+            return false;
+        }
+        *slot = Some(pin);
+        true
     }
 
     pub fn page_size(&self) -> usize {
@@ -1120,9 +1131,9 @@ impl PageList {
     }
 
     pub fn scroll_clear(&mut self) {
-        let mut non_empty = 0usize;
-        let mut seen_content = false;
+        let mut trailing_empty = 0usize;
         let mut current = self.last;
+        let mut rows_to_grow = 0usize;
         while let Some(id) = current {
             let Some(node) = self.node(id) else {
                 break;
@@ -1137,24 +1148,22 @@ impl PageList {
                         break;
                     }
                 }
-                if empty {
-                    if seen_content {
-                        non_empty += 1;
-                    }
-                } else {
-                    seen_content = true;
-                    non_empty += 1;
+                if !empty {
+                    rows_to_grow = (self.rows as usize).saturating_sub(trailing_empty);
+                    break;
                 }
-                if non_empty > self.rows as usize {
+                trailing_empty += 1;
+                if trailing_empty > self.rows as usize {
+                    rows_to_grow = 0;
                     break;
                 }
             }
-            if non_empty > self.rows as usize {
+            if rows_to_grow > 0 || trailing_empty > self.rows as usize {
                 break;
             }
             current = node.prev;
         }
-        let count = non_empty.min(self.rows as usize);
+        let count = rows_to_grow.min(self.rows as usize);
         for _ in 0..count {
             let _ = self.grow();
         }
@@ -1241,6 +1250,57 @@ impl PageList {
         self.append_node(next);
         self.total_rows += 1;
         Some(next)
+    }
+
+    pub(crate) fn rotate_rows_right_from_pin_to_end(&mut self, pin: Pin) {
+        let cursor_node = pin.node;
+        let mut current = self.last;
+        while let Some(current_id) = current {
+            if current_id == cursor_node {
+                break;
+            }
+            let Some(prev_id) = self.node(current_id).and_then(|node| node.prev) else {
+                break;
+            };
+            let Some(source_y) = self
+                .node(prev_id)
+                .map(|node| node.page.size().rows.saturating_sub(1))
+            else {
+                break;
+            };
+            let snapshots = self.row_snapshots(prev_id, source_y);
+            if let Some(node) = self.node_mut(current_id) {
+                let rows = node.page.size().rows;
+                if rows > 0 {
+                    node.page.rotate_rows_right_once(0, rows);
+                    write_snapshots_to_row(&mut node.page, 0, &snapshots);
+                    node.page.set_page_dirty(true);
+                }
+            }
+            current = Some(prev_id);
+        }
+
+        if let Some(node) = self.node_mut(cursor_node) {
+            let rows = node.page.size().rows;
+            if pin.y < rows {
+                node.page.rotate_rows_right_once(pin.y, rows);
+                node.page.clear_row(pin.y);
+                node.page.set_page_dirty(true);
+            }
+        }
+    }
+
+    fn row_snapshots(&self, id: NodeId, y: CellCountInt) -> Vec<CellSnapshot> {
+        let Some(node) = self.node(id) else {
+            return Vec::new();
+        };
+        let size = node.page.size();
+        if y >= size.rows {
+            return Vec::new();
+        }
+        (0..size.cols)
+            .map(|x| node.page.cell_snapshot(y, x))
+            .collect()
     }
 
     pub fn increase_capacity(
@@ -2882,7 +2942,7 @@ impl PageList {
         }
     }
 
-    fn node(&self, id: NodeId) -> Option<&PageNode> {
+    pub(crate) fn node(&self, id: NodeId) -> Option<&PageNode> {
         match self.nodes.get(id.index as usize) {
             Some(NodeSlot::Occupied { generation, node }) if *generation == id.generation => {
                 Some(node)
@@ -2891,7 +2951,7 @@ impl PageList {
         }
     }
 
-    fn node_mut(&mut self, id: NodeId) -> Option<&mut PageNode> {
+    pub(crate) fn node_mut(&mut self, id: NodeId) -> Option<&mut PageNode> {
         match self.nodes.get_mut(id.index as usize) {
             Some(NodeSlot::Occupied { generation, node }) if *generation == id.generation => {
                 Some(node)
@@ -3021,6 +3081,17 @@ impl PageList {
             list: self,
             next: self.first,
         }
+    }
+}
+
+fn write_snapshots_to_row(page: &mut Page, y: CellCountInt, snapshots: &[CellSnapshot]) {
+    if y >= page.size().rows {
+        return;
+    }
+    page.clear_row(y);
+    let cols = page.size().cols as usize;
+    for (x, snapshot) in snapshots.iter().take(cols).enumerate() {
+        let _ = page.write_cell_snapshot(y, x as CellCountInt, snapshot);
     }
 }
 
