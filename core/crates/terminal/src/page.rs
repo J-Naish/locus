@@ -615,12 +615,65 @@ impl Page {
         *self = replacement;
     }
 
+    pub(crate) fn reinit_with_layout(&mut self, layout: Layout) {
+        debug_assert_eq!(self.memory.len(), layout.total_size);
+        self.memory.fill(0);
+        let replacement = Self::init_buf(std::mem::take(&mut self.memory), layout);
+        *self = replacement;
+    }
+
     pub fn size(&self) -> PageSize {
         self.size
     }
 
+    pub(crate) fn set_size(&mut self, size: PageSize) {
+        debug_assert!(size.cols <= self.capacity.cols);
+        debug_assert!(size.rows <= self.capacity.rows);
+        self.size = size;
+    }
+
+    pub(crate) fn set_size_rows(&mut self, rows: CellCountInt) {
+        debug_assert!(rows <= self.capacity.rows);
+        self.size.rows = rows;
+    }
+
+    pub(crate) fn set_size_cols(&mut self, cols: CellCountInt) {
+        debug_assert!(cols <= self.capacity.cols);
+        self.size.cols = cols;
+    }
+
     pub fn capacity(&self) -> Capacity {
         self.capacity
+    }
+
+    pub(crate) fn memory_len(&self) -> usize {
+        self.memory.len()
+    }
+
+    pub(crate) fn memory_ptr(&self) -> *const u8 {
+        self.memory.as_ptr()
+    }
+
+    pub(crate) fn into_memory(self) -> Vec<u8> {
+        self.memory
+    }
+
+    pub(crate) fn page_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    pub(crate) fn set_page_dirty(&mut self, dirty: bool) {
+        self.dirty = dirty;
+    }
+
+    pub(crate) fn row_dirty(&self, y: CellCountInt) -> bool {
+        self.row(y).dirty()
+    }
+
+    pub(crate) fn mark_row_dirty(&mut self, y: CellCountInt) {
+        let mut row = self.row(y);
+        row.set_dirty(true);
+        self.set_row(y, row);
     }
 
     pub fn row(&self, y: CellCountInt) -> Row {
@@ -771,6 +824,24 @@ impl Page {
             row.set_dirty(true);
             self.set_row(dst_y, row);
             self.update_row_flags(dst_y);
+        }
+    }
+
+    pub(crate) fn clone_rows_from(
+        &mut self,
+        source: &Page,
+        start_y: CellCountInt,
+        end_y: CellCountInt,
+    ) {
+        let count = end_y.saturating_sub(start_y);
+        for offset in 0..count {
+            self.clone_partial_row_from(
+                CloneSource::Other(source),
+                offset,
+                start_y + offset,
+                0,
+                source.size.cols.min(self.size.cols),
+            );
         }
     }
 
