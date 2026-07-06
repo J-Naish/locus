@@ -371,7 +371,7 @@ impl Cell {
         match self.content_tag() {
             CellContentTag::BgColorPalette | CellContentTag::BgColorRgb => false,
             CellContentTag::Codepoint | CellContentTag::CodepointGrapheme => {
-                self.codepoint() == 0 && self.style_id() == 0 && !self.hyperlink()
+                self.codepoint() == 0 && matches!(self.wide(), CellWide::Narrow)
             }
         }
     }
@@ -473,6 +473,28 @@ pub struct Page {
     size: PageSize,
     capacity: Capacity,
     pause_integrity_checks: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HyperlinkSnapshot {
+    Explicit { id: Vec<u8>, uri: Vec<u8> },
+    Implicit { id: u32, uri: Vec<u8> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CellSnapshotWriteError {
+    Style,
+    GraphemeBytes,
+    HyperlinkBytes,
+    StringBytes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CellSnapshot {
+    pub(crate) cell: Cell,
+    pub(crate) style: Option<PackedStyle>,
+    pub(crate) grapheme: Option<Vec<u32>>,
+    pub(crate) hyperlink: Option<HyperlinkSnapshot>,
 }
 
 impl Page {
@@ -858,6 +880,157 @@ impl Page {
             0,
             source.size.cols.min(self.size.cols),
         );
+    }
+
+    pub(crate) fn cell_snapshot(&self, y: CellCountInt, x: CellCountInt) -> CellSnapshot {
+        let hyperlink = self.hyperlink_entry(y, x).map(|entry| match entry.id() {
+            PageEntryId::Explicit(id) => HyperlinkSnapshot::Explicit {
+                id: self.bytes(id).to_vec(),
+                uri: self.bytes(entry.uri()).to_vec(),
+            },
+            PageEntryId::Implicit(id) => HyperlinkSnapshot::Implicit {
+                id,
+                uri: self.bytes(entry.uri()).to_vec(),
+            },
+        });
+        CellSnapshot {
+            cell: self.cell(y, x),
+            style: self.style_for_cell(y, x),
+            grapheme: self.grapheme(y, x),
+            hyperlink,
+        }
+    }
+
+    pub(crate) fn write_cell_snapshot(
+        &mut self,
+        y: CellCountInt,
+        x: CellCountInt,
+        snapshot: &CellSnapshot,
+    ) -> Result<(), OutOfMemory> {
+        let mut cell = snapshot.cell;
+        cell.set_style_id(0);
+        cell.set_hyperlink(false);
+        if snapshot.grapheme.is_some() {
+            cell.0 = (cell.0 & !Cell::CONTENT_TAG_MASK) | CellContentTag::Codepoint as u64;
+        }
+        self.set_cell(y, x, cell);
+        if let Some(style) = snapshot.style {
+            self.set_style(y, x, style)?;
+        }
+        match &snapshot.hyperlink {
+            Some(HyperlinkSnapshot::Explicit { id, uri }) => {
+                let id = self.insert_hyperlink_explicit(id, uri)?;
+                self.set_hyperlink_id(y, x, id)?;
+            }
+            Some(HyperlinkSnapshot::Implicit { id, uri }) => {
+                self.set_hyperlink_implicit(y, x, *id, uri)?;
+            }
+            None => {}
+        }
+        if let Some(grapheme) = &snapshot.grapheme {
+            for codepoint in grapheme {
+                self.append_grapheme(y, x, *codepoint)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn write_cell_unmanaged_snapshot_for_reflow(
+        &mut self,
+        y: CellCountInt,
+        x: CellCountInt,
+        snapshot: &CellSnapshot,
+    ) {
+        self.clear_cells(y, x, x.saturating_add(1));
+
+        let mut cell = snapshot.cell;
+        cell.set_style_id(0);
+        cell.set_hyperlink(false);
+        if snapshot.grapheme.is_some() {
+            cell.0 = (cell.0 & !Cell::CONTENT_TAG_MASK) | CellContentTag::Codepoint as u64;
+        }
+        self.set_cell(y, x, cell);
+    }
+
+    pub(crate) fn write_cell_managed_snapshot_for_reflow(
+        &mut self,
+        y: CellCountInt,
+        x: CellCountInt,
+        snapshot: &CellSnapshot,
+    ) -> Result<(), CellSnapshotWriteError> {
+        if let Some(style) = snapshot.style {
+            self.set_style(y, x, style)
+                .map_err(|_| CellSnapshotWriteError::Style)?;
+        }
+        if let Some(hyperlink) = &snapshot.hyperlink {
+            self.set_hyperlink_snapshot_for_reflow(y, x, hyperlink)?;
+        }
+        if let Some(grapheme) = &snapshot.grapheme {
+            self.set_grapheme_snapshot_for_reflow(y, x, grapheme)?;
+        }
+
+        Ok(())
+    }
+
+    fn set_hyperlink_snapshot_for_reflow(
+        &mut self,
+        y: CellCountInt,
+        x: CellCountInt,
+        snapshot: &HyperlinkSnapshot,
+    ) -> Result<(), CellSnapshotWriteError> {
+        let entry = match snapshot {
+            HyperlinkSnapshot::Explicit { id, uri } => {
+                let uri = self
+                    .copy_bytes(uri)
+                    .map_err(|_| CellSnapshotWriteError::StringBytes)?;
+                let id = self
+                    .copy_bytes(id)
+                    .map_err(|_| CellSnapshotWriteError::StringBytes)?;
+                PageEntry::explicit(id, uri)
+            }
+            HyperlinkSnapshot::Implicit { id, uri } => {
+                let uri = self
+                    .copy_bytes(uri)
+                    .map_err(|_| CellSnapshotWriteError::StringBytes)?;
+                PageEntry::implicit(*id, uri)
+            }
+        };
+        let hyperlink_id = self
+            .hyperlink_set
+            .add(&mut self.memory, entry)
+            .map_err(|_| CellSnapshotWriteError::HyperlinkBytes)?;
+        self.set_hyperlink_id(y, x, hyperlink_id)
+            .map_err(|_| CellSnapshotWriteError::HyperlinkBytes)?;
+        Ok(())
+    }
+
+    fn set_grapheme_snapshot_for_reflow(
+        &mut self,
+        y: CellCountInt,
+        x: CellCountInt,
+        grapheme: &[u32],
+    ) -> Result<(), CellSnapshotWriteError> {
+        if grapheme.is_empty() {
+            return Ok(());
+        }
+
+        let key = self.cell_offset(y, x);
+        let slice = self
+            .grapheme_alloc
+            .alloc::<u32>(&mut self.memory, grapheme.len())
+            .map_err(|_| CellSnapshotWriteError::GraphemeBytes)?;
+        for (index, value) in grapheme.iter().copied().enumerate() {
+            slice.offset.set(&mut self.memory, index, value);
+        }
+        self.grapheme_map
+            .put(&mut self.memory, key, slice)
+            .map_err(|_| CellSnapshotWriteError::GraphemeBytes)?;
+
+        let mut cell = self.cell(y, x);
+        cell.0 = (cell.0 & !Cell::CONTENT_TAG_MASK) | CellContentTag::CodepointGrapheme as u64;
+        self.write_cell_raw(y, x, cell);
+        self.update_row_flags(y);
+        Ok(())
     }
 
     pub(crate) fn clear_row(&mut self, y: CellCountInt) {
@@ -1393,7 +1566,7 @@ impl Page {
         self.update_row_flags(dst_y);
     }
 
-    fn style_for_cell(&self, y: CellCountInt, x: CellCountInt) -> Option<PackedStyle> {
+    pub(crate) fn style_for_cell(&self, y: CellCountInt, x: CellCountInt) -> Option<PackedStyle> {
         let id = self.cell(y, x).style_id();
         self.styles.get(&self.memory, id)
     }

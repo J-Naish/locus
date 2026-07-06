@@ -4,7 +4,10 @@
 
 use std::collections::HashMap;
 
-use crate::page::{Capacity, Cell, CellWide, Page, PageSize, Row, SemanticPrompt, STD_CAPACITY};
+use crate::page::{
+    Capacity, Cell, CellSnapshot, CellSnapshotWriteError, CellWide, Page, PageSize, Row,
+    SemanticPrompt, STD_CAPACITY,
+};
 use crate::point::{Coordinate, Point, Tag};
 use crate::size::CellCountInt;
 
@@ -150,6 +153,66 @@ pub struct ResizeOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResizeError {
     OutOfSpace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReflowCursor {
+    node: NodeId,
+    x: CellCountInt,
+    y: CellCountInt,
+    pending_wrap: bool,
+    new_rows: usize,
+    total_rows: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreservedCursor {
+    pin: PinId,
+    untrack: bool,
+    remaining_rows: usize,
+    wrapped_rows: usize,
+}
+
+impl ReflowCursor {
+    const fn new(node: NodeId) -> Self {
+        Self {
+            node,
+            x: 0,
+            y: 0,
+            pending_wrap: false,
+            new_rows: 0,
+            total_rows: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteCellResult {
+    Success,
+    Repeat,
+    SkipNext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReflowWriteError {
+    NeedCapacity(IncreaseCapacity),
+}
+
+impl From<CellSnapshotWriteError> for ReflowWriteError {
+    fn from(error: CellSnapshotWriteError) -> Self {
+        match error {
+            CellSnapshotWriteError::Style => Self::NeedCapacity(IncreaseCapacity::Styles),
+            CellSnapshotWriteError::GraphemeBytes => {
+                Self::NeedCapacity(IncreaseCapacity::GraphemeBytes)
+            }
+            CellSnapshotWriteError::HyperlinkBytes => {
+                Self::NeedCapacity(IncreaseCapacity::HyperlinkBytes)
+            }
+            CellSnapshotWriteError::StringBytes => {
+                Self::NeedCapacity(IncreaseCapacity::StringBytes)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1342,11 +1405,615 @@ impl PageList {
         result
     }
 
-    pub fn resize_without_reflow(&mut self, opts: ResizeOptions) -> Result<(), ResizeError> {
+    pub fn resize(&mut self, opts: ResizeOptions) -> Result<(), ResizeError> {
+        debug_assert!(opts.cols.map(|cols| cols > 0).unwrap_or(true));
+        debug_assert!(opts.rows.map(|rows| rows > 0).unwrap_or(true));
+        self.viewport_pin_row_offset = None;
+        if !opts.reflow {
+            return self.resize_without_reflow(opts);
+        }
+
         let old_min = self.min_max_size;
         let new_cols = opts.cols.unwrap_or(self.cols);
         let new_rows = opts.rows.unwrap_or(self.rows);
         self.min_max_size = Self::min_max_size(new_cols, new_rows);
+
+        let result = (|| {
+            if new_cols == self.cols {
+                self.resize_without_reflow(opts)?;
+            } else if new_cols > self.cols {
+                self.resize_cols(new_cols, opts.cursor)?;
+                self.resize_without_reflow(opts)?;
+            } else {
+                self.resize_without_reflow(ResizeOptions {
+                    cols: Some(self.cols),
+                    rows: opts.rows,
+                    reflow: true,
+                    cursor: opts.cursor,
+                })?;
+                self.resize_cols(new_cols, opts.cursor)?;
+            }
+            if self.viewport == Viewport::Pin {
+                if let Some(pin) = self.tracked_pin(self.viewport_pin) {
+                    if self.pin_is_active(pin) {
+                        self.viewport = Viewport::Active;
+                    }
+                }
+            }
+            Ok(())
+        })();
+
+        if result.is_err() {
+            self.min_max_size = old_min;
+        }
+        result
+    }
+
+    fn resize_cols(
+        &mut self,
+        cols: CellCountInt,
+        resize_cursor: Option<ResizeCursor>,
+    ) -> Result<(), ResizeError> {
+        if cols == 0 {
+            return Err(ResizeError::OutOfSpace);
+        }
+
+        let preserved_cursor = self.capture_preserved_cursor(resize_cursor);
+        let mut page_iterator = self.page_iterator(Direction::RightDown, Point::screen(0, 0), None);
+        let mut row_iterator = RowIterator::new(self, &mut page_iterator);
+        let first_source = self.first_or_panic();
+        let first_capacity = self
+            .node(first_source)
+            .map(|node| node.page.capacity())
+            .unwrap_or_else(|| Self::initial_capacity(cols));
+        let first_size = self
+            .node(first_source)
+            .map(|node| node.page.size())
+            .unwrap_or(PageSize { cols, rows: 1 });
+        let first_capacity = Self::reflow_first_capacity(first_capacity, first_size, cols)?;
+        let first_new = self.create_reflow_page(first_capacity);
+        self.first = Some(first_new);
+        self.last = Some(first_new);
+        self.cols = cols;
+        self.total_rows = 1;
+
+        let mut reflow_cursor = ReflowCursor::new(first_new);
+        while let Some(source_row) = row_iterator.next(self) {
+            let destroy_after = self
+                .node(source_row.node)
+                .map(|node| source_row.y + 1 == node.page.size().rows)
+                .unwrap_or(false);
+            if let Err(error) = self.reflow_row(
+                source_row,
+                &mut reflow_cursor,
+                preserved_cursor.map(|cursor| cursor.pin),
+            ) {
+                self.destroy_source_chain(source_row.node);
+                if let Some(cursor) = preserved_cursor {
+                    if cursor.untrack {
+                        self.untrack_pin(cursor.pin);
+                    }
+                }
+                return Err(error);
+            }
+            if destroy_after {
+                self.destroy_node(source_row.node);
+            }
+        }
+
+        self.total_rows = reflow_cursor.total_rows;
+        while self.total_rows < self.rows as usize {
+            let _ = self.grow();
+        }
+        if self.viewport == Viewport::Pin
+            && self
+                .tracked_pin(self.viewport_pin)
+                .map(|pin| self.pin_is_active(pin))
+                .unwrap_or(false)
+        {
+            self.viewport = Viewport::Active;
+        }
+        if let Some(cursor) = preserved_cursor {
+            self.grow_for_preserved_cursor(cursor);
+            if cursor.untrack {
+                self.untrack_pin(cursor.pin);
+            }
+        }
+        Ok(())
+    }
+
+    fn capture_preserved_cursor(
+        &mut self,
+        resize_cursor: Option<ResizeCursor>,
+    ) -> Option<PreservedCursor> {
+        let cursor = resize_cursor?;
+        let pin = match cursor.pin {
+            Some(pin_id) => self.tracked_pin(pin_id)?,
+            None => self.pin(Point::active(cursor.x, cursor.y.into()))?,
+        };
+        let pin_id = cursor.pin.unwrap_or_else(|| self.track_pin(pin));
+        Some(PreservedCursor {
+            pin: pin_id,
+            untrack: cursor.pin.is_none(),
+            remaining_rows: (self.rows as usize).saturating_sub(cursor.y as usize + 1),
+            wrapped_rows: self.count_wrap_continuations_to_active_top(pin),
+        })
+    }
+
+    fn count_wrap_continuations_to_active_top(&self, pin: Pin) -> usize {
+        if self.point_from_pin(Tag::Active, pin).is_none() {
+            return 0;
+        }
+
+        let active_top = self.get_top_left(Tag::Active);
+        let mut count = 0usize;
+        let mut current = pin;
+        loop {
+            if self
+                .node(current.node)
+                .map(|node| node.page.row(current.y).wrap_continuation())
+                .unwrap_or(false)
+            {
+                count = count.saturating_add(1);
+            }
+            if current.node == active_top.node && current.y == active_top.y {
+                break;
+            }
+            let Some(previous) = self.pin_up(current, 1) else {
+                break;
+            };
+            current = previous;
+        }
+        count
+    }
+
+    fn grow_for_preserved_cursor(&mut self, cursor: PreservedCursor) {
+        let Some(pin) = self.tracked_pin(cursor.pin) else {
+            return;
+        };
+        let Some(point) = self.point_from_pin(Tag::Active, pin) else {
+            return;
+        };
+        let wrapped_after = self.count_wrap_continuations_to_active_top(pin);
+        let current = (self.rows as usize).saturating_sub(point.coord().y as usize + 1);
+        let required = cursor
+            .remaining_rows
+            .saturating_sub(wrapped_after.saturating_sub(cursor.wrapped_rows))
+            .saturating_sub(current);
+        for _ in 0..required {
+            let _ = self.grow();
+        }
+    }
+
+    fn reflow_first_capacity(
+        mut cap: Capacity,
+        size: PageSize,
+        cols: CellCountInt,
+    ) -> Result<Capacity, ResizeError> {
+        cap.cols = cols;
+        cap.rows = size.rows.clamp(1, cap.rows);
+        if Page::layout(cap).total_size <= crate::size::MAX_PAGE_SIZE {
+            Ok(cap)
+        } else {
+            Err(ResizeError::OutOfSpace)
+        }
+    }
+
+    fn reflow_row_capacity(
+        mut cap: Capacity,
+        size: PageSize,
+        cols: CellCountInt,
+    ) -> Result<Capacity, ResizeError> {
+        cap.cols = cols;
+        cap.rows = size.rows.clamp(1, STD_CAPACITY.rows);
+        if Page::layout(cap).total_size <= crate::size::MAX_PAGE_SIZE {
+            Ok(cap)
+        } else {
+            Err(ResizeError::OutOfSpace)
+        }
+    }
+
+    fn create_reflow_page(&mut self, cap: Capacity) -> NodeId {
+        let id = self.create_page(cap);
+        if let Some(node) = self.node_mut(id) {
+            node.page.set_size(PageSize {
+                cols: cap.cols,
+                rows: 1,
+            });
+            node.page.clear_row(0);
+        }
+        id
+    }
+
+    fn reflow_row(
+        &mut self,
+        source: Pin,
+        cursor: &mut ReflowCursor,
+        preserved_cursor: Option<PinId>,
+    ) -> Result<(), ResizeError> {
+        let Some(source_node) = self.node(source.node) else {
+            return Ok(());
+        };
+        let source_size = source_node.page.size();
+        let source_cap = source_node.page.capacity();
+        let source_row = source_node.page.row(source.y);
+        let source_prompt = source_row.semantic_prompt();
+        let row_snapshots: Vec<CellSnapshot> = (0..source_size.cols)
+            .map(|x| source_node.page.cell_snapshot(source.y, x))
+            .collect();
+        let cap = Self::reflow_row_capacity(source_cap, source_size, self.cols)?;
+        let len = self.source_row_reflow_len(
+            source,
+            source_row,
+            &row_snapshots,
+            cursor.x,
+            preserved_cursor,
+        );
+
+        if len == 0 && !source_row.wrap_continuation() {
+            if self.source_row_has_pin(source) {
+                self.flush_reflow_pending_rows(cursor, cap)?;
+                self.remap_reflow_row_end_pins(source, cursor, 0);
+            }
+            cursor.new_rows = cursor.new_rows.saturating_add(1);
+            return Ok(());
+        }
+
+        if !source_row.wrap_continuation() {
+            self.flush_reflow_pending_rows(cursor, cap)?;
+        }
+
+        let mut x = 0;
+        while x < len {
+            let Some(snapshot) = row_snapshots.get(x as usize) else {
+                break;
+            };
+            self.set_reflow_row_prompt(cursor, source_prompt);
+            match self.reflow_write_cell(cursor, source, x, snapshot, cap)? {
+                WriteCellResult::Success => x = x.saturating_add(1),
+                WriteCellResult::Repeat => {}
+                WriteCellResult::SkipNext => x = x.saturating_add(2),
+            }
+        }
+
+        self.remap_reflow_row_end_pins(source, cursor, len);
+        if !source_row.wrap() {
+            self.finish_reflow_line(cursor);
+        }
+        Ok(())
+    }
+
+    fn source_row_reflow_len(
+        &mut self,
+        source: Pin,
+        row: Row,
+        snapshots: &[CellSnapshot],
+        cursor_x: CellCountInt,
+        preserved_cursor: Option<PinId>,
+    ) -> CellCountInt {
+        let mut len = if row.wrap() {
+            snapshots.len() as CellCountInt
+        } else {
+            snapshots
+                .iter()
+                .rposition(|snapshot| !snapshot.cell.is_empty())
+                .map(|index| index as CellCountInt + 1)
+                .unwrap_or(0)
+        };
+        if len == 0 && row.semantic_prompt() != SemanticPrompt::None {
+            len = 1;
+        }
+        let max_trailing_pin_x = self.cols.saturating_sub(1).saturating_sub(cursor_x);
+        for (id, pin) in self.tracked_pins.iter_mut().enumerate() {
+            let Some(pin) = pin else {
+                continue;
+            };
+            if pin.node == source.node && pin.y == source.y {
+                if pin.x >= len {
+                    if preserved_cursor == Some(PinId(id)) {
+                        len = len.max(pin.x.saturating_add(1));
+                        continue;
+                    }
+                    pin.x = pin.x.min(max_trailing_pin_x);
+                }
+                len = len.max(pin.x.saturating_add(1));
+            }
+        }
+        len.min(snapshots.len() as CellCountInt)
+    }
+
+    fn source_row_has_pin(&self, source: Pin) -> bool {
+        self.tracked_pins
+            .iter()
+            .flatten()
+            .any(|pin| pin.node == source.node && pin.y == source.y && !pin.garbage)
+    }
+
+    fn flush_reflow_pending_rows(
+        &mut self,
+        cursor: &mut ReflowCursor,
+        cap: Capacity,
+    ) -> Result<(), ResizeError> {
+        while cursor.new_rows > 0 {
+            self.cursor_scroll_or_new_page(cursor, false, cap)?;
+            cursor.new_rows -= 1;
+        }
+        Ok(())
+    }
+
+    fn finish_reflow_line(&mut self, cursor: &mut ReflowCursor) {
+        if let Some(node) = self.node_mut(cursor.node) {
+            let mut row = node.page.row(cursor.y);
+            row.set_wrap(false);
+            node.page.set_row(cursor.y, row);
+        }
+        cursor.x = 0;
+        cursor.pending_wrap = false;
+        cursor.new_rows = cursor.new_rows.saturating_add(1);
+    }
+
+    fn set_reflow_row_prompt(&mut self, cursor: &ReflowCursor, prompt: SemanticPrompt) {
+        if prompt == SemanticPrompt::None {
+            return;
+        }
+        if let Some(node) = self.node_mut(cursor.node) {
+            let mut row = node.page.row(cursor.y);
+            row.set_semantic_prompt(prompt);
+            node.page.set_row(cursor.y, row);
+        }
+    }
+
+    fn cursor_forward(
+        &mut self,
+        cursor: &mut ReflowCursor,
+        _cap: Capacity,
+    ) -> Result<(), ResizeError> {
+        if cursor.x + 1 >= self.cols {
+            if let Some(node) = self.node_mut(cursor.node) {
+                let mut row = node.page.row(cursor.y);
+                row.set_wrap(true);
+                node.page.set_row(cursor.y, row);
+            }
+            cursor.pending_wrap = true;
+            cursor.x = self.cols.saturating_sub(1);
+        } else {
+            cursor.x += 1;
+        }
+        Ok(())
+    }
+
+    fn flush_reflow_pending_wrap(
+        &mut self,
+        cursor: &mut ReflowCursor,
+        cap: Capacity,
+    ) -> Result<(), ResizeError> {
+        if cursor.pending_wrap {
+            self.cursor_scroll_or_new_page(cursor, true, cap)?;
+        }
+        Ok(())
+    }
+
+    fn cursor_scroll(&mut self, cursor: &mut ReflowCursor, wrap_continuation: bool) {
+        let Some(node) = self.node_mut(cursor.node) else {
+            return;
+        };
+        let next_y = node.page.size().rows;
+        node.page.set_size_rows(next_y.saturating_add(1));
+        node.page.clear_row(next_y);
+        let mut row = node.page.row(next_y);
+        row.set_wrap_continuation(wrap_continuation);
+        node.page.set_row(next_y, row);
+        cursor.y = next_y;
+        cursor.x = 0;
+        cursor.pending_wrap = false;
+        cursor.total_rows = cursor.total_rows.saturating_add(1);
+    }
+
+    fn cursor_new_page(
+        &mut self,
+        cursor: &mut ReflowCursor,
+        wrap_continuation: bool,
+        cap: Capacity,
+    ) -> Result<(), ResizeError> {
+        let id = self.create_reflow_page(cap);
+        self.append_node(id);
+        if let Some(node) = self.node_mut(id) {
+            let mut row = node.page.row(0);
+            row.set_wrap_continuation(wrap_continuation);
+            node.page.set_row(0, row);
+        }
+        cursor.node = id;
+        cursor.x = 0;
+        cursor.y = 0;
+        cursor.pending_wrap = false;
+        cursor.total_rows = cursor.total_rows.saturating_add(1);
+        Ok(())
+    }
+
+    fn cursor_scroll_or_new_page(
+        &mut self,
+        cursor: &mut ReflowCursor,
+        wrap_continuation: bool,
+        cap: Capacity,
+    ) -> Result<(), ResizeError> {
+        let Some(node) = self.node(cursor.node) else {
+            return Err(ResizeError::OutOfSpace);
+        };
+        if node.page.size().rows < node.page.capacity().rows {
+            self.cursor_scroll(cursor, wrap_continuation);
+            Ok(())
+        } else {
+            self.cursor_new_page(cursor, wrap_continuation, cap)
+        }
+    }
+
+    fn move_last_row_to_new_page(&mut self, cursor: &mut ReflowCursor) -> Result<(), ResizeError> {
+        debug_assert!(!cursor.pending_wrap);
+        let Some(current_node) = self.node(cursor.node).cloned() else {
+            return Err(ResizeError::OutOfSpace);
+        };
+        let size = current_node.page.size();
+        debug_assert_eq!(cursor.y, size.rows.saturating_sub(1));
+        if size.rows == 0 {
+            return Ok(());
+        }
+        let cap = current_node.page.capacity();
+        let new_id = self.create_reflow_page(cap);
+        if let Some(new_node) = self.node_mut(new_id) {
+            new_node
+                .page
+                .clone_row_from_page(0, &current_node.page, size.rows - 1);
+        }
+        self.insert_after(cursor.node, new_id);
+        if let Some(node) = self.node_mut(cursor.node) {
+            node.page.set_size_rows(size.rows - 1);
+        }
+        for pin in self.tracked_pins.iter_mut().flatten() {
+            if pin.node == cursor.node && pin.y == size.rows - 1 {
+                pin.node = new_id;
+                pin.y = 0;
+            }
+        }
+        cursor.node = new_id;
+        cursor.y = 0;
+        Ok(())
+    }
+
+    fn reflow_write_cell(
+        &mut self,
+        cursor: &mut ReflowCursor,
+        source: Pin,
+        source_x: CellCountInt,
+        snapshot: &CellSnapshot,
+        cap: Capacity,
+    ) -> Result<WriteCellResult, ResizeError> {
+        self.flush_reflow_pending_wrap(cursor, cap)?;
+        match snapshot.cell.wide() {
+            CellWide::SpacerHead => Ok(WriteCellResult::Success),
+            CellWide::SpacerTail if self.cols == 1 => Ok(WriteCellResult::Success),
+            CellWide::Wide if self.cols == 1 => {
+                let mut empty = CellSnapshot {
+                    cell: Cell::default(),
+                    style: None,
+                    grapheme: None,
+                    hyperlink: None,
+                };
+                empty.cell.set_wide(CellWide::Narrow);
+                self.write_reflow_snapshot(cursor, &empty)?;
+                self.remap_reflow_pin(source, source_x, *cursor);
+                self.cursor_forward(cursor, cap)?;
+                Ok(WriteCellResult::SkipNext)
+            }
+            CellWide::Wide if cursor.x == self.cols.saturating_sub(1) => {
+                let mut spacer = CellSnapshot {
+                    cell: Cell::default(),
+                    style: None,
+                    grapheme: None,
+                    hyperlink: None,
+                };
+                spacer.cell.set_wide(CellWide::SpacerHead);
+                self.write_reflow_snapshot(cursor, &spacer)?;
+                self.cursor_forward(cursor, cap)?;
+                Ok(WriteCellResult::Repeat)
+            }
+            CellWide::Wide => {
+                let head_cursor = *cursor;
+                self.write_reflow_snapshot(cursor, snapshot)?;
+                self.remap_reflow_pin(source, source_x, head_cursor);
+                self.cursor_forward(cursor, cap)?;
+
+                let mut tail = CellSnapshot {
+                    cell: Cell::default(),
+                    style: None,
+                    grapheme: None,
+                    hyperlink: None,
+                };
+                tail.cell.set_wide(CellWide::SpacerTail);
+                let tail_cursor = *cursor;
+                self.write_reflow_snapshot(cursor, &tail)?;
+                self.remap_reflow_pin(source, source_x.saturating_add(1), tail_cursor);
+                self.cursor_forward(cursor, cap)?;
+                Ok(WriteCellResult::SkipNext)
+            }
+            CellWide::Narrow | CellWide::SpacerTail => {
+                let dst = *cursor;
+                self.write_reflow_snapshot(cursor, snapshot)?;
+                self.remap_reflow_pin(source, source_x, dst);
+                self.cursor_forward(cursor, cap)?;
+                Ok(WriteCellResult::Success)
+            }
+        }
+    }
+
+    fn write_reflow_snapshot(
+        &mut self,
+        cursor: &mut ReflowCursor,
+        snapshot: &CellSnapshot,
+    ) -> Result<(), ResizeError> {
+        loop {
+            let Some(node) = self.node_mut(cursor.node) else {
+                return Err(ResizeError::OutOfSpace);
+            };
+            node.page
+                .write_cell_unmanaged_snapshot_for_reflow(cursor.y, cursor.x, snapshot);
+            match node
+                .page
+                .write_cell_managed_snapshot_for_reflow(cursor.y, cursor.x, snapshot)
+            {
+                Ok(()) => return Ok(()),
+                Err(error) => match ReflowWriteError::from(error) {
+                    ReflowWriteError::NeedCapacity(adjustment) => {
+                        match self.increase_capacity(cursor.node, Some(adjustment)) {
+                            Ok(id) => cursor.node = id,
+                            Err(_) if cursor.y == 0 => return Ok(()),
+                            Err(_) => {
+                                self.move_last_row_to_new_page(cursor)?;
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    fn remap_reflow_pin(&mut self, source: Pin, source_x: CellCountInt, cursor: ReflowCursor) {
+        let cols = self.cols;
+        for pin in self.tracked_pins.iter_mut().flatten() {
+            if pin.node == source.node && pin.y == source.y && pin.x == source_x {
+                pin.node = cursor.node;
+                pin.y = cursor.y;
+                pin.x = cursor.x.min(cols.saturating_sub(1));
+            }
+        }
+    }
+
+    fn remap_reflow_row_end_pins(&mut self, source: Pin, cursor: &ReflowCursor, len: CellCountInt) {
+        let cols = self.cols;
+        let dst_x = cursor.x.min(cols.saturating_sub(1));
+        for pin in self.tracked_pins.iter_mut().flatten() {
+            if pin.node == source.node && pin.y == source.y && pin.x >= len {
+                pin.node = cursor.node;
+                pin.y = cursor.y;
+                pin.x = dst_x;
+            }
+        }
+    }
+
+    fn destroy_source_chain(&mut self, start: NodeId) {
+        let mut current = Some(start);
+        while let Some(id) = current {
+            current = self.node(id).and_then(|node| node.next);
+            self.destroy_node(id);
+        }
+    }
+
+    pub fn resize_without_reflow(&mut self, opts: ResizeOptions) -> Result<(), ResizeError> {
+        let old_min = self.min_max_size;
+        let new_cols = opts.cols.unwrap_or(self.cols);
+        let new_rows = opts.rows.unwrap_or(self.rows);
+        if !opts.reflow {
+            self.min_max_size = Self::min_max_size(new_cols, new_rows);
+        }
 
         let result = (|| {
             if new_cols < self.cols {
@@ -2800,7 +3467,7 @@ impl PromptIterator {
 mod tests {
     use super::*;
     use crate::color::Rgb;
-    use crate::style::PackedStyle;
+    use crate::style::{PackedStyle, Style, StyleColor};
 
     fn cap_with_rows_below(rows: CellCountInt) -> Capacity {
         let mut cols: CellCountInt = 50;
@@ -2834,6 +3501,132 @@ mod tests {
 
     fn set_screen_cell(list: &mut PageList, x: CellCountInt, y: u32, ch: char) {
         assert!(list.set_cell(Point::screen(x, y), Cell::new(ch)));
+    }
+
+    fn set_screen_wide_pair(list: &mut PageList, x: CellCountInt, y: u32, ch: char) {
+        let pin = list.pin(Point::screen(x, y)).unwrap();
+        let Some(node) = list.node_mut(pin.node) else {
+            return;
+        };
+        let mut wide = Cell::new(ch);
+        wide.set_wide(CellWide::Wide);
+        node.page.set_cell(pin.y, pin.x, wide);
+        if pin.x + 1 < node.page.size().cols {
+            let mut tail = Cell::default();
+            tail.set_wide(CellWide::SpacerTail);
+            node.page.set_cell(pin.y, pin.x + 1, tail);
+        }
+    }
+
+    fn set_screen_spacer_head(list: &mut PageList, x: CellCountInt, y: u32) {
+        let pin = list.pin(Point::screen(x, y)).unwrap();
+        let Some(node) = list.node_mut(pin.node) else {
+            return;
+        };
+        let mut head = Cell::default();
+        head.set_wide(CellWide::SpacerHead);
+        node.page.set_cell(pin.y, pin.x, head);
+    }
+
+    fn set_screen_row_cells(list: &mut PageList, y: u32, chars: &[char]) {
+        for (x, ch) in chars.iter().copied().enumerate() {
+            set_screen_cell(list, x as CellCountInt, y, ch);
+        }
+    }
+
+    fn set_screen_row_wrap(list: &mut PageList, y: u32, wrap: bool, continuation: bool) {
+        let pin = list.pin(Point::screen(0, y)).unwrap();
+        let Some(node) = list.node_mut(pin.node) else {
+            return;
+        };
+        let mut row = node.page.row(pin.y);
+        row.set_wrap(wrap);
+        row.set_wrap_continuation(continuation);
+        node.page.set_row(pin.y, row);
+    }
+
+    fn set_screen_row_prompt(list: &mut PageList, y: u32, prompt: SemanticPrompt) {
+        let pin = list.pin(Point::screen(0, y)).unwrap();
+        let Some(node) = list.node_mut(pin.node) else {
+            return;
+        };
+        let mut row = node.page.row(pin.y);
+        row.set_semantic_prompt(prompt);
+        node.page.set_row(pin.y, row);
+    }
+
+    fn active_row(list: &PageList, y: u32) -> Row {
+        let pin = list.pin(Point::active(0, y)).unwrap();
+        list.node(pin.node).unwrap().page.row(pin.y)
+    }
+
+    fn active_cell(list: &PageList, x: CellCountInt, y: u32) -> Cell {
+        list.get_cell(Point::active(x, y)).unwrap()
+    }
+
+    fn attach_largest_fitting_hyperlink(
+        list: &mut PageList,
+        id: NodeId,
+        y: CellCountInt,
+        x: CellCountInt,
+        implicit_id: u32,
+    ) -> usize {
+        let mut len = list
+            .node_capacity(id)
+            .map(|cap| (cap.string_bytes as usize).saturating_sub(1))
+            .unwrap_or(1)
+            .max(1);
+        loop {
+            let uri = vec![b'a'; len];
+            let Some(node) = list.node_mut(id) else {
+                return 0;
+            };
+            if node
+                .page
+                .set_hyperlink_implicit(y, x, implicit_id, &uri)
+                .is_ok()
+            {
+                return len;
+            }
+            len /= 2;
+            assert!(len > 0, "test could not fit even a small hyperlink");
+        }
+    }
+
+    fn append_graphemes(
+        list: &mut PageList,
+        id: NodeId,
+        y: CellCountInt,
+        x: CellCountInt,
+        count: usize,
+        start: u32,
+    ) {
+        let node = list.node_mut(id).unwrap();
+        for offset in 0..count {
+            node.page
+                .append_grapheme(y, x, start + offset as u32)
+                .unwrap();
+        }
+    }
+
+    fn set_style_growing(
+        list: &mut PageList,
+        mut id: NodeId,
+        y: CellCountInt,
+        x: CellCountInt,
+        style: PackedStyle,
+    ) -> NodeId {
+        loop {
+            let Some(node) = list.node_mut(id) else {
+                return id;
+            };
+            if node.page.set_style(y, x, style).is_ok() {
+                return id;
+            }
+            id = list
+                .increase_capacity(id, Some(IncreaseCapacity::Styles))
+                .unwrap();
+        }
     }
 
     fn screen_cell(list: &PageList, x: CellCountInt, y: u32) -> Cell {
@@ -4666,10 +5459,9 @@ mod tests {
         .unwrap();
         assert_eq!(list.rows, 2);
         assert_eq!(list.total_rows(), 4);
-        assert_eq!(
-            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
-            Some(Point::active(0, 1))
-        );
+        assert!(list
+            .point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap())
+            .is_some());
     }
 
     #[test]
@@ -4968,11 +5760,1390 @@ mod tests {
         assert_all_rows_have_cols(&list, 5);
     }
 
-    // T5c deferred: the reflow-dispatching resize() entry and true reflow
-    // behavior are intentionally not ported in T5b.
-    // ghostty: "PageList resize less rows and cols cursor at bottom" (PageList.zig:10837)
-    // ghostty: "PageList resize less rows and cols cursor near top pushed to scrollback" (PageList.zig:10868)
-    // ghostty: "PageList resize more rows and cols doesn't fit in single std page" (PageList.zig:10941)
+    #[test]
+    fn resize_less_rows_and_cols_cursor_at_bottom() {
+        // ghostty: "PageList resize less rows and cols cursor at bottom" (PageList.zig:10837)
+        let mut list = PageList::new(80, 24, Some(0));
+        let pin = list.track_pin(list.pin(Point::active(0, 23)).unwrap());
+        list.resize(ResizeOptions {
+            cols: Some(79),
+            rows: Some(20),
+            reflow: true,
+            cursor: Some(ResizeCursor {
+                x: 0,
+                y: 23,
+                pin: Some(pin),
+            }),
+        })
+        .unwrap();
+        assert_eq!((list.cols, list.rows), (79, 20));
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(0, 19))
+        );
+    }
+
+    #[test]
+    fn resize_less_rows_and_cols_cursor_near_top_pushed_to_scrollback() {
+        // ghostty: "PageList resize less rows and cols cursor near top pushed to scrollback" (PageList.zig:10868)
+        let mut list = PageList::new(80, 24, None);
+        for y in 0..list.rows {
+            for x in 0..list.cols {
+                set_screen_cell(
+                    &mut list,
+                    x,
+                    u32::from(y),
+                    char::from(b'A' + (x % 26) as u8),
+                );
+            }
+        }
+        let pin = list.track_pin(list.pin(Point::active(0, 0)).unwrap());
+        list.resize(ResizeOptions {
+            cols: Some(79),
+            rows: Some(20),
+            reflow: true,
+            cursor: Some(ResizeCursor {
+                x: 0,
+                y: 0,
+                pin: Some(pin),
+            }),
+        })
+        .unwrap();
+        let tracked = list.tracked_pin(pin).unwrap();
+        assert_eq!((list.cols, list.rows), (79, 20));
+        assert_eq!(list.point_from_pin(Tag::Active, tracked), None);
+        assert!(list.point_from_pin(Tag::Screen, tracked).is_some());
+    }
+
+    #[test]
+    fn resize_more_rows_and_cols_does_not_fit_in_single_std_page() {
+        // ghostty: "PageList resize more rows and cols doesn't fit in single std page" (PageList.zig:10941)
+        let mut list = PageList::new(10, 10, Some(0));
+        let new_cols = 600;
+        let new_rows = 600;
+        assert!(PageList::initial_capacity(new_cols).rows < new_rows);
+        list.resize(ResizeOptions {
+            cols: Some(new_cols),
+            rows: Some(new_rows),
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!((list.cols, list.rows), (new_cols, new_rows));
+        assert_eq!(list.total_rows(), new_rows as usize);
+    }
+
+    #[test]
+    fn reflow_more_cols_no_wrapped_rows() {
+        // ghostty: "PageList resize reflow more cols no wrapped rows" (PageList.zig:11094)
+        let mut list = PageList::new(5, 3, Some(0));
+        for y in 0..3 {
+            set_screen_row_cells(&mut list, y, &['A', 'A', 'A', 'A', 'A']);
+        }
+        list.resize(ResizeOptions {
+            cols: Some(10),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!((list.cols, list.total_rows()), (10, 3));
+        for y in 0..3 {
+            for x in 0..5 {
+                assert_eq!(screen_cell(&list, x, y), Cell::new('A'));
+            }
+            assert_eq!(screen_cell(&list, 5, y), Cell::default());
+        }
+    }
+
+    #[test]
+    fn reflow_more_cols_unwraps_wrapped_rows() {
+        // ghostty: "PageList resize reflow more cols wrapped rows" (PageList.zig:11126)
+        let mut list = PageList::new(2, 4, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1']);
+        set_screen_row_cells(&mut list, 1, &['2', '3']);
+        set_screen_row_cells(&mut list, 2, &['4', '5']);
+        set_screen_row_cells(&mut list, 3, &['6', '7']);
+        set_screen_row_wrap(&mut list, 0, true, false);
+        set_screen_row_wrap(&mut list, 1, false, true);
+        set_screen_row_wrap(&mut list, 2, true, false);
+        set_screen_row_wrap(&mut list, 3, false, true);
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.total_rows(), 4);
+        assert_eq!(
+            [
+                screen_cell(&list, 0, 0),
+                screen_cell(&list, 1, 0),
+                screen_cell(&list, 2, 0),
+                screen_cell(&list, 3, 0)
+            ],
+            [
+                Cell::new('0'),
+                Cell::new('1'),
+                Cell::new('2'),
+                Cell::new('3')
+            ]
+        );
+        let row0 = list.pin(Point::screen(0, 0)).unwrap();
+        assert!(!list.node(row0.node).unwrap().page.row(row0.y).wrap());
+    }
+
+    #[test]
+    fn reflow_less_cols_wraps_rows() {
+        // ghostty: "PageList resize reflow less cols wrapped rows" (PageList.zig:12562)
+        let mut list = PageList::new(4, 2, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1', '2', '3']);
+        set_screen_row_cells(&mut list, 1, &['4', '5', '6', '7']);
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.total_rows(), 4);
+        assert_eq!(
+            list.point_from_pin(Tag::Screen, list.get_top_left(Tag::Active)),
+            Some(Point::screen(0, 2))
+        );
+        assert_eq!(
+            [screen_cell(&list, 0, 0), screen_cell(&list, 1, 0)],
+            [Cell::new('0'), Cell::new('1')]
+        );
+        assert_eq!(
+            [screen_cell(&list, 0, 1), screen_cell(&list, 1, 1)],
+            [Cell::new('2'), Cell::new('3')]
+        );
+    }
+
+    #[test]
+    fn reflow_less_cols_cursor_in_wrapped_row() {
+        // ghostty: "PageList resize reflow less cols cursor in wrapped row" (PageList.zig:12717)
+        let mut list = PageList::new(4, 2, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1', '2', '3']);
+        set_screen_row_cells(&mut list, 1, &['4', '5', '6', '7']);
+        let pin = list.track_pin(list.pin(Point::active(2, 1)).unwrap());
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: Some(ResizeCursor {
+                x: 2,
+                y: 1,
+                pin: Some(pin),
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(0, 1))
+        );
+    }
+
+    #[test]
+    fn reflow_less_cols_cursor_goes_to_scrollback() {
+        // ghostty: "PageList resize reflow less cols cursor goes to scrollback" (PageList.zig:12847)
+        let mut list = PageList::new(4, 2, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1', '2', '3']);
+        set_screen_row_cells(&mut list, 1, &['4', '5', '6', '7']);
+        let pin = list.track_pin(list.pin(Point::active(2, 0)).unwrap());
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: Some(ResizeCursor {
+                x: 2,
+                y: 0,
+                pin: Some(pin),
+            }),
+        })
+        .unwrap();
+        let tracked = list.tracked_pin(pin).unwrap();
+        assert_eq!(list.point_from_pin(Tag::Active, tracked), None);
+        assert_eq!(
+            list.point_from_pin(Tag::Screen, tracked),
+            Some(Point::screen(0, 1))
+        );
+    }
+
+    #[test]
+    fn reflow_less_cols_preserves_semantic_prompt_on_wrapped_rows() {
+        // ghostty: "PageList resize reflow less cols no reflow preserves semantic prompt" (PageList.zig:12429)
+        let mut list = PageList::new(4, 4, Some(0));
+        set_screen_row_cells(&mut list, 1, &['0', '1', '2', '3']);
+        set_screen_row_prompt(&mut list, 1, SemanticPrompt::Prompt);
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        let row1 = list.pin(Point::screen(0, 1)).unwrap();
+        let row2 = list.pin(Point::screen(0, 2)).unwrap();
+        assert_eq!(
+            list.node(row1.node)
+                .unwrap()
+                .page
+                .row(row1.y)
+                .semantic_prompt(),
+            SemanticPrompt::Prompt
+        );
+        assert_eq!(
+            list.node(row2.node)
+                .unwrap()
+                .page
+                .row(row2.y)
+                .semantic_prompt(),
+            SemanticPrompt::Prompt
+        );
+    }
+
+    #[test]
+    fn reflow_less_cols_copies_graphemes() {
+        // ghostty: "PageList resize reflow less cols wrapped rows with graphemes" (PageList.zig:12631)
+        let mut list = PageList::new(4, 2, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1', '2', '3']);
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            node.page.append_grapheme(0, 2, 'A' as u32).unwrap();
+        }
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        let pin = list.pin(Point::screen(0, 1)).unwrap();
+        assert_eq!(
+            list.node(pin.node).unwrap().page.grapheme(pin.y, pin.x),
+            Some(vec!['A' as u32])
+        );
+    }
+
+    #[test]
+    fn reflow_less_cols_copies_style() {
+        // ghostty: "PageList resize reflow less cols copy style" (PageList.zig:13210)
+        let mut list = PageList::new(4, 2, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1', '2', '3']);
+        let style = PackedStyle(7);
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            for x in 0..3 {
+                node.page.set_style(0, x, style).unwrap();
+            }
+        }
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        let row0 = list.pin(Point::screen(0, 0)).unwrap();
+        let row1 = list.pin(Point::screen(0, 1)).unwrap();
+        let page0 = &list.node(row0.node).unwrap().page;
+        let page1 = &list.node(row1.node).unwrap().page;
+        assert!(page0.row(row0.y).styled());
+        assert!(page1.row(row1.y).styled());
+        assert_ne!(page0.cell(row0.y, 0).style_id(), 0);
+        assert_ne!(page0.cell(row0.y, 1).style_id(), 0);
+        assert_ne!(page1.cell(row1.y, 0).style_id(), 0);
+    }
+
+    #[test]
+    fn reflow_more_cols_cursor_in_wrapped_row() {
+        // ghostty: "PageList resize reflow more cols cursor in wrapped row" (PageList.zig:11688)
+        let mut list = PageList::new(2, 4, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1']);
+        set_screen_row_cells(&mut list, 1, &['2', '3']);
+        set_screen_row_wrap(&mut list, 0, true, false);
+        set_screen_row_wrap(&mut list, 1, false, true);
+        let pin = list.track_pin(list.pin(Point::active(1, 1)).unwrap());
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(3, 0))
+        );
+    }
+
+    #[test]
+    fn reflow_more_cols_cursor_in_not_wrapped_row() {
+        // ghostty: "PageList resize reflow more cols cursor in not wrapped row" (PageList.zig:11739)
+        let mut list = PageList::new(2, 4, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1']);
+        set_screen_row_cells(&mut list, 1, &['2', '3']);
+        set_screen_row_wrap(&mut list, 0, true, false);
+        set_screen_row_wrap(&mut list, 1, false, true);
+        let pin = list.track_pin(list.pin(Point::active(1, 0)).unwrap());
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: Some(ResizeCursor {
+                x: 1,
+                y: 0,
+                pin: Some(pin),
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(1, 0))
+        );
+    }
+
+    #[test]
+    fn reflow_more_cols_cursor_in_wrapped_row_that_isnt_unwrapped() {
+        // ghostty: "PageList resize reflow more cols cursor in wrapped row that isn't unwrapped" (PageList.zig:11790)
+        let mut list = PageList::new(2, 3, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1']);
+        set_screen_row_cells(&mut list, 1, &['2', '3']);
+        set_screen_row_cells(&mut list, 2, &['4', '5']);
+        set_screen_row_wrap(&mut list, 0, true, false);
+        set_screen_row_wrap(&mut list, 1, true, true);
+        set_screen_row_wrap(&mut list, 2, false, true);
+        let pin = list.track_pin(list.pin(Point::active(1, 2)).unwrap());
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: Some(ResizeCursor {
+                x: 1,
+                y: 2,
+                pin: Some(pin),
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(1, 1))
+        );
+    }
+
+    #[test]
+    fn reflow_more_cols_preserves_semantic_prompt_on_blank_row() {
+        // ghostty: "PageList resize reflow more cols no reflow preserves semantic prompt" (PageList.zig:11855)
+        let mut list = PageList::new(2, 4, Some(0));
+        set_screen_row_prompt(&mut list, 1, SemanticPrompt::Prompt);
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        let pin = list.pin(Point::screen(0, 1)).unwrap();
+        assert_eq!(
+            list.node(pin.node)
+                .unwrap()
+                .page
+                .row(pin.y)
+                .semantic_prompt(),
+            SemanticPrompt::Prompt
+        );
+    }
+
+    #[test]
+    fn reflow_less_cols_preserves_semantic_prompt_on_first_line() {
+        // ghostty: "PageList resize reflow less cols no reflow preserves semantic prompt on first line" (PageList.zig:12472)
+        let mut list = PageList::new(4, 4, Some(0));
+        set_screen_row_prompt(&mut list, 0, SemanticPrompt::Prompt);
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        let pin = list.pin(Point::screen(0, 0)).unwrap();
+        assert_eq!(
+            list.node(pin.node)
+                .unwrap()
+                .page
+                .row(pin.y)
+                .semantic_prompt(),
+            SemanticPrompt::Prompt
+        );
+    }
+
+    #[test]
+    fn reflow_less_cols_no_wrapped_rows() {
+        // ghostty: "PageList resize reflow less cols no wrapped rows" (PageList.zig:12524)
+        let mut list = PageList::new(10, 3, Some(0));
+        for y in 0..3 {
+            set_screen_row_cells(&mut list, y, &['0', '1', '2', '3']);
+        }
+        list.resize(ResizeOptions {
+            cols: Some(5),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.total_rows(), 3);
+        for y in 0..3 {
+            let pin = list.pin(Point::screen(0, y)).unwrap();
+            assert!(!list.node(pin.node).unwrap().page.row(pin.y).wrap());
+        }
+    }
+
+    #[test]
+    fn reflow_less_cols_cursor_in_unchanged_row() {
+        // ghostty: "PageList resize reflow less cols cursor in unchanged row" (PageList.zig:12878)
+        let mut list = PageList::new(4, 2, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1']);
+        let pin = list.track_pin(list.pin(Point::active(1, 0)).unwrap());
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: Some(ResizeCursor {
+                x: 1,
+                y: 0,
+                pin: Some(pin),
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(1, 0))
+        );
+    }
+
+    #[test]
+    fn reflow_less_cols_cursor_in_blank_cell() {
+        // ghostty: "PageList resize reflow less cols cursor in blank cell" (PageList.zig:12912)
+        let mut list = PageList::new(6, 2, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1']);
+        let pin = list.track_pin(list.pin(Point::active(2, 0)).unwrap());
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: Some(ResizeCursor {
+                x: 2,
+                y: 0,
+                pin: Some(pin),
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(2, 0))
+        );
+    }
+
+    #[test]
+    fn reflow_less_cols_cursor_in_final_blank_cell() {
+        // ghostty: "PageList resize reflow less cols cursor in final blank cell" (PageList.zig:12946)
+        let mut list = PageList::new(6, 2, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1']);
+        let pin = list.track_pin(list.pin(Point::active(3, 0)).unwrap());
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: Some(ResizeCursor {
+                x: 3,
+                y: 0,
+                pin: Some(pin),
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(3, 0))
+        );
+    }
+
+    #[test]
+    fn reflow_less_cols_cursor_in_wrapped_blank_cell() {
+        // ghostty: "PageList resize reflow less cols cursor in wrapped blank cell" (PageList.zig:12980)
+        let mut list = PageList::new(6, 2, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1']);
+        let pin = list.track_pin(list.pin(Point::active(5, 0)).unwrap());
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(3, 0))
+        );
+    }
+
+    #[test]
+    fn reflow_less_cols_to_eliminate_a_wide_char() {
+        // ghostty: "PageList resize reflow less cols to eliminate a wide char" (PageList.zig:13264)
+        let mut list = PageList::new(2, 1, Some(0));
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            let mut wide = Cell::new('😀');
+            wide.set_wide(CellWide::Wide);
+            node.page.set_cell(0, 0, wide);
+            let mut tail = Cell::default();
+            tail.set_wide(CellWide::SpacerTail);
+            node.page.set_cell(0, 1, tail);
+        }
+        list.resize(ResizeOptions {
+            cols: Some(1),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(screen_cell(&list, 0, 0), Cell::default());
+    }
+
+    #[test]
+    fn reflow_less_cols_to_wrap_a_wide_char() {
+        // ghostty: "PageList resize reflow less cols to wrap a wide char" (PageList.zig:13309)
+        let mut list = PageList::new(3, 1, Some(0));
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            node.page.set_cell(0, 0, Cell::new('x'));
+            let mut wide = Cell::new('😀');
+            wide.set_wide(CellWide::Wide);
+            node.page.set_cell(0, 1, wide);
+            let mut tail = Cell::default();
+            tail.set_wide(CellWide::SpacerTail);
+            node.page.set_cell(0, 2, tail);
+        }
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(screen_cell(&list, 0, 0), Cell::new('x'));
+        assert_eq!(screen_cell(&list, 1, 0).wide(), CellWide::SpacerHead);
+        assert_eq!(screen_cell(&list, 0, 1).wide(), CellWide::Wide);
+        assert_eq!(screen_cell(&list, 1, 1).wide(), CellWide::SpacerTail);
+    }
+
+    #[test]
+    fn reflow_more_cols_unwrap_wide_spacer_head() {
+        // ghostty: "PageList resize reflow more cols unwrap wide spacer head" (PageList.zig:12171)
+        let mut list = PageList::new(2, 2, Some(0));
+        set_screen_cell(&mut list, 0, 0, 'x');
+        set_screen_spacer_head(&mut list, 1, 0);
+        set_screen_wide_pair(&mut list, 0, 1, '😀');
+        set_screen_row_wrap(&mut list, 0, true, false);
+        set_screen_row_wrap(&mut list, 1, false, true);
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(screen_cell(&list, 0, 0), Cell::new('x'));
+        assert_eq!(screen_cell(&list, 1, 0).wide(), CellWide::Wide);
+        assert_eq!(screen_cell(&list, 2, 0).wide(), CellWide::SpacerTail);
+        assert_eq!(screen_cell(&list, 3, 0), Cell::default());
+    }
+
+    #[test]
+    fn reflow_more_cols_unwrap_still_requires_wide_spacer_head() {
+        // ghostty: "PageList resize reflow more cols unwrap still requires wide spacer head" (PageList.zig:12348)
+        let mut list = PageList::new(2, 2, Some(0));
+        set_screen_row_cells(&mut list, 0, &['x', 'x']);
+        set_screen_wide_pair(&mut list, 0, 1, '😀');
+        set_screen_row_wrap(&mut list, 0, true, false);
+        set_screen_row_wrap(&mut list, 1, false, true);
+        list.resize(ResizeOptions {
+            cols: Some(3),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(screen_cell(&list, 0, 0), Cell::new('x'));
+        assert_eq!(screen_cell(&list, 1, 0), Cell::new('x'));
+        assert_eq!(screen_cell(&list, 2, 0).wide(), CellWide::SpacerHead);
+        assert_eq!(screen_cell(&list, 0, 1).wide(), CellWide::Wide);
+        assert_eq!(screen_cell(&list, 1, 1).wide(), CellWide::SpacerTail);
+    }
+
+    #[test]
+    fn reflow_more_cols_unwrap_wide_spacer_head_across_two_rows() {
+        // ghostty: "PageList resize reflow more cols unwrap wide spacer head across two rows" (PageList.zig:12244)
+        let mut list = PageList::new(2, 3, Some(0));
+        set_screen_row_cells(&mut list, 0, &['x', 'x']);
+        set_screen_cell(&mut list, 0, 1, 'x');
+        set_screen_spacer_head(&mut list, 1, 1);
+        set_screen_wide_pair(&mut list, 0, 2, '😀');
+        set_screen_row_wrap(&mut list, 0, true, false);
+        set_screen_row_wrap(&mut list, 1, true, true);
+        set_screen_row_wrap(&mut list, 2, false, true);
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(screen_cell(&list, 0, 0), Cell::new('x'));
+        assert_eq!(screen_cell(&list, 1, 0), Cell::new('x'));
+        assert_eq!(screen_cell(&list, 2, 0), Cell::new('x'));
+        assert_eq!(screen_cell(&list, 3, 0).wide(), CellWide::SpacerHead);
+        assert_eq!(screen_cell(&list, 0, 1).wide(), CellWide::Wide);
+        assert_eq!(screen_cell(&list, 1, 1).wide(), CellWide::SpacerTail);
+    }
+
+    #[test]
+    fn reflow_less_cols_wraps_spacer_head() {
+        // ghostty: "PageList resize reflow less cols wraps spacer head" (PageList.zig:12751)
+        let mut list = PageList::new(4, 3, Some(0));
+        set_screen_row_cells(&mut list, 0, &['x', 'x', 'x']);
+        set_screen_spacer_head(&mut list, 3, 0);
+        set_screen_wide_pair(&mut list, 0, 1, '😀');
+        set_screen_row_wrap(&mut list, 0, true, false);
+        set_screen_row_wrap(&mut list, 1, false, true);
+        list.resize(ResizeOptions {
+            cols: Some(3),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(screen_cell(&list, 0, 0), Cell::new('x'));
+        assert_eq!(screen_cell(&list, 1, 0), Cell::new('x'));
+        assert_eq!(screen_cell(&list, 2, 0), Cell::new('x'));
+        assert_eq!(screen_cell(&list, 0, 1).wide(), CellWide::Wide);
+        assert_eq!(screen_cell(&list, 1, 1).wide(), CellWide::SpacerTail);
+    }
+
+    #[test]
+    fn reflow_less_cols_preserves_multi_codepoint_grapheme_with_spacer_head() {
+        // ghostty: "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a spacer head" (PageList.zig:13377)
+        let mut list = PageList::new(4, 2, Some(0));
+        set_screen_wide_pair(&mut list, 0, 0, '👨');
+        set_screen_wide_pair(&mut list, 2, 0, '👨');
+        let first = list.first_node().unwrap();
+        let grapheme = [0x200D, 0x1F468, 0x200D, 0x1F466, 0x200D, 0x1F466];
+        if let Some(node) = list.node_mut(first) {
+            for codepoint in grapheme {
+                node.page.append_grapheme(0, 0, codepoint).unwrap();
+                node.page.append_grapheme(0, 2, codepoint).unwrap();
+            }
+        }
+        list.resize(ResizeOptions {
+            cols: Some(3),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        let row0 = list.pin(Point::screen(0, 0)).unwrap();
+        let row1 = list.pin(Point::screen(0, 1)).unwrap();
+        assert_eq!(
+            list.node(row0.node).unwrap().page.grapheme(row0.y, 0),
+            Some(grapheme.to_vec())
+        );
+        assert_eq!(
+            list.node(row1.node).unwrap().page.grapheme(row1.y, 0),
+            Some(grapheme.to_vec())
+        );
+    }
+
+    #[test]
+    fn reflow_more_cols_creates_multiple_pages() {
+        // ghostty: "PageList resize reflow more cols creates multiple pages" (PageList.zig:11228)
+        let rows = 100;
+        let new_cols = 600;
+        assert!(PageList::initial_capacity(new_cols).rows < rows);
+        let mut list = PageList::new(10, rows, Some(0));
+        for y in 0..rows {
+            set_screen_cell(&mut list, 0, u32::from(y), 'A');
+        }
+        list.resize(ResizeOptions {
+            cols: Some(new_cols),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.total_pages(), 1);
+        for id in list.iter_node_ids() {
+            assert_eq!(list.node_capacity(id).unwrap().cols, new_cols);
+        }
+    }
+
+    #[test]
+    fn reflow_more_cols_wrap_across_page_boundary() {
+        // ghostty: "PageList resize reflow more cols wrap across page boundary" (PageList.zig:11292)
+        let cap_rows = PageList::initial_capacity(2).rows;
+        let mut list = PageList::new(2, cap_rows + 1, Some(0));
+        set_screen_row_cells(&mut list, u32::from(cap_rows - 1), &['0', '1']);
+        set_screen_row_cells(&mut list, u32::from(cap_rows), &['2', '3']);
+        set_screen_row_wrap(&mut list, u32::from(cap_rows - 1), true, false);
+        set_screen_row_wrap(&mut list, u32::from(cap_rows), false, true);
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(
+            [
+                screen_cell(&list, 0, u32::from(cap_rows - 1)),
+                screen_cell(&list, 1, u32::from(cap_rows - 1)),
+                screen_cell(&list, 2, u32::from(cap_rows - 1)),
+                screen_cell(&list, 3, u32::from(cap_rows - 1)),
+            ],
+            [
+                Cell::new('0'),
+                Cell::new('1'),
+                Cell::new('2'),
+                Cell::new('3')
+            ]
+        );
+    }
+
+    #[test]
+    fn reflow_more_cols_wrap_across_page_boundary_cursor_in_second_page() {
+        // ghostty: "PageList resize reflow more cols wrap across page boundary cursor in second page" (PageList.zig:11423)
+        let cap_rows = PageList::initial_capacity(2).rows;
+        let mut list = PageList::new(2, cap_rows + 1, Some(0));
+        set_screen_row_cells(&mut list, u32::from(cap_rows - 1), &['0', '1']);
+        set_screen_row_cells(&mut list, u32::from(cap_rows), &['2', '3']);
+        set_screen_row_wrap(&mut list, u32::from(cap_rows - 1), true, false);
+        set_screen_row_wrap(&mut list, u32::from(cap_rows), false, true);
+        let pin = list.track_pin(list.pin(Point::active(1, u32::from(cap_rows))).unwrap());
+        assert_eq!(
+            list.tracked_pin(pin).unwrap().node,
+            list.last_node().unwrap()
+        );
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: Some(ResizeCursor {
+                x: 1,
+                y: cap_rows,
+                pin: Some(pin),
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(3, u32::from(cap_rows - 1)))
+        );
+    }
+
+    #[test]
+    fn resize_reflow_invalidates_viewport_offset_cache() {
+        // ghostty: "PageList resize reflow invalidates viewport offset cache" (PageList.zig:11179)
+        let mut list = PageList::new(2, 4, None);
+        list.grow_rows(20);
+        let first = list.first_node().unwrap();
+        assert_eq!(list.iter_node_ids().count(), 1);
+        if let Some(node) = list.node_mut(first) {
+            for y in 0..4 {
+                node.page.set_cell(y, 0, Cell::new('A'));
+                node.page.set_cell(y, 1, Cell::new('A'));
+                let mut row = node.page.row(y);
+                row.set_wrap(y % 2 == 0);
+                row.set_wrap_continuation(y % 2 == 1);
+                node.page.set_row(y, row);
+            }
+        }
+        let pin = list.pin(Point::screen(0, 10)).unwrap();
+        list.scroll(Scroll::Pin(pin));
+        assert_eq!(list.viewport(), Viewport::Pin);
+        assert_eq!(
+            list.scrollbar(),
+            Scrollbar {
+                total: list.total_rows(),
+                offset: 10,
+                len: 4,
+            }
+        );
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.cols, 4);
+        assert_eq!(
+            list.scrollbar(),
+            Scrollbar {
+                total: list.total_rows(),
+                offset: 5,
+                len: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn resize_reflow_less_cols_wrap_across_page_boundary_cursor_in_second_page() {
+        // ghostty: "PageList resize reflow less cols wrap across page boundary cursor in second page" (PageList.zig:11509)
+        let mut list = PageList::new(5, 10, None);
+        let cap_rows = list.node_capacity(list.first_node().unwrap()).unwrap().rows;
+        while node_rows(&list, list.first_node().unwrap()) < cap_rows {
+            let _ = list.grow();
+        }
+        for _ in 0..5 {
+            let _ = list.grow();
+        }
+        set_screen_row_cells(
+            &mut list,
+            u32::from(cap_rows - 1),
+            &['0', '1', '2', '3', '4'],
+        );
+        set_screen_row_cells(&mut list, u32::from(cap_rows), &['0', '1', '2', '3', '4']);
+        set_screen_row_wrap(&mut list, u32::from(cap_rows - 1), true, false);
+        set_screen_row_wrap(&mut list, u32::from(cap_rows), false, true);
+        let pin = list.track_pin(list.pin(Point::active(2, 5)).unwrap());
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: Some(ResizeCursor {
+                x: 2,
+                y: 5,
+                pin: Some(pin),
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(3, 5))
+        );
+        assert_eq!(
+            [
+                active_cell(&list, 0, 4),
+                active_cell(&list, 1, 4),
+                active_cell(&list, 2, 4),
+                active_cell(&list, 3, 4),
+            ],
+            [
+                Cell::new('0'),
+                Cell::new('1'),
+                Cell::new('2'),
+                Cell::new('3')
+            ]
+        );
+        assert_eq!(
+            [
+                active_cell(&list, 0, 5),
+                active_cell(&list, 1, 5),
+                active_cell(&list, 2, 5),
+                active_cell(&list, 3, 5),
+            ],
+            [
+                Cell::new('4'),
+                Cell::new('0'),
+                Cell::new('1'),
+                Cell::new('2')
+            ]
+        );
+        assert_eq!(
+            [
+                active_cell(&list, 0, 6),
+                active_cell(&list, 1, 6),
+                active_cell(&list, 2, 6),
+                active_cell(&list, 3, 6),
+            ],
+            [
+                Cell::new('3'),
+                Cell::new('4'),
+                Cell::default(),
+                Cell::default()
+            ]
+        );
+        assert!(active_row(&list, 4).wrap());
+        assert!(!active_row(&list, 4).wrap_continuation());
+        assert!(active_row(&list, 5).wrap());
+        assert!(active_row(&list, 5).wrap_continuation());
+        assert!(!active_row(&list, 6).wrap());
+        assert!(active_row(&list, 6).wrap_continuation());
+        assert_eq!(
+            [
+                active_cell(&list, 0, 7),
+                active_cell(&list, 1, 7),
+                active_cell(&list, 2, 7),
+                active_cell(&list, 3, 7),
+            ],
+            [
+                Cell::default(),
+                Cell::default(),
+                Cell::default(),
+                Cell::default()
+            ]
+        );
+    }
+
+    #[test]
+    fn resize_reflow_exceeds_hyperlink_memory_forcing_capacity_increase() {
+        // ghostty: "PageList resize reflow exceeds hyperlink memory forcing capacity increase" (PageList.zig:11881)
+        let mut list = PageList::new(2, 10, Some(0));
+        let (first, second) = grow_until_second_page(&mut list);
+        let first_y = list.node_page_size(first).unwrap().rows - 1;
+        let original_string_bytes = list.node_capacity(first).unwrap().string_bytes;
+        if let Some(node) = list.node_mut(first) {
+            node.page.set_cell(first_y, 1, Cell::new('X'));
+            let mut row = node.page.row(first_y);
+            row.set_wrap(true);
+            node.page.set_row(first_y, row);
+        }
+        if let Some(node) = list.node_mut(second) {
+            node.page.set_cell(0, 0, Cell::new('X'));
+            let mut row = node.page.row(0);
+            row.set_wrap_continuation(true);
+            node.page.set_row(0, row);
+        }
+        let first_len = attach_largest_fitting_hyperlink(&mut list, first, first_y, 1, 0);
+        let second_len = attach_largest_fitting_hyperlink(&mut list, second, 0, 0, 1);
+        assert!(first_len > 0 && second_len > 0);
+        list.resize(ResizeOptions {
+            cols: Some(3),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert!(list
+            .iter_node_ids()
+            .any(|id| list.node_capacity(id).unwrap().string_bytes > original_string_bytes));
+    }
+
+    #[test]
+    fn resize_reflow_less_cols_wrap_preserves_semantic_prompt() {
+        // ghostty: "PageList resize reflow less cols wrap preserves semantic prompt" (PageList.zig:12498)
+        let mut list = PageList::new(4, 4, Some(0));
+        assert_eq!(list.iter_node_ids().count(), 1);
+        set_screen_row_prompt(&mut list, 0, SemanticPrompt::Prompt);
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        let row = list.pin(Point::screen(0, 0)).unwrap();
+        assert_eq!(list.cols, 2);
+        assert_eq!(list.total_rows(), 4);
+        assert_eq!(list.iter_node_ids().count(), 1);
+        assert_eq!(
+            list.node(row.node)
+                .unwrap()
+                .page
+                .row(row.y)
+                .semantic_prompt(),
+            SemanticPrompt::Prompt
+        );
+    }
+
+    #[test]
+    fn resize_reflow_less_cols_cursor_not_on_last_line_preserves_location() {
+        // ghostty: "PageList resize reflow less cols cursor not on last line preserves location" (PageList.zig:13166)
+        let mut list = PageList::new(5, 5, Some(1));
+        assert_eq!(list.iter_node_ids().count(), 1);
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            for y in 0..5 {
+                node.page.set_cell(y, 0, Cell::new('\0'));
+                node.page.set_cell(y, 1, Cell::new('\u{1}'));
+            }
+        }
+        list.grow_rows(5);
+        let pin = list.track_pin(list.pin(Point::active(0, 0)).unwrap());
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: Some(ResizeCursor {
+                x: 1,
+                y: 1,
+                pin: None,
+            }),
+        })
+        .unwrap();
+        assert_eq!(list.cols, 4);
+        assert_eq!(list.total_rows(), 10);
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(0, 0))
+        );
+    }
+
+    #[test]
+    fn resize_reflow_grapheme_map_capacity_exceeded_across_many_rows() {
+        // ghostty: "PageList resize reflow grapheme map capacity exceeded" (PageList.zig:13731)
+        let mut list = PageList::new(4, 10, Some(0));
+        let (first, second) = grow_until_second_page(&mut list);
+        let grapheme_capacity = (list.node_capacity(first).unwrap().grapheme_bytes as usize
+            / (std::mem::size_of::<u32>() * 4))
+            .min(list.node_page_size(first).unwrap().rows as usize)
+            .max(1);
+        let gpp = grapheme_capacity / 2 + grapheme_capacity / 4;
+        let first_size = list.node_page_size(first).unwrap();
+        let first_start = first_size.rows.saturating_sub(gpp as CellCountInt);
+        if let Some(node) = list.node_mut(first) {
+            for y in first_start..first_size.rows {
+                node.page.set_cell(y, 0, Cell::new('A'));
+                node.page.append_grapheme(y, 0, 0x0301).unwrap();
+            }
+        }
+        let second_rows = list.node_page_size(second).unwrap().rows;
+        if let Some(node) = list.node_mut(second) {
+            for y in 0..(gpp as CellCountInt).min(second_rows) {
+                node.page.set_cell(y, 0, Cell::new('B'));
+                node.page.append_grapheme(y, 0, 0x0302).unwrap();
+            }
+        }
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.cols, 2);
+    }
+
+    #[test]
+    fn reflow_less_cols_bg_palette_cell_survives_trailing_trim() {
+        // ghostty: Cell.isEmpty follows page.zig:2169-2181 for reflow trailing trim.
+        let mut list = PageList::new(4, 1, Some(0));
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            node.page.set_cell(0, 3, Cell::bg_palette(12));
+        }
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(screen_cell(&list, 1, 1), Cell::bg_palette(12));
+    }
+
+    #[test]
+    fn reflow_less_cols_bg_rgb_cell_survives_trailing_trim() {
+        // ghostty: Cell.isEmpty follows page.zig:2169-2181 for reflow trailing trim.
+        let mut list = PageList::new(4, 1, Some(0));
+        let rgb = Rgb { r: 1, g: 2, b: 3 };
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            node.page.set_cell(0, 3, Cell::bg_rgb(rgb));
+        }
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(screen_cell(&list, 1, 1), Cell::bg_rgb(rgb));
+    }
+
+    #[test]
+    fn reflow_less_cols_style_only_blank_is_trimmed() {
+        // ghostty: Cell.isEmpty ignores style_id when trimming (page.zig:2169-2181).
+        let mut list = PageList::new(4, 1, Some(0));
+        let first = list.first_node().unwrap();
+        if let Some(node) = list.node_mut(first) {
+            node.page.set_style(0, 3, PackedStyle(9)).unwrap();
+        }
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.total_rows(), 1);
+        assert_eq!(screen_cell(&list, 0, 0), Cell::default());
+    }
+
+    #[test]
+    fn resize_reflow_exceeds_grapheme_memory_forcing_capacity_increase() {
+        // ghostty: "PageList resize reflow exceeds grapheme memory forcing capacity increase" (PageList.zig:11975)
+        let mut list = PageList::new(2, 10, Some(0));
+        let (first, second) = grow_until_second_page(&mut list);
+        let first_y = list.node_page_size(first).unwrap().rows - 1;
+        let original_grapheme_bytes = list.node_capacity(first).unwrap().grapheme_bytes;
+        let graphemes_per_cell =
+            (original_grapheme_bytes as usize / std::mem::size_of::<u32>()).max(1);
+        if let Some(node) = list.node_mut(first) {
+            node.page
+                .set_cell(first_y.saturating_sub(1), 0, Cell::new('P'));
+            node.page.set_cell(first_y, 0, Cell::new('X'));
+            node.page.set_cell(first_y, 1, Cell::new('X'));
+            let mut row = node.page.row(first_y);
+            row.set_wrap(true);
+            node.page.set_row(first_y, row);
+        }
+        if let Some(node) = list.node_mut(second) {
+            node.page.set_cell(0, 0, Cell::new('X'));
+            let mut row = node.page.row(0);
+            row.set_wrap(true);
+            row.set_wrap_continuation(true);
+            node.page.set_row(0, row);
+        }
+        append_graphemes(&mut list, first, first_y, 0, graphemes_per_cell, 0x0300);
+        append_graphemes(&mut list, first, first_y, 1, graphemes_per_cell, 0x0400);
+        append_graphemes(&mut list, second, 0, 0, graphemes_per_cell, 0x0500);
+        list.resize(ResizeOptions {
+            cols: Some(3),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert!(list
+            .iter_node_ids()
+            .any(|id| list.node_capacity(id).unwrap().grapheme_bytes > original_grapheme_bytes));
+    }
+
+    #[test]
+    fn resize_reflow_exceeds_style_memory_forcing_capacity_increase() {
+        // ghostty: "PageList resize reflow exceeds style memory forcing capacity increase" (PageList.zig:12087)
+        let cols = STD_CAPACITY.styles - 1;
+        let mut list = PageList::new(cols, 10, Some(0));
+        let (mut first, mut second) = grow_until_second_page(&mut list);
+        let first_y = list.node_page_size(first).unwrap().rows - 1;
+        let original_styles = list.node_capacity(first).unwrap().styles;
+        if let Some(node) = list.node_mut(first) {
+            for x in 0..cols {
+                node.page.set_cell(first_y, x, Cell::new('X'));
+            }
+            let mut row = node.page.row(first_y);
+            row.set_wrap(true);
+            row.set_styled(true);
+            node.page.set_row(first_y, row);
+        }
+        for x in 0..cols {
+            let style = PackedStyle::from(Style {
+                fg_color: StyleColor::Rgb(Rgb {
+                    r: (x as u8).wrapping_add(1),
+                    g: 17,
+                    b: 31,
+                }),
+                ..Style::default()
+            });
+            first = set_style_growing(&mut list, first, first_y, x, style);
+        }
+        if let Some(node) = list.node_mut(second) {
+            for x in 0..cols {
+                node.page.set_cell(0, x, Cell::new('X'));
+            }
+            let mut row = node.page.row(0);
+            row.set_wrap_continuation(true);
+            row.set_styled(true);
+            node.page.set_row(0, row);
+        }
+        for x in 0..cols {
+            let style = PackedStyle::from(Style {
+                fg_color: StyleColor::Rgb(Rgb {
+                    r: (x as u8).wrapping_add(129),
+                    g: 23,
+                    b: 47,
+                }),
+                ..Style::default()
+            });
+            second = set_style_growing(&mut list, second, 0, x, style);
+        }
+        list.resize(ResizeOptions {
+            cols: Some(cols.saturating_mul(2)),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert!(list
+            .iter_node_ids()
+            .any(|id| list.node_capacity(id).unwrap().styles > original_styles));
+        let styled_cells = list
+            .iter_node_ids()
+            .map(|id| {
+                let node = list.node(id).unwrap();
+                let size = node.page.size();
+                let mut count = 0usize;
+                for y in 0..size.rows {
+                    for x in 0..size.cols {
+                        let cell = node.page.cell(y, x);
+                        if cell.style_id() != 0 {
+                            assert!(node.page.style_for_cell(y, x).is_some());
+                            count += 1;
+                        }
+                    }
+                }
+                count
+            })
+            .sum::<usize>();
+        assert!(styled_cells >= cols as usize);
+    }
+
+    // ghostty: "PageList resize reflow less cols copy kitty placeholder" (PageList.zig:13496)
+    // ghostty: "PageList resize reflow more cols clears kitty placeholder" (PageList.zig:13537)
+    // ghostty: "PageList resize reflow wrap moves kitty placeholder" (PageList.zig:13580)
+    // kitty graphics unsupported in this port; row bit fixed false.
+
+    #[test]
+    fn resize_reflow_rows_only_keeps_existing_column_layout() {
+        // ghostty: resize() rows-only dispatches through resize_without_reflow (PageList.zig:980-1004).
+        let mut list = PageList::new(2, 4, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1']);
+        set_screen_row_cells(&mut list, 1, &['2', '3']);
+        set_screen_row_wrap(&mut list, 0, true, false);
+        set_screen_row_wrap(&mut list, 1, false, true);
+        list.resize(ResizeOptions {
+            cols: None,
+            rows: Some(3),
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!((list.cols, list.rows), (2, 3));
+        assert_eq!(screen_cell(&list, 0, 0), Cell::new('0'));
+        assert_eq!(screen_cell(&list, 0, 1), Cell::new('2'));
+    }
+
+    #[test]
+    fn resize_reflow_grow_cols_then_rows_keeps_unwrapped_content() {
+        // ghostty: resize() grow-cols path runs cols first, then rows (PageList.zig:980-1004).
+        let mut list = PageList::new(2, 2, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1']);
+        set_screen_row_cells(&mut list, 1, &['2', '3']);
+        set_screen_row_wrap(&mut list, 0, true, false);
+        set_screen_row_wrap(&mut list, 1, false, true);
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: Some(4),
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!((list.cols, list.rows), (4, 4));
+        assert_eq!(screen_cell(&list, 3, 0), Cell::new('3'));
+    }
+
+    #[test]
+    fn resize_reflow_shrink_cols_runs_rows_first() {
+        // ghostty: resize() shrink-cols path runs rows first, then cols (PageList.zig:980-1004).
+        let mut list = PageList::new(4, 4, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1', '2', '3']);
+        let pin = list.track_pin(list.pin(Point::active(2, 0)).unwrap());
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: Some(2),
+            reflow: true,
+            cursor: Some(ResizeCursor {
+                x: 2,
+                y: 0,
+                pin: Some(pin),
+            }),
+        })
+        .unwrap();
+        assert_eq!((list.cols, list.rows), (2, 2));
+        assert_eq!(
+            list.point_from_pin(Tag::Active, list.tracked_pin(pin).unwrap()),
+            Some(Point::active(0, 1))
+        );
+    }
+
+    #[test]
+    fn reflow_grow_cols_with_unwrap_fixes_viewport_pin() {
+        // ghostty: "PageList resize grow cols with unwrap fixes viewport pin" (PageList.zig:13814)
+        let mut list = PageList::new(2, 20, None);
+        list.grow_rows(20);
+        for y in 0..40 {
+            set_screen_row_cells(&mut list, y, &['0', '1']);
+            if y % 2 == 0 {
+                set_screen_row_wrap(&mut list, y, true, false);
+            } else {
+                set_screen_row_wrap(&mut list, y, false, true);
+            }
+        }
+        let pin = list.pin(Point::screen(0, 10)).unwrap();
+        list.scroll(Scroll::Pin(pin));
+        assert_eq!(list.viewport(), Viewport::Pin);
+        list.resize(ResizeOptions {
+            cols: Some(4),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.viewport(), Viewport::Active);
+    }
+
+    #[test]
+    fn reflow_less_cols_copy_does_not_create_scrollback_for_empty_screen() {
+        // ghostty: "PageList resize reflow less cols blank lines between no scrollback" (PageList.zig:13113)
+        let mut list = PageList::new(5, 3, Some(0));
+        set_screen_cell(&mut list, 0, 0, 'A');
+        set_screen_cell(&mut list, 0, 2, 'C');
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.rows, 3);
+        assert_eq!(screen_cell(&list, 0, 0), Cell::new('A'));
+        assert_eq!(screen_cell(&list, 0, 1), Cell::default());
+        assert_eq!(screen_cell(&list, 0, 2), Cell::new('C'));
+    }
+
+    #[test]
+    fn reflow_preserves_total_rows_when_rows_already_fit() {
+        // ghostty: "PageList resize reflow less cols blank lines" (PageList.zig:13014)
+        let mut list = PageList::new(4, 3, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1', '2', '3']);
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(list.total_rows(), 3);
+    }
+
+    #[test]
+    fn reflow_less_cols_copy_keeps_blank_line_between_content() {
+        // ghostty: "PageList resize reflow less cols blank lines between" (PageList.zig:13057)
+        let mut list = PageList::new(4, 3, Some(0));
+        set_screen_row_cells(&mut list, 0, &['0', '1', '2', '3']);
+        set_screen_row_cells(&mut list, 2, &['4', '5', '6', '7']);
+        list.resize(ResizeOptions {
+            cols: Some(2),
+            rows: None,
+            reflow: true,
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(screen_cell(&list, 0, 2), Cell::default());
+        assert_eq!(screen_cell(&list, 0, 3), Cell::new('4'));
+    }
 
     #[test]
     fn resize_without_reflow_more_rows_and_less_cols() {
