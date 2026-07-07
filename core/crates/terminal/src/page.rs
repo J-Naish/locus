@@ -805,8 +805,16 @@ impl Page {
             }
         }
 
+        // Clear the vacated source cells. When the source and destination
+        // ranges overlap on the same row (a self-move, as insertBlanks does),
+        // skip any source cell that now lives inside the destination range so
+        // we don't clobber a cell we just wrote there.
         for index in 0..count {
-            self.write_cell_raw(src_y, src_start + index, Cell::default());
+            let src_x = src_start + index;
+            if src_y == dst_y && src_x >= dst_start && src_x < dst_start.saturating_add(count) {
+                continue;
+            }
+            self.write_cell_raw(src_y, src_x, Cell::default());
         }
 
         let mut src_row = self.row(src_y);
@@ -1520,6 +1528,10 @@ impl Page {
         self.styles.use_ref(&mut self.memory, id);
     }
 
+    pub(crate) fn use_style_multiple(&mut self, id: StyleCountInt, n: StyleCountInt) {
+        self.styles.use_multiple(&mut self.memory, id, n);
+    }
+
     pub(crate) fn release_style(&mut self, id: StyleCountInt) {
         self.styles.release(&mut self.memory, id);
     }
@@ -1533,6 +1545,15 @@ impl Page {
 
     pub(crate) fn style_count(&self) -> usize {
         self.styles.count()
+    }
+
+    /// The style set's slot capacity (`styles.layout.cap` in Ghostty).
+    pub(crate) fn style_layout_cap(&self) -> usize {
+        self.styles.layout_cap()
+    }
+
+    pub(crate) fn style_ref_count(&self, id: StyleCountInt) -> u16 {
+        self.styles.ref_count(&self.memory, id)
     }
 
     pub(crate) fn set_hyperlink_implicit(

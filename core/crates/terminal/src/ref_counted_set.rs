@@ -233,6 +233,13 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
         self.living
     }
 
+    /// The number of item slots this set can hold before it must be rehashed or
+    /// grown. Mirrors reading `styles.layout.cap` in Ghostty (used by tests that
+    /// need to fill the set to its true capacity).
+    pub(crate) const fn layout_cap(self) -> usize {
+        self.layout.cap
+    }
+
     pub(crate) fn lookup(self, backing: &[u8], value: T) -> Option<Id> {
         self.lookup_with_probe(backing, backing, value)
     }
@@ -264,44 +271,122 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
         None
     }
 
+    /// Insert `value` into the table, allocating `new_id` for it (or reusing a
+    /// smaller dead id encountered while probing). Robin-hood open addressing:
+    /// while probing, an item with a lower PSL (or equal PSL and lower ref
+    /// count) is displaced and re-homed so high-traffic items stay near their
+    /// ideal bucket, which lets the table pack to near its full capacity.
+    /// Mirrors Ghostty's `RefCountedSet.insert` (ref_counted_set.zig).
+    ///
+    /// The new item is kept "in hand" (its value/psl tracked locally, ref 0)
+    /// until it lands in a bucket; only its final bucket is recorded during the
+    /// probe, and its value/psl/ref are written to `items[chosen_id]` at the
+    /// end (chosen_id may differ from new_id if a smaller dead id is reused).
+    /// Displaced existing items are re-homed in place as we pass them.
     fn insert(&mut self, backing: &mut [u8], value: T, new_id: Id) -> Result<Id, AddError> {
-        if self.psl_stats[MAX_PSL] > 0 {
-            return Err(AddError::OutOfMemory);
-        }
-
         let hash = self.context.hash(backing, &value);
-        let mut chosen_id = new_id;
-        let mut chosen_bucket = None;
-        let mut chosen_psl = 0;
+        let table_cap = self.layout.table_cap;
 
-        for probe in 0..self.layout.table_cap {
-            let bucket =
-                ((hash.wrapping_add(probe as u64)) & u64::from(self.layout.table_mask)) as usize;
-            let id = self.table.get(backing, bucket);
-            if id == EMPTY_ID || self.ref_count(backing, id) == 0 {
-                if id != EMPTY_ID {
-                    self.delete_item(backing, id);
-                    if id < new_id {
-                        chosen_id = id;
-                    }
+        // The item currently in hand. When `held_is_new` it is the new value
+        // (not yet written to the items array); otherwise it is an existing
+        // item identified by `held_id` (already stored in `items[held_id]`).
+        let mut held_is_new = true;
+        let mut held_id: Id = new_id;
+        let mut held_psl: Id = 0;
+
+        // Final resting place of the new item (bucket + psl), and the id it
+        // will occupy.
+        let mut new_bucket: Option<usize> = None;
+        let mut new_psl: Id = 0;
+        let mut chosen_id: Id = new_id;
+
+        let mut placed = false;
+        for i in 0..table_cap.saturating_sub(1) {
+            let p = ((hash.wrapping_add(i as u64)) & u64::from(self.layout.table_mask)) as usize;
+            let id = self.table.get(backing, p);
+
+            let stop = if id == EMPTY_ID {
+                true
+            } else if self.ref_count(backing, id) == 0 {
+                // Dead item: reap it, reuse its bucket (and its id if smaller).
+                let dead_psl = read_psl::<T>(backing, self.items, id);
+                let dead_value = read_value::<T>(backing, self.items, id);
+                self.context.deleted(backing, &dead_value);
+                self.psl_stats[dead_psl as usize] =
+                    self.psl_stats[dead_psl as usize].saturating_sub(1);
+                clear_item::<T>(backing, self.items, id);
+                if id < new_id {
+                    chosen_id = id;
                 }
-                chosen_bucket = Some(bucket);
-                chosen_psl = probe as Id;
+                true
+            } else {
+                false
+            };
+
+            if stop {
+                // Drop the held item into this bucket.
+                self.table.set(backing, p, held_id);
+                if held_is_new {
+                    new_bucket = Some(p);
+                    new_psl = held_psl;
+                } else {
+                    write_bucket::<T>(backing, self.items, held_id, p as Id);
+                    write_psl::<T>(backing, self.items, held_id, held_psl);
+                }
+                self.psl_stats[held_psl as usize] += 1;
+                self.max_psl = self.max_psl.max(held_psl);
+                placed = true;
                 break;
             }
-            if probe >= MAX_PSL {
+
+            // Robin-hood: displace the occupant if the held item is "poorer"
+            // (higher PSL, or equal PSL and higher ref count).
+            let item_psl = read_psl::<T>(backing, self.items, id);
+            let item_ref = self.ref_count(backing, id);
+            let held_ref: RefCountInt = if held_is_new {
+                0
+            } else {
+                self.ref_count(backing, held_id)
+            };
+            if item_psl < held_psl || (item_psl == held_psl && item_ref < held_ref) {
+                // Place the held item here.
+                self.table.set(backing, p, held_id);
+                if held_is_new {
+                    new_bucket = Some(p);
+                    new_psl = held_psl;
+                } else {
+                    write_bucket::<T>(backing, self.items, held_id, p as Id);
+                    write_psl::<T>(backing, self.items, held_id, held_psl);
+                }
+                self.psl_stats[held_psl as usize] += 1;
+                self.max_psl = self.max_psl.max(held_psl);
+                // Pick up the displaced occupant and keep probing it.
+                self.psl_stats[item_psl as usize] =
+                    self.psl_stats[item_psl as usize].saturating_sub(1);
+                held_is_new = false;
+                held_id = id;
+                held_psl = item_psl;
+            }
+
+            held_psl = held_psl.saturating_add(1);
+            if held_psl as usize > MAX_PSL {
                 return Err(AddError::OutOfMemory);
             }
         }
 
-        let bucket = chosen_bucket.ok_or(AddError::OutOfMemory)?;
-        self.table.set(backing, bucket, chosen_id);
+        let Some(new_bucket) = new_bucket else {
+            // The new item never found a home (table effectively full).
+            let _ = placed;
+            return Err(AddError::OutOfMemory);
+        };
+
+        // The chosen id may differ from new_id (reused dead id), so ensure the
+        // new item's bucket points at chosen_id, then write the new item.
+        self.table.set(backing, new_bucket, chosen_id);
         write_value::<T>(backing, self.items, chosen_id, value);
-        write_bucket::<T>(backing, self.items, chosen_id, bucket as Id);
-        write_psl::<T>(backing, self.items, chosen_id, chosen_psl);
+        write_bucket::<T>(backing, self.items, chosen_id, new_bucket as Id);
+        write_psl::<T>(backing, self.items, chosen_id, new_psl);
         write_ref::<T>(backing, self.items, chosen_id, 0);
-        self.psl_stats[chosen_psl as usize] += 1;
-        self.max_psl = self.max_psl.max(chosen_psl);
         Ok(chosen_id)
     }
 

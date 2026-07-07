@@ -2,21 +2,24 @@
 //!
 //! This is the first Rust slice of Ghostty's `terminal/Terminal.zig`: it wires
 //! the parser stream to the screen/page substrate and ports the core print,
-//! cursor, margin, tab, scroll, and row-editing operations. Alternate screen,
-//! DECCOLM, resize, full erase display/line, reset, and richer OSC state are
+//! cursor, margin, tab, scroll, resize, and row-editing operations. Alternate
+//! screen, DECCOLM, full erase display/line, reset, and richer OSC state are
 //! intentionally left for later terminal phases.
 
 use crate::charsets::{ActiveSlot, Charset, Slots as CharsetSlots};
 use crate::modes::{Mode, ModeState};
-use crate::osc::parsers::semantic_prompt::SemanticPromptAction;
+use crate::osc::parsers::semantic_prompt::{
+    PromptKind, SemanticPrompt as SemanticPromptCommand, SemanticPromptAction,
+};
 use crate::page::{Cell, CellWide, CloneSource, SemanticContent, SemanticPrompt};
 use crate::page_list::Pin;
 use crate::point::{Point, Tag};
 use crate::screen::{CharsetState, CursorStyle as ScreenCursorStyle, Options as ScreenOptions};
-use crate::screen::{SavedCursor, Screen};
-use crate::screen_set::ScreenSet;
+use crate::screen::{PromptRedraw, Resize, SavedCursor, Screen, SemanticClick};
+use crate::screen_set::{ScreenKey, ScreenSet};
 use crate::size::CellCountInt;
-use crate::stream::{CursorStyle, Handler, ProtectedMode};
+use crate::stream::{CursorStyle, EraseDisplay, EraseLine, Handler, ProtectedMode};
+use crate::style::{Style, StyleColor, DEFAULT_STYLE_ID};
 use crate::tabstops::{Tabstops, TABSTOP_INTERVAL};
 use crate::unicode;
 
@@ -64,6 +67,27 @@ impl ScrollingRegion {
 pub enum StatusDisplay {
     Main,
     Status,
+}
+
+/// DECCOLM target width. Faithful port of ghostty's `DeccolmMode`
+/// (Terminal.zig:2875).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeccolmMode {
+    Cols80,
+    Cols132,
+}
+
+/// The xterm alternate-screen mode numbers. Faithful port of ghostty's
+/// `SwitchScreenMode` (Terminal.zig:3153).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchScreenMode {
+    /// Mode 47: switch screens, copy only the cursor, never erase.
+    M47,
+    /// Mode 1047: like 47, but clear the alternate screen on exit.
+    M1047,
+    /// Mode 1049: save the cursor, switch to a cleared alternate screen on
+    /// entry, restore the cursor on the primary screen on exit.
+    M1049,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -184,6 +208,19 @@ impl Terminal {
             .unwrap_or(0)
     }
 
+    /// The ref count of the cursor's current style in the page holding the
+    /// cursor. Mirrors reading
+    /// `cursor.page_pin.node.data.styles.refCount(memory, cursor.style_id)`.
+    pub fn cursor_page_style_ref_count(&self) -> u16 {
+        let screen = self.active_screen();
+        let style_id = screen.cursor.style_id;
+        screen
+            .cursor_pin()
+            .and_then(|pin| screen.pages.node(pin.node))
+            .map(|node| node.page.style_ref_count(style_id))
+            .unwrap_or(0)
+    }
+
     /// The number of grapheme cells stored in the page holding the cursor.
     /// Mirrors reading `cursor.page_pin.node.data.graphemeCount()`.
     pub fn cursor_page_grapheme_count(&self) -> usize {
@@ -274,9 +311,12 @@ impl Terminal {
         }
     }
 
-    pub fn print_repeat(&mut self, value: char, count: usize) {
-        for _ in 0..count {
-            self.print(value);
+    pub fn print_repeat(&mut self, count_req: usize) {
+        if let Some(c) = self.previous_char {
+            let count = count_req.max(1);
+            for _ in 0..count {
+                self.print(c);
+            }
         }
     }
 
@@ -727,11 +767,33 @@ impl Terminal {
     }
 
     pub fn index(&mut self) {
+        // Unset pending wrap state.
+        self.active_screen_mut().cursor.pending_wrap = false;
+
+        // Perform the actual line movement (scroll or cursor down).
         let y = self.active_screen().cursor.y;
         if y == self.scrolling_region.bottom && self.cursor_inside_horizontal_region() {
             self.scroll_up(1);
         } else {
             self.cursor_down(1);
+        }
+
+        // We handle our cursor semantic prompt state AFTER doing the scrolling,
+        // because we may need to apply it to the new row. Mirrors Ghostty's
+        // `index` deferred block.
+        if self.active_screen().cursor.semantic_content != SemanticContent::Output {
+            // Always reset any semantic content clear-eol state.
+            if self.active_screen().cursor.semantic_content_clear_eol {
+                self.active_screen_mut().cursor.semantic_content = SemanticContent::Output;
+                self.active_screen_mut().cursor.semantic_content_clear_eol = false;
+            } else {
+                // If we aren't clearing our state at EOL and we're not output,
+                // mark the new row as a prompt continuation. This works around
+                // shells that don't send OSC 133 k=s sequences for
+                // continuations. A later `semanticPrompt` may correct a false
+                // positive if the shell then outputs command content.
+                self.set_cursor_row_semantic_prompt(SemanticPrompt::PromptContinuation);
+            }
         }
     }
 
@@ -1105,60 +1167,170 @@ impl Terminal {
         self.dirty.screen = true;
     }
 
+    /// ICH: insert `count` blank cells at the cursor, shifting existing content
+    /// right within the current row (bounded by the scroll region's right
+    /// margin). ghostty: `Terminal.insertBlanks` (Terminal.zig:2240).
     pub fn insert_blanks(&mut self, count: usize) {
-        // ghostty: "Terminal: insertBlanks" is covered by first-half print/edit tests.
-        let y = self.active_screen().cursor.y;
-        let x = self.active_screen().cursor.x;
-        let right = self.print_right_limit_exclusive();
-        if x >= right {
-            return;
-        }
-        let count = count.min((right - x) as usize) as CellCountInt;
+        // Unset pending wrap state without wrapping. Note: this purposely
+        // happens BEFORE the scroll region check below, because that's what
+        // xterm does.
+        self.active_screen_mut().cursor.pending_wrap = false;
+
+        // A zero count does nothing. The rest of this function assumes count > 0.
         if count == 0 {
             return;
         }
-        self.split_row_region_boundaries(y, x, right);
-        let len = right.saturating_sub(x).saturating_sub(count);
-        if let Some(pin) = self
-            .active_screen()
-            .pages
-            .pin(Point::active(x, u32::from(y)))
-        {
-            if let Some(node) = self.active_screen_mut().pages.node_mut(pin.node) {
-                node.page
-                    .move_cells(pin.y, x, pin.y, x.saturating_add(count), len);
-                node.page.clear_cells(pin.y, x, x.saturating_add(count));
+
+        // If our cursor is outside the margins then do nothing. We DO reset
+        // wrap state still so this must remain below the above logic.
+        let x = self.active_screen().cursor.x;
+        if x < self.scrolling_region.left || x > self.scrolling_region.right {
+            return;
+        }
+
+        let y = u32::from(self.active_screen().cursor.y);
+
+        // If our X is a wide spacer tail then we need to erase the previous
+        // cell too so we don't split a multi-cell character.
+        if self.cell_wide_at(y, x) == CellWide::SpacerTail {
+            debug_assert!(x > 0);
+            self.active_screen_mut().clear_cells(
+                Point::active(x - 1, y),
+                Point::active(x, y),
+                false,
+            );
+        }
+
+        // Remaining cols from our cursor to the right margin.
+        let rem = self.scrolling_region.right - x + 1;
+
+        // If the cell at the right margin is wide, its spacer tail is outside
+        // the scroll region and would be orphaned by either the shift or the
+        // clear. Clean up both halves up front.
+        let right_x = x + (rem - 1);
+        if self.cell_wide_at(y, right_x) == CellWide::Wide {
+            self.active_screen_mut().clear_cells(
+                Point::active(right_x, y),
+                Point::active(right_x + 1, y),
+                false,
+            );
+        }
+
+        // We can only insert blanks up to our remaining cols.
+        let adjusted_count = (count as CellCountInt).min(rem);
+
+        // The number of cols at the right of the scroll region that will NOT be
+        // blank, so we need to shift them right.
+        let scroll_amount = rem - adjusted_count;
+        if scroll_amount > 0 {
+            // If our last cell we're shifting is wide, clear it to be empty so
+            // we don't split the multi-cell char.
+            let end_x = x + (scroll_amount - 1);
+            if self.cell_wide_at(y, end_x) == CellWide::Wide {
+                self.active_screen_mut().clear_cells(
+                    Point::active(end_x, y),
+                    Point::active(end_x + 1, y),
+                    false,
+                );
+            }
+
+            // We work backwards so we don't overwrite data.
+            let mut sx = x + (scroll_amount - 1);
+            loop {
+                self.swap_row_cells(y, sx, sx + adjusted_count);
+                if sx == x {
+                    break;
+                }
+                sx -= 1;
             }
         }
+
+        // Insert blanks. The blanks preserve the background color.
+        self.active_screen_mut().clear_cells(
+            Point::active(x, y),
+            Point::active(x + adjusted_count - 1, y),
+            false,
+        );
+
+        // Our row is always dirty.
+        self.active_screen_mut().cursor_mark_dirty();
         self.dirty.screen = true;
     }
 
-    pub fn delete_chars(&mut self, count: usize) {
-        let y = self.active_screen().cursor.y;
+    /// DCH: remove `count` characters at the cursor, shifting the remaining
+    /// characters left and filling the right margin with blanks. Does not move
+    /// the cursor. ghostty: `Terminal.deleteChars` (Terminal.zig:2341).
+    pub fn delete_chars(&mut self, count_req: usize) {
+        if count_req == 0 {
+            return;
+        }
+
+        // If our cursor is outside the margins then do nothing.
         let x = self.active_screen().cursor.x;
-        let right = self.print_right_limit_exclusive();
-        if x >= right {
+        if x < self.scrolling_region.left || x > self.scrolling_region.right {
             return;
         }
-        let count = count.min((right - x) as usize) as CellCountInt;
-        if count == 0 {
-            return;
-        }
-        self.split_row_region_boundaries(y, x, right);
-        let src = x.saturating_add(count);
-        let len = right.saturating_sub(src);
-        if let Some(pin) = self
-            .active_screen()
-            .pages
-            .pin(Point::active(x, u32::from(y)))
-        {
-            if let Some(node) = self.active_screen_mut().pages.node_mut(pin.node) {
-                node.page.move_cells(pin.y, src, pin.y, x, len);
-                node.page
-                    .clear_cells(pin.y, right.saturating_sub(count), right);
+
+        let y = u32::from(self.active_screen().cursor.y);
+
+        // Remaining cols from our cursor to the right margin.
+        let rem = self.scrolling_region.right - x + 1;
+
+        // We can only delete up to our remaining cols.
+        let count = (count_req as CellCountInt).min(rem);
+
+        let right_boundary = self.scrolling_region.right + 1;
+        self.active_screen_mut()
+            .split_cell_boundary(Point::active(x, y));
+        self.active_screen_mut()
+            .split_cell_boundary(Point::active(x + count, y));
+        self.active_screen_mut()
+            .split_cell_boundary(Point::active(right_boundary, y));
+
+        // The number of cols at the right of the scroll region that will NOT be
+        // blank, so we need to shift them left.
+        let scroll_amount = rem - count;
+        let mut sx = x;
+        if scroll_amount > 0 {
+            let right_x = x + (scroll_amount - 1);
+            while sx <= right_x {
+                self.swap_row_cells(y, sx + count, sx);
+                sx += 1;
             }
         }
+
+        // Insert blanks. The blanks preserve the background color.
+        let clear_end = sx + (rem - scroll_amount);
+        self.active_screen_mut().clear_cells(
+            Point::active(sx, y),
+            Point::active(clear_end - 1, y),
+            false,
+        );
+
+        // Our row's soft-wrap is always reset.
+        self.active_screen_mut().cursor_reset_wrap();
+
+        // Our row is always dirty.
+        self.active_screen_mut().cursor_mark_dirty();
         self.dirty.screen = true;
+    }
+
+    /// The wide-flag of the cell at active `(x, y)`, or `Narrow` if out of range.
+    fn cell_wide_at(&self, y: u32, x: CellCountInt) -> CellWide {
+        self.get_cell(Point::active(x, y))
+            .map(|c| c.wide())
+            .unwrap_or(CellWide::Narrow)
+    }
+
+    /// Swap two cells in the cursor's active row, preserving graphemes and
+    /// hyperlinks. Mirrors Ghostty's `page.swapCells`.
+    fn swap_row_cells(&mut self, y: u32, a: CellCountInt, b: CellCountInt) {
+        let Some(pin) = self.active_screen().pages.pin(Point::active(a, y)) else {
+            return;
+        };
+        if let Some(node) = self.active_screen_mut().pages.node_mut(pin.node) {
+            let _ = node.page.swap_cells(pin.y, a, b);
+        }
     }
 
     pub fn erase_chars(&mut self, count_req: usize) {
@@ -1204,14 +1376,254 @@ impl Terminal {
         self.dirty.screen = true;
     }
 
-    pub fn horizontal_tab(&mut self) {
-        let right = self.print_right_limit_exclusive().saturating_sub(1);
-        let mut x = self.active_screen().cursor.x.saturating_add(1);
-        while x < right && !self.tabstops.get(usize::from(x)) {
-            x = x.saturating_add(1);
+    /// Erase the line.
+    pub fn erase_line(&mut self, mode: EraseLine, protected_req: bool) {
+        let y = u32::from(self.active_screen().cursor.y);
+
+        // Get our start/end columns depending on the mode. `end` here is the
+        // exclusive right bound, matching Ghostty's `cells[start..end]` slice.
+        let (start, end) = match mode {
+            EraseLine::Right => {
+                let mut x = self.active_screen().cursor.x;
+                // If our X is a wide spacer tail then we need to erase the
+                // previous cell too so we don't split a multi-cell character.
+                let is_spacer_tail = self
+                    .active_screen()
+                    .cursor_cell()
+                    .map(|c| c.wide() == CellWide::SpacerTail)
+                    .unwrap_or(false);
+                if x > 0 && is_spacer_tail {
+                    x -= 1;
+                }
+                // Reset our row's soft-wrap.
+                self.active_screen_mut().cursor_reset_wrap();
+                (x, self.cols)
+            }
+            EraseLine::Left => {
+                let mut x = self.active_screen().cursor.x;
+                // If our x is a wide char we need to delete the tail too.
+                let is_wide = self
+                    .active_screen()
+                    .cursor_cell()
+                    .map(|c| c.wide() == CellWide::Wide)
+                    .unwrap_or(false);
+                if is_wide {
+                    x += 1;
+                }
+                (0, x + 1)
+            }
+            // Note that it seems like complete should reset the soft-wrap
+            // state of the line but in xterm it does not.
+            EraseLine::Complete => (0, self.cols),
+            // Unimplemented modes: log-and-return in Ghostty; we return.
+            EraseLine::RightUnlessPendingWrap => return,
+        };
+
+        // All modes will clear the pending wrap state and we know we have
+        // a valid mode at this point.
+        self.active_screen_mut().cursor.pending_wrap = false;
+
+        // We always mark our row as dirty.
+        self.active_screen_mut().cursor_mark_dirty();
+
+        // Nothing to clear if the range is empty.
+        if end <= start {
+            return;
         }
-        let y = self.active_screen().cursor.y;
-        self.active_screen_mut().cursor_absolute(x.min(right), y);
+
+        // We respect protected attributes if explicitly requested (probably
+        // a DECSEL sequence) or if our last protected mode was ISO even if it's
+        // not currently set.
+        let protected = self.protected_mode == ProtectedMode::Iso || protected_req;
+
+        self.active_screen_mut().clear_cells(
+            Point::active(start, y),
+            Point::active(end - 1, y),
+            protected,
+        );
+    }
+
+    /// Erase the display.
+    pub fn erase_display(&mut self, mode: EraseDisplay, protected_req: bool) {
+        // We respect protected attributes if explicitly requested (probably
+        // a DECSEL sequence) or if our last protected mode was ISO even if it's
+        // not currently set.
+        let protected = self.protected_mode == ProtectedMode::Iso || protected_req;
+
+        match mode {
+            EraseDisplay::ScrollComplete => {
+                self.active_screen_mut().scroll_clear();
+                // Unsets pending wrap state.
+                self.active_screen_mut().cursor.pending_wrap = false;
+            }
+
+            EraseDisplay::Complete => {
+                // If we're on the primary screen and our last non-empty row is
+                // a prompt, then we do a scroll_complete instead. This is a
+                // heuristic to get the generally desirable behavior that ^L
+                // at a prompt scrolls the screen contents prior to clearing.
+                // Most shells send `ESC [ H ESC [ 2 J` so we can't just check
+                // our current cursor position. See #905
+                if self.screens.active_key() == ScreenKey::Primary && self.active_at_prompt() {
+                    self.active_screen_mut().scroll_clear();
+                }
+
+                // All active area.
+                self.active_screen_mut()
+                    .clear_rows(Point::active(0, 0), None, protected);
+
+                // Unsets pending wrap state.
+                self.active_screen_mut().cursor.pending_wrap = false;
+
+                // Cleared screen dirty bit.
+                self.dirty.screen = true;
+            }
+
+            EraseDisplay::Below => {
+                // All lines to the right (including the cursor).
+                self.erase_line(EraseLine::Right, protected_req);
+
+                // All lines below.
+                let cursor_y = u32::from(self.active_screen().cursor.y);
+                if cursor_y + 1 < u32::from(self.rows) {
+                    self.active_screen_mut().clear_rows(
+                        Point::active(0, cursor_y + 1),
+                        None,
+                        protected,
+                    );
+                }
+
+                // Unsets pending wrap state. Should be done by erase_line.
+                debug_assert!(!self.active_screen().cursor.pending_wrap);
+            }
+
+            EraseDisplay::Above => {
+                // Erase to the left (including the cursor).
+                self.erase_line(EraseLine::Left, protected_req);
+
+                // All lines above.
+                let cursor_y = u32::from(self.active_screen().cursor.y);
+                if cursor_y > 0 {
+                    self.active_screen_mut().clear_rows(
+                        Point::active(0, 0),
+                        Some(Point::active(0, cursor_y - 1)),
+                        protected,
+                    );
+                }
+
+                // Unsets pending wrap state.
+                debug_assert!(!self.active_screen().cursor.pending_wrap);
+            }
+
+            EraseDisplay::Scrollback => self.active_screen_mut().erase_history(None),
+        }
+    }
+
+    /// Returns whether the last non-empty row of the active area is a prompt
+    /// or prompt continuation. Used by the `erase_display(.complete)` `^L`
+    /// scroll heuristic (Ghostty's inline `at_prompt` block).
+    fn active_at_prompt(&self) -> bool {
+        let screen = self.active_screen();
+        // Ghostty walks the active area bottom-to-top and breaks on the first
+        // row it reaches: a prompt/continuation means we're at a prompt, a
+        // `.none` (command output) means we're not. Because every row carries
+        // one of these three semantic values, the bottom-most active row always
+        // decides the outcome, so we only need to inspect it.
+        let Some(bottom_right) = screen.pages.get_bottom_right(Tag::Active) else {
+            return false;
+        };
+        let semantic = screen
+            .pages
+            .node(bottom_right.node)
+            .map(|node| node.page.row(bottom_right.y).semantic_prompt())
+            .unwrap_or(SemanticPrompt::None);
+        match semantic {
+            // At a prompt or input area, so we are at a prompt.
+            SemanticPrompt::Prompt | SemanticPrompt::PromptContinuation => true,
+            // Command output, so we are most certainly not at a prompt.
+            SemanticPrompt::None => false,
+        }
+    }
+
+    /// Writes the SGR representation of the current cursor style into `buf`,
+    /// used for DECRPSS responses. The response always starts with `0`.
+    /// See <https://vt100.net/docs/vt510-rm/DECRPSS>.
+    pub fn print_attributes(&self) -> String {
+        let mut out = String::new();
+        // The SGR response always starts with a 0.
+        out.push('0');
+
+        let pen = &self.active_screen().cursor.style;
+
+        if pen.flags.bold {
+            out.push_str(";1");
+        }
+        if pen.flags.faint {
+            out.push_str(";2");
+        }
+        if pen.flags.italic {
+            out.push_str(";3");
+        }
+        if pen.flags.underline != crate::sgr::Underline::None {
+            out.push_str(";4");
+        }
+        if pen.flags.blink {
+            out.push_str(";5");
+        }
+        if pen.flags.inverse {
+            out.push_str(";7");
+        }
+        if pen.flags.invisible {
+            out.push_str(";8");
+        }
+        if pen.flags.strikethrough {
+            out.push_str(";9");
+        }
+
+        Self::write_sgr_color(&mut out, pen.fg_color, 3, 9, 38);
+        Self::write_sgr_color(&mut out, pen.bg_color, 4, 10, 48);
+
+        out
+    }
+
+    /// Appends the SGR encoding of a single foreground/background color to
+    /// `out`. `low` is the base for palette indices < 8 (3 for fg, 4 for bg),
+    /// `high` is the base for palette indices in 8..16 (9 for fg, 10 for bg),
+    /// and `ext` is the extended-color introducer (38 for fg, 48 for bg).
+    fn write_sgr_color(out: &mut String, color: StyleColor, low: u8, high: u8, ext: u8) {
+        use std::fmt::Write;
+        match color {
+            StyleColor::None => {}
+            StyleColor::Palette(idx) => {
+                if idx >= 16 {
+                    let _ = write!(out, ";{ext}:5:{idx}");
+                } else if idx >= 8 {
+                    let _ = write!(out, ";{high}{}", idx - 8);
+                } else {
+                    let _ = write!(out, ";{low}{idx}");
+                }
+            }
+            StyleColor::Rgb(rgb) => {
+                let _ = write!(out, ";{ext}:2::{}:{}:{}", rgb.r, rgb.g, rgb.b);
+            }
+        }
+    }
+
+    pub fn horizontal_tab(&mut self) {
+        // Mirrors Ghostty's `horizontalTab`: repeatedly move the cursor right
+        // (an in-row move that does not dirty the row) until we land on a
+        // tabstop or reach the right margin. We check the tabstop at the
+        // *new* cursor position so a space is written at the tabstop unless
+        // we're at the end (the loop condition).
+        while self.active_screen().cursor.x < self.scrolling_region.right {
+            self.active_screen_mut().cursor_right(1);
+            if self
+                .tabstops
+                .get(usize::from(self.active_screen().cursor.x))
+            {
+                return;
+            }
+        }
     }
 
     pub fn horizontal_tab_back(&mut self, count: usize) {
@@ -1276,6 +1688,74 @@ impl Terminal {
         }
     }
 
+    /// DECALN: fill the entire screen with `E` for alignment testing.
+    /// ghostty: `Terminal.decaln` (Terminal.zig:2655).
+    pub fn decaln(&mut self) {
+        // Clear our stylistic attributes, preserving only the fg/bg colors.
+        // This is the only thing that can fail so Ghostty does it first so it
+        // can be undone; our `manual_style_update` is infallible.
+        {
+            let cursor = &mut self.active_screen_mut().cursor;
+            cursor.style = Style {
+                fg_color: cursor.style.fg_color,
+                bg_color: cursor.style.bg_color,
+                ..Style::default()
+            };
+        }
+        self.active_screen_mut().manual_style_update();
+
+        // Reset margins, also sets cursor to top-left.
+        self.scrolling_region = ScrollingRegion::full(self.cols, self.rows);
+
+        // Origin mode is disabled.
+        self.modes.set(Mode::Origin, false);
+
+        // Move our cursor to the top-left.
+        self.set_cursor_pos(1, 1);
+
+        // Use clearRows instead of eraseDisplay because we must NOT respect
+        // protected attributes here.
+        self.active_screen_mut()
+            .clear_rows(Point::active(0, 0), None, false);
+
+        // Fill with Es by moving the cursor down row by row.
+        let last_row = self.rows.saturating_sub(1);
+        loop {
+            let style_id = self.active_screen().cursor.style_id;
+            if let Some(pin) = self.active_screen().cursor_pin() {
+                if let Some(node) = self.active_screen_mut().pages.node_mut(pin.node) {
+                    let cols = node.page.size().cols;
+                    let mut e_cell = Cell::new('E');
+                    e_cell.set_style_id(style_id);
+                    // DECALN does not respect protected state (verified w/ xterm).
+                    e_cell.set_protected(false);
+                    for x in 0..cols {
+                        node.page.set_cell(pin.y, x, e_cell);
+                    }
+                    // If we have a ref-counted style, increase its count.
+                    if style_id != DEFAULT_STYLE_ID {
+                        node.page.use_style_multiple(style_id, cols);
+                        let mut row = node.page.row(pin.y);
+                        row.set_styled(true);
+                        node.page.set_row(pin.y, row);
+                    }
+                }
+            }
+            self.active_screen_mut().cursor_mark_dirty();
+            if self.active_screen().cursor.y == last_row {
+                break;
+            }
+            self.active_screen_mut().cursor_down(1);
+        }
+
+        // Reset the cursor to the top-left.
+        self.set_cursor_pos(1, 1);
+        self.dirty.screen = true;
+    }
+
+    /// DECSC: save cursor position and further state. Save state is per-screen;
+    /// re-saving overwrites the prior save for the active screen.
+    /// ghostty: `Terminal.saveCursor` (Terminal.zig:1116).
     pub fn save_cursor(&mut self) {
         let origin = self.modes.get(Mode::Origin);
         let screen = self.active_screen_mut();
@@ -1286,21 +1766,277 @@ impl Terminal {
             protected: screen.cursor.protected,
             pending_wrap: screen.cursor.pending_wrap,
             origin,
-            charset: CharsetState::default(),
+            charset: screen.charset,
         });
     }
 
+    /// DECRC: restore cursor position and other state. If no save was done
+    /// before, values reset to their initial defaults.
+    /// ghostty: `Terminal.restoreCursor` (Terminal.zig:1132).
     pub fn restore_cursor(&mut self) {
-        let Some(saved) = self.active_screen().saved_cursor.clone() else {
+        let saved = self
+            .active_screen()
+            .saved_cursor
+            .clone()
+            .unwrap_or_else(|| SavedCursor {
+                x: 0,
+                y: 0,
+                style: Style::default(),
+                protected: false,
+                pending_wrap: false,
+                origin: false,
+                charset: CharsetState::default(),
+            });
+
+        // Set the style first because it can fail. Regardless of the error, we
+        // revert to an unstyled cursor: it is more important that the restore
+        // succeeds in other attributes because terminals have no way to
+        // communicate failure back.
+        {
+            let screen = self.active_screen_mut();
+            screen.cursor.style = saved.style;
+            if !screen.try_manual_style_update() {
+                screen.cursor.style = Style::default();
+                screen.manual_style_update();
+            }
+        }
+
+        self.modes.set(Mode::Origin, saved.origin);
+
+        let cols = self.cols;
+        let rows = self.rows;
+        let screen = self.active_screen_mut();
+        screen.charset = saved.charset;
+        screen.cursor.protected = saved.protected;
+        // `cursor_absolute` clears `pending_wrap`, so restore it afterward to
+        // preserve the saved wrap-pending state (matches Ghostty, whose
+        // `cursorAbsolute` does not touch pending_wrap).
+        screen.cursor_absolute(
+            saved.x.min(cols.saturating_sub(1)),
+            saved.y.min(rows.saturating_sub(1)),
+        );
+        screen.cursor.pending_wrap = saved.pending_wrap;
+    }
+
+    /// Resize the terminal to the given dimensions. The primary screen reflows
+    /// when wraparound mode is enabled; the alternate screen never reflows. Any
+    /// custom scroll margins are lost. ghostty: `Terminal.resize`
+    /// (Terminal.zig:2915).
+    pub fn resize(&mut self, cols: CellCountInt, rows: CellCountInt) {
+        // If our cols/rows didn't change then we're done.
+        if self.cols == cols && self.rows == rows {
+            return;
+        }
+
+        // Resize our tabstops. Tab stops do not preserve custom stops across a
+        // column change; they reset to the default every-8 pattern.
+        if self.cols != cols {
+            self.tabstops = Tabstops::new(usize::from(cols), TABSTOP_INTERVAL);
+        }
+
+        // Resize primary screen, which supports reflow.
+        let reflow = self.modes.get(Mode::Wraparound);
+        if let Some(primary) = self.screens.get_mut(ScreenKey::Primary) {
+            let _ = primary.resize(Resize {
+                cols,
+                rows,
+                reflow,
+                prompt_redraw: PromptRedraw::True,
+            });
+        }
+
+        // Alternate screen, if it exists, doesn't reflow.
+        if let Some(alt) = self.screens.get_mut(ScreenKey::Alternate) {
+            let _ = alt.resize(Resize {
+                cols,
+                rows,
+                reflow: false,
+                prompt_redraw: PromptRedraw::False,
+            });
+        }
+
+        // Whenever we resize we just mark it as a screen clear.
+        self.dirty.screen = true;
+
+        // Set our size.
+        self.cols = cols;
+        self.rows = rows;
+
+        // Reset the scrolling region.
+        self.scrolling_region = ScrollingRegion::full(cols, rows);
+    }
+
+    /// DECCOLM: fix the terminal width at 80 or 132 columns. Does nothing
+    /// unless DEC mode 40 (`enable_mode_3`) is set. Faithful port of ghostty's
+    /// `deccolm` (Terminal.zig:2887).
+    pub fn deccolm(&mut self, mode: DeccolmMode) {
+        // If DEC mode 40 isn't enabled this is ignored, and we clear the
+        // 132-column mode flag so a bare set-mode can't stick.
+        if !self.modes.get(Mode::EnableMode3) {
+            self.modes.set(Mode::Column132, false);
+            return;
+        }
+
+        // Enable it.
+        self.modes
+            .set(Mode::Column132, mode == DeccolmMode::Cols132);
+
+        // Resize to the requested width, keeping the current row count.
+        let cols = match mode {
+            DeccolmMode::Cols132 => 132,
+            DeccolmMode::Cols80 => 80,
+        };
+        self.resize(cols, self.rows);
+
+        // Erase the display and home the cursor.
+        self.erase_display(EraseDisplay::Complete, false);
+        self.set_cursor_pos(1, 1);
+    }
+
+    /// Full reset (RIS). Faithful port of ghostty's `fullReset`
+    /// (Terminal.zig:3184).
+    pub fn full_reset(&mut self) {
+        // Ensure we're back on the primary screen and drop the alternate.
+        self.screens.switch_to(ScreenKey::Primary);
+        self.screens.remove(ScreenKey::Alternate);
+
+        // Reset the active (primary) screen.
+        self.active_screen_mut().reset();
+
+        // Reset our basic state.
+        self.modes.reset();
+        self.previous_char = None;
+        self.pwd = None;
+        self.title = None;
+        self.status_display = StatusDisplay::Main;
+        self.protected_mode = ProtectedMode::Off;
+        self.tabstops = Tabstops::new(usize::from(self.cols), TABSTOP_INTERVAL);
+        self.scrolling_region = ScrollingRegion::full(self.cols, self.rows);
+
+        // Always mark dirty so we redraw everything.
+        self.dirty = Dirty::default();
+        self.dirty.screen = true;
+    }
+
+    /// Switch to the given screen type. This does NOT clear the screen or copy
+    /// the cursor; callers handle those. Returns whether the screen actually
+    /// changed. Faithful port of ghostty's `switchScreen` (Terminal.zig:3009).
+    pub fn switch_screen(&mut self, key: ScreenKey) -> bool {
+        // Already on the requested screen: nothing to do.
+        if self.screens.active_key() == key {
+            return false;
+        }
+
+        // We always end hyperlink state on the OLD screen before switching.
+        self.active_screen_mut().end_hyperlink();
+
+        // Carry the charset state across (it follows the terminal, not the
+        // screen), and ensure the target screen exists.
+        let charset = self.active_screen().charset;
+        {
+            let new = self.screens.get_init(key);
+            debug_assert_eq!(new.cursor.hyperlink_id, 0);
+            new.charset = charset;
+            new.clear_selection();
+        }
+
+        // A screen switch always forces a full redraw.
+        self.dirty.screen = true;
+
+        // Finalize the switch.
+        self.screens.switch_to(key);
+        true
+    }
+
+    /// Switch screens via a mode number (47/1047/1049), handling the
+    /// mode-specific clear/save/restore behavior. Faithful port of ghostty's
+    /// `switchScreenMode` (Terminal.zig:3088).
+    pub fn switch_screen_mode(&mut self, mode: SwitchScreenMode, enabled: bool) {
+        match mode {
+            SwitchScreenMode::M47 => {}
+            // Disabling 1047 while on the alternate screen clears it.
+            SwitchScreenMode::M1047 => {
+                if !enabled && self.screens.active_key() == ScreenKey::Alternate {
+                    self.erase_display(EraseDisplay::Complete, false);
+                }
+            }
+            // 1049 unconditionally saves the cursor when enabling.
+            SwitchScreenMode::M1049 => {
+                if enabled {
+                    self.save_cursor();
+                }
+            }
+        }
+
+        // Switch to the destination screen first.
+        let to = if enabled {
+            ScreenKey::Alternate
+        } else {
+            ScreenKey::Primary
+        };
+        let changed = self.switch_screen(to);
+
+        match mode {
+            // 47/1047 copy the cursor (without hyperlink) when the screen
+            // actually changed.
+            SwitchScreenMode::M47 | SwitchScreenMode::M1047 => {
+                if changed {
+                    self.copy_cursor_from_other_screen(to);
+                }
+            }
+            SwitchScreenMode::M1049 => {
+                if enabled {
+                    debug_assert_eq!(self.screens.active_key(), ScreenKey::Alternate);
+                    self.erase_display(EraseDisplay::Complete, false);
+                    // Entering the alt screen copies the primary cursor.
+                    if changed {
+                        self.copy_cursor_from_other_screen(to);
+                    }
+                } else {
+                    debug_assert_eq!(self.screens.active_key(), ScreenKey::Primary);
+                    self.restore_cursor();
+                }
+            }
+        }
+    }
+
+    /// Copy the cursor from the non-active screen onto the now-active `to`
+    /// screen (without the hyperlink). Mirrors ghostty's `cursorCopy` call in
+    /// `switchScreenMode`; the source is always the screen we just left.
+    fn copy_cursor_from_other_screen(&mut self, to: ScreenKey) {
+        let from = match to {
+            ScreenKey::Primary => ScreenKey::Alternate,
+            ScreenKey::Alternate => ScreenKey::Primary,
+        };
+        let Some(source) = self.screens.get(from).map(|screen| screen.cursor_copy()) else {
             return;
         };
-        self.modes.set(Mode::Origin, saved.origin);
-        let screen = self.active_screen_mut();
-        screen.cursor.style = saved.style;
-        screen.cursor.protected = saved.protected;
-        screen.cursor.pending_wrap = saved.pending_wrap;
-        screen.cursor_absolute(saved.x, saved.y);
-        screen.manual_style_update();
+        self.active_screen_mut().cursor_copy_from(&source, false);
+    }
+
+    /// Returns true if the cursor is currently at a shell prompt. Faithful port
+    /// of ghostty's `cursorIsAtPrompt` (Terminal.zig).
+    pub fn cursor_is_at_prompt(&self) -> bool {
+        // The secondary screen is never a prompt.
+        if self.screens.active_key() == ScreenKey::Alternate {
+            return false;
+        }
+
+        // If our page row is a prompt then we're always at a prompt.
+        if self
+            .active_screen()
+            .cursor_row_semantic_prompt()
+            .map(|prompt| prompt != SemanticPrompt::None)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        // Otherwise defer to the cursor's own semantic content.
+        match self.active_screen().cursor.semantic_content {
+            SemanticContent::Input | SemanticContent::Prompt => true,
+            SemanticContent::Output => false,
+        }
     }
 
     /// Set the charset into the given slot.
@@ -1322,22 +2058,37 @@ impl Terminal {
         }
     }
 
-    /// Perform a semantic prompt command (OSC 133). Only the actions exercised
-    /// by the current terminal slice are handled; the rest fall through to the
-    /// output-content default like Ghostty's `end_command`.
-    pub fn semantic_prompt(&mut self, action: SemanticPromptAction) {
-        match action {
+    /// Perform a semantic prompt command (OSC 133). Faithful port of
+    /// ghostty's `semanticPrompt` (Terminal.zig:1181).
+    pub fn semantic_prompt(&mut self, cmd: SemanticPromptCommand<'_>) {
+        match cmd.action {
             SemanticPromptAction::FreshLine => self.semantic_prompt_fresh_line(),
             SemanticPromptAction::FreshLineNewPrompt | SemanticPromptAction::NewCommand => {
                 // "First do a fresh-line." `NewCommand` degrades to the `A`
                 // action because we don't track explicit command IDs.
                 self.semantic_prompt_fresh_line();
-                self.active_screen_mut()
-                    .cursor_set_semantic_content(SemanticContent::Prompt);
+
+                // "Subsequent text is a prompt string (as if followed by
+                // OSC 133;P;k=i)."
+                let kind = cmd.read_prompt_kind().unwrap_or(PromptKind::Initial);
+                self.active_screen_mut().cursor_set_semantic_prompt(kind);
+
+                // Ghostty also reads the `redraw` option here to flip
+                // `flags.shell_redraws_prompt` (a Kitty extension that only
+                // influences resize reflow). The `flags` struct is deferred in
+                // this port, so we skip it; no test in this slice exercises it.
+
+                // click_events takes priority over cl.
+                if let Some(events) = cmd.read_click_events() {
+                    self.active_screen_mut().semantic_prompt.click =
+                        SemanticClick::ClickEvents(events);
+                } else if let Some(cl) = cmd.read_cl() {
+                    self.active_screen_mut().semantic_prompt.click = SemanticClick::Cl(cl);
+                }
             }
             SemanticPromptAction::PromptStart => {
-                self.active_screen_mut()
-                    .cursor_set_semantic_content(SemanticContent::Prompt);
+                let kind = cmd.read_prompt_kind().unwrap_or(PromptKind::Initial);
+                self.active_screen_mut().cursor_set_semantic_prompt(kind);
             }
             SemanticPromptAction::EndPromptStartInput => {
                 self.active_screen_mut()
@@ -1353,7 +2104,12 @@ impl Terminal {
                 // Fish heuristic: a prompt row with the cursor at column zero is
                 // assumed to be overwriting the prompt, so un-mark it.
                 let at_col_zero = self.active_screen().cursor.x == 0;
-                if at_col_zero {
+                let row_is_prompt = self
+                    .active_screen()
+                    .cursor_row_semantic_prompt()
+                    .map(|prompt| prompt != SemanticPrompt::None)
+                    .unwrap_or(false);
+                if row_is_prompt && at_col_zero {
                     self.active_screen_mut()
                         .set_cursor_row_semantic_prompt(SemanticPrompt::None);
                 }
@@ -1491,20 +2247,6 @@ impl Terminal {
 
     fn cursor_inside_region(&self) -> bool {
         self.cursor_inside_vertical_region() && self.cursor_inside_horizontal_region()
-    }
-
-    fn split_row_region_boundaries(
-        &mut self,
-        y: CellCountInt,
-        left: CellCountInt,
-        right_exclusive: CellCountInt,
-    ) {
-        self.active_screen_mut()
-            .split_cell_boundary(Point::active(left, u32::from(y)));
-        if right_exclusive < self.cols {
-            self.active_screen_mut()
-                .split_cell_boundary(Point::active(right_exclusive, u32::from(y)));
-        }
     }
 
     /// Prepare a row for being shifted by an insert/delete lines operation.
@@ -1707,6 +2449,14 @@ impl Handler for Terminal {
         self.insert_blanks(value);
     }
 
+    fn erase_display(&mut self, mode: EraseDisplay, protected: bool) {
+        self.erase_display(mode, protected);
+    }
+
+    fn erase_line(&mut self, mode: EraseLine, protected: bool) {
+        self.erase_line(mode, protected);
+    }
+
     fn set_attribute(&mut self, attribute: crate::sgr::Attribute<'_>) {
         self.active_screen_mut().set_attribute(attribute);
     }
@@ -1788,8 +2538,11 @@ impl Handler for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::Rgb;
+    use crate::osc::parsers::semantic_prompt::{PromptClick, PromptClickEvents};
     use crate::page::{CellContentTag, CellWide};
     use crate::page_list::Scroll;
+    use crate::sgr::Attribute;
     use crate::stream::Stream;
 
     fn terminal(cols: CellCountInt, rows: CellCountInt) -> Terminal {
@@ -2996,6 +3749,7 @@ mod tests {
     }
 
     // T-omitted (kitty unsupported): "Terminal: print kitty unicode placeholder" (Terminal.zig:4969)
+    // T-omitted (glyph APC / kitty unsupported): "Terminal: glyph APC stores session glossary entries" (Terminal.zig:13238)
 
     #[test]
     fn soft_wrap() {
@@ -3015,7 +3769,9 @@ mod tests {
         // ghostty: "Terminal: soft wrap with semantic prompt" (Terminal.zig:5004)
         let mut t = terminal(3, 80);
         // Mark our prompt. Should not make anything dirty on its own.
-        t.semantic_prompt(SemanticPromptAction::PromptStart);
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::PromptStart,
+        ));
         assert!(!t.is_dirty(screen_point(0, 0)));
         // Write and wrap.
         for c in "hello".chars() {
@@ -5570,10 +6326,3655 @@ mod tests {
     }
 
     #[test]
+    fn cursor_left_reverse_wrap_with_no_soft_wrap() {
+        // ghostty: "Terminal: cursorLeft reverse wrap with no soft wrap" (Terminal.zig:8606)
+        let mut t = terminal(5, 5);
+        t.modes.set(Mode::Wraparound, true);
+        t.modes.set(Mode::ReverseWrap, true);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        t.print('1');
+        t.cursor_left(2);
+        t.print('X');
+        assert_eq!(t.plain_string(), "ABCDE\nX");
+    }
+
+    #[test]
+    fn cursor_left_reverse_wrap_before_left_margin() {
+        // ghostty: "Terminal: cursorLeft reverse wrap before left margin" (Terminal.zig:8628)
+        let mut t = terminal(5, 5);
+        t.modes.set(Mode::Wraparound, true);
+        t.modes.set(Mode::ReverseWrap, true);
+        t.set_top_and_bottom_margin(3, 0);
+        t.cursor_left(1);
+        t.print('X');
+        assert_eq!(t.plain_string(), "\n\nX");
+    }
+
+    #[test]
+    fn cursor_left_extended_reverse_wrap() {
+        // ghostty: "Terminal: cursorLeft extended reverse wrap" (Terminal.zig:8646)
+        let mut t = terminal(5, 5);
+        t.modes.set(Mode::Wraparound, true);
+        t.modes.set(Mode::ReverseWrapExtended, true);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        t.print('1');
+        t.cursor_left(2);
+        t.print('X');
+        assert_eq!(t.plain_string(), "ABCDX\n1");
+    }
+
+    #[test]
+    fn cursor_left_extended_reverse_wrap_bottom_wraparound() {
+        // ghostty: "Terminal: cursorLeft extended reverse wrap bottom wraparound" (Terminal.zig:8668)
+        let mut t = terminal(5, 3);
+        t.modes.set(Mode::Wraparound, true);
+        t.modes.set(Mode::ReverseWrapExtended, true);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        t.print('1');
+        t.cursor_left(1 + usize::from(t.cols) + 1);
+        t.print('X');
+        assert_eq!(t.plain_string(), "ABCDE\n1\n    X");
+    }
+
+    #[test]
+    fn cursor_left_extended_reverse_wrap_is_priority_if_both_set() {
+        // ghostty: "Terminal: cursorLeft extended reverse wrap is priority if both set" (Terminal.zig:8690)
+        let mut t = terminal(5, 3);
+        t.modes.set(Mode::Wraparound, true);
+        t.modes.set(Mode::ReverseWrap, true);
+        t.modes.set(Mode::ReverseWrapExtended, true);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        t.print('1');
+        t.cursor_left(1 + usize::from(t.cols) + 1);
+        t.print('X');
+        assert_eq!(t.plain_string(), "ABCDE\n1\n    X");
+    }
+
+    #[test]
+    fn cursor_left_extended_reverse_wrap_above_top_scroll_region() {
+        // ghostty: "Terminal: cursorLeft extended reverse wrap above top scroll region" (Terminal.zig:8713)
+        let mut t = terminal(5, 5);
+        t.modes.set(Mode::Wraparound, true);
+        t.modes.set(Mode::ReverseWrapExtended, true);
+        t.set_top_and_bottom_margin(3, 0);
+        t.set_cursor_pos(2, 1);
+        t.cursor_left(1000);
+        assert_eq!(t.active_screen().cursor.x, 0);
+        assert_eq!(t.active_screen().cursor.y, 0);
+    }
+
+    #[test]
+    fn cursor_left_reverse_wrap_on_first_row() {
+        // ghostty: "Terminal: cursorLeft reverse wrap on first row" (Terminal.zig:8729)
+        let mut t = terminal(5, 5);
+        t.modes.set(Mode::Wraparound, true);
+        t.modes.set(Mode::ReverseWrap, true);
+        t.set_top_and_bottom_margin(3, 0);
+        t.set_cursor_pos(1, 2);
+        t.cursor_left(1000);
+        assert_eq!(t.active_screen().cursor.x, 0);
+        assert_eq!(t.active_screen().cursor.y, 0);
+    }
+
+    #[test]
+    fn cursor_down_basic() {
+        // ghostty: "Terminal: cursorDown basic" (Terminal.zig:8745)
+        let mut t = terminal(5, 5);
+        t.print('A');
+        t.cursor_down(10);
+        t.print('X');
+        assert_eq!(t.plain_string(), "A\n\n\n\n X");
+    }
+
+    #[test]
+    fn cursor_down_above_bottom_scroll_margin() {
+        // ghostty: "Terminal: cursorDown above bottom scroll margin" (Terminal.zig:8761)
+        let mut t = terminal(5, 5);
+        t.set_top_and_bottom_margin(1, 3);
+        t.print('A');
+        t.cursor_down(10);
+        t.print('X');
+        assert_eq!(t.plain_string(), "A\n\n X");
+    }
+
+    #[test]
+    fn cursor_down_below_bottom_scroll_margin() {
+        // ghostty: "Terminal: cursorDown below bottom scroll margin" (Terminal.zig:8778)
+        let mut t = terminal(5, 5);
+        t.set_top_and_bottom_margin(1, 3);
+        t.print('A');
+        t.set_cursor_pos(4, 1);
+        t.cursor_down(10);
+        t.print('X');
+        assert_eq!(t.plain_string(), "A\n\n\n\nX");
+    }
+
+    #[test]
+    fn cursor_down_resets_wrap() {
+        // ghostty: "Terminal: cursorDown resets wrap" (Terminal.zig:8796)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        assert!(t.active_screen().cursor.pending_wrap);
+        t.cursor_down(1);
+        assert!(!t.active_screen().cursor.pending_wrap);
+        t.print('X');
+        assert_eq!(t.plain_string(), "ABCDE\n    X");
+    }
+
+    #[test]
+    fn cursor_right_resets_wrap() {
+        // ghostty: "Terminal: cursorRight resets wrap" (Terminal.zig:8814)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        assert!(t.active_screen().cursor.pending_wrap);
+        t.cursor_right(1);
+        assert!(!t.active_screen().cursor.pending_wrap);
+        t.print('X');
+        assert_eq!(t.plain_string(), "ABCDX");
+    }
+
+    #[test]
+    fn cursor_right_to_the_edge_of_screen() {
+        // ghostty: "Terminal: cursorRight to the edge of screen" (Terminal.zig:8832)
+        let mut t = terminal(5, 5);
+        t.cursor_right(100);
+        t.print('X');
+        assert_eq!(t.plain_string(), "    X");
+    }
+
+    #[test]
+    fn cursor_right_left_of_right_margin() {
+        // ghostty: "Terminal: cursorRight left of right margin" (Terminal.zig:8847)
+        let mut t = terminal(5, 5);
+        t.scrolling_region.right = 2;
+        t.cursor_right(100);
+        t.print('X');
+        assert_eq!(t.plain_string(), "  X");
+    }
+
+    #[test]
+    fn cursor_right_right_of_right_margin() {
+        // ghostty: "Terminal: cursorRight right of right margin" (Terminal.zig:8863)
+        let mut t = terminal(5, 5);
+        t.scrolling_region.right = 2;
+        t.set_cursor_pos(1, 4);
+        t.cursor_right(100);
+        t.print('X');
+        assert_eq!(t.plain_string(), "    X");
+    }
+
+    #[test]
+    fn delete_lines_simple() {
+        // ghostty: "Terminal: deleteLines simple" (Terminal.zig:8880)
+        let mut t = terminal(5, 5);
+        t.print_string("ABC");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("DEF");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("GHI");
+        t.set_cursor_pos(2, 2);
+        t.clear_dirty();
+        t.delete_lines(1);
+        assert!(!t.is_dirty(Point::active(0, 0)));
+        assert!(t.is_dirty(Point::active(0, 1)));
+        assert!(t.is_dirty(Point::active(0, 2)));
+        assert!(t.is_dirty(Point::active(0, 3)));
+        assert_eq!(t.plain_string(), "ABC\nGHI");
+    }
+
+    #[test]
+    fn delete_lines_colors_with_bg_color() {
+        // ghostty: "Terminal: deleteLines colors with bg color" (Terminal.zig:8909)
+        let mut t = terminal(5, 5);
+        t.print_string("ABC");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("DEF");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("GHI");
+        t.set_cursor_pos(2, 2);
+        t.set_attribute(crate::sgr::Attribute::DirectColorBg(crate::color::Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0,
+        }));
+        t.delete_lines(1);
+        assert_eq!(t.plain_string(), "ABC\nGHI");
+        for x in 0..t.cols {
+            let c = active_cell(&t, x, 4);
+            assert_eq!(c.content_tag(), CellContentTag::BgColorRgb);
+            assert_eq!(
+                c.rgb(),
+                crate::color::Rgb {
+                    r: 0xFF,
+                    g: 0,
+                    b: 0
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn delete_lines_across_page_boundary_marks_all_shifted_rows_dirty() {
+        // ghostty: "Terminal: deleteLines across page boundary marks all shifted rows dirty" (Terminal.zig:8950)
+        let mut t = terminal_opts(10, 5, 1024);
+        let first_page_nrows = t.first_page_capacity_rows();
+        // Fill up the first page minus 3 rows.
+        for _ in 0..first_page_nrows - 3 {
+            t.linefeed();
+        }
+        // Add content that will cross a page boundary.
+        t.print_string("1AAAA");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("2BBBB");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("3CCCC");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("4DDDD");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("5EEEE");
+        // Verify we now have a second page.
+        assert!(t.active_screen().pages.total_pages() > 1);
+        t.set_cursor_pos(1, 1);
+        t.clear_dirty();
+        t.delete_lines(1);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert!(t.is_dirty(Point::active(0, 1)));
+        assert!(t.is_dirty(Point::active(0, 2)));
+        assert!(t.is_dirty(Point::active(0, 3)));
+        assert!(t.is_dirty(Point::active(0, 4)));
+        assert_eq!(t.plain_string(), "2BBBB\n3CCCC\n4DDDD\n5EEEE");
+    }
+
+    #[test]
+    fn delete_lines_legacy() {
+        // ghostty: "Terminal: deleteLines (legacy)" (Terminal.zig:8996)
+        let mut t = terminal(80, 80);
+        // Initial value
+        t.print('A');
+        t.carriage_return();
+        t.linefeed();
+        t.print('B');
+        t.carriage_return();
+        t.linefeed();
+        t.print('C');
+        t.carriage_return();
+        t.linefeed();
+        t.print('D');
+        t.cursor_up(2);
+        t.delete_lines(1);
+        t.print('E');
+        t.carriage_return();
+        t.linefeed();
+        // We should be
+        assert_eq!(t.active_screen().cursor.x, 0);
+        assert_eq!(t.active_screen().cursor.y, 2);
+        assert_eq!(t.plain_string(), "A\nE\nD");
+    }
+
+    #[test]
+    fn delete_lines_with_scroll_region() {
+        // ghostty: "Terminal: deleteLines with scroll region" (Terminal.zig:9031)
+        let mut t = terminal(80, 80);
+        // Initial value
+        t.print('A');
+        t.carriage_return();
+        t.linefeed();
+        t.print('B');
+        t.carriage_return();
+        t.linefeed();
+        t.print('C');
+        t.carriage_return();
+        t.linefeed();
+        t.print('D');
+        t.set_top_and_bottom_margin(1, 3);
+        t.set_cursor_pos(1, 1);
+        t.clear_dirty();
+        t.delete_lines(1);
+        t.print('E');
+        t.carriage_return();
+        t.linefeed();
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert!(t.is_dirty(Point::active(0, 1)));
+        assert!(t.is_dirty(Point::active(0, 2)));
+        assert!(!t.is_dirty(Point::active(0, 3)));
+        // We should be
+        // assert_eq!(t.active_screen().cursor.x, 0);
+        // assert_eq!(t.active_screen().cursor.y, 2);
+        assert_eq!(t.plain_string(), "E\nC\n\nD");
+    }
+
+    #[test]
+    fn delete_lines_with_scroll_region_large_count() {
+        // ghostty: "Terminal: deleteLines with scroll region, large count" (Terminal.zig:9074)
+        let mut t = terminal(80, 80);
+        // Initial value
+        t.print('A');
+        t.carriage_return();
+        t.linefeed();
+        t.print('B');
+        t.carriage_return();
+        t.linefeed();
+        t.print('C');
+        t.carriage_return();
+        t.linefeed();
+        t.print('D');
+        t.set_top_and_bottom_margin(1, 3);
+        t.set_cursor_pos(1, 1);
+        t.clear_dirty();
+        t.delete_lines(5);
+        t.print('E');
+        t.carriage_return();
+        t.linefeed();
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert!(t.is_dirty(Point::active(0, 1)));
+        assert!(t.is_dirty(Point::active(0, 2)));
+        assert!(!t.is_dirty(Point::active(0, 3)));
+        // We should be
+        // assert_eq!(t.active_screen().cursor.x, 0);
+        // assert_eq!(t.active_screen().cursor.y, 2);
+        assert_eq!(t.plain_string(), "E\n\n\nD");
+    }
+
+    #[test]
+    fn delete_lines_with_scroll_region_cursor_outside_of_region() {
+        // ghostty: "Terminal: deleteLines with scroll region, cursor outside of region" (Terminal.zig:9117)
+        let mut t = terminal(80, 80);
+        // Initial value
+        t.print('A');
+        t.carriage_return();
+        t.linefeed();
+        t.print('B');
+        t.carriage_return();
+        t.linefeed();
+        t.print('C');
+        t.carriage_return();
+        t.linefeed();
+        t.print('D');
+        t.set_top_and_bottom_margin(1, 3);
+        t.set_cursor_pos(4, 1);
+        t.clear_dirty();
+        t.delete_lines(1);
+        for y in 0..4 {
+            assert!(!t.is_dirty(Point::active(0, y)));
+        }
+        assert_eq!(t.plain_string(), "A\nB\nC\nD");
+    }
+
+    #[test]
+    fn delete_lines_resets_pending_wrap() {
+        // ghostty: "Terminal: deleteLines resets pending wrap" (Terminal.zig:9152)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        assert!(t.active_screen().cursor.pending_wrap);
+        t.delete_lines(1);
+        assert!(!t.active_screen().cursor.pending_wrap);
+        t.print('B');
+        assert_eq!(t.plain_string(), "B");
+    }
+
+    #[test]
+    fn delete_lines_resets_wrap() {
+        // ghostty: "Terminal: deleteLines resets wrap" (Terminal.zig:9170)
+        let mut t = terminal(3, 3);
+        t.print('1');
+        t.carriage_return();
+        t.linefeed();
+        for c in "ABCDEF".chars() {
+            t.print(c);
+        }
+        t.set_top_and_bottom_margin(1, 2);
+        t.set_cursor_pos(1, 1);
+        t.delete_lines(1);
+        t.print('X');
+        assert_eq!(t.plain_string(), "XBC\n\nDEF");
+        for y in 0..t.rows {
+            let row = t.get_row(Point::active(0, u32::from(y))).expect("row");
+            assert!(!row.wrap());
+        }
+    }
+
+    #[test]
+    fn delete_lines_left_right_scroll_region() {
+        // ghostty: "Terminal: deleteLines left/right scroll region" (Terminal.zig:9201)
+        let mut t = terminal(10, 10);
+        t.print_string("ABC123");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("DEF456");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("GHI789");
+        t.scrolling_region.left = 1;
+        t.scrolling_region.right = 3;
+        t.set_cursor_pos(2, 2);
+        t.clear_dirty();
+        t.delete_lines(1);
+        assert!(!t.is_dirty(Point::active(0, 0)));
+        for y in 1..3 {
+            assert!(t.is_dirty(Point::active(0, y)));
+        }
+        assert_eq!(t.plain_string(), "ABC123\nDHI756\nG   89");
+    }
+
+    #[test]
+    fn delete_lines_left_right_scroll_region_from_top() {
+        // ghostty: "Terminal: deleteLines left/right scroll region from top" (Terminal.zig:9233)
+        let mut t = terminal(10, 10);
+        t.print_string("ABC123");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("DEF456");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("GHI789");
+        t.scrolling_region.left = 1;
+        t.scrolling_region.right = 3;
+        t.set_cursor_pos(1, 2);
+        t.clear_dirty();
+        t.delete_lines(1);
+        for y in 0..3 {
+            assert!(t.is_dirty(Point::active(0, y)));
+        }
+        assert_eq!(t.plain_string(), "AEF423\nDHI756\nG   89");
+    }
+
+    #[test]
+    fn delete_lines_left_right_scroll_region_high_count() {
+        // ghostty: "Terminal: deleteLines left/right scroll region high count" (Terminal.zig:9264)
+        let mut t = terminal(10, 10);
+        t.print_string("ABC123");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("DEF456");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("GHI789");
+        t.scrolling_region.left = 1;
+        t.scrolling_region.right = 3;
+        t.set_cursor_pos(2, 2);
+        t.clear_dirty();
+        t.delete_lines(100);
+        assert!(!t.is_dirty(Point::active(0, 0)));
+        for y in 1..3 {
+            assert!(t.is_dirty(Point::active(0, y)));
+        }
+        assert_eq!(t.plain_string(), "ABC123\nD   56\nG   89");
+    }
+
+    #[test]
+    fn delete_lines_wide_character_spacer_head() {
+        // ghostty: "Terminal: deleteLines wide character spacer head" (Terminal.zig:9296)
+        let mut t = terminal(5, 3);
+        // Initial value
+        // +-----+
+        // |AAAAA| < Wrapped
+        // |BBBB*| < Wrapped     (continued)
+        // |WWCCC| < Non-wrapped (continued)
+        // +-----+
+        // where * represents a spacer head cell
+        // and WW is the wide character.
+        t.print_string("AAAAABBBB\u{1F600}CCC");
+        // Delete the top line
+        // +-----+
+        // |BBBB | < Non-wrapped
+        // |WWCCC| < Non-wrapped
+        // |     | < Non-wrapped
+        // +-----+
+        // This should convert the spacer head to
+        // a regular empty cell, and un-set wrap.
+        t.set_cursor_pos(1, 1);
+        t.delete_lines(1);
+        let str = t.plain_string();
+        let unwrapped_str = t.plain_string_unwrapped();
+        assert_eq!(str, "BBBB\n\u{1F600}CCC");
+        assert_eq!(unwrapped_str, "BBBB\n\u{1F600}CCC");
+    }
+
+    #[test]
+    fn delete_lines_wide_character_spacer_head_left_scroll_margin() {
+        // ghostty: "Terminal: deleteLines wide character spacer head left scroll margin" (Terminal.zig:9332)
+        let mut t = terminal(5, 3);
+        // Initial value
+        // +-----+
+        // |AAAAA| < Wrapped
+        // |BBBB*| < Wrapped     (continued)
+        // |WWCCC| < Non-wrapped (continued)
+        // +-----+
+        // where * represents a spacer head cell
+        // and WW is the wide character.
+        t.print_string("AAAAABBBB\u{1F600}CCC");
+        t.scrolling_region.left = 2;
+        // Delete the top line
+        //    ###  <- scrolling region
+        // +-----+
+        // |AABB | < Wrapped
+        // |BBCCC| < Wrapped     (continued)
+        // |WW   | < Non-wrapped (continued)
+        // +-----+
+        // This should convert the spacer head to
+        // a regular empty cell, but due to the
+        // left scrolling margin, wrap state should
+        // remain.
+        t.set_cursor_pos(1, 3);
+        t.delete_lines(1);
+        let str = t.plain_string();
+        let unwrapped_str = t.plain_string_unwrapped();
+        assert_eq!(str, "AABB\nBBCCC\n\u{1F600}");
+        assert_eq!(unwrapped_str, "AABB BBCCC\u{1F600}");
+    }
+
+    #[test]
+    fn delete_lines_wide_character_spacer_head_right_scroll_margin() {
+        // ghostty: "Terminal: deleteLines wide character spacer head right scroll margin" (Terminal.zig:9373)
+        let mut t = terminal(5, 3);
+        // Initial value
+        // +-----+
+        // |AAAAA| < Wrapped
+        // |BBBB*| < Wrapped     (continued)
+        // |WWCCC| < Non-wrapped (continued)
+        // +-----+
+        // where * represents a spacer head cell
+        // and WW is the wide character.
+        t.print_string("AAAAABBBB\u{1F600}CCC");
+        t.scrolling_region.right = 3;
+        // Delete the top line
+        //  ####   <- scrolling region
+        // +-----+
+        // |BBBBA| < Wrapped
+        // |WWCC | < Wrapped     (continued)
+        // |    C| < Non-wrapped (continued)
+        // +-----+
+        // This should convert the spacer head to
+        // a regular empty cell, but due to the
+        // right scrolling margin, wrap state should
+        // remain.
+        t.set_cursor_pos(1, 1);
+        t.delete_lines(1);
+        let str = t.plain_string();
+        let unwrapped_str = t.plain_string_unwrapped();
+        assert_eq!(str, "BBBBA\n\u{1F600}CC\n    C");
+        assert_eq!(unwrapped_str, "BBBBA\u{1F600}CC     C");
+    }
+
+    #[test]
+    fn delete_lines_wide_character_spacer_head_left_and_right_scroll_margin() {
+        // ghostty: "Terminal: deleteLines wide character spacer head left and right scroll margin" (Terminal.zig:9414)
+        let mut t = terminal(5, 3);
+        // Initial value
+        // +-----+
+        // |AAAAA| < Wrapped
+        // |BBBB*| < Wrapped     (continued)
+        // |WWCCC| < Non-wrapped (continued)
+        // +-----+
+        // where * represents a spacer head cell
+        // and WW is the wide character.
+        t.print_string("AAAAABBBB\u{1F600}CCC");
+        t.scrolling_region.right = 3;
+        t.scrolling_region.left = 2;
+        // Delete the top line
+        //    ##   <- scrolling region
+        // +-----+
+        // |AABBA| < Wrapped
+        // |BBCC*| < Wrapped     (continued)
+        // |WW  C| < Non-wrapped (continued)
+        // +-----+
+        // Because there is both a left scrolling
+        // margin > 1 and a right scrolling margin
+        // the spacer head should remain, and the
+        // wrap state should be untouched.
+        t.set_cursor_pos(1, 3);
+        t.delete_lines(1);
+        let str = t.plain_string();
+        let unwrapped_str = t.plain_string_unwrapped();
+        assert_eq!(str, "AABBA\nBBCC\n\u{1F600}  C");
+        assert_eq!(unwrapped_str, "AABBABBCC\u{1F600}  C");
+    }
+
+    #[test]
+    fn delete_lines_wide_character_spacer_head_left_lt_2_and_right_scroll_margin() {
+        // ghostty: "Terminal: deleteLines wide character spacer head left (< 2) and right scroll margin" (Terminal.zig:9456)
+        let mut t = terminal(5, 3);
+        // Initial value
+        // +-----+
+        // |AAAAA| < Wrapped
+        // |BBBB*| < Wrapped     (continued)
+        // |WWCCC| < Non-wrapped (continued)
+        // +-----+
+        // where * represents a spacer head cell
+        // and WW is the wide character.
+        t.print_string("AAAAABBBB\u{1F600}CCC");
+        t.scrolling_region.right = 3;
+        t.scrolling_region.left = 1;
+        // Delete the top line
+        //   ###   <- scrolling region
+        // +-----+
+        // |ABBBA| < Wrapped
+        // |B CC | < Wrapped     (continued)
+        // |    C| < Non-wrapped (continued)
+        // +-----+
+        // Because the left margin is 1, the wide
+        // char is split, and therefore removed,
+        // along with the spacer head - however,
+        // wrap state should be untouched.
+        t.set_cursor_pos(1, 2);
+        t.delete_lines(1);
+        let str = t.plain_string();
+        let unwrapped_str = t.plain_string_unwrapped();
+        assert_eq!(str, "ABBBA\nB CC\n    C");
+        assert_eq!(unwrapped_str, "ABBBAB CC     C");
+    }
+
+    #[test]
+    fn delete_lines_wide_characters_split_by_left_right_scroll_region_boundaries() {
+        // ghostty: "Terminal: deleteLines wide characters split by left/right scroll region boundaries" (Terminal.zig:9498)
+        let mut t = terminal(5, 2);
+        // Initial value
+        // +-----+
+        // |AAAAA|
+        // |WWBWW|
+        // +-----+
+        // where WW represents a wide character
+        t.print_string("AAAAA\n\u{1F600}B\u{1F600}");
+        t.scrolling_region.right = 3;
+        t.scrolling_region.left = 1;
+        // Delete the top line
+        //   ###   <- scrolling region
+        // +-----+
+        // |A B A|
+        // |     |
+        // +-----+
+        // The two wide chars, because they're
+        // split by the edge of the scrolling
+        // region, get removed.
+        t.set_cursor_pos(1, 2);
+        t.delete_lines(1);
+        assert_eq!(t.plain_string(), "A B A");
+    }
+
+    #[test]
+    fn delete_lines_zero() {
+        // ghostty: "Terminal: deleteLines zero" (Terminal.zig:9533)
+        let mut t = terminal(2, 5);
+        // This should do nothing
+        t.set_cursor_pos(1, 1);
+        t.delete_lines(0);
+    }
+
+    #[test]
+    fn default_style_is_empty() {
+        // ghostty: "Terminal: default style is empty" (Terminal.zig:9543)
+        let mut t = terminal(5, 5);
+        t.print('A');
+        let c = cell(&t, 0, 0);
+        assert_eq!(c.codepoint(), u32::from('A'));
+        assert_eq!(c.style_id(), 0);
+    }
+
+    #[test]
+    fn bold_style() {
+        // ghostty: "Terminal: bold style" (Terminal.zig:9558)
+        let mut t = terminal(5, 5);
+        t.set_attribute(crate::sgr::Attribute::Bold);
+        t.print('A');
+        let c = cell(&t, 0, 0);
+        assert_eq!(c.codepoint(), u32::from('A'));
+        assert!(c.style_id() != 0);
+        assert!(t.cursor_page_style_ref_count() > 1);
+    }
+
+    #[test]
+    fn garbage_collect_overwritten() {
+        // ghostty: "Terminal: garbage collect overwritten" (Terminal.zig:9576)
+        let mut t = terminal(5, 5);
+        t.set_attribute(crate::sgr::Attribute::Bold);
+        t.print('A');
+        t.set_cursor_pos(1, 1);
+        t.set_attribute(crate::sgr::Attribute::Unset);
+        t.print('B');
+        let c = cell(&t, 0, 0);
+        assert_eq!(c.codepoint(), u32::from('B'));
+        assert_eq!(c.style_id(), 0);
+        // verify we have no styles in our style map
+        assert_eq!(t.cursor_page_style_count(), 0);
+    }
+
+    #[test]
+    fn do_not_garbage_collect_old_styles_in_use() {
+        // ghostty: "Terminal: do not garbage collect old styles in use" (Terminal.zig:9599)
+        let mut t = terminal(5, 5);
+        t.set_attribute(crate::sgr::Attribute::Bold);
+        t.print('A');
+        t.set_attribute(crate::sgr::Attribute::Unset);
+        t.print('B');
+        let c = cell(&t, 1, 0);
+        assert_eq!(c.codepoint(), u32::from('B'));
+        assert_eq!(c.style_id(), 0);
+        // verify we have no styles in our style map
+        assert_eq!(t.cursor_page_style_count(), 1);
+    }
+
+    #[test]
+    fn print_with_style_marks_the_row_as_styled() {
+        // ghostty: "Terminal: print with style marks the row as styled" (Terminal.zig:9621)
+        let mut t = terminal(5, 5);
+        t.set_attribute(crate::sgr::Attribute::Bold);
+        t.print('A');
+        t.set_attribute(crate::sgr::Attribute::Unset);
+        t.print('B');
+        let row = t.get_row(screen_point(0, 0)).expect("row");
+        assert!(row.styled());
+    }
+
+    #[test]
+    fn decaln() {
+        // ghostty: "Terminal: DECALN" (Terminal.zig:9637)
+        let mut t = terminal(2, 2);
+        // Initial value
+        t.print('A');
+        t.carriage_return();
+        t.linefeed();
+        t.print('B');
+        t.decaln();
+        assert_eq!(t.active_screen().cursor.y, 0);
+        assert_eq!(t.active_screen().cursor.x, 0);
+        for y in 0..t.rows {
+            assert!(t.is_dirty(Point::active(0, u32::from(y))));
+        }
+        assert_eq!(t.plain_string(), "EE\nEE");
+    }
+
+    #[test]
+    fn decaln_reset_margins() {
+        // ghostty: "Terminal: decaln reset margins" (Terminal.zig:9664)
+        let mut t = terminal(3, 3);
+        // Initial value
+        t.modes.set(Mode::Origin, true);
+        t.set_top_and_bottom_margin(2, 3);
+        t.decaln();
+        t.scroll_down(1);
+        assert_eq!(t.plain_string(), "\nEEE\nEEE");
+    }
+
+    #[test]
+    fn decaln_preserves_color() {
+        // ghostty: "Terminal: decaln preserves color" (Terminal.zig:9682)
+        let mut t = terminal(3, 3);
+        // Initial value
+        t.set_attribute(crate::sgr::Attribute::DirectColorBg(crate::color::Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0,
+        }));
+        t.modes.set(Mode::Origin, true);
+        t.set_top_and_bottom_margin(2, 3);
+        t.decaln();
+        t.scroll_down(1);
+        assert_eq!(t.plain_string(), "\nEEE\nEEE");
+        let c = active_cell(&t, 0, 0);
+        assert_eq!(c.content_tag(), CellContentTag::BgColorRgb);
+        assert_eq!(
+            c.rgb(),
+            crate::color::Rgb {
+                r: 0xFF,
+                g: 0,
+                b: 0
+            }
+        );
+    }
+
+    #[test]
+    fn decaln_resets_graphemes_with_protected_mode() {
+        // ghostty: "Terminal: DECALN resets graphemes with protected mode" (Terminal.zig:9711)
+        let mut t = terminal(3, 3);
+        // Add protected mode. A previous version of DECALN accidentally preserved
+        // protected mode which left dangling managed memory.
+        t.set_protected_mode(ProtectedMode::Iso);
+        // This is: 👨‍👩‍👧 (which may or may not render correctly)
+        t.modes.set(Mode::GraphemeCluster, true);
+        print_cp(&mut t, 0x1F468);
+        print_cp(&mut t, 0x200D);
+        print_cp(&mut t, 0x1F469);
+        print_cp(&mut t, 0x200D);
+        print_cp(&mut t, 0x1F467);
+        t.decaln();
+        assert_eq!(t.active_screen().cursor.y, 0);
+        assert_eq!(t.active_screen().cursor.x, 0);
+        assert!(t.active_screen().cursor.protected);
+        assert!(t.protected_mode == ProtectedMode::Iso);
+        for y in 0..t.rows {
+            assert!(t.is_dirty(Point::active(0, u32::from(y))));
+        }
+        assert_eq!(t.plain_string(), "EEE\nEEE\nEEE");
+    }
+
+    #[test]
+    fn insert_blanks_zero() {
+        // ghostty: "Terminal: insertBlanks zero" (Terminal.zig:9747)
+        let mut t = terminal(5, 2);
+        t.print('A');
+        t.print('B');
+        t.print('C');
+        t.set_cursor_pos(1, 1);
+        t.insert_blanks(0);
+        assert_eq!(t.plain_string(), "ABC");
+    }
+
+    #[test]
+    fn insert_blanks() {
+        // ghostty: "Terminal: insertBlanks" (Terminal.zig:9766)
+        let mut t = terminal(5, 2);
+        t.print('A');
+        t.print('B');
+        t.print('C');
+        // NOTE: this is not verified with conformance tests, so these
+        // tests might actually be verifying wrong behavior.
+        t.set_cursor_pos(1, 1);
+        t.clear_dirty();
+        t.insert_blanks(2);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert!(!t.is_dirty(Point::active(0, 1)));
+        assert_eq!(t.plain_string(), "  ABC");
+    }
+
+    #[test]
+    fn insert_blanks_pushes_off_end() {
+        // ghostty: "Terminal: insertBlanks pushes off end" (Terminal.zig:9790)
+        let mut t = terminal(3, 2);
+        t.print('A');
+        t.print('B');
+        t.print('C');
+        // NOTE: this is not verified with conformance tests, so these
+        // tests might actually be verifying wrong behavior.
+        t.set_cursor_pos(1, 1);
+        t.clear_dirty();
+        t.insert_blanks(2);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert_eq!(t.plain_string(), "  A");
+    }
+
+    #[test]
+    fn insert_blanks_more_than_size() {
+        // ghostty: "Terminal: insertBlanks more than size" (Terminal.zig:9813)
+        let mut t = terminal(3, 2);
+        t.print('A');
+        t.print('B');
+        t.print('C');
+        // NOTE: this is not verified with conformance tests, so these
+        // tests might actually be verifying wrong behavior.
+        t.set_cursor_pos(1, 1);
+        t.clear_dirty();
+        t.insert_blanks(5);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert_eq!(t.plain_string(), "");
+    }
+
+    #[test]
+    fn insert_blanks_no_scroll_region_fits() {
+        // ghostty: "Terminal: insertBlanks no scroll region, fits" (Terminal.zig:9836)
+        let mut t = terminal(10, 10);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 1);
+        t.clear_dirty();
+        t.insert_blanks(2);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert_eq!(t.plain_string(), "  ABC");
+    }
+
+    #[test]
+    fn insert_blanks_preserves_background_sgr() {
+        // ghostty: "Terminal: insertBlanks preserves background sgr" (Terminal.zig:9855)
+        let mut t = terminal(10, 10);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 1);
+        t.set_attribute(Attribute::DirectColorBg(Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0,
+        }));
+        t.insert_blanks(2);
+        assert_eq!(t.plain_string(), "  ABC");
+        let c = active_cell(&t, 0, 0);
+        assert_eq!(c.content_tag(), CellContentTag::BgColorRgb);
+        assert_eq!(
+            c.rgb(),
+            Rgb {
+                r: 0xFF,
+                g: 0,
+                b: 0
+            }
+        );
+    }
+
+    #[test]
+    fn insert_blanks_shift_off_screen() {
+        // ghostty: "Terminal: insertBlanks shift off screen" (Terminal.zig:9885)
+        let mut t = terminal(5, 10);
+        for c in "  ABC".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 3);
+        t.clear_dirty();
+        t.insert_blanks(2);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        t.print('X');
+        assert_eq!(t.plain_string(), "  X A");
+    }
+
+    #[test]
+    fn insert_blanks_split_multi_cell_character() {
+        // ghostty: "Terminal: insertBlanks split multi-cell character" (Terminal.zig:9904)
+        let mut t = terminal(5, 10);
+        for c in "123".chars() {
+            t.print(c);
+        }
+        t.print('橋');
+        t.set_cursor_pos(1, 1);
+        t.clear_dirty();
+        t.insert_blanks(1);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert_eq!(t.plain_string(), " 123");
+    }
+
+    #[test]
+    fn insert_blanks_inside_left_right_scroll_region() {
+        // ghostty: "Terminal: insertBlanks inside left/right scroll region" (Terminal.zig:9923)
+        let mut t = terminal(10, 10);
+        t.scrolling_region.left = 2;
+        t.scrolling_region.right = 4;
+        t.set_cursor_pos(1, 3);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 3);
+        t.clear_dirty();
+        t.insert_blanks(2);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        t.print('X');
+        assert_eq!(t.plain_string(), "  X A");
+    }
+
+    #[test]
+    fn insert_blanks_outside_left_right_scroll_region() {
+        // ghostty: "Terminal: insertBlanks outside left/right scroll region" (Terminal.zig:9946)
+        let mut t = terminal(6, 10);
+        t.set_cursor_pos(1, 4);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.scrolling_region.left = 2;
+        t.scrolling_region.right = 4;
+        assert!(t.active_screen().cursor.pending_wrap);
+        t.clear_dirty();
+        t.insert_blanks(2);
+        assert!(!t.is_dirty(Point::active(0, 0)));
+        assert!(!t.active_screen().cursor.pending_wrap);
+        t.print('X');
+        assert_eq!(t.plain_string(), "   ABX");
+    }
+
+    #[test]
+    fn insert_blanks_left_right_scroll_region_large_count() {
+        // ghostty: "Terminal: insertBlanks left/right scroll region large count" (Terminal.zig:9969)
+        let mut t = terminal(10, 10);
+        t.modes.set(Mode::Origin, true);
+        t.modes.set(Mode::EnableLeftAndRightMargin, true);
+        t.set_left_and_right_margin(3, 5);
+        t.set_cursor_pos(1, 1);
+        t.clear_dirty();
+        t.insert_blanks(140);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        t.print('X');
+        assert_eq!(t.plain_string(), "  X");
+    }
+
+    #[test]
+    fn insert_blanks_deleting_graphemes() {
+        // ghostty: "Terminal: insertBlanks deleting graphemes" (Terminal.zig:9990)
+        let mut t = terminal(5, 5);
+        // Disable grapheme clustering
+        t.modes.set(Mode::GraphemeCluster, true);
+        t.print_string("ABC");
+        // This is: 👨‍👩‍👧 (which may or may not render correctly)
+        print_cp(&mut t, 0x1F468);
+        print_cp(&mut t, 0x200D);
+        print_cp(&mut t, 0x1F469);
+        print_cp(&mut t, 0x200D);
+        print_cp(&mut t, 0x1F467);
+        // We should have one cell with graphemes
+        assert_eq!(t.cursor_page_grapheme_count(), 1);
+        t.set_cursor_pos(1, 1);
+        t.clear_dirty();
+        t.insert_blanks(4);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert_eq!(t.plain_string(), "    A");
+        // We should have no graphemes
+        assert_eq!(t.cursor_page_grapheme_count(), 0);
+    }
+
+    #[test]
+    fn insert_blanks_shift_graphemes() {
+        // ghostty: "Terminal: insertBlanks shift graphemes" (Terminal.zig:10026)
+        let mut t = terminal(5, 5);
+        // Enable grapheme clustering
+        t.modes.set(Mode::GraphemeCluster, true);
+        t.print_string("A");
+        // This is: 👨‍👩‍👧 (which may or may not render correctly)
+        print_cp(&mut t, 0x1F468);
+        print_cp(&mut t, 0x200D);
+        print_cp(&mut t, 0x1F469);
+        print_cp(&mut t, 0x200D);
+        print_cp(&mut t, 0x1F467);
+        // We should have one cell with graphemes
+        assert_eq!(t.cursor_page_grapheme_count(), 1);
+        t.set_cursor_pos(1, 1);
+        t.clear_dirty();
+        t.insert_blanks(1);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert_eq!(t.plain_string(), " A👨‍👩‍👧");
+        // We should have no graphemes
+        assert_eq!(t.cursor_page_grapheme_count(), 1);
+    }
+
+    #[test]
+    fn insert_blanks_split_multi_cell_character_from_tail() {
+        // ghostty: "Terminal: insertBlanks split multi-cell character from tail" (Terminal.zig:10062)
+        let mut t = terminal(5, 10);
+        t.print_string("橋123");
+        t.set_cursor_pos(1, 2);
+        t.insert_blanks(1);
+        assert_eq!(t.plain_string(), "   12");
+    }
+
+    #[test]
+    fn insert_blanks_shifts_hyperlinks() {
+        // ghostty: "Terminal: insertBlanks shifts hyperlinks" (Terminal.zig:10078)
+        // osc "8;;http://example.com"
+        // printf "link"
+        // printf "\r"
+        // csi "3@"
+        // echo
+        //
+        // link should be preserved, blanks should not be linked
+        let mut t = terminal(10, 2);
+        t.active_screen_mut()
+            .start_hyperlink(None, b"http://example.com");
+        t.print_string("ABC");
+        t.set_cursor_pos(1, 1);
+        t.insert_blanks(2);
+        assert_eq!(t.plain_string(), "  ABC");
+        // Verify all our cells have a hyperlink
+        for x in 2..5 {
+            assert!(t.get_row(screen_point(x, 0)).unwrap().hyperlink());
+            assert!(cell(&t, x, 0).hyperlink());
+            assert_eq!(t.hyperlink_id_at(screen_point(x, 0)), Some(1));
+        }
+        for x in 0..2 {
+            assert!(!cell(&t, x, 0).hyperlink());
+            assert_eq!(t.hyperlink_id_at(screen_point(x, 0)), None);
+        }
+    }
+
+    #[test]
+    fn insert_blanks_pushes_hyperlink_off_end_completely() {
+        // ghostty: "Terminal: insertBlanks pushes hyperlink off end completely" (Terminal.zig:10127)
+        let mut t = terminal(3, 2);
+        t.active_screen_mut()
+            .start_hyperlink(None, b"http://example.com");
+        t.print_string("ABC");
+        t.set_cursor_pos(1, 1);
+        t.insert_blanks(3);
+        assert_eq!(t.plain_string(), "");
+        for x in 0..3 {
+            assert!(!t.get_row(screen_point(x, 0)).unwrap().hyperlink());
+            assert!(!cell(&t, x, 0).hyperlink());
+            assert_eq!(t.hyperlink_id_at(screen_point(x, 0)), None);
+        }
+    }
+
+    #[test]
+    fn insert_blanks_wide_char_straddling_right_margin() {
+        // ghostty: "Terminal: insertBlanks wide char straddling right margin" (Terminal.zig:10157)
+        // Crash found by AFL++ fuzzer.
+        //
+        // When a wide character straddles the right scroll margin (head at the
+        // margin, spacer_tail just beyond it), insertBlanks shifts the wide head
+        // away via swapCells but leaves the orphaned spacer_tail in place,
+        // causing a page integrity violation.
+        let mut t = terminal(10, 5);
+        // Fill row: A B C D 橋 _ _ _ _ _
+        // Positions: 0 1 2 3 4W 5T 6 7 8 9
+        t.set_cursor_pos(1, 1);
+        for c in "ABCD".chars() {
+            t.print(c);
+        }
+        t.print('橋'); // wide char: head at 4, spacer_tail at 5
+                       // Set right margin so the wide head is AT the boundary and the
+                       // spacer_tail is just outside it.
+        t.scrolling_region.right = 4;
+        // Position cursor at x=2 (1-indexed col 3) and insert one blank. This
+        // triggers the swap loop which displaces the wide head at position 4
+        // without clearing the spacer_tail at position 5.
+        t.set_cursor_pos(1, 3);
+        t.insert_blanks(1);
+        assert_eq!(t.plain_string(), "AB CD");
+    }
+
+    #[test]
+    fn insert_blanks_wide_char_spacer_tail_orphaned_beyond_right_margin() {
+        // ghostty: "Terminal: insertBlanks wide char spacer_tail orphaned beyond right margin" (Terminal.zig:10191)
+        // Regression test for AFL++ crash.
+        //
+        // When insertBlanks clears the entire region from cursor to the right
+        // margin (scroll_amount == 0), a wide character whose head is AT the
+        // right margin gets cleared but its spacer_tail just beyond the margin
+        // is left behind, causing a page integrity violation:
+        //   "spacer tail not following wide"
+        let mut t = terminal(10, 5);
+        // Fill cols 0–9 with wide chars: 中中中中中
+        // Positions: 0W 1T 2W 3T 4W 5T 6W 7T 8W 9T
+        for _ in 0..5 {
+            print_cp(&mut t, 0x4E2D);
+        }
+        // Set left/right margins so that the last wide char (cols 8–9)
+        // straddles the boundary: head at col 8 (inside), tail at col 9 (outside).
+        t.modes.set(Mode::EnableLeftAndRightMargin, true);
+        t.set_left_and_right_margin(1, 9); // 1-indexed: left=0, right=8
+                                           // Cursor is now at (0, 0) after DECSLRM. Print a narrow char to advance
+                                           // cursor to col 1.
+        t.print('a');
+        // ICH 8: insert 8 blanks at cursor x=1.
+        // rem = right(8) - x(1) + 1 = 8, adjusted_count = 8, scroll_amount = 0.
+        // The code clears cols 1–8 without noticing the spacer_tail at col 9.
+        t.insert_blanks(8);
+        assert_eq!(t.plain_string(), "a");
+    }
+
+    #[test]
+    fn insert_mode_with_space() {
+        // ghostty: "Terminal: insert mode with space" (Terminal.zig:10228)
+        let mut t = terminal(10, 2);
+        for c in "hello".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 2);
+        t.modes.set(Mode::Insert, true);
+        t.print('X');
+        assert_eq!(t.plain_string(), "hXello");
+    }
+
+    #[test]
+    fn insert_mode_doesnt_wrap_pushed_characters() {
+        // ghostty: "Terminal: insert mode doesn't wrap pushed characters" (Terminal.zig:10245)
+        let mut t = terminal(5, 2);
+        for c in "hello".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 2);
+        t.modes.set(Mode::Insert, true);
+        t.print('X');
+        assert_eq!(t.plain_string(), "hXell");
+    }
+
+    #[test]
+    fn insert_mode_does_nothing_at_the_end_of_the_line() {
+        // ghostty: "Terminal: insert mode does nothing at the end of the line" (Terminal.zig:10262)
+        let mut t = terminal(5, 2);
+        for c in "hello".chars() {
+            t.print(c);
+        }
+        t.modes.set(Mode::Insert, true);
+        t.print('X');
+        assert_eq!(t.plain_string(), "hello\nX");
+    }
+
+    #[test]
+    fn insert_mode_with_wide_characters() {
+        // ghostty: "Terminal: insert mode with wide characters" (Terminal.zig:10278)
+        let mut t = terminal(5, 2);
+        for c in "hello".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 2);
+        t.modes.set(Mode::Insert, true);
+        t.print('😀'); // 0x1F600
+        assert_eq!(t.plain_string(), "h😀el");
+    }
+
+    #[test]
+    fn insert_mode_with_wide_characters_at_end() {
+        // ghostty: "Terminal: insert mode with wide characters at end" (Terminal.zig:10295)
+        let mut t = terminal(5, 2);
+        for c in "well".chars() {
+            t.print(c);
+        }
+        t.modes.set(Mode::Insert, true);
+        t.print('😀'); // 0x1F600
+        assert_eq!(t.plain_string(), "well\n😀");
+    }
+
+    #[test]
+    fn insert_mode_pushing_off_wide_character() {
+        // ghostty: "Terminal: insert mode pushing off wide character" (Terminal.zig:10311)
+        let mut t = terminal(5, 2);
+        for c in "123".chars() {
+            t.print(c);
+        }
+        t.print('😀'); // 0x1F600
+        t.modes.set(Mode::Insert, true);
+        t.set_cursor_pos(1, 1);
+        t.print('X');
+        assert_eq!(t.plain_string(), "X123");
+    }
+
+    #[test]
+    fn delete_chars() {
+        // ghostty: "Terminal: deleteChars" (Terminal.zig:10329)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 2);
+        t.clear_dirty();
+        t.delete_chars(2);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert_eq!(t.plain_string(), "ADE");
+    }
+
+    #[test]
+    fn delete_chars_zero_count() {
+        // ghostty: "Terminal: deleteChars zero count" (Terminal.zig:10348)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 2);
+        t.clear_dirty();
+        t.delete_chars(0);
+        assert!(!t.is_dirty(Point::active(0, 0)));
+        assert_eq!(t.plain_string(), "ABCDE");
+    }
+
+    #[test]
+    fn delete_chars_more_than_half() {
+        // ghostty: "Terminal: deleteChars more than half" (Terminal.zig:10367)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 2);
+        t.clear_dirty();
+        t.delete_chars(3);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert_eq!(t.plain_string(), "AE");
+    }
+
+    #[test]
+    fn delete_chars_more_than_line_width() {
+        // ghostty: "Terminal: deleteChars more than line width" (Terminal.zig:10386)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 2);
+        t.clear_dirty();
+        t.delete_chars(10);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert_eq!(t.plain_string(), "A");
+    }
+
+    #[test]
+    fn delete_chars_should_shift_left() {
+        // ghostty: "Terminal: deleteChars should shift left" (Terminal.zig:10405)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 2);
+        t.clear_dirty();
+        t.delete_chars(1);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert_eq!(t.plain_string(), "ACDE");
+    }
+
+    #[test]
+    fn delete_chars_resets_pending_wrap() {
+        // ghostty: "Terminal: deleteChars resets pending wrap" (Terminal.zig:10424)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        assert!(t.active_screen().cursor.pending_wrap);
+        t.delete_chars(1);
+        assert!(!t.active_screen().cursor.pending_wrap);
+        t.print('X');
+        assert_eq!(t.plain_string(), "ABCDX");
+    }
+
+    #[test]
+    fn delete_chars_resets_wrap() {
+        // ghostty: "Terminal: deleteChars resets wrap" (Terminal.zig:10442)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE123".chars() {
+            t.print(c);
+        }
+        assert!(t.get_row(Point::active(0, 0)).unwrap().wrap());
+        t.set_cursor_pos(1, 1);
+        t.delete_chars(1);
+        assert!(!t.get_row(Point::active(0, 0)).unwrap().wrap());
+        t.print('X');
+        assert_eq!(t.plain_string(), "XCDE\n123");
+    }
+
+    #[test]
+    fn delete_chars_simple_operation() {
+        // ghostty: "Terminal: deleteChars simple operation" (Terminal.zig:10471)
+        let mut t = terminal(10, 10);
+        t.print_string("ABC123");
+        t.set_cursor_pos(1, 3);
+        t.clear_dirty();
+        t.delete_chars(2);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert_eq!(t.plain_string(), "AB23");
+    }
+
+    #[test]
+    fn delete_chars_preserves_background_sgr() {
+        // ghostty: "Terminal: deleteChars preserves background sgr" (Terminal.zig:10490)
+        let mut t = terminal(10, 10);
+        for c in "ABC123".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 3);
+        t.set_attribute(Attribute::DirectColorBg(Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0,
+        }));
+        t.delete_chars(2);
+        assert_eq!(t.plain_string(), "AB23");
+        for x in (t.cols - 2)..t.cols {
+            let c = active_cell(&t, x, 0);
+            assert_eq!(c.content_tag(), CellContentTag::BgColorRgb);
+            assert_eq!(
+                c.rgb(),
+                Rgb {
+                    r: 0xFF,
+                    g: 0,
+                    b: 0
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn delete_chars_outside_scroll_region() {
+        // ghostty: "Terminal: deleteChars outside scroll region" (Terminal.zig:10523)
+        let mut t = terminal(6, 10);
+        t.print_string("ABC123");
+        t.scrolling_region.left = 2;
+        t.scrolling_region.right = 4;
+        assert!(t.active_screen().cursor.pending_wrap);
+        t.clear_dirty();
+        t.delete_chars(2);
+        assert!(!t.is_dirty(Point::active(0, 0)));
+        assert!(t.active_screen().cursor.pending_wrap);
+        assert_eq!(t.plain_string(), "ABC123");
+    }
+
+    #[test]
+    fn delete_chars_inside_scroll_region() {
+        // ghostty: "Terminal: deleteChars inside scroll region" (Terminal.zig:10544)
+        let mut t = terminal(6, 10);
+        t.print_string("ABC123");
+        t.scrolling_region.left = 2;
+        t.scrolling_region.right = 4;
+        t.set_cursor_pos(1, 4);
+        t.clear_dirty();
+        t.delete_chars(1);
+        assert!(t.is_dirty(Point::active(0, 0)));
+        assert_eq!(t.plain_string(), "ABC2 3");
+    }
+
+    #[test]
+    fn delete_chars_split_wide_character_from_spacer_tail() {
+        // ghostty: "Terminal: deleteChars split wide character from spacer tail" (Terminal.zig:10565)
+        let mut t = terminal(6, 10);
+        t.print_string("A橋123");
+        t.set_cursor_pos(1, 3);
+        t.delete_chars(1);
+        assert_eq!(t.plain_string(), "A 123");
+    }
+
+    #[test]
+    fn delete_chars_split_wide_character_from_wide() {
+        // ghostty: "Terminal: deleteChars split wide character from wide" (Terminal.zig:10581)
+        let mut t = terminal(6, 10);
+        t.print_string("橋123");
+        t.set_cursor_pos(1, 1);
+        t.delete_chars(1);
+        let c = cell(&t, 0, 0);
+        assert_eq!(c.codepoint(), 0);
+        assert_eq!(c.wide(), CellWide::Narrow);
+        let c = cell(&t, 1, 0);
+        assert_eq!(c.codepoint(), u32::from('1'));
+        assert_eq!(c.wide(), CellWide::Narrow);
+    }
+
+    #[test]
+    fn delete_chars_split_wide_character_from_end() {
+        // ghostty: "Terminal: deleteChars split wide character from end" (Terminal.zig:10604)
+        let mut t = terminal(6, 10);
+        t.print_string("A橋123");
+        t.set_cursor_pos(1, 1);
+        t.delete_chars(1);
+        let c = cell(&t, 0, 0);
+        assert_eq!(c.codepoint(), 0x6A4B);
+        assert_eq!(c.wide(), CellWide::Wide);
+        let c = cell(&t, 1, 0);
+        assert_eq!(c.codepoint(), 0);
+        assert_eq!(c.wide(), CellWide::SpacerTail);
+    }
+
+    #[test]
+    fn delete_chars_with_a_spacer_head_at_the_end() {
+        // ghostty: "Terminal: deleteChars with a spacer head at the end" (Terminal.zig:10627)
+        let mut t = terminal(5, 10);
+        t.print_string("0123橋123");
+        {
+            let c = cell(&t, 4, 0);
+            assert_eq!(c.wide(), CellWide::SpacerHead);
+            assert!(t.get_row(screen_point(4, 0)).unwrap().wrap());
+        }
+        t.set_cursor_pos(1, 1);
+        t.delete_chars(1);
+        let c = cell(&t, 3, 0);
+        assert_eq!(c.codepoint(), 0);
+        assert_eq!(c.wide(), CellWide::Narrow);
+    }
+
+    #[test]
+    fn delete_chars_split_wide_character_tail() {
+        // ghostty: "Terminal: deleteChars split wide character tail" (Terminal.zig:10652)
+        let mut t = terminal(5, 5);
+        t.set_cursor_pos(1, t.cols - 1);
+        print_cp(&mut t, 0x6A4B); // 橋
+        t.carriage_return();
+        t.delete_chars(usize::from(t.cols - 1));
+        t.print('0');
+        assert_eq!(t.plain_string(), "0");
+    }
+
+    #[test]
+    fn delete_chars_wide_char_boundary_conditions() {
+        // ghostty: "Terminal: deleteChars wide char boundary conditions" (Terminal.zig:10670)
+        let mut t = terminal(8, 1);
+
+        // EXPLANATION(qwerasd):
+        //
+        // There are 3 or 4 boundaries to be concerned with in deleteChars,
+        // depending on how you count them. Consider the following terminal:
+        //
+        //   +--------+
+        // 0 |.ABCDEF.|
+        //   : ^      : (^ = cursor)
+        //   +--------+
+        //
+        // if we DCH 3 we get
+        //
+        //   +--------+
+        // 0 |.DEF....|
+        //   +--------+
+        //
+        // The boundaries exist at the following points then:
+        //
+        //   +--------+
+        // 0 |.ABCDEF.|
+        //   :11 22 33:
+        //   +--------+
+        //
+        // I'm counting 2 for double since it's both the end of the deleted
+        // content and the start of the content that is shifted in to place.
+        //
+        // Now consider wide characters (represented as `WW`) at these boundaries:
+        //
+        //   +--------+
+        // 0 |WWaWWbWW|
+        //   : ^      : (^ = cursor)
+        //   : ^^^    : (^ = deleted by DCH 3)
+        //   +--------+
+        //
+        // -> DCH 3
+        // -> The first 2 wide characters are split & destroyed (verified in xterm)
+        //
+        //   +--------+
+        // 0 |..bWW...|
+        //   +--------+
+        t.print_string("😀a😀b😀");
+        assert_eq!(t.plain_string(), "😀a😀b😀");
+        t.set_cursor_pos(1, 2);
+        t.delete_chars(3);
+        t.active_screen().assert_integrity();
+        assert_eq!(t.plain_string(), "  b😀");
+    }
+
+    #[test]
+    fn delete_chars_wide_char_wrap_boundary_conditions() {
+        // ghostty: "Terminal: deleteChars wide char wrap boundary conditions" (Terminal.zig:10734)
+        let mut t = terminal(8, 3);
+
+        // EXPLANATION(qwerasd):
+        // (cont. from "Terminal: deleteChars wide char boundary conditions")
+        //
+        // Additionally consider soft-wrapped wide chars (`H` = spacer head):
+        //
+        //   +--------+
+        // 0 |.......H…
+        // 1 …WWabcdeH…
+        //   : ^      : (^ = cursor)
+        //   : ^^^    : (^ = deleted by DCH 3)
+        // 2 …WW......|
+        //   +--------+
+        //
+        // -> DCH 3
+        // -> First wide character split and destroyed, including spacer head,
+        //    second spacer head removed (verified in xterm).
+        // -> Wrap state of row reset
+        //
+        //   +--------+
+        // 0 |........|
+        // 1 |.cde....|
+        // 2 |WW......|
+        //   +--------+
+        t.print_string(".......😀abcde😀......");
+        assert_eq!(t.plain_string(), ".......\n😀abcde\n😀......");
+        assert_eq!(t.plain_string_unwrapped(), ".......😀abcde😀......");
+        t.set_cursor_pos(2, 2);
+        t.delete_chars(3);
+        t.active_screen().assert_integrity();
+        assert_eq!(t.plain_string(), ".......\n cde\n😀......");
+        assert_eq!(t.plain_string_unwrapped(), ".......  cde\n😀......");
+    }
+
+    #[test]
+    fn delete_chars_wide_char_across_right_margin() {
+        // ghostty: "Terminal: deleteChars wide char across right margin" (Terminal.zig:10790)
+        let mut t = terminal(8, 3);
+
+        // scroll region
+        //    VVVVVV
+        //  +-######-+
+        //  |.abcdeWW|
+        //  : ^      : (^ = cursor)
+        //  +--------+
+        //
+        // DCH 1
+        t.print_string("123456橋");
+        t.modes.set(Mode::EnableLeftAndRightMargin, true);
+        t.set_left_and_right_margin(2, 7);
+        assert_eq!(t.plain_string(), "123456橋");
+        t.set_cursor_pos(1, 2);
+        t.delete_chars(1);
+        t.active_screen().assert_integrity();
+        // NOTE: This behavior is slightly inconsistent with xterm. xterm
+        // _visually_ splits the wide character (half the wide character shows
+        // up in col 6 and half in col 8). In all other wide char split scenarios,
+        // xterm clears the cell. Therefore, we've chosen to clear the cell here.
+        // Given we have space, we also could actually preserve it, but I haven't
+        // yet found a terminal that behaves that way. We should be open to
+        // revisiting this behavior but for now we're going with the simpler
+        // impl.
+        assert_eq!(t.plain_string(), "13456");
+    }
+
+    #[test]
+    fn save_cursor() {
+        // ghostty: "Terminal: saveCursor" (Terminal.zig:10833)
+        let mut t = terminal(3, 3);
+        t.set_attribute(Attribute::Bold);
+        t.active_screen_mut().charset.gr = CharsetSlots::G3;
+        t.modes.set(Mode::Origin, true);
+        t.save_cursor();
+        t.active_screen_mut().charset.gr = CharsetSlots::G0;
+        t.set_attribute(Attribute::Unset);
+        t.modes.set(Mode::Origin, false);
+        t.restore_cursor();
+        assert!(t.active_screen().cursor.style.flags.bold);
+        assert!(t.active_screen().charset.gr == CharsetSlots::G3);
+        assert!(t.modes.get(Mode::Origin));
+    }
+
+    #[test]
+    fn save_cursor_position() {
+        // ghostty: "Terminal: saveCursor position" (Terminal.zig:10851)
+        let mut t = terminal(10, 5);
+        t.set_cursor_pos(1, 5);
+        t.print('A');
+        t.save_cursor();
+        t.set_cursor_pos(1, 1);
+        t.print('B');
+        t.restore_cursor();
+        t.print('X');
+        assert_eq!(t.plain_string(), "B   AX");
+    }
+
+    #[test]
+    fn save_cursor_pending_wrap_state() {
+        // ghostty: "Terminal: saveCursor pending wrap state" (Terminal.zig:10871)
+        let mut t = terminal(5, 5);
+        t.set_cursor_pos(1, 5);
+        t.print('A');
+        t.save_cursor();
+        t.set_cursor_pos(1, 1);
+        t.print('B');
+        t.restore_cursor();
+        t.print('X');
+        assert_eq!(t.plain_string(), "B   A\nX");
+    }
+
+    #[test]
+    fn save_cursor_origin_mode() {
+        // ghostty: "Terminal: saveCursor origin mode" (Terminal.zig:10891)
+        let mut t = terminal(10, 5);
+        t.modes.set(Mode::Origin, true);
+        t.save_cursor();
+        t.modes.set(Mode::EnableLeftAndRightMargin, true);
+        t.set_left_and_right_margin(3, 5);
+        t.set_top_and_bottom_margin(2, 4);
+        t.restore_cursor();
+        t.print('X');
+        assert_eq!(t.plain_string(), "X");
+    }
+
+    #[test]
+    fn save_cursor_resize() {
+        // ghostty: "Terminal: saveCursor resize" (Terminal.zig:10911)
+        let mut t = terminal(10, 5);
+        t.set_cursor_pos(1, 10);
+        t.save_cursor();
+        t.resize(5, 5);
+        t.restore_cursor();
+        t.print('X');
+        assert_eq!(t.plain_string(), "    X");
+    }
+
+    #[test]
+    fn save_cursor_protected_pen() {
+        // ghostty: "Terminal: saveCursor protected pen" (Terminal.zig:10929)
+        let mut t = terminal(10, 5);
+        t.set_protected_mode(ProtectedMode::Iso);
+        assert!(t.active_screen().cursor.protected);
+        t.set_cursor_pos(1, 10);
+        t.save_cursor();
+        t.set_protected_mode(ProtectedMode::Off);
+        assert!(!t.active_screen().cursor.protected);
+        t.restore_cursor();
+        assert!(t.active_screen().cursor.protected);
+    }
+
+    #[test]
+    fn save_cursor_doesnt_modify_hyperlink_state() {
+        // ghostty: "Terminal: saveCursor doesn't modify hyperlink state" (Terminal.zig:10944)
+        let mut t = terminal(3, 3);
+        t.active_screen_mut()
+            .start_hyperlink(None, b"http://example.com");
+        let id = t.active_screen().cursor.hyperlink_id;
+        t.save_cursor();
+        assert_eq!(id, t.active_screen().cursor.hyperlink_id);
+        t.restore_cursor();
+        assert_eq!(id, t.active_screen().cursor.hyperlink_id);
+    }
+
+    #[test]
+    fn restore_cursor_uses_default_style_on_out_of_space() {
+        // ghostty: "Terminal: restoreCursor uses default style on OutOfSpace" (Terminal.zig:10957)
+        // Tests that restoreCursor falls back to default style when
+        // manualStyleUpdate fails with OutOfSpace (can't split a 1-row page
+        // and styles are at max capacity).
+        // Use a single row so the page can't be split
+        let mut t = terminal(10, 1);
+
+        // Set a style and save the cursor
+        t.set_attribute(Attribute::Bold);
+        t.save_cursor();
+
+        // Clear the style
+        t.set_attribute(Attribute::Unset);
+        assert!(!t.active_screen().cursor.style.flags.bold);
+
+        // Fill the style map to max capacity
+        let max_styles = crate::size::CellCountInt::MAX;
+        loop {
+            let node = t.active_screen().cursor_pin().unwrap().node;
+            if t.active_screen().pages.node_capacity(node).unwrap().styles >= max_styles {
+                break;
+            }
+            if t.active_screen_mut()
+                .increase_capacity(node, crate::page_list::IncreaseCapacity::Styles)
+                .is_err()
+            {
+                break;
+            }
+        }
+
+        let node = t.active_screen().cursor_pin().unwrap().node;
+        assert_eq!(
+            t.active_screen().pages.node_capacity(node).unwrap().styles,
+            max_styles
+        );
+
+        // Fill all style slots using the StyleSet's layout capacity, which
+        // accounts for the load factor. The capacity in the layout is the
+        // actual max number of items that can be stored.
+        {
+            let max_items = t
+                .active_screen()
+                .pages
+                .node(node)
+                .map(|node| node.page.style_layout_cap())
+                .unwrap_or(0);
+            let mut n = 1usize;
+            while n < max_items {
+                let style = crate::style::PackedStyle::from(Style {
+                    bg_color: crate::style::StyleColor::Rgb(Rgb {
+                        r: ((n >> 16) & 0xFF) as u8,
+                        g: ((n >> 8) & 0xFF) as u8,
+                        b: (n & 0xFF) as u8,
+                    }),
+                    ..Style::default()
+                });
+                let Some(node) = t.active_screen_mut().pages.node_mut(node) else {
+                    break;
+                };
+                if node.page.add_style(style).is_err() {
+                    break;
+                }
+                n += 1;
+            }
+        }
+
+        // Restore cursor - should fall back to default style since page
+        // can't be split (1 row) and styles are at max capacity
+        t.restore_cursor();
+
+        // The style should be reset to default because OutOfSpace occurred
+        assert!(!t.active_screen().cursor.style.flags.bold);
+        assert_eq!(t.active_screen().cursor.style_id, DEFAULT_STYLE_ID);
+    }
+
+    #[test]
     fn stream_dispatches_to_terminal() {
         // port-added: Stream<Terminal> integration for T7b handler wiring.
         let mut stream = Stream::new(terminal(8, 3));
         stream.next_slice(b"ab\x1B[2;3Hcd");
         assert_eq!(stream.handler.dump_string(), "ab\n  cd");
+    }
+
+    // Helper: assert every cell in [x_range] on active row `y` is a red RGB bg.
+    fn assert_red_bg_row(t: &Terminal, xs: std::ops::Range<CellCountInt>, y: u32) {
+        for x in xs {
+            let c = active_cell(t, x, y);
+            assert_eq!(c.content_tag(), CellContentTag::BgColorRgb);
+            assert_eq!(
+                c.rgb(),
+                Rgb {
+                    r: 0xFF,
+                    g: 0,
+                    b: 0
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn set_protected_mode() {
+        // ghostty: "Terminal: setProtectedMode" (Terminal.zig:11014)
+        let mut t = terminal(3, 3);
+        assert!(!t.active_screen().cursor.protected);
+        t.set_protected_mode(ProtectedMode::Off);
+        assert!(!t.active_screen().cursor.protected);
+        t.set_protected_mode(ProtectedMode::Iso);
+        assert!(t.active_screen().cursor.protected);
+        t.set_protected_mode(ProtectedMode::Dec);
+        assert!(t.active_screen().cursor.protected);
+        t.set_protected_mode(ProtectedMode::Off);
+        assert!(!t.active_screen().cursor.protected);
+    }
+
+    #[test]
+    fn erase_line_simple_erase_right() {
+        // ghostty: "Terminal: eraseLine simple erase right" (Terminal.zig:11030)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 3);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Right, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "AB");
+    }
+
+    #[test]
+    fn erase_line_resets_pending_wrap() {
+        // ghostty: "Terminal: eraseLine resets pending wrap" (Terminal.zig:11048)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        assert!(t.active_screen().cursor.pending_wrap);
+        t.erase_line(EraseLine::Right, false);
+        assert!(!t.active_screen().cursor.pending_wrap);
+        t.print('B');
+        assert_eq!(t.plain_string(), "ABCDB");
+    }
+
+    #[test]
+    fn erase_line_resets_wrap() {
+        // ghostty: "Terminal: eraseLine resets wrap" (Terminal.zig:11066)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE123".chars() {
+            t.print(c);
+        }
+        assert!(t.get_row(screen_point(0, 0)).unwrap().wrap());
+        t.set_cursor_pos(1, 1);
+        t.erase_line(EraseLine::Right, false);
+        assert!(!t.get_row(screen_point(0, 0)).unwrap().wrap());
+        t.print('X');
+        assert_eq!(t.plain_string(), "X\n123");
+    }
+
+    #[test]
+    fn erase_line_right_preserves_background_sgr() {
+        // ghostty: "Terminal: eraseLine right preserves background sgr" (Terminal.zig:11093)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 2);
+        t.set_attribute(Attribute::DirectColorBg(Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0,
+        }));
+        t.erase_line(EraseLine::Right, false);
+        assert_eq!(t.plain_string(), "A");
+        assert_red_bg_row(&t, 1..5, 0);
+    }
+
+    #[test]
+    fn erase_line_right_wide_character() {
+        // ghostty: "Terminal: eraseLine right wide character" (Terminal.zig:11126)
+        let mut t = terminal(10, 5);
+        for c in "AB".chars() {
+            t.print(c);
+        }
+        t.print('橋');
+        for c in "DE".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 4);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Right, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "AB");
+    }
+
+    #[test]
+    fn erase_line_right_protected_attributes_respected_with_iso() {
+        // ghostty: "Terminal: eraseLine right protected attributes respected with iso" (Terminal.zig:11146)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Iso);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 1);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Right, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "ABC");
+    }
+
+    #[test]
+    fn erase_line_right_protected_attributes_ignored_with_dec_most_recent() {
+        // ghostty: "Terminal: eraseLine right protected attributes ignored with dec most recent" (Terminal.zig:11165)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Iso);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.set_protected_mode(ProtectedMode::Dec);
+        t.set_protected_mode(ProtectedMode::Off);
+        t.set_cursor_pos(1, 2);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Right, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "A");
+    }
+
+    #[test]
+    fn erase_line_right_protected_attributes_ignored_with_dec_set() {
+        // ghostty: "Terminal: eraseLine right protected attributes ignored with dec set" (Terminal.zig:11186)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Dec);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 2);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Right, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "A");
+    }
+
+    #[test]
+    fn erase_line_right_protected_requested() {
+        // ghostty: "Terminal: eraseLine right protected requested" (Terminal.zig:11205)
+        let mut t = terminal(10, 5);
+        for c in "12345678".chars() {
+            t.print(c);
+        }
+        let y = t.active_screen().cursor.y;
+        t.set_cursor_pos(y + 1, 6);
+        t.set_protected_mode(ProtectedMode::Dec);
+        t.print('X');
+        let y = t.active_screen().cursor.y;
+        t.set_cursor_pos(y + 1, 4);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Right, true);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "123  X");
+    }
+
+    #[test]
+    fn erase_line_simple_erase_left() {
+        // ghostty: "Terminal: eraseLine simple erase left" (Terminal.zig:11226)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 3);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Left, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "   DE");
+    }
+
+    #[test]
+    fn erase_line_left_resets_wrap() {
+        // ghostty: "Terminal: eraseLine left resets wrap" (Terminal.zig:11244)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        assert!(t.active_screen().cursor.pending_wrap);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Left, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert!(!t.active_screen().cursor.pending_wrap);
+        t.print('B');
+        assert_eq!(t.plain_string(), "    B");
+    }
+
+    #[test]
+    fn erase_line_left_preserves_background_sgr() {
+        // ghostty: "Terminal: eraseLine left preserves background sgr" (Terminal.zig:11264)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 2);
+        t.set_attribute(Attribute::DirectColorBg(Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0,
+        }));
+        t.erase_line(EraseLine::Left, false);
+        assert_eq!(t.plain_string(), "  CDE");
+        assert_red_bg_row(&t, 0..2, 0);
+    }
+
+    #[test]
+    fn erase_line_left_wide_character() {
+        // ghostty: "Terminal: eraseLine left wide character" (Terminal.zig:11297)
+        let mut t = terminal(10, 5);
+        for c in "AB".chars() {
+            t.print(c);
+        }
+        t.print('橋');
+        for c in "DE".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 3);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Left, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "    DE");
+    }
+
+    #[test]
+    fn erase_line_left_protected_attributes_respected_with_iso() {
+        // ghostty: "Terminal: eraseLine left protected attributes respected with iso" (Terminal.zig:11317)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Iso);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 1);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Left, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "ABC");
+    }
+
+    #[test]
+    fn erase_line_left_protected_attributes_ignored_with_dec_most_recent() {
+        // ghostty: "Terminal: eraseLine left protected attributes ignored with dec most recent" (Terminal.zig:11336)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Iso);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.set_protected_mode(ProtectedMode::Dec);
+        t.set_protected_mode(ProtectedMode::Off);
+        t.set_cursor_pos(1, 2);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Left, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "  C");
+    }
+
+    #[test]
+    fn erase_line_left_protected_attributes_ignored_with_dec_set() {
+        // ghostty: "Terminal: eraseLine left protected attributes ignored with dec set" (Terminal.zig:11357)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Dec);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 2);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Left, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "  C");
+    }
+
+    #[test]
+    fn erase_line_left_protected_requested() {
+        // ghostty: "Terminal: eraseLine left protected requested" (Terminal.zig:11376)
+        let mut t = terminal(10, 5);
+        for c in "123456789".chars() {
+            t.print(c);
+        }
+        let y = t.active_screen().cursor.y;
+        t.set_cursor_pos(y + 1, 6);
+        t.set_protected_mode(ProtectedMode::Dec);
+        t.print('X');
+        let y = t.active_screen().cursor.y;
+        t.set_cursor_pos(y + 1, 8);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Left, true);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "     X  9");
+    }
+
+    #[test]
+    fn erase_line_complete_preserves_background_sgr() {
+        // ghostty: "Terminal: eraseLine complete preserves background sgr" (Terminal.zig:11397)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 2);
+        t.set_attribute(Attribute::DirectColorBg(Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0,
+        }));
+        t.erase_line(EraseLine::Complete, false);
+        assert_eq!(t.plain_string(), "");
+        assert_red_bg_row(&t, 0..5, 0);
+    }
+
+    #[test]
+    fn erase_line_complete_protected_attributes_respected_with_iso() {
+        // ghostty: "Terminal: eraseLine complete protected attributes respected with iso" (Terminal.zig:11430)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Iso);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 1);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Complete, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "ABC");
+    }
+
+    #[test]
+    fn erase_line_complete_protected_attributes_ignored_with_dec_most_recent() {
+        // ghostty: "Terminal: eraseLine complete protected attributes ignored with dec most recent" (Terminal.zig:11449)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Iso);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.set_protected_mode(ProtectedMode::Dec);
+        t.set_protected_mode(ProtectedMode::Off);
+        t.set_cursor_pos(1, 2);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Complete, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "");
+    }
+
+    #[test]
+    fn erase_line_complete_protected_attributes_ignored_with_dec_set() {
+        // ghostty: "Terminal: eraseLine complete protected attributes ignored with dec set" (Terminal.zig:11470)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Dec);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(1, 2);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Complete, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "");
+    }
+
+    #[test]
+    fn erase_line_complete_protected_requested() {
+        // ghostty: "Terminal: eraseLine complete protected requested" (Terminal.zig:11489)
+        let mut t = terminal(10, 5);
+        for c in "123456789".chars() {
+            t.print(c);
+        }
+        let y = t.active_screen().cursor.y;
+        t.set_cursor_pos(y + 1, 6);
+        t.set_protected_mode(ProtectedMode::Dec);
+        t.print('X');
+        let y = t.active_screen().cursor.y;
+        t.set_cursor_pos(y + 1, 8);
+        t.clear_dirty();
+        t.erase_line(EraseLine::Complete, true);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "     X");
+    }
+
+    #[test]
+    fn tab_clear_single() {
+        // ghostty: "Terminal: tabClear single" (Terminal.zig:11510)
+        let mut t = terminal(30, 5);
+        t.horizontal_tab();
+        t.tab_clear_current();
+        assert!(!t.is_dirty(screen_point(0, 0)));
+        t.set_cursor_pos(1, 1);
+        t.horizontal_tab();
+        assert_eq!(t.active_screen().cursor.x, 16);
+    }
+
+    #[test]
+    fn tab_clear_all() {
+        // ghostty: "Terminal: tabClear all" (Terminal.zig:11523)
+        let mut t = terminal(30, 5);
+        t.tab_clear_all();
+        assert!(!t.is_dirty(screen_point(0, 0)));
+        t.set_cursor_pos(1, 1);
+        t.horizontal_tab();
+        assert_eq!(t.active_screen().cursor.x, 29);
+    }
+
+    #[test]
+    fn print_repeat_simple() {
+        // ghostty: "Terminal: printRepeat simple" (Terminal.zig:11535)
+        let mut t = terminal(5, 5);
+        t.print_string("A");
+        t.print_repeat(1);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "AA");
+    }
+
+    #[test]
+    fn print_repeat_wrap() {
+        // ghostty: "Terminal: printRepeat wrap" (Terminal.zig:11551)
+        let mut t = terminal(5, 5);
+        t.print_string("    A");
+        t.print_repeat(1);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "    A\nA");
+    }
+
+    #[test]
+    fn print_repeat_no_previous_character() {
+        // ghostty: "Terminal: printRepeat no previous character" (Terminal.zig:11567)
+        let mut t = terminal(5, 5);
+        t.print_repeat(1);
+        assert!(!t.is_dirty(screen_point(0, 0)));
+        assert_eq!(t.plain_string(), "");
+    }
+
+    #[test]
+    fn print_attributes() {
+        // ghostty: "Terminal: printAttributes" (Terminal.zig:11582)
+        let mut t = terminal(5, 5);
+
+        {
+            t.set_attribute(Attribute::DirectColorFg(Rgb { r: 1, g: 2, b: 3 }));
+            assert_eq!(t.print_attributes(), "0;38:2::1:2:3");
+            t.set_attribute(Attribute::Unset);
+        }
+
+        {
+            t.set_attribute(Attribute::Bold);
+            t.set_attribute(Attribute::DirectColorBg(Rgb { r: 1, g: 2, b: 3 }));
+            assert_eq!(t.print_attributes(), "0;1;48:2::1:2:3");
+            t.set_attribute(Attribute::Unset);
+        }
+
+        {
+            t.set_attribute(Attribute::Bold);
+            t.set_attribute(Attribute::Faint);
+            t.set_attribute(Attribute::Italic);
+            t.set_attribute(Attribute::Underline(crate::sgr::Underline::Single));
+            t.set_attribute(Attribute::Blink);
+            t.set_attribute(Attribute::Inverse);
+            t.set_attribute(Attribute::Invisible);
+            t.set_attribute(Attribute::Strikethrough);
+            t.set_attribute(Attribute::DirectColorFg(Rgb {
+                r: 100,
+                g: 200,
+                b: 255,
+            }));
+            t.set_attribute(Attribute::DirectColorBg(Rgb {
+                r: 101,
+                g: 102,
+                b: 103,
+            }));
+            assert_eq!(
+                t.print_attributes(),
+                "0;1;2;3;4;5;7;8;9;38:2::100:200:255;48:2::101:102:103"
+            );
+            t.set_attribute(Attribute::Unset);
+        }
+
+        {
+            t.set_attribute(Attribute::Underline(crate::sgr::Underline::Single));
+            assert_eq!(t.print_attributes(), "0;4");
+            t.set_attribute(Attribute::Unset);
+        }
+
+        {
+            assert_eq!(t.print_attributes(), "0");
+        }
+    }
+
+    #[test]
+    fn erase_display_simple_erase_below() {
+        // ghostty: "Terminal: eraseDisplay simple erase below" (Terminal.zig:11633)
+        let mut t = terminal(5, 5);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "DEF".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "GHI".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(2, 2);
+        t.clear_dirty();
+        t.erase_display(EraseDisplay::Below, false);
+        assert!(!t.is_dirty(screen_point(0, 0)));
+        assert!(t.is_dirty(screen_point(0, 1)));
+        assert!(t.is_dirty(screen_point(0, 2)));
+        assert_eq!(t.plain_string(), "ABC\nD");
+    }
+
+    #[test]
+    fn erase_display_erase_below_preserves_sgr_bg() {
+        // ghostty: "Terminal: eraseDisplay erase below preserves SGR bg" (Terminal.zig:11661)
+        let mut t = terminal(5, 5);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "DEF".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "GHI".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(2, 2);
+        t.set_attribute(Attribute::DirectColorBg(Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0,
+        }));
+        t.erase_display(EraseDisplay::Below, false);
+        assert_eq!(t.plain_string(), "ABC\nD");
+        assert_red_bg_row(&t, 1..5, 1);
+    }
+
+    #[test]
+    fn erase_display_below_split_multi_cell() {
+        // ghostty: "Terminal: eraseDisplay below split multi-cell" (Terminal.zig:11701)
+        let mut t = terminal(5, 5);
+        t.print_string("AB橋C");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("DE橋F");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("GH橋I");
+        t.set_cursor_pos(2, 4);
+        t.erase_display(EraseDisplay::Below, false);
+        assert_eq!(t.plain_string(), "AB橋C\nDE");
+    }
+
+    #[test]
+    fn erase_display_below_protected_attributes_respected_with_iso() {
+        // ghostty: "Terminal: eraseDisplay below protected attributes respected with iso" (Terminal.zig:11723)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Iso);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "DEF".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "GHI".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(2, 2);
+        t.erase_display(EraseDisplay::Below, false);
+        assert_eq!(t.plain_string(), "ABC\nDEF\nGHI");
+    }
+
+    #[test]
+    fn erase_display_below_protected_attributes_ignored_with_dec_most_recent() {
+        // ghostty: "Terminal: eraseDisplay below protected attributes ignored with dec most recent" (Terminal.zig:11746)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Iso);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "DEF".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "GHI".chars() {
+            t.print(c);
+        }
+        t.set_protected_mode(ProtectedMode::Dec);
+        t.set_protected_mode(ProtectedMode::Off);
+        t.set_cursor_pos(2, 2);
+        t.erase_display(EraseDisplay::Below, false);
+        assert_eq!(t.plain_string(), "ABC\nD");
+    }
+
+    #[test]
+    fn erase_display_below_protected_attributes_ignored_with_dec_set() {
+        // ghostty: "Terminal: eraseDisplay below protected attributes ignored with dec set" (Terminal.zig:11771)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Dec);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "DEF".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "GHI".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(2, 2);
+        t.erase_display(EraseDisplay::Below, false);
+        assert_eq!(t.plain_string(), "ABC\nD");
+    }
+
+    #[test]
+    fn erase_display_below_protected_attributes_respected_with_force() {
+        // ghostty: "Terminal: eraseDisplay below protected attributes respected with force" (Terminal.zig:11794)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Dec);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "DEF".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "GHI".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(2, 2);
+        t.erase_display(EraseDisplay::Below, true);
+        assert_eq!(t.plain_string(), "ABC\nDEF\nGHI");
+    }
+
+    #[test]
+    fn erase_display_simple_erase_above() {
+        // ghostty: "Terminal: eraseDisplay simple erase above" (Terminal.zig:11817)
+        let mut t = terminal(5, 5);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "DEF".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "GHI".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(2, 2);
+        t.clear_dirty();
+        t.erase_display(EraseDisplay::Above, false);
+        assert!(t.is_dirty(screen_point(0, 0)));
+        assert!(t.is_dirty(screen_point(0, 1)));
+        assert!(!t.is_dirty(screen_point(0, 2)));
+        assert_eq!(t.plain_string(), "\n  F\nGHI");
+    }
+
+    #[test]
+    fn erase_display_erase_above_preserves_sgr_bg() {
+        // ghostty: "Terminal: eraseDisplay erase above preserves SGR bg" (Terminal.zig:11844)
+        let mut t = terminal(5, 5);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "DEF".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "GHI".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(2, 2);
+        t.set_attribute(Attribute::DirectColorBg(Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0,
+        }));
+        t.erase_display(EraseDisplay::Above, false);
+        assert_eq!(t.plain_string(), "\n  F\nGHI");
+        assert_red_bg_row(&t, 0..2, 1);
+    }
+
+    #[test]
+    fn erase_display_above_split_multi_cell() {
+        // ghostty: "Terminal: eraseDisplay above split multi-cell" (Terminal.zig:11884)
+        let mut t = terminal(5, 5);
+        t.print_string("AB橋C");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("DE橋F");
+        t.carriage_return();
+        t.linefeed();
+        t.print_string("GH橋I");
+        t.set_cursor_pos(2, 3);
+        t.erase_display(EraseDisplay::Above, false);
+        assert_eq!(t.plain_string(), "\n    F\nGH橋I");
+    }
+
+    #[test]
+    fn erase_display_above_protected_attributes_respected_with_iso() {
+        // ghostty: "Terminal: eraseDisplay above protected attributes respected with iso" (Terminal.zig:11906)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Iso);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "DEF".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "GHI".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(2, 2);
+        t.erase_display(EraseDisplay::Above, false);
+        assert_eq!(t.plain_string(), "ABC\nDEF\nGHI");
+    }
+
+    #[test]
+    fn erase_display_above_protected_attributes_ignored_with_dec_most_recent() {
+        // ghostty: "Terminal: eraseDisplay above protected attributes ignored with dec most recent" (Terminal.zig:11929)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Iso);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "DEF".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "GHI".chars() {
+            t.print(c);
+        }
+        t.set_protected_mode(ProtectedMode::Dec);
+        t.set_protected_mode(ProtectedMode::Off);
+        t.set_cursor_pos(2, 2);
+        t.erase_display(EraseDisplay::Above, false);
+        assert_eq!(t.plain_string(), "\n  F\nGHI");
+    }
+
+    #[test]
+    fn erase_display_above_protected_attributes_ignored_with_dec_set() {
+        // ghostty: "Terminal: eraseDisplay above protected attributes ignored with dec set" (Terminal.zig:11954)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Dec);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "DEF".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "GHI".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(2, 2);
+        t.erase_display(EraseDisplay::Above, false);
+        assert_eq!(t.plain_string(), "\n  F\nGHI");
+    }
+
+    #[test]
+    fn erase_display_above_protected_attributes_respected_with_force() {
+        // ghostty: "Terminal: eraseDisplay above protected attributes respected with force" (Terminal.zig:11977)
+        let mut t = terminal(5, 5);
+        t.set_protected_mode(ProtectedMode::Dec);
+        for c in "ABC".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "DEF".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "GHI".chars() {
+            t.print(c);
+        }
+        t.set_cursor_pos(2, 2);
+        t.erase_display(EraseDisplay::Above, true);
+        assert_eq!(t.plain_string(), "ABC\nDEF\nGHI");
+    }
+
+    #[test]
+    fn erase_display_protected_complete() {
+        // ghostty: "Terminal: eraseDisplay protected complete" (Terminal.zig:12000)
+        let mut t = terminal(10, 5);
+        t.print('A');
+        t.carriage_return();
+        t.linefeed();
+        for c in "123456789".chars() {
+            t.print(c);
+        }
+        let y = t.active_screen().cursor.y;
+        t.set_cursor_pos(y + 1, 6);
+        t.set_protected_mode(ProtectedMode::Dec);
+        t.print('X');
+        let y = t.active_screen().cursor.y;
+        t.set_cursor_pos(y + 1, 4);
+        t.clear_dirty();
+        t.erase_display(EraseDisplay::Complete, true);
+        for y in 0..u32::from(t.rows) {
+            assert!(t.is_dirty(screen_point(0, y)));
+        }
+        assert_eq!(t.plain_string(), "\n     X");
+    }
+
+    #[test]
+    fn erase_display_protected_below() {
+        // ghostty: "Terminal: eraseDisplay protected below" (Terminal.zig:12028)
+        let mut t = terminal(10, 5);
+        t.print('A');
+        t.carriage_return();
+        t.linefeed();
+        for c in "123456789".chars() {
+            t.print(c);
+        }
+        let y = t.active_screen().cursor.y;
+        t.set_cursor_pos(y + 1, 6);
+        t.set_protected_mode(ProtectedMode::Dec);
+        t.print('X');
+        let y = t.active_screen().cursor.y;
+        t.set_cursor_pos(y + 1, 4);
+        t.erase_display(EraseDisplay::Below, true);
+        assert_eq!(t.plain_string(), "A\n123  X");
+    }
+
+    #[test]
+    fn erase_display_scroll_complete() {
+        // ghostty: "Terminal: eraseDisplay scroll complete" (Terminal.zig:12050)
+        let mut t = terminal(10, 5);
+        t.print('A');
+        t.carriage_return();
+        t.linefeed();
+        t.erase_display(EraseDisplay::ScrollComplete, false);
+        assert_eq!(t.plain_string(), "");
+    }
+
+    #[test]
+    fn erase_display_protected_above() {
+        // ghostty: "Terminal: eraseDisplay protected above" (Terminal.zig:12067)
+        let mut t = terminal(10, 3);
+        t.print('A');
+        t.carriage_return();
+        t.linefeed();
+        for c in "123456789".chars() {
+            t.print(c);
+        }
+        let y = t.active_screen().cursor.y;
+        t.set_cursor_pos(y + 1, 6);
+        t.set_protected_mode(ProtectedMode::Dec);
+        t.print('X');
+        let y = t.active_screen().cursor.y;
+        t.set_cursor_pos(y + 1, 8);
+        t.erase_display(EraseDisplay::Above, true);
+        assert_eq!(t.plain_string(), "\n     X  9");
+    }
+
+    #[test]
+    fn erase_display_complete_preserves_cursor() {
+        // ghostty: "Terminal: eraseDisplay complete preserves cursor" (Terminal.zig:12089)
+        let mut t = terminal(5, 5);
+        t.print_string("AAAA");
+        t.set_attribute(Attribute::Bold);
+        assert_ne!(t.active_screen().cursor.style_id, DEFAULT_STYLE_ID);
+        t.erase_display(EraseDisplay::Complete, false);
+        assert_ne!(t.active_screen().cursor.style_id, DEFAULT_STYLE_ID);
+    }
+
+    #[test]
+    fn semantic_prompt_marks_prompt_and_output() {
+        // ghostty: "Terminal: semantic prompt" (Terminal.zig:12106)
+        let mut t = terminal(10, 5);
+
+        // Prompt
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::FreshLineNewPrompt,
+        ));
+        for c in "hello".chars() {
+            t.print(c);
+        }
+        assert_eq!(t.active_screen().cursor.y, 0);
+        assert_eq!(t.active_screen().cursor.x, 5);
+        {
+            let x = t.active_screen().cursor.x - 1;
+            let y = u32::from(t.active_screen().cursor.y);
+            let c = active_cell(&t, x, y);
+            assert_eq!(c.semantic_content(), SemanticContent::Prompt);
+            let row = t.get_row(Point::active(x, y)).unwrap();
+            assert_eq!(row.semantic_prompt(), SemanticPrompt::Prompt);
+        }
+
+        // Start input but end it on EOL
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::EndPromptStartInputTerminateEol,
+        ));
+        t.carriage_return();
+        t.linefeed();
+
+        // Write some output
+        assert_eq!(t.active_screen().cursor.y, 1);
+        assert_eq!(t.active_screen().cursor.x, 0);
+        for c in "world".chars() {
+            t.print(c);
+        }
+        {
+            let x = t.active_screen().cursor.x - 1;
+            let y = u32::from(t.active_screen().cursor.y);
+            let c = active_cell(&t, x, y);
+            assert_eq!(c.semantic_content(), SemanticContent::Output);
+            let row = t.get_row(Point::active(x, y)).unwrap();
+            assert_eq!(row.semantic_prompt(), SemanticPrompt::None);
+        }
+    }
+
+    /// The semantic-prompt classification of the active row at `y`.
+    fn active_row_prompt(t: &Terminal, y: u32) -> SemanticPrompt {
+        t.get_row(Point::active(0, y)).unwrap().semantic_prompt()
+    }
+
+    #[test]
+    fn semantic_prompt_continuations() {
+        // ghostty: "Terminal: semantic prompt continuations" (Terminal.zig:12150)
+        let mut t = terminal(10, 5);
+
+        // Prompt
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::FreshLineNewPrompt,
+        ));
+        for c in "hello".chars() {
+            t.print(c);
+        }
+        assert_eq!(t.active_screen().cursor.y, 0);
+        assert_eq!(t.active_screen().cursor.x, 5);
+        {
+            let x = t.active_screen().cursor.x - 1;
+            let y = u32::from(t.active_screen().cursor.y);
+            let c = active_cell(&t, x, y);
+            assert_eq!(c.semantic_content(), SemanticContent::Prompt);
+            let row = t.get_row(Point::active(x, y)).unwrap();
+            assert_eq!(row.semantic_prompt(), SemanticPrompt::Prompt);
+        }
+
+        // Continuation
+        t.carriage_return();
+        t.linefeed();
+        t.semantic_prompt(SemanticPromptCommand {
+            action: SemanticPromptAction::PromptStart,
+            options_unvalidated: b"k=c",
+        });
+        assert_eq!(t.active_screen().cursor.y, 1);
+        assert_eq!(t.active_screen().cursor.x, 0);
+        for c in "world".chars() {
+            t.print(c);
+        }
+        {
+            let x = t.active_screen().cursor.x - 1;
+            let y = u32::from(t.active_screen().cursor.y);
+            let c = active_cell(&t, x, y);
+            assert_eq!(c.semantic_content(), SemanticContent::Prompt);
+            let row = t.get_row(Point::active(x, y)).unwrap();
+            assert_eq!(row.semantic_prompt(), SemanticPrompt::PromptContinuation);
+        }
+    }
+
+    #[test]
+    fn index_in_prompt_mode_marks_new_row_as_prompt_continuation() {
+        // ghostty: "Terminal: index in prompt mode marks new row as prompt continuation" (Terminal.zig:12197)
+        let mut t = terminal(10, 5);
+
+        // Start a prompt
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::PromptStart,
+        ));
+        for c in "hello".chars() {
+            t.print(c);
+        }
+
+        // CRLF to a new line
+        t.carriage_return();
+        t.linefeed();
+
+        assert_eq!(active_row_prompt(&t, 0), SemanticPrompt::Prompt);
+        assert_eq!(active_row_prompt(&t, 1), SemanticPrompt::PromptContinuation);
+        assert_eq!(
+            t.active_screen().cursor.semantic_content,
+            SemanticContent::Prompt
+        );
+    }
+
+    #[test]
+    fn index_in_input_mode_does_not_mark_new_row_as_prompt() {
+        // ghostty: "Terminal: index in input mode does not mark new row as prompt" (Terminal.zig:12235)
+        let mut t = terminal(10, 5);
+
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::PromptStart,
+        ));
+        for c in "$ ".chars() {
+            t.print(c);
+        }
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::EndPromptStartInput,
+        ));
+        for c in "echo \\".chars() {
+            t.print(c);
+        }
+
+        // CRLF to a new line
+        t.carriage_return();
+        t.linefeed();
+
+        assert_eq!(active_row_prompt(&t, 1), SemanticPrompt::PromptContinuation);
+        assert_eq!(
+            t.active_screen().cursor.semantic_content,
+            SemanticContent::Input
+        );
+    }
+
+    #[test]
+    fn index_in_output_mode_does_not_mark_new_row_as_prompt() {
+        // ghostty: "Terminal: index in output mode does not mark new row as prompt" (Terminal.zig:12265)
+        let mut t = terminal(10, 5);
+
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::PromptStart,
+        ));
+        for c in "$ ".chars() {
+            t.print(c);
+        }
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::EndPromptStartInput,
+        ));
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::EndInputStartOutput,
+        ));
+        for c in "ls".chars() {
+            t.print(c);
+        }
+
+        // CRLF to a new line
+        t.carriage_return();
+        t.linefeed();
+
+        assert_eq!(active_row_prompt(&t, 1), SemanticPrompt::None);
+    }
+
+    #[test]
+    fn multiple_newlines_in_prompt_mode_marks_all_rows() {
+        // ghostty: "Terminal: multiple newlines in prompt mode marks all rows" (Terminal.zig:12373)
+        let mut t = terminal(10, 5);
+
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::PromptStart,
+        ));
+        for c in "line1".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "line2".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        for c in "line3".chars() {
+            t.print(c);
+        }
+
+        assert_eq!(active_row_prompt(&t, 0), SemanticPrompt::Prompt);
+        assert_eq!(active_row_prompt(&t, 1), SemanticPrompt::PromptContinuation);
+        assert_eq!(active_row_prompt(&t, 2), SemanticPrompt::PromptContinuation);
+    }
+
+    #[test]
+    fn osc133c_at_x0_on_prompt_row_clears_prompt_mark() {
+        // ghostty: "Terminal: OSC133C at x=0 on prompt row clears prompt mark" (Terminal.zig:12292)
+        let mut t = terminal(10, 5);
+
+        // Set up a prompt with input that wraps to a continuation line
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::PromptStart,
+        ));
+        for c in "$ echo \\".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+
+        // Before OSC133C, the row is marked as a prompt continuation
+        assert_eq!(active_row_prompt(&t, 1), SemanticPrompt::PromptContinuation);
+
+        // OSC133C at x=0 should clear the prompt mark
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::EndInputStartOutput,
+        ));
+        assert_eq!(t.active_screen().cursor.x, 0);
+
+        // After OSC133C, the prompt mark is cleared
+        assert_eq!(active_row_prompt(&t, 1), SemanticPrompt::None);
+    }
+
+    #[test]
+    fn osc133c_at_x_gt_0_on_prompt_row_does_not_clear_prompt_mark() {
+        // ghostty: "Terminal: OSC133C at x>0 on prompt row does not clear prompt mark" (Terminal.zig:12331)
+        let mut t = terminal(10, 5);
+
+        // Set up a prompt with a continuation prompt string on the next line
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::PromptStart,
+        ));
+        for c in "$ ".chars() {
+            t.print(c);
+        }
+        t.carriage_return();
+        t.linefeed();
+        t.semantic_prompt(SemanticPromptCommand {
+            action: SemanticPromptAction::PromptStart,
+            options_unvalidated: b"k=c",
+        });
+        for c in "> ".chars() {
+            t.print(c);
+        }
+
+        // Before OSC133C, the row is marked as a prompt continuation
+        assert_eq!(active_row_prompt(&t, 1), SemanticPrompt::PromptContinuation);
+
+        // OSC133C at x>0 should NOT clear the prompt mark
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::EndInputStartOutput,
+        ));
+        assert!(t.active_screen().cursor.x > 0);
+
+        // After OSC133C, the prompt mark remains
+        assert_eq!(active_row_prompt(&t, 1), SemanticPrompt::PromptContinuation);
+    }
+
+    /// Drive a `fresh_line_new_prompt` (OSC 133;A) with the given raw option
+    /// bytes and return the resulting screen click state.
+    fn click_after_osc133a(options: &[u8]) -> SemanticClick {
+        let mut t = terminal(10, 5);
+        assert_eq!(t.active_screen().semantic_prompt.click, SemanticClick::None);
+        t.semantic_prompt(SemanticPromptCommand {
+            action: SemanticPromptAction::FreshLineNewPrompt,
+            options_unvalidated: options,
+        });
+        t.active_screen().semantic_prompt.click
+    }
+
+    #[test]
+    fn osc133a_click_events_1_sets_click_to_click_events() {
+        // ghostty: "Terminal: OSC133A click_events=1 sets click to click_events" (Terminal.zig:12417)
+        assert_eq!(
+            click_after_osc133a(b"click_events=1"),
+            SemanticClick::ClickEvents(PromptClickEvents::Absolute)
+        );
+    }
+
+    #[test]
+    fn osc133a_click_events_2_sets_click_to_click_events_relative() {
+        // ghostty: "Terminal: OSC133A click_events=2 sets click to click_events (relative)" (Terminal.zig:12434)
+        assert_eq!(
+            click_after_osc133a(b"click_events=2"),
+            SemanticClick::ClickEvents(PromptClickEvents::Relative)
+        );
+    }
+
+    #[test]
+    fn osc133a_click_events_0_does_not_set_click_events() {
+        // ghostty: "Terminal: OSC133A click_events=0 does not set click_events" (Terminal.zig:12451)
+        assert_eq!(click_after_osc133a(b"click_events=0"), SemanticClick::None);
+    }
+
+    #[test]
+    fn osc133a_cl_option_sets_click_to_cl_value() {
+        // ghostty: "Terminal: OSC133A cl option sets click to cl value" (Terminal.zig:12466)
+        assert_eq!(
+            click_after_osc133a(b"cl=m"),
+            SemanticClick::Cl(PromptClick::Multiple)
+        );
+    }
+
+    #[test]
+    fn osc133a_cl_line_sets_click_to_line() {
+        // ghostty: "Terminal: OSC133A cl=line sets click to line" (Terminal.zig:12480)
+        assert_eq!(
+            click_after_osc133a(b"cl=line"),
+            SemanticClick::Cl(PromptClick::Line)
+        );
+    }
+
+    #[test]
+    fn osc133a_click_events_1_takes_priority_over_cl() {
+        // ghostty: "Terminal: OSC133A click_events=1 takes priority over cl" (Terminal.zig:12493)
+        assert_eq!(
+            click_after_osc133a(b"click_events=1;cl=m"),
+            SemanticClick::ClickEvents(PromptClickEvents::Absolute)
+        );
+    }
+
+    #[test]
+    fn osc133a_click_events_0_falls_back_to_cl() {
+        // ghostty: "Terminal: OSC133A click_events=0 falls back to cl" (Terminal.zig:12508)
+        assert_eq!(
+            click_after_osc133a(b"click_events=0;cl=v"),
+            SemanticClick::Cl(PromptClick::ConservativeVertical)
+        );
+    }
+
+    #[test]
+    fn osc133a_no_click_options_leaves_click_as_none() {
+        // ghostty: "Terminal: OSC133A no click options leaves click as none" (Terminal.zig:12523)
+        assert_eq!(click_after_osc133a(b"aid=123"), SemanticClick::None);
+    }
+
+    #[test]
+    fn cursor_is_at_prompt() {
+        // ghostty: "Terminal: cursorIsAtPrompt" (Terminal.zig:12537)
+        let mut t = terminal(10, 3);
+        assert!(!t.cursor_is_at_prompt());
+
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::PromptStart,
+        ));
+        for c in "$ ".chars() {
+            t.print(c);
+        }
+        assert!(t.cursor_is_at_prompt());
+
+        // Input is also a prompt.
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::EndPromptStartInput,
+        ));
+        for c in "ls".chars() {
+            t.print(c);
+        }
+        assert!(t.cursor_is_at_prompt());
+
+        // Still a prompt because this line has a prompt.
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::EndInputStartOutput,
+        ));
+        assert!(t.cursor_is_at_prompt());
+
+        // Newline to move to the next line (still in this prompt).
+        t.linefeed();
+        assert!(!t.cursor_is_at_prompt());
+
+        // Now go to another prompt.
+        t.linefeed();
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::PromptStart,
+        ));
+        assert!(t.cursor_is_at_prompt());
+    }
+
+    #[test]
+    fn cursor_is_at_prompt_alternate_screen() {
+        // ghostty: "Terminal: cursorIsAtPrompt alternate screen" (Terminal.zig:12566)
+        let mut t = terminal(3, 2);
+        assert!(!t.cursor_is_at_prompt());
+
+        // Add a prompt on the primary screen.
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::PromptStart,
+        ));
+        assert!(t.cursor_is_at_prompt());
+
+        // Switch to the alternate screen (never a prompt).
+        t.switch_screen_mode(SwitchScreenMode::M1049, true);
+        assert!(!t.cursor_is_at_prompt());
+
+        // Even setting a prompt while on the alt screen keeps it not-a-prompt.
+        t.semantic_prompt(SemanticPromptCommand::init(
+            SemanticPromptAction::PromptStart,
+        ));
+        assert!(!t.cursor_is_at_prompt());
+    }
+
+    #[test]
+    fn full_reset_with_a_non_empty_pen() {
+        // ghostty: "Terminal: fullReset with a non-empty pen" (Terminal.zig:12582)
+        let mut t = terminal(80, 80);
+        t.set_attribute(Attribute::DirectColorFg(Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0x7F,
+        }));
+        t.set_attribute(Attribute::DirectColorBg(Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0x7F,
+        }));
+        t.active_screen_mut().cursor.semantic_content = SemanticContent::Input;
+        t.full_reset();
+
+        let cell = active_cell(&t, 0, 0);
+        assert_eq!(cell.style_id(), DEFAULT_STYLE_ID);
+        assert_eq!(t.active_screen().cursor.style_id, DEFAULT_STYLE_ID);
+        assert_eq!(
+            t.active_screen().cursor.semantic_content,
+            SemanticContent::Output
+        );
+    }
+
+    #[test]
+    fn full_reset_hyperlink() {
+        // ghostty: "Terminal: fullReset hyperlink" (Terminal.zig:12604)
+        let mut t = terminal(80, 80);
+        t.active_screen_mut()
+            .start_hyperlink(None, b"http://example.com");
+        t.full_reset();
+        assert_eq!(t.active_screen().cursor.hyperlink_id, 0);
+    }
+
+    #[test]
+    fn full_reset_with_a_non_empty_saved_cursor() {
+        // ghostty: "Terminal: fullReset with a non-empty saved cursor" (Terminal.zig:12613)
+        let mut t = terminal(80, 80);
+        t.set_attribute(Attribute::DirectColorFg(Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0x7F,
+        }));
+        t.set_attribute(Attribute::DirectColorBg(Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0x7F,
+        }));
+        t.save_cursor();
+        t.full_reset();
+
+        let cell = active_cell(&t, 0, 0);
+        assert_eq!(cell.style_id(), DEFAULT_STYLE_ID);
+        assert_eq!(t.active_screen().cursor.style_id, DEFAULT_STYLE_ID);
+    }
+
+    #[test]
+    fn full_reset_origin_mode() {
+        // ghostty: "Terminal: fullReset origin mode" (Terminal.zig:12634)
+        let mut t = terminal(10, 10);
+        t.set_cursor_pos(3, 5);
+        t.modes.set(Mode::Origin, true);
+        t.full_reset();
+        assert_eq!(t.active_screen().cursor.y, 0);
+        assert_eq!(t.active_screen().cursor.x, 0);
+        assert!(!t.modes.get(Mode::Origin));
+    }
+
+    #[test]
+    fn full_reset_status_display() {
+        // ghostty: "Terminal: fullReset status display" (Terminal.zig:12648)
+        let mut t = terminal(10, 10);
+        t.status_display = StatusDisplay::Status;
+        t.full_reset();
+        assert_eq!(t.status_display, StatusDisplay::Main);
+    }
+
+    #[test]
+    fn full_reset_clears_alt_screen() {
+        // ghostty: "Terminal: fullReset clears alt screen kitty keyboard state" (Terminal.zig:12658)
+        // https://github.com/mitchellh/ghostty/issues/1607
+        // The kitty-keyboard push from the Zig test is omitted (kitty
+        // unsupported); the portable assertion is that fullReset removes the
+        // alternate screen.
+        let mut t = terminal(10, 10);
+        t.switch_screen_mode(SwitchScreenMode::M1049, true);
+        t.switch_screen_mode(SwitchScreenMode::M1049, false);
+        t.full_reset();
+        assert!(t.screens.get(ScreenKey::Alternate).is_none());
+    }
+
+    #[test]
+    fn full_reset_default_modes() {
+        // ghostty: "Terminal: fullReset default modes" (Terminal.zig:12676)
+        // init(alloc, .{ .default_modes = .{ .grapheme_cluster = true } })
+        let mut t = terminal(10, 10);
+        t.modes = ModeState::with_default(
+            crate::modes::ModeBits::default_values().with_mode(Mode::GraphemeCluster, true),
+        );
+        assert!(t.modes.get(Mode::GraphemeCluster));
+        t.full_reset();
+        assert!(t.modes.get(Mode::GraphemeCluster));
+    }
+
+    #[test]
+    fn full_reset_tracked_pins() {
+        // ghostty: "Terminal: fullReset tracked pins" (Terminal.zig:12688)
+        let mut t = terminal(80, 80);
+        let cursor_pin = t.active_screen().cursor_pin().unwrap();
+        let p = t.active_screen_mut().pages.track_pin(cursor_pin);
+        t.full_reset();
+        let pin = t.active_screen().pages.tracked_pin(p).unwrap();
+        assert!(t.active_screen().pages.pin_is_valid(pin));
+    }
+
+    #[test]
+    fn resize_less_cols_with_wide_char_then_print() {
+        // ghostty: "Terminal: resize less cols with wide char then print" (Terminal.zig:12701)
+        // https://github.com/mitchellh/ghostty/issues/272
+        // This is also tested in depth in screen resize tests but I want to keep
+        // this test around to ensure we don't regress at multiple layers.
+        let mut t = terminal(3, 3);
+        t.print('x');
+        print_cp(&mut t, 0x1F600); // 😀
+        t.resize(2, 3);
+        t.set_cursor_pos(1, 2);
+        print_cp(&mut t, 0x1F600); // 😀
+    }
+
+    #[test]
+    fn resize_with_left_and_right_margin_set() {
+        // ghostty: "Terminal: resize with left and right margin set" (Terminal.zig:12715)
+        // https://github.com/mitchellh/ghostty/issues/723
+        // This was found via fuzzing so its highly specific.
+        let cols = 70;
+        let rows = 23;
+        let mut t = terminal(cols, rows);
+        t.modes.set(Mode::EnableLeftAndRightMargin, true);
+        t.modes.set(Mode::EnableMode3, true);
+        t.resize(cols, rows);
+        t.set_left_and_right_margin(2, 0);
+        t.print('0');
+        t.print_repeat(1850);
+        let _ = t.modes.restore(Mode::EnableMode3);
+        t.resize(cols, rows);
+    }
+
+    #[test]
+    fn resize_with_wraparound_off() {
+        // ghostty: "Terminal: resize with wraparound off" (Terminal.zig:12733)
+        // https://github.com/mitchellh/ghostty/issues/1343
+        let cols = 4;
+        let rows = 2;
+        let mut t = terminal(cols, rows);
+        t.modes.set(Mode::Wraparound, false);
+        t.print('0');
+        t.print('1');
+        t.print('2');
+        t.print('3');
+        let new_cols = 2;
+        t.resize(new_cols, rows);
+        assert_eq!(t.plain_string(), "01");
+    }
+
+    #[test]
+    fn resize_with_wraparound_on() {
+        // ghostty: "Terminal: resize with wraparound on" (Terminal.zig:12753)
+        let cols = 4;
+        let rows = 2;
+        let mut t = terminal(cols, rows);
+        t.modes.set(Mode::Wraparound, true);
+        t.print('0');
+        t.print('1');
+        t.print('2');
+        t.print('3');
+        let new_cols = 2;
+        t.resize(new_cols, rows);
+        assert_eq!(t.plain_string(), "01\n23");
+    }
+
+    #[test]
+    fn resize_with_high_unique_style_per_cell() {
+        // ghostty: "Terminal: resize with high unique style per cell" (Terminal.zig:12773)
+        let mut t = terminal(30, 30);
+        for y in 0..t.rows {
+            for x in 0..t.cols {
+                t.set_cursor_pos(y, x);
+                t.set_attribute(Attribute::DirectColorBg(Rgb {
+                    r: x as u8,
+                    g: y as u8,
+                    b: 0,
+                }));
+                t.print('x');
+            }
+        }
+        t.resize(60, 30);
+    }
+
+    #[test]
+    fn resize_with_high_unique_style_per_cell_with_wrapping() {
+        // ghostty: "Terminal: resize with high unique style per cell with wrapping" (Terminal.zig:12793)
+        let mut t = terminal(30, 30);
+        let cell_count: u16 = t.rows * t.cols;
+        for i in 0..cell_count {
+            let r: u8 = (i >> 8) as u8;
+            let g: u8 = (i & 0xFF) as u8;
+            t.set_attribute(Attribute::DirectColorBg(Rgb { r, g, b: 0 }));
+            t.print('x');
+        }
+        t.resize(60, 30);
+    }
+
+    #[test]
+    fn resize_with_reflow_and_saved_cursor() {
+        // ghostty: "Terminal: resize with reflow and saved cursor" (Terminal.zig:12814)
+        let mut t = terminal(2, 3);
+        t.print_string("1A2B");
+        t.set_cursor_pos(2, 2);
+        {
+            let cell = t.active_screen().cursor_cell().expect("cursor cell exists");
+            assert_eq!(cell.codepoint(), 'B' as u32);
+        }
+        assert_eq!(t.plain_string(), "1A\n2B");
+
+        // Save the cursor, resize (reflow), and restore.
+        t.save_cursor();
+        t.resize(5, 3);
+        t.restore_cursor();
+
+        assert_eq!(t.plain_string(), "1A2B");
+        let cell = t.active_screen().cursor_cell().expect("cursor cell exists");
+        assert_eq!(cell.codepoint(), 'B' as u32);
+    }
+
+    #[test]
+    fn resize_with_reflow_and_saved_cursor_pending_wrap() {
+        // ghostty: "Terminal: resize with reflow and saved cursor pending wrap" (Terminal.zig:12856)
+        let mut t = terminal(2, 3);
+        t.print_string("1A2B");
+        {
+            let cell = t.active_screen().cursor_cell().expect("cursor cell exists");
+            assert_eq!(cell.codepoint(), 'B' as u32);
+        }
+        assert_eq!(t.plain_string(), "1A\n2B");
+
+        // Save the cursor, resize (reflow), and restore.
+        t.save_cursor();
+        t.resize(5, 3);
+        t.restore_cursor();
+
+        assert_eq!(t.plain_string(), "1A2B");
+
+        // Pending wrap should be reset.
+        t.print('X');
+        assert_eq!(t.plain_string(), "1A2BX");
+    }
+
+    #[test]
+    fn deccolm_without_dec_mode_40() {
+        // ghostty: "Terminal: DECCOLM without DEC mode 40" (Terminal.zig:12895)
+        let mut t = terminal(5, 5);
+        t.modes.set(Mode::Column132, true);
+        t.deccolm(DeccolmMode::Cols132);
+        assert_eq!(t.cols, 5);
+        assert_eq!(t.rows, 5);
+        assert!(!t.modes.get(Mode::Column132));
+    }
+
+    #[test]
+    fn deccolm_unset() {
+        // ghostty: "Terminal: DECCOLM unset" (Terminal.zig:12907)
+        let mut t = terminal(5, 5);
+        t.modes.set(Mode::EnableMode3, true);
+        t.deccolm(DeccolmMode::Cols80);
+        assert_eq!(t.cols, 80);
+        assert_eq!(t.rows, 5);
+    }
+
+    #[test]
+    fn deccolm_resets_pending_wrap() {
+        // ghostty: "Terminal: DECCOLM resets pending wrap" (Terminal.zig:12918)
+        let mut t = terminal(5, 5);
+        for c in "ABCDE".chars() {
+            t.print(c);
+        }
+        assert!(t.active_screen().cursor.pending_wrap);
+
+        t.modes.set(Mode::EnableMode3, true);
+        t.deccolm(DeccolmMode::Cols80);
+        assert_eq!(t.cols, 80);
+        assert_eq!(t.rows, 5);
+        assert!(!t.active_screen().cursor.pending_wrap);
+    }
+
+    #[test]
+    fn deccolm_preserves_sgr_bg() {
+        // ghostty: "Terminal: DECCOLM preserves SGR bg" (Terminal.zig:12933)
+        let mut t = terminal(5, 5);
+        t.set_attribute(Attribute::DirectColorBg(Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0,
+        }));
+        t.modes.set(Mode::EnableMode3, true);
+        t.deccolm(DeccolmMode::Cols80);
+
+        let c = active_cell(&t, 0, 0);
+        assert_eq!(c.content_tag(), CellContentTag::BgColorRgb);
+        assert_eq!(
+            c.rgb(),
+            Rgb {
+                r: 0xFF,
+                g: 0,
+                b: 0
+            }
+        );
+    }
+
+    #[test]
+    fn deccolm_resets_scroll_region() {
+        // ghostty: "Terminal: DECCOLM resets scroll region" (Terminal.zig:12957)
+        let mut t = terminal(5, 5);
+        t.modes.set(Mode::EnableLeftAndRightMargin, true);
+        t.set_top_and_bottom_margin(2, 3);
+        t.set_left_and_right_margin(3, 5);
+        t.modes.set(Mode::EnableMode3, true);
+        t.deccolm(DeccolmMode::Cols80);
+
+        assert!(t.modes.get(Mode::EnableLeftAndRightMargin));
+        assert_eq!(t.scrolling_region.top, 0);
+        assert_eq!(t.scrolling_region.bottom, 4);
+        assert_eq!(t.scrolling_region.left, 0);
+        assert_eq!(t.scrolling_region.right, 79);
+    }
+
+    #[test]
+    fn mode_47_alt_screen_plain() {
+        // ghostty: "Terminal: mode 47 alt screen plain" (Terminal.zig:12976)
+        let mut t = terminal(5, 5);
+        t.print_string("1A");
+
+        // Switch to the alternate screen; it should be empty.
+        t.switch_screen_mode(SwitchScreenMode::M47, true);
+        assert_eq!(t.screens.active_key(), ScreenKey::Alternate);
+        assert_eq!(t.plain_string(), "");
+
+        // Write to the alt screen.
+        t.print_string("2B");
+        assert_eq!(t.plain_string(), "  2B");
+
+        // Switch back to primary; it retains its content.
+        t.switch_screen_mode(SwitchScreenMode::M47, false);
+        assert_eq!(t.screens.active_key(), ScreenKey::Primary);
+        assert_eq!(t.plain_string(), "1A");
+
+        // Switch to alt again; mode 47 does NOT clear it.
+        t.switch_screen_mode(SwitchScreenMode::M47, true);
+        assert_eq!(t.screens.active_key(), ScreenKey::Alternate);
+        assert_eq!(t.plain_string(), "  2B");
+    }
+
+    #[test]
+    fn mode_47_copies_cursor_both_directions() {
+        // ghostty: "Terminal: mode 47 copies cursor both directions" (Terminal.zig:13027)
+        let mut t = terminal(5, 5);
+        t.set_attribute(Attribute::DirectColorFg(Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0x7F,
+        }));
+
+        // Enter the alt screen: the cursor (and its style) is copied.
+        t.switch_screen_mode(SwitchScreenMode::M47, true);
+        assert_eq!(t.screens.active_key(), ScreenKey::Alternate);
+        assert_ne!(t.active_screen().cursor.style_id, DEFAULT_STYLE_ID);
+        assert_eq!(t.cursor_page_style_count(), 1);
+        assert!(t.cursor_page_style_ref_count() > 0);
+
+        // Change the style on the alt screen.
+        t.set_attribute(Attribute::DirectColorFg(Rgb {
+            r: 0,
+            g: 0xFF,
+            b: 0,
+        }));
+
+        // Return to primary: the cursor is copied back.
+        t.switch_screen_mode(SwitchScreenMode::M47, false);
+        assert_eq!(t.screens.active_key(), ScreenKey::Primary);
+        assert_ne!(t.active_screen().cursor.style_id, DEFAULT_STYLE_ID);
+        assert_eq!(t.cursor_page_style_count(), 1);
+        assert!(t.cursor_page_style_ref_count() > 0);
+    }
+
+    #[test]
+    fn mode_1047_alt_screen_plain() {
+        // ghostty: "Terminal: mode 1047 alt screen plain" (Terminal.zig:13063)
+        let mut t = terminal(5, 5);
+        t.print_string("1A");
+
+        // Switch to the alternate screen; it should be empty.
+        t.switch_screen_mode(SwitchScreenMode::M1047, true);
+        assert_eq!(t.screens.active_key(), ScreenKey::Alternate);
+        assert_eq!(t.plain_string(), "");
+
+        // Write to the alt screen.
+        t.print_string("2B");
+        assert_eq!(t.plain_string(), "  2B");
+
+        // Switch back to primary; it retains its content.
+        t.switch_screen_mode(SwitchScreenMode::M1047, false);
+        assert_eq!(t.screens.active_key(), ScreenKey::Primary);
+        assert_eq!(t.plain_string(), "1A");
+
+        // Switch to alt again; mode 1047 clears the alt screen on re-entry.
+        t.switch_screen_mode(SwitchScreenMode::M1047, true);
+        assert_eq!(t.screens.active_key(), ScreenKey::Alternate);
+        assert_eq!(t.plain_string(), "");
+    }
+
+    #[test]
+    fn mode_1047_copies_cursor_both_directions() {
+        // ghostty: "Terminal: mode 1047 copies cursor both directions" (Terminal.zig:13114)
+        let mut t = terminal(5, 5);
+        t.set_attribute(Attribute::DirectColorFg(Rgb {
+            r: 0xFF,
+            g: 0,
+            b: 0x7F,
+        }));
+
+        // Enter the alt screen: the cursor (and its style) is copied.
+        t.switch_screen_mode(SwitchScreenMode::M1047, true);
+        assert_eq!(t.screens.active_key(), ScreenKey::Alternate);
+        assert_ne!(t.active_screen().cursor.style_id, DEFAULT_STYLE_ID);
+        assert_eq!(t.cursor_page_style_count(), 1);
+        assert!(t.cursor_page_style_ref_count() > 0);
+
+        // Change the style on the alt screen.
+        t.set_attribute(Attribute::DirectColorFg(Rgb {
+            r: 0,
+            g: 0xFF,
+            b: 0,
+        }));
+
+        // Return to primary: the cursor is copied back.
+        t.switch_screen_mode(SwitchScreenMode::M1047, false);
+        assert_eq!(t.screens.active_key(), ScreenKey::Primary);
+        assert_ne!(t.active_screen().cursor.style_id, DEFAULT_STYLE_ID);
+        assert_eq!(t.cursor_page_style_count(), 1);
+        assert!(t.cursor_page_style_ref_count() > 0);
+    }
+
+    #[test]
+    fn mode_1049_alt_screen_plain() {
+        // ghostty: "Terminal: mode 1049 alt screen plain" (Terminal.zig:13150)
+        let mut t = terminal(5, 5);
+        t.print_string("1A");
+
+        // Switch to the alternate screen; it should be empty.
+        t.switch_screen_mode(SwitchScreenMode::M1049, true);
+        assert_eq!(t.screens.active_key(), ScreenKey::Alternate);
+        assert_eq!(t.plain_string(), "");
+
+        // Write to the alt screen.
+        t.print_string("2B");
+        assert_eq!(t.plain_string(), "  2B");
+
+        // Switch back to primary; it retains its content.
+        t.switch_screen_mode(SwitchScreenMode::M1049, false);
+        assert_eq!(t.screens.active_key(), ScreenKey::Primary);
+        assert_eq!(t.plain_string(), "1A");
+
+        // Our cursor should be restored, so printing continues from it.
+        t.print_string("C");
+        assert_eq!(t.plain_string(), "1AC");
+
+        // Switch to alt again; it is cleared on entry.
+        t.switch_screen_mode(SwitchScreenMode::M1049, true);
+        assert_eq!(t.screens.active_key(), ScreenKey::Alternate);
+        assert_eq!(t.plain_string(), "");
+    }
+
+    #[test]
+    fn delete_lines_wide_char_at_right_margin_with_full_clear() {
+        // ghostty: "Terminal: deleteLines wide char at right margin with full clear" (Terminal.zig:13215)
+        // Reproduces a crash found by AFL++ fuzzer (afl-out/stream/default/crashes/
+        // id:000007,sig:06,src:004522). The crash is a page integrity violation
+        // "spacer tail not following wide" triggered during scrollUp -> deleteLines
+        // -> clearCells. When deleteLines count >= scroll region height, all rows
+        // are cleared (no shifting), so rowWillBeShifted is never called and wide
+        // characters straddling the right margin boundary leave orphaned spacer_tails.
+        let mut t = terminal(80, 24);
+
+        // Place a wide character at col 39 (1-indexed) on several rows.
+        // The wide cell lands at col 38 (0-indexed) with spacer_tail at col 39.
+        t.set_cursor_pos(10, 39);
+        print_cp(&mut t, 0x4E2D); // '中'
+
+        // Set left/right scroll margins so scrolling_region.right = 38.
+        t.modes.set(Mode::EnableLeftAndRightMargin, true);
+        t.set_left_and_right_margin(5, 39);
+
+        // clearCells will clear cells[4..39], which includes the wide cell
+        // at col 38 but NOT the spacer_tail at col 39.
+        // scrollUp with count >= region height causes deleteLines to clear
+        // ALL rows without any shifting, so rowWillBeShifted is never called
+        // and the orphaned spacer_tail at col 39 triggers a page integrity
+        // violation in clearCells.
+        t.scroll_up(usize::from(t.rows));
     }
 }

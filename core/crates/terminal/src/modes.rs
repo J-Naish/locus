@@ -89,7 +89,8 @@ impl ModeTag {
 pub struct ModeBits(u64);
 
 impl ModeBits {
-    const fn default_values() -> Self {
+    /// The packed defaults for all modes (as declared in `ENTRIES`).
+    pub const fn default_values() -> Self {
         let mut bits = Self(0);
         let mut index = 0;
         while index < ENTRIES.len() {
@@ -99,6 +100,13 @@ impl ModeBits {
             index += 1;
         }
         bits
+    }
+
+    /// Return a copy of these bits with `mode` set to `value`. Useful for
+    /// building an initial `default_modes` set for `Terminal`/`Options`.
+    pub fn with_mode(mut self, mode: Mode, value: bool) -> Self {
+        self.set(mode, value);
+        self
     }
 
     fn get(self, mode: Mode) -> bool {
@@ -135,6 +143,17 @@ impl Default for ModeState {
 }
 
 impl ModeState {
+    /// Construct a state whose current and default values both come from
+    /// `default_modes`, mirroring ghostty's `Terminal.init`
+    /// (`modes = .{ .values = default_modes, .default = default_modes }`).
+    pub fn with_default(default_modes: ModeBits) -> Self {
+        Self {
+            values: default_modes,
+            saved: ModeBits::default(),
+            default: default_modes,
+        }
+    }
+
     pub fn reset(&mut self) {
         self.values = self.default;
         self.saved = ModeBits::default();

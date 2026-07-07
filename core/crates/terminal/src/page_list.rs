@@ -1777,21 +1777,39 @@ impl PageList {
             len = 1;
         }
         let max_trailing_pin_x = self.cols.saturating_sub(1).saturating_sub(cursor_x);
+
+        // Handle non-cursor tracked pins first (matching Ghostty's ordering).
+        // A pin sitting in the trailing blanks past the destination width is
+        // clamped to the destination width; the live cursor pin is handled
+        // separately below and must NOT be clamped, so it is skipped here. Order
+        // matters: clamping a non-cursor pin uses the content-derived `len`
+        // before the cursor extends it, otherwise the saved-cursor pin would be
+        // dragged onto a wrapped row instead of clamped.
         for (id, pin) in self.tracked_pins.iter_mut().enumerate() {
             let Some(pin) = pin else {
                 continue;
             };
+            if preserved_cursor == Some(PinId(id)) {
+                continue;
+            }
             if pin.node == source.node && pin.y == source.y {
                 if pin.x >= len {
-                    if preserved_cursor == Some(PinId(id)) {
-                        len = len.max(pin.x.saturating_add(1));
-                        continue;
-                    }
                     pin.x = pin.x.min(max_trailing_pin_x);
                 }
                 len = len.max(pin.x.saturating_add(1));
             }
         }
+
+        // The live cursor, if it's after blanks on the right, keeps those cells
+        // before the next write so they reflow with it (never clamped).
+        if let Some(cursor_id) = preserved_cursor {
+            if let Some(Some(pin)) = self.tracked_pins.get(cursor_id.0) {
+                if pin.node == source.node && pin.y == source.y {
+                    len = len.max(pin.x.saturating_add(1));
+                }
+            }
+        }
+
         len.min(snapshots.len() as CellCountInt)
     }
 

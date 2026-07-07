@@ -50,6 +50,15 @@ pub enum PromptClickEvents {
 }
 
 impl<'a> SemanticPrompt<'a> {
+    /// Construct a command for `action` with no options. Mirrors ghostty's
+    /// `osc.Command.SemanticPrompt.init` (semantic_prompt.zig:32).
+    pub fn init(action: SemanticPromptAction) -> Self {
+        Self {
+            action,
+            options_unvalidated: b"",
+        }
+    }
+
     pub fn read_aid(self) -> Option<&'a [u8]> {
         read_option(self.options_unvalidated, b"aid")
     }

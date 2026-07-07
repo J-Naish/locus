@@ -60,9 +60,17 @@ impl ScreenSet {
     pub fn get_init(&mut self, key: ScreenKey) -> &mut Screen {
         match key {
             ScreenKey::Primary => &mut self.primary,
-            ScreenKey::Alternate => self
-                .alternate
-                .get_or_insert_with(|| Screen::new(self.options)),
+            // The alternate screen never keeps scrollback, matching ghostty's
+            // `switchScreen`, which hardcodes `max_scrollback = 0` for it.
+            ScreenKey::Alternate => {
+                let options = self.options;
+                self.alternate.get_or_insert_with(|| {
+                    Screen::new(Options {
+                        max_scrollback: 0,
+                        ..options
+                    })
+                })
+            }
         }
     }
 

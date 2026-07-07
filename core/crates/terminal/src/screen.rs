@@ -7,6 +7,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::color::Name;
 use crate::hyperlink::{Hyperlink, HyperlinkId, HyperlinkIdKind};
+use crate::osc::parsers::semantic_prompt::{PromptClick, PromptClickEvents, PromptKind};
 use crate::page::{Cell, CellWide, Page, SemanticContent, SemanticPrompt};
 use crate::page_list::{
     CloneOptions, Direction, IncreaseCapacity, IncreaseCapacityError, PageList, Pin, PinId,
@@ -25,12 +26,15 @@ pub struct Dirty {
     pub hyperlink_hover: bool,
 }
 
+/// Faithful port of ghostty's `Screen.SemanticPrompt.SemanticClick`
+/// (Screen.zig:114): a tagged union set from `cl`/`click_events` options on
+/// the most recent OSC 133 commands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SemanticClick {
     #[default]
     None,
-    ClickEvents,
-    Cl,
+    ClickEvents(PromptClickEvents),
+    Cl(PromptClick),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -270,17 +274,31 @@ impl Screen {
         screen
     }
 
+    /// Reset the screen to its initial state. Faithful port of ghostty's
+    /// `Screen.reset` (Screen.zig): `pages.reset()` preserves tracked pins (so
+    /// the cursor pin stays valid at the top-left), then cursor and per-screen
+    /// state are reset in place.
     pub fn reset(&mut self) {
-        let options = Options {
-            cols: self.pages.cols,
-            rows: self.pages.rows,
-            max_scrollback: if self.no_scrollback {
-                0
-            } else {
-                self.pages.max_size()
-            },
-        };
-        *self = Self::new(options);
+        // Release any live cursor refs before the pages are torn down.
+        self.release_cursor_refs();
+
+        // Reset our pages. This preserves tracked pins, moving them to the
+        // top-left, so the cursor pin remains valid.
+        self.pages.reset();
+
+        // The cursor keeps its (preserved) tracked pin, now at (0, 0).
+        let cursor_pin = self.cursor.pin;
+        self.cursor = Cursor::new(cursor_pin);
+
+        // Reset our basic per-screen state. (Protected mode lives on the
+        // `Terminal` in this port, not the `Screen`, so it is reset there.)
+        self.saved_cursor = None;
+        self.charset = CharsetState::default();
+        self.semantic_prompt = ScreenSemanticPrompt::default();
+        self.clear_selection();
+        self.dirty = Dirty::default();
+
+        self.assert_integrity();
     }
 
     pub fn cols(&self) -> CellCountInt {
@@ -888,6 +906,16 @@ impl Screen {
     }
 
     pub fn manual_style_update(&mut self) {
+        let _ = self.try_manual_style_update();
+    }
+
+    /// Reload `cursor.style_id` from `cursor.style`, acquiring a new style ref
+    /// and growing/splitting the page as needed. Returns `false` when the style
+    /// could not be stored (capacity exhausted and the page could not be split)
+    /// and the cursor was forced back to the default style id — callers that
+    /// need to keep terminal state coherent (e.g. `restoreCursor`) should then
+    /// reset `cursor.style` to default themselves.
+    pub fn try_manual_style_update(&mut self) -> bool {
         let old = self.cursor.style_id;
         if old != DEFAULT_STYLE_ID {
             if let Some(pin) = self.cursor_pin() {
@@ -899,23 +927,23 @@ impl Screen {
 
         if self.cursor.style.is_default() {
             self.cursor.style_id = DEFAULT_STYLE_ID;
-            return;
+            return true;
         }
 
         let style = PackedStyle::from(self.cursor.style);
         loop {
             let Some(pin) = self.cursor_pin() else {
                 self.cursor.style_id = DEFAULT_STYLE_ID;
-                return;
+                return false;
             };
             let Some(node) = self.pages.node_mut(pin.node) else {
                 self.cursor.style_id = DEFAULT_STYLE_ID;
-                return;
+                return false;
             };
             match node.page.add_style(style) {
                 Ok(id) => {
                     self.cursor.style_id = id;
-                    return;
+                    return true;
                 }
                 Err(_) => {
                     if self
@@ -927,7 +955,7 @@ impl Screen {
                             .is_err()
                     {
                         self.cursor.style_id = DEFAULT_STYLE_ID;
-                        return;
+                        return false;
                     }
                 }
             }
@@ -1174,6 +1202,10 @@ impl Screen {
         true
     }
 
+    /// Modify the semantic content type of the cursor. Faithful port of
+    /// ghostty's `cursorSetSemanticContent` (Screen.zig:2375). The `prompt`
+    /// arm is the only one that marks the cursor's page row; the `input` and
+    /// `output` arms touch cursor fields only.
     pub fn cursor_set_semantic_content(&mut self, content: SemanticContent) {
         self.cursor.semantic_content = content;
         self.cursor.semantic_content_clear_eol = false;
@@ -1182,17 +1214,32 @@ impl Screen {
                 self.semantic_prompt.seen = true;
                 self.set_cursor_row_semantic_prompt(SemanticPrompt::Prompt);
             }
-            SemanticContent::Input => {
-                self.set_cursor_row_semantic_prompt(SemanticPrompt::PromptContinuation);
-            }
-            SemanticContent::Output => {}
+            // Ghostty's `.input`/`.output` arms only update the cursor; they do
+            // NOT write `page_row.semantic_prompt`.
+            SemanticContent::Input | SemanticContent::Output => {}
         }
     }
 
+    /// The `.prompt` arm of `cursorSetSemanticContent` with an explicit
+    /// `PromptKind`, controlling whether the row is marked `.prompt`
+    /// (initial/right) or `.prompt_continuation` (continuation/secondary).
+    pub fn cursor_set_semantic_prompt(&mut self, kind: PromptKind) {
+        self.semantic_prompt.seen = true;
+        self.cursor.semantic_content = SemanticContent::Prompt;
+        self.cursor.semantic_content_clear_eol = false;
+        let prompt = match kind {
+            PromptKind::Initial | PromptKind::Right => SemanticPrompt::Prompt,
+            PromptKind::Continuation | PromptKind::Secondary => SemanticPrompt::PromptContinuation,
+        };
+        self.set_cursor_row_semantic_prompt(prompt);
+    }
+
+    /// The `.input`/`.clear_eol` arm of `cursorSetSemanticContent`. Sets the
+    /// cursor to input content that terminates at end-of-line. Ghostty does
+    /// not mark the row here.
     pub fn cursor_set_semantic_input_clear_eol(&mut self) {
         self.cursor.semantic_content = SemanticContent::Input;
         self.cursor.semantic_content_clear_eol = true;
-        self.set_cursor_row_semantic_prompt(SemanticPrompt::PromptContinuation);
     }
 
     pub fn cursor_mark_dirty(&mut self) {
@@ -1782,7 +1829,7 @@ impl Screen {
         if !cursor_input
             || matches!(
                 self.semantic_prompt.click,
-                SemanticClick::None | SemanticClick::ClickEvents
+                SemanticClick::None | SemanticClick::ClickEvents(_)
             )
         {
             return PromptClickMove::ZERO;
@@ -2431,6 +2478,15 @@ impl Screen {
         }
     }
 
+    /// The semantic-prompt classification of the cursor's page row, mirroring
+    /// a read of ghostty's `cursor.page_row.semantic_prompt`.
+    pub fn cursor_row_semantic_prompt(&self) -> Option<SemanticPrompt> {
+        let pin = self.cursor_pin()?;
+        self.pages
+            .node(pin.node)
+            .map(|node| node.page.row(pin.y).semantic_prompt())
+    }
+
     fn clear_row_at_cursor(&mut self) {
         if let Some(pin) = self.cursor_pin() {
             self.clear_row(pin, false);
@@ -2438,15 +2494,19 @@ impl Screen {
     }
 
     fn clear_row(&mut self, pin: Pin, protected: bool) {
+        // Ghostty's `clearRows` fills with `blankCell()`, so a non-default
+        // cursor background is preserved across the cleared row.
+        let fill = self.blank_cell();
         if let Some(node) = self.pages.node_mut(pin.node) {
+            let cols = node.page.size().cols;
             if protected {
-                for x in 0..node.page.size().cols {
+                for x in 0..cols {
                     if !node.page.cell(pin.y, x).protected() {
-                        node.page.clear_cells(pin.y, x, x.saturating_add(1));
+                        node.page.fill_cells(pin.y, x, x.saturating_add(1), fill);
                     }
                 }
             } else {
-                node.page.clear_cells(pin.y, 0, node.page.size().cols);
+                node.page.fill_cells(pin.y, 0, cols, fill);
             }
         }
     }
@@ -6155,7 +6215,7 @@ mod tests {
         });
 
         // Enable line click mode
-        screen.semantic_prompt.click = SemanticClick::Cl;
+        screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
 
         // Write a prompt and input
         screen.cursor_set_semantic_content(SemanticContent::Prompt);
@@ -6630,7 +6690,7 @@ mod tests {
         |screen| {
             screen.cursor_absolute(0, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 5, 2));
             assert!(movement.right >= movement.left);
         }
@@ -6641,7 +6701,7 @@ mod tests {
         |screen| {
             screen.cursor_absolute(6, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 1, 2));
             assert!(movement.left >= movement.right);
         }
@@ -6651,7 +6711,7 @@ mod tests {
         "port-added: prompt click movement is disabled while click events are enabled",
         |screen| {
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::ClickEvents;
+            screen.semantic_prompt.click = SemanticClick::ClickEvents(PromptClickEvents::Absolute);
             assert_eq!(
                 screen.prompt_click_move(screen_pin(&screen, 1, 2)),
                 PromptClickMove::ZERO
@@ -6850,7 +6910,7 @@ mod tests {
         screen_prompt_click_move_right_cursor_not_on_input,
         "ghostty: \"Screen: promptClickMove line right cursor not on input\" (Screen.zig:10018)",
         |screen| {
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             assert_eq!(
                 screen.prompt_click_move(screen_pin(&screen, 5, 2)),
                 PromptClickMove::ZERO
@@ -6863,7 +6923,7 @@ mod tests {
         |screen| {
             screen.cursor_absolute(5, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             assert_eq!(
                 screen.prompt_click_move(screen_pin(&screen, 5, 2)),
                 PromptClickMove::ZERO
@@ -6876,7 +6936,7 @@ mod tests {
         |screen| {
             screen.cursor_absolute(0, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 6, 2));
             assert!(movement.right <= 6);
         }
@@ -6889,7 +6949,7 @@ mod tests {
             set_screen_row_wrap(&mut screen.pages, 3, false, true);
             screen.cursor_absolute(0, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 2, 3));
             assert!(movement.left <= movement.right);
         }
@@ -6914,7 +6974,7 @@ mod tests {
             set_screen_row_wrap(&mut screen.pages, 2, false, false);
             screen.cursor_absolute(0, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 0, 3));
             assert_eq!(movement, PromptClickMove::ZERO);
         }
@@ -6927,7 +6987,7 @@ mod tests {
             set_screen_row_wrap(&mut screen.pages, 3, false, false);
             screen.cursor_absolute(0, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 0, 3));
             assert_eq!(movement, PromptClickMove::ZERO);
         }
@@ -6938,7 +6998,7 @@ mod tests {
         |screen| {
             screen.cursor_absolute(6, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 1, 2));
             assert!(movement.right <= movement.left);
         }
@@ -6949,7 +7009,7 @@ mod tests {
         |screen| {
             screen.cursor_absolute(7, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 1, 2));
             assert!(movement.left <= 7);
         }
@@ -6962,7 +7022,7 @@ mod tests {
             set_screen_row_wrap(&mut screen.pages, 1, true, false);
             screen.cursor_absolute(4, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 1, 1));
             assert!(movement.right <= movement.left);
         }
@@ -6973,7 +7033,7 @@ mod tests {
         |screen| {
             screen.cursor_absolute(4, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 1, 1));
             assert_eq!(movement, PromptClickMove::ZERO);
         }
@@ -6984,7 +7044,7 @@ mod tests {
         |screen| {
             screen.cursor_absolute(0, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 9, 2));
             assert!(movement.right <= 9);
         }
@@ -6995,7 +7055,7 @@ mod tests {
         |screen| {
             screen.cursor_absolute(9, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 11, 2));
             assert!(movement.right <= 2);
         }
@@ -7008,7 +7068,7 @@ mod tests {
             set_screen_row_wrap(&mut screen.pages, 3, false, true);
             screen.cursor_absolute(0, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 4, 3));
             assert!(movement.left <= movement.right);
         }
@@ -7021,7 +7081,7 @@ mod tests {
             set_screen_row_wrap(&mut screen.pages, 3, false, true);
             screen.cursor_absolute(4, 3);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 6, 3));
             assert!(movement.right <= 2);
         }
@@ -7032,7 +7092,7 @@ mod tests {
         |screen| {
             screen.cursor_absolute(6, 2);
             screen.cursor_set_semantic_content(SemanticContent::Input);
-            screen.semantic_prompt.click = SemanticClick::Cl;
+            screen.semantic_prompt.click = SemanticClick::Cl(PromptClick::Line);
             let movement = screen.prompt_click_move(screen_pin(&screen, 15, 2));
             assert_eq!(movement.left, 0);
             assert!(movement.right <= 9);
