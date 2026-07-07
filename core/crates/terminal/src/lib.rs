@@ -17,6 +17,7 @@ pub mod formatter;
 pub(crate) mod hash_map;
 pub mod highlight;
 pub(crate) mod hyperlink;
+pub mod input;
 pub mod modes;
 pub mod osc;
 pub mod page;
