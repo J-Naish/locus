@@ -79,6 +79,45 @@ impl Pin {
         result.x = result.x.saturating_sub(n);
         result
     }
+
+    pub fn right_clamp(self, pages: &PageList, n: CellCountInt) -> Self {
+        pages.pin_right_clamp(self, n)
+    }
+
+    pub fn before(self, pages: &PageList, other: Self) -> bool {
+        pages.pin_before(self, other)
+    }
+
+    pub fn left_wrap(self, pages: &PageList, n: usize) -> Option<Self> {
+        let mut result = self;
+        for _ in 0..n {
+            if result.x > 0 {
+                result.x -= 1;
+                continue;
+            }
+            let mut prior = pages.pin_up(result, 1)?;
+            let cols = pages
+                .node(prior.node)
+                .map(|node| node.page.size().cols)
+                .unwrap_or(1);
+            prior.x = cols.saturating_sub(1);
+            result = prior;
+        }
+        Some(result)
+    }
+
+    pub fn right_wrap(self, pages: &PageList, n: usize) -> Option<Self> {
+        let mut result = self;
+        for _ in 0..n {
+            let cols = pages.node(result.node)?.page.size().cols;
+            if result.x + 1 < cols {
+                result.x += 1;
+                continue;
+            }
+            result = pages.pin_down(Pin { x: 0, ..result }, 1)?;
+        }
+        Some(result)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -790,9 +829,6 @@ impl PageList {
             current = prev;
         }
     }
-
-    // Ghostty's left_wrap/right_wrap are upstream-marked "TODO: Unit tests".
-    // They are intentionally deferred until a later phase has coverage.
 
     pub fn track_pin(&mut self, pin: Pin) -> PinId {
         if let Some((index, slot)) = self
@@ -4690,7 +4726,50 @@ mod tests {
         let pin = list.pin(Point::screen(5, 0)).unwrap();
         assert_eq!(pin.left_clamp(99).x, 0);
         assert_eq!(list.pin_right_clamp(pin, 99).x, 9);
+        assert_eq!(pin.right_clamp(&list, 99).x, 9);
         assert_eq!(list.pin_right(pin, 2).x, 7);
+    }
+
+    #[test]
+    fn pin_right_wrap_crosses_to_next_row() {
+        // port-added: Ghostty left_wrap/right_wrap are upstream TODO-tested; T8b ports them with
+        // direct wrap tests.
+        let list = PageList::new(3, 2, Some(0));
+        let pin = list.pin(Point::screen(2, 0)).unwrap();
+        let wrapped = pin.right_wrap(&list, 1).unwrap();
+        assert_eq!(
+            list.point_from_pin(Tag::Screen, wrapped),
+            Some(Point::screen(0, 1))
+        );
+    }
+
+    #[test]
+    fn pin_left_wrap_crosses_to_previous_row() {
+        // port-added: Ghostty left_wrap/right_wrap are upstream TODO-tested; T8b ports them with
+        // direct wrap tests.
+        let list = PageList::new(3, 2, Some(0));
+        let pin = list.pin(Point::screen(0, 1)).unwrap();
+        let wrapped = pin.left_wrap(&list, 1).unwrap();
+        assert_eq!(
+            list.point_from_pin(Tag::Screen, wrapped),
+            Some(Point::screen(2, 0))
+        );
+    }
+
+    #[test]
+    fn pin_wrap_returns_none_past_document_edges() {
+        // port-added: saturating helpers clamp, wrap helpers report overflow at document edges.
+        let list = PageList::new(3, 2, Some(0));
+        assert!(list
+            .pin(Point::screen(0, 0))
+            .unwrap()
+            .left_wrap(&list, 1)
+            .is_none());
+        assert!(list
+            .pin(Point::screen(2, 1))
+            .unwrap()
+            .right_wrap(&list, 1)
+            .is_none());
     }
 
     #[test]

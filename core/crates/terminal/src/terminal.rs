@@ -145,6 +145,7 @@ pub struct TerminalFlags {
     pub mouse_format: MouseFormat,
     pub modify_other_keys_2: bool,
     pub shell_redraws_prompt: bool,
+    pub password_input: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +263,10 @@ impl Terminal {
     /// `Terminal.clearDirty`.
     pub fn clear_dirty(&mut self) {
         self.active_screen_mut().pages.clear_dirty();
+    }
+
+    pub fn scroll_viewport(&mut self, scroll: crate::page_list::Scroll) {
+        self.active_screen_mut().scroll(scroll);
     }
 
     /// The cell at `point`, if any. Mirrors `screens.active.pages.getCell`.
