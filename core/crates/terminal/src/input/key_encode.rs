@@ -3,6 +3,8 @@
 use super::function_keys;
 use super::key::{Action, Key, KeyEvent};
 use super::key_mods::{Mods, Side};
+use super::kitty_entries::{self, Entry as KittyEntry};
+use super::kitty_flags::Flags as KittyFlags;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptionAsAlt {
@@ -21,6 +23,7 @@ pub struct Options {
     pub ignore_keypad_with_numlock: bool,
     pub alt_esc_prefix: bool,
     pub modify_other_keys_state_2: bool,
+    pub kitty_flags: KittyFlags,
     pub macos_option_as_alt: OptionAsAlt,
     pub is_macos: bool,
 }
@@ -34,6 +37,7 @@ impl Default for Options {
             ignore_keypad_with_numlock: false,
             alt_esc_prefix: false,
             modify_other_keys_state_2: false,
+            kitty_flags: KittyFlags::DISABLED,
             macos_option_as_alt: OptionAsAlt::False,
             is_macos: cfg!(target_os = "macos"),
         }
@@ -41,9 +45,157 @@ impl Default for Options {
 }
 
 pub fn encode(event: KeyEvent<'_>, opts: Options) -> Vec<u8> {
-    // The Kitty keyboard protocol branch is intentionally deferred to the next
-    // input phase; this phase always uses Ghostty's legacy fallback path.
-    legacy(event, opts)
+    if opts.kitty_flags.int() != 0 {
+        kitty(event, opts)
+    } else {
+        legacy(event, opts)
+    }
+}
+
+pub fn kitty(event: KeyEvent<'_>, opts: Options) -> Vec<u8> {
+    if opts.kitty_flags.int() == 0 {
+        return legacy(event, opts);
+    }
+
+    let mut output = Vec::new();
+
+    if event.action == Action::Release {
+        if !opts.kitty_flags.report_events {
+            return output;
+        }
+
+        if !opts.kitty_flags.report_all
+            && matches!(event.key, Key::Enter | Key::Backspace | Key::Tab)
+        {
+            return output;
+        }
+    }
+
+    let all_mods = event.mods;
+    let effective_mods = event.effective_mods();
+    let binding_mods = effective_mods.binding();
+    let entry = kitty_entries::entry_for(event.key).or_else(|| {
+        (event.unshifted_codepoint > 0).then_some(KittyEntry {
+            key: event.key,
+            code: event.unshifted_codepoint,
+            final_byte: b'u',
+            modifier: false,
+        })
+    });
+
+    if event.composing {
+        if !entry.is_some_and(|entry| entry.modifier) {
+            return output;
+        }
+    } else if !event.utf8.is_empty() {
+        match event.key {
+            Key::Enter if !is_control_utf8(event.utf8) => {
+                output.extend_from_slice(event.utf8);
+                return output;
+            }
+            Key::Backspace if !is_control_utf8(event.utf8) => return output,
+            _ => {}
+        }
+    }
+
+    if !opts.kitty_flags.report_all {
+        if binding_mods.empty() {
+            match event.key {
+                Key::Enter => {
+                    output.push(b'\r');
+                    return output;
+                }
+                Key::Tab => {
+                    output.push(b'\t');
+                    return output;
+                }
+                Key::Backspace => {
+                    output.push(0x7f);
+                    return output;
+                }
+                _ => {}
+            }
+        }
+
+        if !event.utf8.is_empty()
+            && binding_mods.empty()
+            && event.action != Action::Release
+            && utf8_codepoints(event.utf8)
+                .is_some_and(|mut codepoints| codepoints.all(|codepoint| !is_control(codepoint)))
+        {
+            output.extend_from_slice(event.utf8);
+            return output;
+        }
+    }
+
+    let Some(entry) = entry else {
+        if !event.utf8.is_empty() {
+            output.extend_from_slice(event.utf8);
+        }
+        return output;
+    };
+
+    if entry.modifier && !opts.kitty_flags.report_all {
+        return output;
+    }
+
+    let mut sequence = KittySequence {
+        key: entry.code,
+        final_byte: entry.final_byte,
+        mods: KittyMods::from_input(event.action, event.key, all_mods),
+        ..KittySequence::default()
+    };
+
+    if opts.kitty_flags.report_events {
+        sequence.event = match event.action {
+            Action::Press => KittyEvent::Press,
+            Action::Release => KittyEvent::Release,
+            Action::Repeat => KittyEvent::Repeat,
+        };
+    }
+
+    if opts.kitty_flags.report_alternates && !is_control(sequence.key) {
+        match first_two_codepoints(event.utf8) {
+            Some((Some(first), has_second)) => {
+                if first != sequence.key && sequence.mods.shift {
+                    sequence.alternates[0] = Some(first);
+                }
+
+                if let Some(base) = event.key.codepoint() {
+                    if base != sequence.key && first != base && !has_second {
+                        sequence.alternates[1] = Some(base);
+                    }
+                }
+            }
+            Some((None, _)) | None => {
+                if let Some(base) = event.key.codepoint() {
+                    if base != sequence.key {
+                        sequence.alternates[1] = Some(base);
+                    }
+                }
+            }
+        }
+    }
+
+    if opts.kitty_flags.report_associated && sequence.event != KittyEvent::Release {
+        let alt_prevents_text = if opts.is_macos {
+            match opts.macos_option_as_alt {
+                OptionAsAlt::Left => all_mods.sides.alt == Side::Left,
+                OptionAsAlt::Right => all_mods.sides.alt == Side::Right,
+                OptionAsAlt::True => true,
+                OptionAsAlt::False => false,
+            }
+        } else {
+            true
+        };
+
+        if !sequence.mods.prevents_text(alt_prevents_text) {
+            sequence.text = event.utf8;
+        }
+    }
+
+    sequence.encode(&mut output);
+    output
 }
 
 pub fn legacy(event: KeyEvent<'_>, opts: Options) -> Vec<u8> {
@@ -503,6 +655,17 @@ fn single_codepoint(bytes: &[u8]) -> Option<u32> {
     }
 }
 
+fn utf8_codepoints(bytes: &[u8]) -> Option<impl Iterator<Item = u32> + '_> {
+    Some(std::str::from_utf8(bytes).ok()?.chars().map(|ch| ch as u32))
+}
+
+fn first_two_codepoints(bytes: &[u8]) -> Option<(Option<u32>, bool)> {
+    let mut chars = std::str::from_utf8(bytes).ok()?.chars();
+    let first = chars.next().map(|ch| ch as u32);
+    let has_second = chars.next().is_some();
+    Some((first, has_second))
+}
+
 fn is_control(cp: u32) -> bool {
     cp < 0x20 || cp == 0x7f
 }
@@ -624,6 +787,185 @@ impl CsiUMods {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KittyMods {
+    pub shift: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+    pub super_key: bool,
+    pub hyper: bool,
+    pub meta: bool,
+    pub caps_lock: bool,
+    pub num_lock: bool,
+}
+
+impl KittyMods {
+    pub fn from_input(_action: Action, _key: Key, mods: Mods) -> Self {
+        Self {
+            shift: mods.shift,
+            alt: mods.alt,
+            ctrl: mods.ctrl,
+            super_key: mods.super_key,
+            hyper: false,
+            meta: false,
+            caps_lock: mods.caps_lock,
+            num_lock: mods.num_lock,
+        }
+    }
+
+    pub const fn prevents_text(self, alt_prevents_text: bool) -> bool {
+        (self.alt && alt_prevents_text) || self.ctrl || self.super_key || self.hyper || self.meta
+    }
+
+    pub const fn int(self) -> u16 {
+        (self.shift as u16)
+            | ((self.alt as u16) << 1)
+            | ((self.ctrl as u16) << 2)
+            | ((self.super_key as u16) << 3)
+            | ((self.hyper as u16) << 4)
+            | ((self.meta as u16) << 5)
+            | ((self.caps_lock as u16) << 6)
+            | ((self.num_lock as u16) << 7)
+    }
+
+    pub const fn seq_int(self) -> u16 {
+        self.int() + 1
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum KittyEvent {
+    #[default]
+    None,
+    Press,
+    Repeat,
+    Release,
+}
+
+impl KittyEvent {
+    const fn code(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Press => 1,
+            Self::Repeat => 2,
+            Self::Release => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KittySequence<'a> {
+    key: u32,
+    final_byte: u8,
+    mods: KittyMods,
+    event: KittyEvent,
+    alternates: [Option<u32>; 2],
+    text: &'a [u8],
+}
+
+impl<'a> Default for KittySequence<'a> {
+    fn default() -> Self {
+        Self {
+            key: 0,
+            final_byte: b'u',
+            mods: KittyMods::default(),
+            event: KittyEvent::None,
+            alternates: [None, None],
+            text: b"",
+        }
+    }
+}
+
+impl<'a> KittySequence<'a> {
+    fn encode(self, output: &mut Vec<u8>) {
+        if self.final_byte == b'u' || self.final_byte == b'~' {
+            self.encode_full(output);
+        } else {
+            self.encode_special(output);
+        }
+    }
+
+    fn encode_full(self, output: &mut Vec<u8>) {
+        output.extend_from_slice(b"\x1b[");
+        push_number(output, self.key);
+
+        if let Some(shifted) = self.alternates[0] {
+            output.push(b':');
+            push_number(output, shifted);
+        }
+        if let Some(base) = self.alternates[1] {
+            if self.alternates[0].is_none() {
+                output.extend_from_slice(b"::");
+            } else {
+                output.push(b':');
+            }
+            push_number(output, base);
+        }
+
+        let mods = self.mods.seq_int();
+        let mut emitted_prior = false;
+        if self.event != KittyEvent::None && self.event != KittyEvent::Press {
+            output.push(b';');
+            push_number(output, mods);
+            output.push(b':');
+            push_number(output, self.event.code());
+            emitted_prior = true;
+        } else if mods > 1 {
+            output.push(b';');
+            push_number(output, mods);
+            emitted_prior = true;
+        }
+
+        if let Some(codepoints) = utf8_codepoints(self.text) {
+            let mut count = 0usize;
+            for codepoint in codepoints {
+                if is_control(codepoint) {
+                    continue;
+                }
+
+                if count == 0 {
+                    if !emitted_prior {
+                        output.push(b';');
+                    }
+                    output.push(b';');
+                } else {
+                    output.push(b':');
+                }
+                push_number(output, codepoint);
+                count += 1;
+            }
+        }
+
+        output.push(self.final_byte);
+    }
+
+    fn encode_special(self, output: &mut Vec<u8>) {
+        let mods = self.mods.seq_int();
+        if self.event != KittyEvent::None {
+            output.extend_from_slice(b"\x1b[1;");
+            push_number(output, mods);
+            output.push(b':');
+            push_number(output, self.event.code());
+            output.push(self.final_byte);
+            return;
+        }
+
+        if mods > 1 {
+            output.extend_from_slice(b"\x1b[1;");
+            push_number(output, mods);
+            output.push(self.final_byte);
+            return;
+        }
+
+        output.extend_from_slice(b"\x1b[");
+        output.push(self.final_byte);
+    }
+}
+
+fn push_number<T: ToString>(output: &mut Vec<u8>, number: T) {
+    output.extend_from_slice(number.to_string().as_bytes());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,6 +998,17 @@ mod tests {
 
     fn s(bytes: &[u8]) -> String {
         String::from_utf8_lossy(bytes).into_owned()
+    }
+
+    fn kitty_disambiguate() -> KittyFlags {
+        KittyFlags {
+            disambiguate: true,
+            ..KittyFlags::DISABLED
+        }
+    }
+
+    fn kitty_all_flags() -> KittyFlags {
+        KittyFlags::ALL
     }
 
     #[test]
@@ -722,6 +1075,992 @@ mod tests {
             .seq_int(),
             8
         );
+    }
+
+    #[test]
+    fn kitty_modifier_sequence_values() {
+        // ghostty: "modifier sequence values" (key_encode.zig:951)
+        assert_eq!(KittyMods::default().seq_int(), 1);
+        assert_eq!(
+            KittyMods {
+                shift: true,
+                ..KittyMods::default()
+            }
+            .seq_int(),
+            2
+        );
+        assert_eq!(
+            KittyMods {
+                alt: true,
+                ..KittyMods::default()
+            }
+            .seq_int(),
+            3
+        );
+        assert_eq!(
+            KittyMods {
+                ctrl: true,
+                ..KittyMods::default()
+            }
+            .seq_int(),
+            5
+        );
+        assert_eq!(
+            KittyMods {
+                alt: true,
+                shift: true,
+                ..KittyMods::default()
+            }
+            .seq_int(),
+            4
+        );
+        assert_eq!(
+            KittyMods {
+                ctrl: true,
+                shift: true,
+                ..KittyMods::default()
+            }
+            .seq_int(),
+            6
+        );
+        assert_eq!(
+            KittyMods {
+                alt: true,
+                ctrl: true,
+                ..KittyMods::default()
+            }
+            .seq_int(),
+            7
+        );
+        assert_eq!(
+            KittyMods {
+                alt: true,
+                ctrl: true,
+                shift: true,
+                ..KittyMods::default()
+            }
+            .seq_int(),
+            8
+        );
+    }
+
+    #[test]
+    fn kitty_sequence_backspace() {
+        // ghostty: "KittySequence: backspace" (key_encode.zig:1093)
+        let mut output = Vec::new();
+        KittySequence {
+            key: 127,
+            final_byte: b'u',
+            ..KittySequence::default()
+        }
+        .encode(&mut output);
+        assert_eq!(output, b"\x1b[127u");
+
+        output.clear();
+        KittySequence {
+            key: 127,
+            final_byte: b'u',
+            event: KittyEvent::Release,
+            ..KittySequence::default()
+        }
+        .encode(&mut output);
+        assert_eq!(output, b"\x1b[127;1:3u");
+
+        output.clear();
+        KittySequence {
+            key: 127,
+            final_byte: b'u',
+            mods: KittyMods {
+                shift: true,
+                ..KittyMods::default()
+            },
+            ..KittySequence::default()
+        }
+        .encode(&mut output);
+        assert_eq!(output, b"\x1b[127;2u");
+    }
+
+    #[test]
+    fn kitty_sequence_text() {
+        // ghostty: "KittySequence: text" (key_encode.zig:1125)
+        let mut output = Vec::new();
+        KittySequence {
+            key: 127,
+            final_byte: b'u',
+            text: b"A",
+            ..KittySequence::default()
+        }
+        .encode(&mut output);
+        assert_eq!(output, b"\x1b[127;;65u");
+
+        output.clear();
+        KittySequence {
+            key: 127,
+            final_byte: b'u',
+            event: KittyEvent::Release,
+            text: b"A",
+            ..KittySequence::default()
+        }
+        .encode(&mut output);
+        assert_eq!(output, b"\x1b[127;1:3;65u");
+
+        output.clear();
+        KittySequence {
+            key: 127,
+            final_byte: b'u',
+            mods: KittyMods {
+                shift: true,
+                ..KittyMods::default()
+            },
+            text: b"A",
+            ..KittySequence::default()
+        }
+        .encode(&mut output);
+        assert_eq!(output, b"\x1b[127;2;65u");
+    }
+
+    #[test]
+    fn kitty_sequence_text_with_control_characters() {
+        // ghostty: "KittySequence: text with control characters" (key_encode.zig:1167)
+        let mut output = Vec::new();
+        KittySequence {
+            key: 127,
+            final_byte: b'u',
+            text: b"\n",
+            ..KittySequence::default()
+        }
+        .encode(&mut output);
+        assert_eq!(output, b"\x1b[127u");
+
+        output.clear();
+        KittySequence {
+            key: 127,
+            final_byte: b'u',
+            text: b"A\n",
+            ..KittySequence::default()
+        }
+        .encode(&mut output);
+        assert_eq!(output, b"\x1b[127;;65u");
+    }
+
+    #[test]
+    fn kitty_sequence_special_no_mods() {
+        // ghostty: "KittySequence: special no mods" (key_encode.zig:1195)
+        let mut output = Vec::new();
+        KittySequence {
+            key: 1,
+            final_byte: b'A',
+            ..KittySequence::default()
+        }
+        .encode(&mut output);
+        assert_eq!(output, b"\x1b[A");
+    }
+
+    #[test]
+    fn kitty_sequence_special_mods_only() {
+        // ghostty: "KittySequence: special mods only" (key_encode.zig:1203)
+        let mut output = Vec::new();
+        KittySequence {
+            key: 1,
+            final_byte: b'A',
+            mods: KittyMods {
+                shift: true,
+                ..KittyMods::default()
+            },
+            ..KittySequence::default()
+        }
+        .encode(&mut output);
+        assert_eq!(output, b"\x1b[1;2A");
+    }
+
+    #[test]
+    fn kitty_sequence_special_mods_and_event() {
+        // ghostty: "KittySequence: special mods and event" (key_encode.zig:1211)
+        let mut output = Vec::new();
+        KittySequence {
+            key: 1,
+            final_byte: b'A',
+            event: KittyEvent::Release,
+            mods: KittyMods {
+                shift: true,
+                ..KittyMods::default()
+            },
+            ..KittySequence::default()
+        }
+        .encode(&mut output);
+        assert_eq!(output, b"\x1b[1;2:3A");
+    }
+
+    #[test]
+    fn kitty_plain_text() {
+        // ghostty: "kitty: plain text" (key_encode.zig:1224)
+        let actual = encode(
+            text_event(Key::KeyA, b"abcd"),
+            Options {
+                kitty_flags: kitty_disambiguate(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"abcd");
+    }
+
+    #[test]
+    fn kitty_repeat_with_just_disambiguate() {
+        // ghostty: "kitty: repeat with just disambiguate" (key_encode.zig:1237)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::KeyA,
+                action: Action::Repeat,
+                utf8: b"a",
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_disambiguate(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"a");
+    }
+
+    #[test]
+    fn kitty_enter_backspace_tab() {
+        // ghostty: "kitty: enter, backspace, tab" (key_encode.zig:1251)
+        let opts = Options {
+            kitty_flags: kitty_disambiguate(),
+            ..Options::default()
+        };
+        assert_eq!(kitty(event(Key::Enter), opts), b"\r");
+        assert_eq!(kitty(event(Key::Backspace), opts), b"\x7f");
+        assert_eq!(
+            kitty(
+                event(Key::Backspace),
+                Options {
+                    backarrow_key_mode: true,
+                    ..opts
+                }
+            ),
+            b"\x7f"
+        );
+        assert_eq!(kitty(event(Key::Tab), opts), b"\t");
+
+        let report_events = Options {
+            kitty_flags: KittyFlags {
+                disambiguate: true,
+                report_events: true,
+                ..KittyFlags::DISABLED
+            },
+            ..Options::default()
+        };
+        assert_eq!(
+            kitty(
+                KeyEvent {
+                    action: Action::Release,
+                    key: Key::Enter,
+                    ..KeyEvent::default()
+                },
+                report_events
+            ),
+            b""
+        );
+        assert_eq!(
+            kitty(
+                KeyEvent {
+                    action: Action::Release,
+                    key: Key::Backspace,
+                    ..KeyEvent::default()
+                },
+                report_events
+            ),
+            b""
+        );
+        assert_eq!(
+            kitty(
+                KeyEvent {
+                    action: Action::Release,
+                    key: Key::Tab,
+                    ..KeyEvent::default()
+                },
+                report_events
+            ),
+            b""
+        );
+
+        let report_releases = Options {
+            kitty_flags: KittyFlags {
+                disambiguate: true,
+                report_events: true,
+                report_all: true,
+                ..KittyFlags::DISABLED
+            },
+            ..Options::default()
+        };
+        assert_eq!(
+            kitty(
+                KeyEvent {
+                    action: Action::Release,
+                    key: Key::Enter,
+                    ..KeyEvent::default()
+                },
+                report_releases
+            ),
+            b"\x1b[13;1:3u"
+        );
+        assert_eq!(
+            kitty(
+                KeyEvent {
+                    action: Action::Release,
+                    key: Key::Backspace,
+                    ..KeyEvent::default()
+                },
+                report_releases
+            ),
+            b"\x1b[127;1:3u"
+        );
+        assert_eq!(
+            kitty(
+                KeyEvent {
+                    action: Action::Release,
+                    key: Key::Tab,
+                    ..KeyEvent::default()
+                },
+                report_releases
+            ),
+            b"\x1b[9;1:3u"
+        );
+    }
+
+    #[test]
+    fn kitty_shift_backspace_emits_csi_u() {
+        // ghostty: "kitty: shift+backspace emits CSI u" (key_encode.zig:1345)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::Backspace,
+                mods: m(true, false, false, false),
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_disambiguate(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[127;2u");
+    }
+
+    #[test]
+    fn kitty_shift_enter_emits_csi_u() {
+        // ghostty: "kitty: shift+enter emits CSI u" (key_encode.zig:1360)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::Enter,
+                mods: m(true, false, false, false),
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_disambiguate(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[13;2u");
+    }
+
+    #[test]
+    fn kitty_shift_tab_emits_csi_u() {
+        // ghostty: "kitty: shift+tab emits CSI u" (key_encode.zig:1373)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::Tab,
+                mods: m(true, false, false, false),
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_disambiguate(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[9;2u");
+    }
+
+    #[test]
+    fn kitty_enter_with_all_flags() {
+        // ghostty: "kitty: enter with all flags" (key_encode.zig:1386)
+        let actual = kitty(
+            event(Key::Enter),
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(&actual[1..], b"[13u");
+    }
+
+    #[test]
+    fn kitty_ctrl_with_all_flags() {
+        // ghostty: "kitty: ctrl with all flags" (key_encode.zig:1402)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::ControlLeft,
+                mods: m(false, true, false, false),
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(&actual[1..], b"[57442;5u");
+    }
+
+    #[test]
+    fn kitty_ctrl_release_with_ctrl_mod_set() {
+        // ghostty: "kitty: ctrl release with ctrl mod set" (key_encode.zig:1418)
+        let actual = kitty(
+            KeyEvent {
+                action: Action::Release,
+                key: Key::ControlLeft,
+                mods: m(false, true, false, false),
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(&actual[1..], b"[57442;5:3u");
+    }
+
+    #[test]
+    fn kitty_delete() {
+        // ghostty: "kitty: delete" (key_encode.zig:1439)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::Delete,
+                utf8: &[0x7f],
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_disambiguate(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[3~");
+    }
+
+    #[test]
+    fn kitty_composing_with_no_modifier() {
+        // ghostty: "kitty: composing with no modifier" (key_encode.zig:1450)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::KeyA,
+                mods: m(true, false, false, false),
+                composing: true,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_disambiguate(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"");
+    }
+
+    #[test]
+    fn kitty_composing_with_modifier() {
+        // ghostty: "kitty: composing with modifier" (key_encode.zig:1463)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::ShiftLeft,
+                mods: m(true, false, false, false),
+                composing: true,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: KittyFlags {
+                    disambiguate: true,
+                    report_all: true,
+                    ..KittyFlags::DISABLED
+                },
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[57441;2u");
+    }
+
+    #[test]
+    fn kitty_composed_text_with_report_all() {
+        // ghostty: "kitty: composed text with report all" (key_encode.zig:1476)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::Unidentified,
+                utf8: "û".as_bytes(),
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, "û".as_bytes());
+    }
+
+    #[test]
+    fn kitty_shift_a_on_us_keyboard() {
+        // ghostty: "kitty: shift+a on US keyboard" (key_encode.zig:1495)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::KeyA,
+                mods: m(true, false, false, false),
+                utf8: b"A",
+                unshifted_codepoint: 'a' as u32,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: KittyFlags {
+                    disambiguate: true,
+                    report_alternates: true,
+                    ..KittyFlags::DISABLED
+                },
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[97:65;2u");
+    }
+
+    #[test]
+    fn kitty_matching_unshifted_codepoint() {
+        // ghostty: "kitty: matching unshifted codepoint" (key_encode.zig:1512)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::KeyA,
+                mods: m(true, false, false, false),
+                utf8: b"A",
+                unshifted_codepoint: 'A' as u32,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: KittyFlags {
+                    disambiguate: true,
+                    report_alternates: true,
+                    ..KittyFlags::DISABLED
+                },
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[65::97;2u");
+    }
+
+    #[test]
+    fn kitty_report_alternates_with_caps() {
+        // ghostty: "kitty: report alternates with caps" (key_encode.zig:1533)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::KeyJ,
+                mods: Mods {
+                    caps_lock: true,
+                    ..Mods::none()
+                },
+                utf8: b"J",
+                unshifted_codepoint: 'j' as u32,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[106;65;74u");
+    }
+
+    #[test]
+    fn kitty_report_alternates_colon() {
+        // ghostty: "kitty: report alternates colon (shift+';')" (key_encode.zig:1552)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::Semicolon,
+                mods: m(true, false, false, false),
+                utf8: b":",
+                unshifted_codepoint: ';' as u32,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[59:58;2;58u");
+    }
+
+    #[test]
+    fn kitty_report_alternates_with_ru_layout() {
+        // ghostty: "kitty: report alternates with ru layout" (key_encode.zig:1571)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::Semicolon,
+                utf8: "ч".as_bytes(),
+                unshifted_codepoint: 'ч' as u32,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, "\x1b[1095::59;;1095u".as_bytes());
+    }
+
+    #[test]
+    fn kitty_report_alternates_with_ru_layout_shifted() {
+        // ghostty: "kitty: report alternates with ru layout shifted" (key_encode.zig:1590)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::Semicolon,
+                mods: m(true, false, false, false),
+                utf8: "Ч".as_bytes(),
+                unshifted_codepoint: 'ч' as u32,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, "\x1b[1095:1063:59;2;1063u".as_bytes());
+    }
+
+    #[test]
+    fn kitty_report_alternates_with_ru_layout_caps_lock() {
+        // ghostty: "kitty: report alternates with ru layout caps lock" (key_encode.zig:1609)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::Semicolon,
+                mods: Mods {
+                    caps_lock: true,
+                    ..Mods::none()
+                },
+                utf8: "Ч".as_bytes(),
+                unshifted_codepoint: 'ч' as u32,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, "\x1b[1095::59;65;1063u".as_bytes());
+    }
+
+    #[test]
+    fn kitty_report_alternates_with_hu_layout_release() {
+        // ghostty: "kitty: report alternates with hu layout release" (key_encode.zig:1628)
+        let actual = kitty(
+            KeyEvent {
+                action: Action::Release,
+                key: Key::BracketLeft,
+                mods: m(false, true, false, false),
+                unshifted_codepoint: 337,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(&actual[1..], b"[337::91;5:3u");
+    }
+
+    #[test]
+    fn kitty_up_arrow_with_utf8() {
+        // ghostty: "kitty: up arrow with utf8" (key_encode.zig:1651)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::ArrowUp,
+                utf8: &[30],
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_disambiguate(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[A");
+    }
+
+    #[test]
+    fn kitty_shift_tab() {
+        // ghostty: "kitty: shift+tab" (key_encode.zig:1664)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::Tab,
+                mods: m(true, false, false, false),
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: KittyFlags {
+                    disambiguate: true,
+                    report_alternates: true,
+                    ..KittyFlags::DISABLED
+                },
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[9;2u");
+    }
+
+    #[test]
+    fn kitty_left_shift() {
+        // ghostty: "kitty: left shift" (key_encode.zig:1677)
+        let actual = kitty(
+            event(Key::ShiftLeft),
+            Options {
+                kitty_flags: KittyFlags {
+                    disambiguate: true,
+                    report_alternates: true,
+                    ..KittyFlags::DISABLED
+                },
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"");
+    }
+
+    #[test]
+    fn kitty_left_shift_with_report_all() {
+        // ghostty: "kitty: left shift with report all" (key_encode.zig:1690)
+        let actual = kitty(
+            event(Key::ShiftLeft),
+            Options {
+                kitty_flags: KittyFlags {
+                    disambiguate: true,
+                    report_all: true,
+                    ..KittyFlags::DISABLED
+                },
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[57441u");
+    }
+
+    #[test]
+    fn kitty_report_associated_with_alt_text_on_macos_with_option() {
+        // ghostty: "kitty: report associated with alt text on macOS with option" (key_encode.zig:1703)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::KeyW,
+                mods: m(false, false, true, false),
+                utf8: "∑".as_bytes(),
+                unshifted_codepoint: 'w' as u32,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                macos_option_as_alt: OptionAsAlt::False,
+                is_macos: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, "\x1b[119;3;8721u".as_bytes());
+    }
+
+    #[test]
+    fn kitty_report_associated_with_alt_text_on_macos_with_alt() {
+        // ghostty: "kitty: report associated with alt text on macOS with alt" (key_encode.zig:1725)
+        let with_alt = kitty(
+            KeyEvent {
+                key: Key::KeyW,
+                mods: m(false, false, true, false),
+                utf8: "∑".as_bytes(),
+                unshifted_codepoint: 'w' as u32,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                macos_option_as_alt: OptionAsAlt::True,
+                is_macos: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(with_alt, b"\x1b[119;3u");
+
+        let without_alt = kitty(
+            KeyEvent {
+                key: Key::KeyW,
+                utf8: "∑".as_bytes(),
+                unshifted_codepoint: 'w' as u32,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                macos_option_as_alt: OptionAsAlt::True,
+                is_macos: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(without_alt, "\x1b[119;;8721u".as_bytes());
+    }
+
+    #[test]
+    fn kitty_report_associated_with_modifiers() {
+        // ghostty: "kitty: report associated with modifiers" (key_encode.zig:1771)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::KeyJ,
+                mods: m(false, true, false, false),
+                utf8: b"j",
+                unshifted_codepoint: 'j' as u32,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[106;5u");
+    }
+
+    #[test]
+    fn kitty_report_associated() {
+        // ghostty: "kitty: report associated" (key_encode.zig:1790)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::KeyJ,
+                mods: m(true, false, false, false),
+                utf8: b"J",
+                unshifted_codepoint: 'j' as u32,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[106:74;2;74u");
+    }
+
+    #[test]
+    fn kitty_report_associated_on_release() {
+        // ghostty: "kitty: report associated on release" (key_encode.zig:1809)
+        let actual = kitty(
+            KeyEvent {
+                action: Action::Release,
+                key: Key::KeyJ,
+                mods: m(true, false, false, false),
+                utf8: b"J",
+                unshifted_codepoint: 'j' as u32,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(&actual[1..], b"[106:74;2:3u");
+    }
+
+    #[test]
+    fn kitty_alternates_omit_control_characters() {
+        // ghostty: "kitty: alternates omit control characters" (key_encode.zig:1831)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::Delete,
+                utf8: &[0x7f],
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: KittyFlags {
+                    disambiguate: true,
+                    report_alternates: true,
+                    report_all: true,
+                    ..KittyFlags::DISABLED
+                },
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[3~");
+    }
+
+    #[test]
+    fn kitty_enter_with_utf8_dead_key_state() {
+        // ghostty: "kitty: enter with utf8 (dead key state)" (key_encode.zig:1848)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::Enter,
+                utf8: b"A",
+                unshifted_codepoint: 0x0d,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: KittyFlags {
+                    disambiguate: true,
+                    report_alternates: true,
+                    report_all: true,
+                    ..KittyFlags::DISABLED
+                },
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"A");
+    }
+
+    #[test]
+    fn kitty_keypad_number() {
+        // ghostty: "kitty: keypad number" (key_encode.zig:1865)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::Numpad1,
+                utf8: b"1",
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(&actual[1..], b"[57400;;49u");
+    }
+
+    #[test]
+    fn kitty_backspace_with_utf8_dead_key_state() {
+        // ghostty: "kitty: backspace with utf8 (dead key state)" (key_encode.zig:1885)
+        let actual = kitty(
+            KeyEvent {
+                key: Key::Backspace,
+                utf8: b"A",
+                unshifted_codepoint: 0x0d,
+                ..KeyEvent::default()
+            },
+            Options {
+                kitty_flags: kitty_all_flags(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"");
+    }
+
+    #[test]
+    fn kitty_backspace_decbkm_reset_report_all() {
+        // ghostty: "kitty: backspace (DECBKM reset) (report_all: true)" (key_encode.zig:1915)
+        let actual = kitty(
+            event(Key::Backspace),
+            Options {
+                kitty_flags: kitty_all_flags(),
+                backarrow_key_mode: false,
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[127u");
+    }
+
+    #[test]
+    fn kitty_backspace_decbkm_set_report_all() {
+        // ghostty: "kitty: backspace (DECBKM set) (report_all: true)" (key_encode.zig:1933)
+        let actual = kitty(
+            event(Key::Backspace),
+            Options {
+                kitty_flags: kitty_all_flags(),
+                backarrow_key_mode: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(actual, b"\x1b[127u");
     }
 
     #[test]
