@@ -13,6 +13,7 @@ pub mod dcs;
 pub mod device_attributes;
 pub mod device_status;
 pub mod focus;
+pub mod formatter;
 pub(crate) mod hash_map;
 pub mod highlight;
 pub(crate) mod hyperlink;
