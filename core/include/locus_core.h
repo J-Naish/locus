@@ -788,6 +788,74 @@ LocusStatus locus_term_paste(
     LocusTerm *term, const uint8_t *bytes, size_t len, LocusTermBytes *out);
 LocusStatus locus_term_scroll(LocusTerm *term, intptr_t delta);
 
+/*
+ * PTY process management ABI (added under ABI version 6).
+ *
+ * The PTY handle owns the child process and master file descriptor. Callers may
+ * watch locus_pty_master_fd() with a platform event source and drive reads when
+ * readable. String inputs are UTF-8 byte slices; embedded NUL bytes are
+ * rejected before spawning.
+ */
+
+#define LOCUS_PTY_STATUS_INVALID_ARGUMENT ((LocusStatus)400u)
+#define LOCUS_PTY_STATUS_IO ((LocusStatus)401u)
+#define LOCUS_PTY_STATUS_WOULD_BLOCK ((LocusStatus)402u)
+#define LOCUS_PTY_STATUS_CHILD_EXEC ((LocusStatus)403u)
+#define LOCUS_PTY_STATUS_TIMEOUT ((LocusStatus)404u)
+#define LOCUS_PTY_STATUS_PANIC ((LocusStatus)405u)
+
+typedef struct LocusPty LocusPty;
+
+typedef struct LocusPtyString {
+    const uint8_t *ptr;
+    size_t len;
+} LocusPtyString;
+
+typedef struct LocusPtyEnvVar {
+    LocusPtyString key;
+    LocusPtyString value;
+} LocusPtyEnvVar;
+
+typedef struct LocusPtyOptions {
+    uint16_t cols;
+    uint16_t rows;
+    /*
+     * Empty command means the user's login shell from passwd, falling back to
+     * /bin/zsh. Non-empty command is executed directly; no shell wrapper is
+     * inserted.
+     */
+    LocusPtyString command;
+    const LocusPtyString *args;
+    size_t args_len;
+    /* Empty cwd means inherit the app process cwd. Non-empty cwd must exist. */
+    LocusPtyString cwd;
+    const LocusPtyEnvVar *env;
+    size_t env_len;
+} LocusPtyOptions;
+
+typedef struct LocusPtyExitStatus {
+    bool exited;
+    int32_t code;   /* -1 when not exited by status code. */
+    int32_t signal; /* 0 when not exited by signal. */
+} LocusPtyExitStatus;
+
+LocusPty *locus_pty_spawn(const LocusPtyOptions *options);
+int32_t locus_pty_master_fd(const LocusPty *pty);
+LocusStatus locus_pty_read(
+    LocusPty *pty, uint8_t *buf, size_t cap, size_t *out_len);
+LocusStatus locus_pty_write(
+    LocusPty *pty, const uint8_t *bytes, size_t len, size_t *out_len);
+LocusStatus locus_pty_resize(LocusPty *pty, uint16_t cols, uint16_t rows);
+LocusStatus locus_pty_try_wait(
+    LocusPty *pty, LocusPtyExitStatus *out_status);
+/*
+ * Sends SIGHUP, waits briefly, then escalates to SIGKILL if the child is still
+ * alive. Drop/free only closes the master, sends SIGHUP, and attempts a short
+ * non-blocking reap.
+ */
+LocusStatus locus_pty_shutdown(LocusPty *pty);
+void locus_pty_free(LocusPty *pty);
+
 #ifdef __cplusplus
 }
 #endif

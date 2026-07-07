@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -7,6 +8,7 @@ use std::time::{Duration, Instant};
 use app_core::text_buffer::TextBuffer;
 use app_core::workspace::list_directory;
 use app_ffi::terminal::{replay_bytes, TermReplayDump};
+use pty::{Pty, PtyError, PtyOptions};
 
 const DEFAULT_ITERATIONS: usize = 5;
 const MAX_ITERATIONS: usize = u32::MAX as usize;
@@ -41,6 +43,12 @@ fn main() {
                 process::exit(error.exit_code());
             }
         }
+        Some("term-run") => {
+            if let Err(error) = run_term_run(args) {
+                eprintln!("error: {error}");
+                process::exit(error.exit_code());
+            }
+        }
         Some("help") | Some("--help") | Some("-h") => print_help(),
         Some(command) => {
             eprintln!("error: unknown command: {command}");
@@ -64,12 +72,14 @@ Usage:
   locus-core perf-list-directory <path> [--iterations N] [--budget-ms N] [--max-budget-ms N]
   locus-core perf-buffer [--size-bytes N] [--iterations N] [--open-budget-ms N] [--scroll-budget-ms N] [--edit-budget-ms N]
   locus-core term-replay <file> --cols N --rows N [--dump plain|vt] [--bench]
+  locus-core term-run --cols N --rows N [--timeout-ms N] -- <cmd> [args...]
 
 Commands:
   version                 Print the Rust core version.
   perf-list-directory     Measure non-recursive workspace listing latency.
   perf-buffer             Measure text-buffer open, viewport read, and edit latency.
   term-replay             Replay a byte log through the terminal FFI surface.
+  term-run                Run a command through a PTY and render the final screen.
 ",
         app_core::APP_NAME,
         app_core::core_version()
@@ -103,6 +113,138 @@ fn run_term_replay(args: impl Iterator<Item = String>) -> Result<(), CliError> {
         println!("render_ms: {:.3}", report.render.as_secs_f64() * 1000.0);
     }
     Ok(())
+}
+
+fn run_term_run(args: impl Iterator<Item = String>) -> Result<(), CliError> {
+    let options = TermRunOptions::parse(args)?;
+    let text = term_run_plain_dump(&options)?;
+    println!("{text}");
+    Ok(())
+}
+
+fn term_run_plain_dump(options: &TermRunOptions) -> Result<String, CliError> {
+    let mut pty = Pty::spawn(PtyOptions {
+        cols: options.cols,
+        rows: options.rows,
+        command: Some(options.command.clone()),
+        args: options.args.clone(),
+        cwd: None,
+        env: Vec::new(),
+    })
+    .map_err(|source| CliError::Runtime(format!("failed to spawn PTY command: {source}")))?;
+
+    let deadline = Instant::now() + options.timeout;
+    let mut output = Vec::new();
+    let mut buf = [0_u8; 4096];
+    loop {
+        match pty.read(&mut buf) {
+            Ok(0) => break,
+            Ok(count) => output.extend_from_slice(&buf[..count]),
+            Err(PtyError::WouldBlock) => {
+                if matches!(pty.try_wait(), Ok(Some(_))) {
+                    match pty.read(&mut buf) {
+                        Ok(0) | Err(PtyError::WouldBlock) => break,
+                        Ok(count) => output.extend_from_slice(&buf[..count]),
+                        Err(source) => {
+                            return Err(CliError::Runtime(format!(
+                                "failed to drain PTY output: {source}"
+                            )))
+                        }
+                    }
+                }
+                if Instant::now() >= deadline {
+                    let _ = pty.shutdown();
+                    return Err(CliError::Runtime(format!(
+                        "term-run timed out after {}ms",
+                        options.timeout.as_millis()
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(source) => {
+                return Err(CliError::Runtime(format!(
+                    "failed to read PTY output: {source}"
+                )))
+            }
+        }
+    }
+
+    let report = replay_bytes(&output, options.cols, options.rows, TermReplayDump::Plain).map_err(
+        |status| CliError::Runtime(format!("terminal replay failed with status {status}")),
+    )?;
+    Ok(report.text)
+}
+
+#[derive(Debug)]
+struct TermRunOptions {
+    cols: u16,
+    rows: u16,
+    timeout: Duration,
+    command: PathBuf,
+    args: Vec<OsString>,
+}
+
+impl TermRunOptions {
+    fn parse(args: impl Iterator<Item = String>) -> Result<Self, CliError> {
+        let mut cols = None;
+        let mut rows = None;
+        let mut timeout = Duration::from_millis(2_000);
+        let mut command = None;
+        let mut command_args = Vec::new();
+        let mut after_separator = false;
+        let mut args = args.peekable();
+
+        while let Some(arg) = args.next() {
+            if after_separator {
+                if command.is_none() {
+                    command = Some(PathBuf::from(arg));
+                } else {
+                    command_args.push(OsString::from(arg));
+                }
+                continue;
+            }
+
+            match arg.as_str() {
+                "--cols" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::Usage("--cols requires a value".to_string()))?;
+                    cols = Some(parse_nonzero_u16("--cols", &value)?);
+                }
+                "--rows" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::Usage("--rows requires a value".to_string()))?;
+                    rows = Some(parse_nonzero_u16("--rows", &value)?);
+                }
+                "--timeout-ms" => {
+                    let value = args.next().ok_or_else(|| {
+                        CliError::Usage("--timeout-ms requires a value".to_string())
+                    })?;
+                    timeout = Duration::from_millis(parse_nonzero_u64("--timeout-ms", &value)?);
+                }
+                "--" => after_separator = true,
+                value if value.starts_with('-') => {
+                    return Err(CliError::Usage(format!("unknown option: {value}")));
+                }
+                _ => {
+                    return Err(CliError::Usage(
+                        "term-run command must follow --".to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(Self {
+            cols: cols.ok_or_else(|| CliError::Usage("term-run requires --cols".to_string()))?,
+            rows: rows.ok_or_else(|| CliError::Usage("term-run requires --rows".to_string()))?,
+            timeout,
+            command: command.ok_or_else(|| {
+                CliError::Usage("term-run requires a command after --".to_string())
+            })?,
+            args: command_args,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -601,14 +743,15 @@ fn generate_buffer_text(size_bytes: usize) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::path::Path;
 
     use app_ffi::terminal::{replay_bytes, TermReplayDump};
 
     use super::{
-        measure_buffer, PerfBufferOptions, PerfListDirectoryOptions, TermReplayOptions,
-        DEFAULT_BUFFER_EDITS, DEFAULT_BUFFER_SCROLL_READS, DEFAULT_BUFFER_SIZE_BYTES,
-        DEFAULT_ITERATIONS,
+        measure_buffer, term_run_plain_dump, PerfBufferOptions, PerfListDirectoryOptions,
+        TermReplayOptions, TermRunOptions, DEFAULT_BUFFER_EDITS, DEFAULT_BUFFER_SCROLL_READS,
+        DEFAULT_BUFFER_SIZE_BYTES, DEFAULT_ITERATIONS,
     };
 
     #[test]
@@ -746,6 +889,67 @@ mod tests {
 
         assert_eq!(error.exit_code(), 2);
         assert_eq!(error.to_string(), "--dump must be plain or vt");
+    }
+
+    #[test]
+    fn parse_term_run_options_accepts_command_after_separator() {
+        let options = TermRunOptions::parse(
+            [
+                "--cols".to_string(),
+                "40".to_string(),
+                "--rows".to_string(),
+                "12".to_string(),
+                "--timeout-ms".to_string(),
+                "1000".to_string(),
+                "--".to_string(),
+                "/bin/echo".to_string(),
+                "hello".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        assert_eq!(options.cols, 40);
+        assert_eq!(options.rows, 12);
+        assert_eq!(options.timeout.as_millis(), 1000);
+        assert_eq!(options.command.to_string_lossy(), "/bin/echo");
+        assert_eq!(options.args, vec![OsString::from("hello")]);
+    }
+
+    #[test]
+    fn parse_term_run_options_requires_separator() {
+        let error = TermRunOptions::parse(
+            [
+                "--cols".to_string(),
+                "40".to_string(),
+                "--rows".to_string(),
+                "12".to_string(),
+                "/bin/echo".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "term-run command must follow --");
+    }
+
+    #[test]
+    fn term_run_echo_round_trips_through_pty_and_terminal_ffi() {
+        let options = TermRunOptions::parse(
+            [
+                "--cols".to_string(),
+                "40".to_string(),
+                "--rows".to_string(),
+                "8".to_string(),
+                "--".to_string(),
+                "/bin/echo".to_string(),
+                "hello".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        assert!(term_run_plain_dump(&options).unwrap().contains("hello"));
     }
 
     #[test]

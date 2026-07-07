@@ -12,6 +12,7 @@ use app_core::workspace::{
 };
 
 pub mod large_file;
+pub mod pty;
 pub mod terminal;
 pub mod text_buffer;
 
@@ -24,7 +25,8 @@ pub mod text_buffer;
 // a signature change to existing symbols, hence a bump — and, additively, the
 // snapshot read surface (`locus_text_buffer_take_snapshot` plus the
 // `locus_text_buffer_snapshot_*` line/position reads). Version 6 additively
-// added the terminal emulation FFI surface (`locus_term_*`).
+// added the terminal emulation FFI surface (`locus_term_*`) and PTY process
+// management (`locus_pty_*`).
 pub const ABI_VERSION: u32 = 6;
 
 static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
