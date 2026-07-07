@@ -7,6 +7,7 @@ name = "app-cli"
 version = "0.1.0"
 dependencies = [
  "app-core",
+ "app-ffi",
 ]
 
 [[package]]
@@ -18,6 +19,7 @@ name = "app-ffi"
 version = "0.1.0"
 dependencies = [
  "app-core",
+ "terminal",
 ]
 
 [[package]]

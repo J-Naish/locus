@@ -642,6 +642,152 @@ LocusStatus locus_large_file_position_for_line_column(
     const LocusLargeFile *file, size_t line, size_t column_utf16,
     LocusTextPosition *out_position);
 
+/*
+ * Terminal emulator preview ABI (added under ABI version 6).
+ *
+ * The terminal handle contains parser state only; it does not spawn or own a
+ * PTY. Feed bytes from a platform-owned process, render into a reusable frame,
+ * and release all Rust-owned byte/frame handles with the matching free calls.
+ */
+
+#define LOCUS_TERM_ABI_VERSION ((uint32_t)1u)
+
+#define LOCUS_TERM_STATUS_INVALID_ARGUMENT ((LocusStatus)300u)
+#define LOCUS_TERM_STATUS_PANIC ((LocusStatus)301u)
+#define LOCUS_TERM_STATUS_UNSAFE_PASTE ((LocusStatus)302u)
+
+#define LOCUS_TERM_DIRTY_NONE ((uint32_t)0u)
+#define LOCUS_TERM_DIRTY_PARTIAL ((uint32_t)1u)
+#define LOCUS_TERM_DIRTY_FULL ((uint32_t)2u)
+
+#define LOCUS_TERM_ACTION_RELEASE ((uint32_t)0u)
+#define LOCUS_TERM_ACTION_PRESS ((uint32_t)1u)
+#define LOCUS_TERM_ACTION_REPEAT ((uint32_t)2u)
+
+#define LOCUS_TERM_MOD_SHIFT ((uint16_t)(1u << 0))
+#define LOCUS_TERM_MOD_CTRL ((uint16_t)(1u << 1))
+#define LOCUS_TERM_MOD_ALT ((uint16_t)(1u << 2))
+#define LOCUS_TERM_MOD_SUPER ((uint16_t)(1u << 3))
+#define LOCUS_TERM_MOD_CAPS_LOCK ((uint16_t)(1u << 4))
+#define LOCUS_TERM_MOD_NUM_LOCK ((uint16_t)(1u << 5))
+
+#define LOCUS_TERM_KEY_UNIDENTIFIED ((uint32_t)0u)
+#define LOCUS_TERM_KEY_ENTER ((uint32_t)1u)
+#define LOCUS_TERM_KEY_BACKSPACE ((uint32_t)2u)
+#define LOCUS_TERM_KEY_TAB ((uint32_t)3u)
+#define LOCUS_TERM_KEY_ESCAPE ((uint32_t)4u)
+#define LOCUS_TERM_KEY_ARROW_UP ((uint32_t)10u)
+#define LOCUS_TERM_KEY_ARROW_DOWN ((uint32_t)11u)
+#define LOCUS_TERM_KEY_ARROW_LEFT ((uint32_t)12u)
+#define LOCUS_TERM_KEY_ARROW_RIGHT ((uint32_t)13u)
+#define LOCUS_TERM_KEY_HOME ((uint32_t)14u)
+#define LOCUS_TERM_KEY_END ((uint32_t)15u)
+#define LOCUS_TERM_KEY_PAGE_UP ((uint32_t)16u)
+#define LOCUS_TERM_KEY_PAGE_DOWN ((uint32_t)17u)
+#define LOCUS_TERM_KEY_DELETE ((uint32_t)18u)
+#define LOCUS_TERM_KEY_INSERT ((uint32_t)19u)
+#define LOCUS_TERM_KEY_F1 ((uint32_t)101u)
+#define LOCUS_TERM_KEY_F2 ((uint32_t)102u)
+#define LOCUS_TERM_KEY_F3 ((uint32_t)103u)
+#define LOCUS_TERM_KEY_F4 ((uint32_t)104u)
+#define LOCUS_TERM_KEY_F5 ((uint32_t)105u)
+#define LOCUS_TERM_KEY_F6 ((uint32_t)106u)
+#define LOCUS_TERM_KEY_F7 ((uint32_t)107u)
+#define LOCUS_TERM_KEY_F8 ((uint32_t)108u)
+#define LOCUS_TERM_KEY_F9 ((uint32_t)109u)
+#define LOCUS_TERM_KEY_F10 ((uint32_t)110u)
+#define LOCUS_TERM_KEY_F11 ((uint32_t)111u)
+#define LOCUS_TERM_KEY_F12 ((uint32_t)112u)
+
+typedef struct LocusTerm LocusTerm;
+typedef struct LocusTermFrameStorage LocusTermFrameStorage;
+
+typedef struct LocusTermBytes {
+    uint8_t *ptr;
+    size_t len;
+    size_t cap;
+} LocusTermBytes;
+
+typedef struct LocusTermRgb {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+} LocusTermRgb;
+
+typedef struct LocusTermCursor {
+    uint16_t x;
+    uint16_t y;
+    bool visible;
+    bool blinking;
+    bool wide_tail;
+    uint32_t style;
+} LocusTermCursor;
+
+typedef struct LocusTermCell {
+    uint32_t codepoint;
+    uint64_t raw;
+    LocusTermRgb fg;
+    LocusTermRgb bg;
+    uint32_t flags;
+    uint8_t wide;
+    size_t grapheme_start;
+    size_t grapheme_len;
+    uint16_t hyperlink_id;
+} LocusTermCell;
+
+typedef struct LocusTermRow {
+    uint16_t y;
+    size_t cell_start;
+    size_t cell_count;
+    bool dirty;
+    bool wrapped;
+} LocusTermRow;
+
+typedef struct LocusTermFrame {
+    uint32_t abi_version;
+    uint16_t cols;
+    uint16_t rows;
+    uint32_t dirty_state;
+    size_t row_count;
+    const LocusTermRow *rows_ptr;
+    size_t cell_count;
+    const LocusTermCell *cells_ptr;
+    size_t grapheme_count;
+    const uint32_t *graphemes_ptr;
+    LocusTermCursor cursor;
+    /* Private Rust-owned storage. Callers must not read, write, or free it. */
+    LocusTermFrameStorage *storage;
+} LocusTermFrame;
+
+typedef struct LocusTermKeyEvent {
+    uint32_t action;
+    uint32_t key;
+    uint16_t mods;
+    uint16_t consumed_mods;
+    bool composing;
+    const uint8_t *utf8;
+    size_t utf8_len;
+    uint32_t unshifted_codepoint;
+} LocusTermKeyEvent;
+
+uint32_t locus_term_abi_version(void);
+LocusTerm *locus_term_new(uint16_t cols, uint16_t rows, size_t max_scrollback);
+void locus_term_free(LocusTerm *term);
+
+LocusStatus locus_term_feed(LocusTerm *term, const uint8_t *bytes, size_t len);
+LocusStatus locus_term_take_responses(LocusTerm *term, LocusTermBytes *out);
+void locus_term_bytes_free(LocusTermBytes *bytes);
+LocusStatus locus_term_resize(LocusTerm *term, uint16_t cols, uint16_t rows);
+LocusStatus locus_term_render(
+    LocusTerm *term, LocusTermFrame *frame, bool full);
+LocusTermFrame *locus_term_frame_new(void);
+void locus_term_frame_free(LocusTermFrame *frame);
+LocusStatus locus_term_key(
+    LocusTerm *term, const LocusTermKeyEvent *event, LocusTermBytes *out);
+LocusStatus locus_term_paste(
+    LocusTerm *term, const uint8_t *bytes, size_t len, LocusTermBytes *out);
+LocusStatus locus_term_scroll(LocusTerm *term, intptr_t delta);
+
 #ifdef __cplusplus
 }
 #endif

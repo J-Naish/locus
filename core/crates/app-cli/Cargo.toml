@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 app-core = { path = "../app-core" }
+app-ffi = { path = "../app-ffi" }
 
 [lints]
 workspace = true

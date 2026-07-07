@@ -1,0 +1,7 @@
+Locus terminal replay
+
+status: ready
+workspace: ~/Documents
+prompt> echo hello
+hello
+

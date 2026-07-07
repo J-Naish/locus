@@ -1,10 +1,12 @@
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Duration, Instant};
 
 use app_core::text_buffer::TextBuffer;
 use app_core::workspace::list_directory;
+use app_ffi::terminal::{replay_bytes, TermReplayDump};
 
 const DEFAULT_ITERATIONS: usize = 5;
 const MAX_ITERATIONS: usize = u32::MAX as usize;
@@ -33,6 +35,12 @@ fn main() {
                 process::exit(error.exit_code());
             }
         }
+        Some("term-replay") => {
+            if let Err(error) = run_term_replay(args) {
+                eprintln!("error: {error}");
+                process::exit(error.exit_code());
+            }
+        }
         Some("help") | Some("--help") | Some("-h") => print_help(),
         Some(command) => {
             eprintln!("error: unknown command: {command}");
@@ -55,15 +63,122 @@ Usage:
   locus-core version
   locus-core perf-list-directory <path> [--iterations N] [--budget-ms N] [--max-budget-ms N]
   locus-core perf-buffer [--size-bytes N] [--iterations N] [--open-budget-ms N] [--scroll-budget-ms N] [--edit-budget-ms N]
+  locus-core term-replay <file> --cols N --rows N [--dump plain|vt] [--bench]
 
 Commands:
   version                 Print the Rust core version.
   perf-list-directory     Measure non-recursive workspace listing latency.
   perf-buffer             Measure text-buffer open, viewport read, and edit latency.
+  term-replay             Replay a byte log through the terminal FFI surface.
 ",
         app_core::APP_NAME,
         app_core::core_version()
     );
+}
+
+fn run_term_replay(args: impl Iterator<Item = String>) -> Result<(), CliError> {
+    let options = TermReplayOptions::parse(args)?;
+    let bytes = fs::read(&options.path).map_err(|source| {
+        CliError::Runtime(format!(
+            "failed to read replay fixture {}: {source}",
+            options.path.display()
+        ))
+    })?;
+
+    let report =
+        replay_bytes(&bytes, options.cols, options.rows, options.dump).map_err(|status| {
+            CliError::Runtime(format!("terminal replay failed with status {status}"))
+        })?;
+    println!("{}", report.text);
+
+    if options.bench {
+        let bytes_per_second = if report.feed.is_zero() {
+            0.0
+        } else {
+            report.bytes as f64 / report.feed.as_secs_f64()
+        };
+        println!("bytes: {}", report.bytes);
+        println!("feed_ms: {:.3}", report.feed.as_secs_f64() * 1000.0);
+        println!("bytes_per_second: {:.0}", bytes_per_second);
+        println!("render_ms: {:.3}", report.render.as_secs_f64() * 1000.0);
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct TermReplayOptions {
+    path: PathBuf,
+    cols: u16,
+    rows: u16,
+    dump: TermReplayDump,
+    bench: bool,
+}
+
+impl TermReplayOptions {
+    fn parse(args: impl Iterator<Item = String>) -> Result<Self, CliError> {
+        let mut path = None;
+        let mut cols = None;
+        let mut rows = None;
+        let mut dump = TermReplayDump::Plain;
+        let mut bench = false;
+        let mut args = args.peekable();
+
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--cols" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::Usage("--cols requires a value".to_string()))?;
+                    cols = Some(parse_nonzero_u16("--cols", &value)?);
+                }
+                "--rows" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::Usage("--rows requires a value".to_string()))?;
+                    rows = Some(parse_nonzero_u16("--rows", &value)?);
+                }
+                "--dump" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::Usage("--dump requires a value".to_string()))?;
+                    dump = match value.as_str() {
+                        "plain" => TermReplayDump::Plain,
+                        "vt" => TermReplayDump::Vt,
+                        _ => return Err(CliError::Usage("--dump must be plain or vt".to_string())),
+                    };
+                }
+                "--bench" => bench = true,
+                value if value.starts_with('-') => {
+                    return Err(CliError::Usage(format!("unknown option: {value}")));
+                }
+                value => {
+                    if path.replace(PathBuf::from(value)).is_some() {
+                        return Err(CliError::Usage(
+                            "term-replay accepts exactly one file".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(Self {
+            path: path.ok_or_else(|| CliError::Usage("term-replay requires a file".to_string()))?,
+            cols: cols.ok_or_else(|| CliError::Usage("term-replay requires --cols".to_string()))?,
+            rows: rows.ok_or_else(|| CliError::Usage("term-replay requires --rows".to_string()))?,
+            dump,
+            bench,
+        })
+    }
+}
+
+fn parse_nonzero_u16(name: &str, value: &str) -> Result<u16, CliError> {
+    let parsed = value
+        .parse::<u16>()
+        .map_err(|source| CliError::Usage(format!("invalid {name} value {value:?}: {source}")))?;
+    if parsed == 0 {
+        return Err(CliError::Usage(format!("{name} must be greater than zero")));
+    }
+    Ok(parsed)
 }
 
 fn run_perf_list_directory(args: impl Iterator<Item = String>) -> Result<(), CliError> {
@@ -486,9 +601,14 @@ fn generate_buffer_text(size_bytes: usize) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use app_ffi::terminal::{replay_bytes, TermReplayDump};
+
     use super::{
-        measure_buffer, PerfBufferOptions, PerfListDirectoryOptions, DEFAULT_BUFFER_EDITS,
-        DEFAULT_BUFFER_SCROLL_READS, DEFAULT_BUFFER_SIZE_BYTES, DEFAULT_ITERATIONS,
+        measure_buffer, PerfBufferOptions, PerfListDirectoryOptions, TermReplayOptions,
+        DEFAULT_BUFFER_EDITS, DEFAULT_BUFFER_SCROLL_READS, DEFAULT_BUFFER_SIZE_BYTES,
+        DEFAULT_ITERATIONS,
     };
 
     #[test]
@@ -571,6 +691,73 @@ mod tests {
 
         assert_eq!(error.exit_code(), 2);
         assert_eq!(error.to_string(), "unknown option: --unknown");
+    }
+
+    #[test]
+    fn parse_term_replay_options_accepts_required_flags() {
+        let options = TermReplayOptions::parse(
+            [
+                "fixtures/terminal/replay-basic.vt".to_string(),
+                "--cols".to_string(),
+                "80".to_string(),
+                "--rows".to_string(),
+                "24".to_string(),
+                "--dump".to_string(),
+                "vt".to_string(),
+                "--bench".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            options.path.to_string_lossy(),
+            "fixtures/terminal/replay-basic.vt"
+        );
+        assert_eq!(options.cols, 80);
+        assert_eq!(options.rows, 24);
+        assert_eq!(options.dump, TermReplayDump::Vt);
+        assert!(options.bench);
+    }
+
+    #[test]
+    fn parse_term_replay_options_rejects_missing_dimensions() {
+        let error = TermReplayOptions::parse(["replay.vt".to_string()].into_iter()).unwrap_err();
+
+        assert_eq!(error.exit_code(), 2);
+        assert_eq!(error.to_string(), "term-replay requires --cols");
+    }
+
+    #[test]
+    fn parse_term_replay_options_rejects_unknown_dump_mode() {
+        let error = TermReplayOptions::parse(
+            [
+                "replay.vt".to_string(),
+                "--cols".to_string(),
+                "80".to_string(),
+                "--rows".to_string(),
+                "24".to_string(),
+                "--dump".to_string(),
+                "ansi".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.exit_code(), 2);
+        assert_eq!(error.to_string(), "--dump must be plain or vt");
+    }
+
+    #[test]
+    fn term_replay_fixture_round_trips_through_terminal_ffi() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/terminal/replay-basic.vt");
+        let bytes = std::fs::read(fixture).unwrap();
+        let report = replay_bytes(&bytes, 40, 16, TermReplayDump::Plain).unwrap();
+
+        assert_eq!(report.bytes, bytes.len());
+        assert!(report.text.contains("Locus terminal replay"));
+        assert!(report.text.contains("ready"));
     }
 
     #[test]
