@@ -22,6 +22,8 @@ pub mod parser;
 pub mod point;
 pub(crate) mod ref_counted_set;
 pub mod screen;
+pub mod screen_set;
+pub mod selection;
 pub mod selection_codepoints;
 pub mod sgr;
 pub mod size;

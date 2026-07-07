@@ -1,8 +1,7 @@
 //! Terminal screen state.
 //!
 //! This ports the first structural slice of Ghostty's `terminal/Screen.zig`.
-//! Resize, selection, and kitty-specific behavior are intentionally deferred
-//! to later terminal phases.
+//! Kitty-specific behavior is intentionally deferred to later terminal phases.
 
 use unicode_width::UnicodeWidthChar;
 
@@ -14,6 +13,8 @@ use crate::page_list::{
     ResizeCursor, ResizeError, ResizeOptions, Scroll,
 };
 use crate::point::{Coordinate, Point, Tag};
+use crate::selection::{Adjustment, Bounds, Selection};
+use crate::selection_codepoints::DEFAULT_LINE_WHITESPACE;
 use crate::sgr::Attribute;
 use crate::size::CellCountInt;
 use crate::style::{PackedStyle, Style, StyleColor, StyleId, DEFAULT_STYLE_ID};
@@ -30,6 +31,39 @@ pub enum SemanticClick {
     None,
     ClickEvents,
     Cl,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PromptClickMove {
+    pub left: usize,
+    pub right: usize,
+}
+
+impl PromptClickMove {
+    pub const ZERO: Self = Self { left: 0, right: 0 };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionStringOptions {
+    pub selection: Selection,
+    pub trim: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectLineOptions<'a> {
+    pub pin: Pin,
+    pub whitespace: Option<&'a [char]>,
+    pub semantic_prompt_boundary: bool,
+}
+
+impl SelectLineOptions<'_> {
+    pub const fn new(pin: Pin) -> Self {
+        Self {
+            pin,
+            whitespace: Some(&DEFAULT_LINE_WHITESPACE),
+            semantic_prompt_boundary: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -194,6 +228,7 @@ pub struct Screen {
     pub saved_cursor: Option<SavedCursor>,
     pub charset: CharsetState,
     pub semantic_prompt: ScreenSemanticPrompt,
+    pub selection: Option<Selection>,
     pub dirty: Dirty,
 }
 
@@ -212,6 +247,7 @@ impl Screen {
             saved_cursor: None,
             charset: CharsetState::default(),
             semantic_prompt: ScreenSemanticPrompt::default(),
+            selection: None,
             dirty: Dirty::default(),
         };
         screen.assert_integrity();
@@ -1003,8 +1039,643 @@ impl Screen {
         clone.cursor.style = self.cursor.style;
         clone.cursor.protected = self.cursor.protected;
         clone.cursor.pending_wrap = self.cursor.pending_wrap;
+        clone.selection = self.remap_selection_for_clone(top, bot, &mut clone.pages);
         clone.manual_style_update();
         clone
+    }
+
+    fn remap_selection_for_clone(
+        &self,
+        top: Point,
+        bot: Option<Point>,
+        clone_pages: &mut PageList,
+    ) -> Option<Selection> {
+        let selection = self.selection?;
+        let source_top_pin = self.pages.pin(top)?;
+        let source_bottom_pin = match bot {
+            Some(point) => self.pages.pin(point)?,
+            None => self.pages.get_bottom_right(top.tag())?,
+        };
+        let source_top = self
+            .pages
+            .point_from_pin(Tag::Screen, source_top_pin)?
+            .coord();
+        let source_bottom = self
+            .pages
+            .point_from_pin(Tag::Screen, source_bottom_pin)?
+            .coord();
+        let region_top_y = source_top.y.min(source_bottom.y);
+        let region_bottom_y = source_top.y.max(source_bottom.y);
+
+        let top_left = selection.top_left(&self.pages)?;
+        let bottom_right = selection.bottom_right(&self.pages)?;
+        let top_left_point = self.pages.point_from_pin(Tag::Screen, top_left)?.coord();
+        let bottom_right_point = self
+            .pages
+            .point_from_pin(Tag::Screen, bottom_right)?
+            .coord();
+        if bottom_right_point.y < region_top_y || top_left_point.y > region_bottom_y {
+            return None;
+        }
+
+        if !selection.tracked() {
+            return None;
+        }
+
+        let start = self.remap_selection_pin_for_clone(
+            clone_pages,
+            top_left,
+            top_left_point,
+            region_top_y,
+            region_bottom_y,
+            top.tag(),
+            top.coord().y,
+            bot.map(Point::coord).map(|coord| coord.y),
+            true,
+            selection.rectangle,
+        )?;
+        let end = self.remap_selection_pin_for_clone(
+            clone_pages,
+            bottom_right,
+            bottom_right_point,
+            region_top_y,
+            region_bottom_y,
+            top.tag(),
+            top.coord().y,
+            bot.map(Point::coord).map(|coord| coord.y),
+            false,
+            selection.rectangle,
+        )?;
+        Some(Selection {
+            bounds: Bounds::Tracked { start, end },
+            rectangle: selection.rectangle,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn remap_selection_pin_for_clone(
+        &self,
+        clone_pages: &mut PageList,
+        source_pin: Pin,
+        source_point: Coordinate,
+        region_top_y: u32,
+        region_bottom_y: u32,
+        clone_tag: Tag,
+        clone_top_y: u32,
+        clone_bottom_y: Option<u32>,
+        is_start: bool,
+        rectangle: bool,
+    ) -> Option<PinId> {
+        if source_point.y >= region_top_y && source_point.y <= region_bottom_y {
+            let tag_point = self.pages.point_from_pin(clone_tag, source_pin);
+            let y = tag_point
+                .map(Point::coord)
+                .and_then(|coord| {
+                    let region_min = clone_top_y.min(clone_bottom_y.unwrap_or(u32::MAX));
+                    let region_max = clone_top_y.max(clone_bottom_y.unwrap_or(u32::MAX));
+                    if coord.y >= region_min && coord.y <= region_max {
+                        Some(coord.y.saturating_sub(region_min))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| source_point.y.saturating_sub(region_top_y));
+            let pin = clone_pages.pin(Point::active(source_pin.x, y))?;
+            return Some(clone_pages.track_pin(pin));
+        }
+
+        let (x, y) = if is_start {
+            let x = if rectangle { source_pin.x } else { 0 };
+            (x, 0)
+        } else {
+            let x = if rectangle {
+                source_pin.x
+            } else {
+                clone_pages.cols.saturating_sub(1)
+            };
+            (x, clone_pages.rows.saturating_sub(1) as u32)
+        };
+        let pin = clone_pages.pin(Point::active(x, y))?;
+        Some(clone_pages.track_pin(pin))
+    }
+
+    pub fn select(&mut self, selection: Option<Selection>) {
+        let Some(selection) = selection else {
+            self.clear_selection();
+            return;
+        };
+        let selection = if selection.tracked() {
+            selection
+        } else {
+            selection.track(&mut self.pages)
+        };
+        if let Some(old) = self.selection.take() {
+            old.untrack(&mut self.pages);
+        }
+        self.selection = Some(selection);
+        self.dirty.selection = true;
+    }
+
+    pub fn clear_selection(&mut self) {
+        if let Some(selection) = self.selection.take() {
+            selection.untrack(&mut self.pages);
+        }
+        self.dirty.selection = true;
+    }
+
+    pub fn adjust_selection(&mut self, adjustment: Adjustment) {
+        let Some(mut selection) = self.selection.take() else {
+            return;
+        };
+        selection.adjust(&mut self.pages, adjustment);
+        self.selection = Some(selection);
+        self.dirty.selection = true;
+    }
+
+    pub fn selection_string(&self, options: SelectionStringOptions) -> String {
+        let Some(top_left) = options.selection.top_left(&self.pages) else {
+            return String::new();
+        };
+        let Some(bottom_right) = options.selection.bottom_right(&self.pages) else {
+            return String::new();
+        };
+        let Some(top_left_point) = self
+            .pages
+            .point_from_pin(Tag::Screen, top_left)
+            .map(Point::coord)
+        else {
+            return String::new();
+        };
+        let Some(bottom_right_point) = self
+            .pages
+            .point_from_pin(Tag::Screen, bottom_right)
+            .map(Point::coord)
+        else {
+            return String::new();
+        };
+
+        let mut out = String::new();
+        let mut current = top_left;
+        let mut seen_row = false;
+        while let Some(point) = self
+            .pages
+            .point_from_pin(Tag::Screen, current)
+            .map(Point::coord)
+        {
+            if point.y > bottom_right_point.y {
+                break;
+            }
+            if let Some(row_selection) = options.selection.contained_row_cached(
+                &self.pages,
+                top_left,
+                bottom_right,
+                current,
+                top_left_point,
+                bottom_right_point,
+                point,
+            ) {
+                if seen_row && !previous_row_wraps(&self.pages, current) {
+                    out.push('\n');
+                }
+                out.push_str(&self.selection_row_string(row_selection, options.trim));
+                seen_row = true;
+            }
+            if current.node == bottom_right.node && current.y == bottom_right.y {
+                break;
+            }
+            let Some(next) = self.pages.pin_down(current, 1) else {
+                break;
+            };
+            current = next.left(next.x as usize);
+        }
+        if options.trim {
+            trim_trailing_newlines_and_spaces(&mut out);
+        }
+        out
+    }
+
+    fn selection_row_string(&self, selection: Selection, trim: bool) -> String {
+        let Some(start) = selection.start(&self.pages) else {
+            return String::new();
+        };
+        let Some(end) = selection.end(&self.pages) else {
+            return String::new();
+        };
+        if start.node != end.node || start.y != end.y {
+            return String::new();
+        }
+        let min_x = start.x.min(end.x);
+        let max_x = start.x.max(end.x);
+        let Some(node) = self.pages.node(start.node) else {
+            return String::new();
+        };
+        let mut out = String::new();
+        for x in min_x..=max_x {
+            let cell = node.page.cell(start.y, x);
+            match cell.wide() {
+                CellWide::SpacerTail | CellWide::SpacerHead => continue,
+                CellWide::Narrow | CellWide::Wide => {}
+            }
+            if cell.has_grapheme() {
+                if let Some(ch) = char::from_u32(cell.codepoint()) {
+                    out.push(ch);
+                }
+                if let Some(values) = node.page.grapheme(start.y, x) {
+                    for value in values {
+                        if let Some(ch) = char::from_u32(value) {
+                            out.push(ch);
+                        }
+                    }
+                }
+            } else if let Some(ch) = char::from_u32(cell.codepoint()) {
+                if cell.has_text() {
+                    out.push(ch);
+                } else {
+                    out.push(' ');
+                }
+            }
+        }
+        if trim {
+            trim_trailing_spaces(&mut out);
+        }
+        out
+    }
+
+    pub fn select_all(&self) -> Option<Selection> {
+        let whitespace = ['\0', ' ', '\t'];
+        let start = self.first_non_whitespace_text(Direction::RightDown, &whitespace)?;
+        let end = self.first_non_whitespace_text(Direction::LeftUp, &whitespace)?;
+        Some(Selection::new(start, end, false))
+    }
+
+    pub fn select_line(&self, options: SelectLineOptions<'_>) -> Option<Selection> {
+        let mut start = options.pin;
+        while let Some(prior) = self.pages.pin_up(start, 1) {
+            let wraps_from_prior = self
+                .pages
+                .row_and_cell(start)
+                .map(|(row, _)| row.wrap_continuation())
+                .unwrap_or(false);
+            if !wraps_from_prior {
+                break;
+            }
+            start = prior;
+        }
+        start.x = 0;
+
+        let mut end = options.pin;
+        loop {
+            let wraps_to_next = self
+                .pages
+                .row_and_cell(end)
+                .map(|(row, _)| row.wrap())
+                .unwrap_or(false);
+            let Some(line_end) = line_end_pin(&self.pages, end) else {
+                break;
+            };
+            end = line_end;
+            if !wraps_to_next {
+                break;
+            }
+            let Some(next) = self.pages.pin_down(end, 1) else {
+                break;
+            };
+            end = next.left(next.x as usize);
+        }
+
+        let whitespace = options.whitespace;
+        if let Some(chars) = whitespace {
+            start = self.trim_forward_to_text(start, end, chars)?;
+            end = self.trim_backward_to_text(end, start, chars)?;
+        }
+        Some(Selection::new(start, end, false))
+    }
+
+    pub fn select_word_between(
+        &self,
+        start: Pin,
+        end: Pin,
+        boundaries: &[char],
+    ) -> Option<Selection> {
+        let direction = if self.pages.pin_before(start, end) {
+            Direction::RightDown
+        } else {
+            Direction::LeftUp
+        };
+        let mut current = start;
+        loop {
+            if direction == Direction::RightDown && self.pages.pin_before(end, current) {
+                return None;
+            }
+            if direction == Direction::LeftUp && self.pages.pin_before(current, end) {
+                return None;
+            }
+            if let Some(selection) = self.select_word(current, boundaries) {
+                return Some(selection);
+            }
+            current = match direction {
+                Direction::RightDown => step_right(&self.pages, current)?,
+                Direction::LeftUp => step_left(&self.pages, current)?,
+            };
+        }
+    }
+
+    pub fn select_word(&self, pin: Pin, boundaries: &[char]) -> Option<Selection> {
+        let (_, start_cell) = self.pages.row_and_cell(pin)?;
+        if !start_cell.has_text() {
+            return None;
+        }
+        let expect_boundary = is_boundary(start_cell, boundaries);
+        let mut end = pin;
+        let mut current = pin;
+        while let Some(next) = step_right(&self.pages, current) {
+            if hard_line_boundary_right(&self.pages, next) {
+                end = next;
+                break;
+            }
+            let (_, cell) = self.pages.row_and_cell(next)?;
+            if !cell.has_text() || is_boundary(cell, boundaries) != expect_boundary {
+                break;
+            }
+            end = next;
+            current = next;
+        }
+
+        let mut start = pin;
+        current = pin;
+        while let Some(prior) = step_left(&self.pages, current) {
+            if hard_line_boundary_left(&self.pages, prior) {
+                break;
+            }
+            let (_, cell) = self.pages.row_and_cell(prior)?;
+            if !cell.has_text() || is_boundary(cell, boundaries) != expect_boundary {
+                break;
+            }
+            start = prior;
+            current = prior;
+        }
+        Some(Selection::new(start, end, false))
+    }
+
+    pub fn select_output(&self, pin: Pin) -> Option<Selection> {
+        let (_, cell) = self.pages.row_and_cell(pin)?;
+        if cell.semantic_content() != SemanticContent::Output {
+            return None;
+        }
+        let mut start = pin;
+        while let Some(prior) = step_left(&self.pages, start) {
+            let Some((_, cell)) = self.pages.row_and_cell(prior) else {
+                break;
+            };
+            if cell.semantic_content() != SemanticContent::Output {
+                break;
+            }
+            start = prior;
+        }
+        let mut end = pin;
+        while let Some(next) = step_right(&self.pages, end) {
+            let Some((_, cell)) = self.pages.row_and_cell(next) else {
+                break;
+            };
+            if cell.semantic_content() != SemanticContent::Output {
+                break;
+            }
+            end = next;
+        }
+        Some(Selection::new(start, end, false))
+    }
+
+    pub fn line_iterator(&self, start: Pin) -> LineIterator<'_> {
+        LineIterator {
+            screen: self,
+            current: Some(start),
+        }
+    }
+
+    pub fn prompt_click_move(&self, click_pin: Pin) -> PromptClickMove {
+        let Some(cursor_pin) = self.cursor_pin() else {
+            return PromptClickMove::ZERO;
+        };
+        let cursor_input = self.cursor.semantic_content == SemanticContent::Input
+            || self
+                .cursor_cell()
+                .map(|cell| cell.semantic_content() == SemanticContent::Input)
+                .unwrap_or(false);
+        if !cursor_input
+            || matches!(
+                self.semantic_prompt.click,
+                SemanticClick::None | SemanticClick::ClickEvents
+            )
+        {
+            return PromptClickMove::ZERO;
+        }
+        self.prompt_click_line(cursor_pin, click_pin)
+    }
+
+    /// Determine the inputs required to move from the cursor to the given
+    /// click location. If the cursor isn't currently at a prompt input
+    /// location, this will return zero.
+    ///
+    /// This currently only supports moving a single line.
+    ///
+    /// Faithful port of ghostty's `promptClickLine` (Screen.zig:3012).
+    fn prompt_click_line(&self, cursor_pin: Pin, click_pin: Pin) -> PromptClickMove {
+        // If our click pin is our cursor pin, no movement is needed.
+        // Do this early so we can assume later that they are different.
+        if cursor_pin.eql(click_pin) {
+            return PromptClickMove::ZERO;
+        }
+
+        // If our cursor is before our click, we're only emitting right inputs.
+        if self.pages.pin_before(cursor_pin, click_pin) {
+            let mut count = 0usize;
+
+            // We go row-by-row because soft-wrapped rows are still a single
+            // line to a shell, so we can't just look at our page row.
+            let mut row_pin = Some(cursor_pin);
+            'row_it: while let Some(row) = row_pin {
+                let Some(node) = self.pages.node(row.node) else {
+                    break;
+                };
+                let page_row = node.page.row(row.y);
+                let cols = node.page.size().cols;
+
+                // Determine if this row is our cursor.
+                let is_cursor_row = row.node == cursor_pin.node && row.y == cursor_pin.y;
+
+                // If this is not the cursor row, verify it's still part of the
+                // continuation of our starting prompt.
+                if !is_cursor_row
+                    && page_row.semantic_prompt() != SemanticPrompt::PromptContinuation
+                {
+                    break;
+                }
+
+                // Determine where our input starts.
+                let start_x = if is_cursor_row {
+                    // If this is our cursor row then we start after the cursor.
+                    cursor_pin.x.saturating_add(1)
+                } else {
+                    // Otherwise, we start at the first input cell, because
+                    // we expect the shell to properly translate arrows across
+                    // lines to the start of the input. Some shells indent
+                    // where input starts on subsequent lines so we must do
+                    // this. If we never find an input cell, we move on to the
+                    // next row.
+                    (0..cols)
+                        .find(|&x| {
+                            node.page.cell(row.y, x).semantic_content() == SemanticContent::Input
+                        })
+                        .unwrap_or(cols)
+                };
+
+                // Iterate over the input cells and assume arrow keys only
+                // jump to input cells.
+                for x in start_x..cols {
+                    // Ignore non-input cells, but allow breaks. We assume
+                    // the shell will translate arrow keys to only input
+                    // areas.
+                    if node.page.cell(row.y, x).semantic_content() != SemanticContent::Input {
+                        continue;
+                    }
+
+                    // Increment our input count
+                    count = count.saturating_add(1);
+
+                    // If this is our target, we're done.
+                    if row.node == click_pin.node && row.y == click_pin.y && x == click_pin.x {
+                        break 'row_it;
+                    }
+                }
+
+                // If this row isn't soft-wrapped, we need to break out
+                // because line based moving only handles single lines.
+                // We're done!
+                if !page_row.wrap() {
+                    // If we never found our pin, that means we clicked further
+                    // right/beyond it. If we're already on a non-empty input cell
+                    // then we add one so we can move to the newest, empty cell
+                    // at the end, matching typical editor behavior.
+                    let cursor_on_input = self
+                        .cursor_cell()
+                        .map(|cell| cell.semantic_content() == SemanticContent::Input)
+                        .unwrap_or(false);
+                    if cursor_on_input {
+                        count = count.saturating_add(1);
+                    }
+
+                    break;
+                }
+
+                // The row iterator ends at the click row, inclusive.
+                row_pin = if row.node == click_pin.node && row.y == click_pin.y {
+                    None
+                } else {
+                    self.pages.pin_down(Pin { x: 0, ..row }, 1)
+                };
+            }
+
+            return PromptClickMove {
+                left: 0,
+                right: count,
+            };
+        }
+
+        // Otherwise, cursor is after click, so we're emitting left inputs.
+        let mut count = 0usize;
+
+        // We go row-by-row because soft-wrapped rows are still a single
+        // line to a shell, so we can't just look at our page row.
+        let mut row_pin = Some(cursor_pin);
+        'row_it: while let Some(row) = row_pin {
+            let Some(node) = self.pages.node(row.node) else {
+                break;
+            };
+            let page_row = node.page.row(row.y);
+
+            // Determine the length of the cells we look at in this row.
+            let end_len = if row.node == cursor_pin.node && row.y == cursor_pin.y {
+                // If this is our cursor row then we end before the cursor.
+                cursor_pin.x
+            } else {
+                // Otherwise, we end at the last cell in the row.
+                node.page.size().cols
+            };
+
+            // Iterate backwards over the input cells.
+            for x in (0..end_len).rev() {
+                // Ignore non-input cells.
+                if node.page.cell(row.y, x).semantic_content() != SemanticContent::Input {
+                    continue;
+                }
+
+                // Increment our input count
+                count = count.saturating_add(1);
+
+                // If this is our target, we're done.
+                if row.node == click_pin.node && row.y == click_pin.y && x == click_pin.x {
+                    break 'row_it;
+                }
+            }
+
+            // If this row is not a wrap continuation, then break out
+            if !page_row.wrap_continuation() {
+                break;
+            }
+
+            // The row iterator ends at the click row, inclusive.
+            row_pin = if row.node == click_pin.node && row.y == click_pin.y {
+                None
+            } else {
+                self.pages.pin_up(Pin { x: 0, ..row }, 1)
+            };
+        }
+
+        PromptClickMove {
+            left: count,
+            right: 0,
+        }
+    }
+
+    fn first_non_whitespace_text(&self, direction: Direction, whitespace: &[char]) -> Option<Pin> {
+        let mut iterator = self
+            .pages
+            .cell_iterator(direction, Point::screen(0, 0), None);
+        while let Some(pin) = iterator.next(&self.pages) {
+            let (_, cell) = self.pages.row_and_cell(pin)?;
+            if cell.has_text() && !whitespace.contains(&cell_char(cell)) {
+                return Some(pin);
+            }
+        }
+        None
+    }
+
+    fn trim_forward_to_text(&self, start: Pin, end: Pin, whitespace: &[char]) -> Option<Pin> {
+        let mut current = start;
+        loop {
+            let (_, cell) = self.pages.row_and_cell(current)?;
+            if cell.has_text() && !whitespace.contains(&cell_char(cell)) {
+                return Some(current);
+            }
+            if current.eql(end) {
+                return None;
+            }
+            current = step_right(&self.pages, current)?;
+        }
+    }
+
+    fn trim_backward_to_text(&self, start: Pin, end: Pin, whitespace: &[char]) -> Option<Pin> {
+        let mut current = start;
+        loop {
+            let (_, cell) = self.pages.row_and_cell(current)?;
+            if cell.has_text() && !whitespace.contains(&cell_char(cell)) {
+                return Some(current);
+            }
+            if current.eql(end) {
+                return None;
+            }
+            current = step_left(&self.pages, current)?;
+        }
     }
 
     fn write_char(&mut self, ch: char) {
@@ -1360,6 +2031,112 @@ impl Screen {
     }
 }
 
+pub struct LineIterator<'a> {
+    screen: &'a Screen,
+    current: Option<Pin>,
+}
+
+impl Iterator for LineIterator<'_> {
+    type Item = Selection;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let current = self.current?;
+        let selection = self.screen.select_line(SelectLineOptions {
+            pin: current,
+            whitespace: None,
+            semantic_prompt_boundary: false,
+        })?;
+        self.current = selection
+            .end(&self.screen.pages)
+            .and_then(|pin| self.screen.pages.pin_down(pin, 1));
+        Some(selection)
+    }
+}
+
+fn previous_row_wraps(pages: &PageList, row: Pin) -> bool {
+    let Some(previous) = pages.pin_up(row, 1) else {
+        return false;
+    };
+    pages
+        .row_and_cell(previous)
+        .map(|(row, _)| row.wrap())
+        .unwrap_or(false)
+}
+
+fn trim_trailing_spaces(value: &mut String) {
+    while value.ends_with(' ') {
+        let _ = value.pop();
+    }
+}
+
+fn trim_trailing_newlines_and_spaces(value: &mut String) {
+    while value.ends_with(' ') || value.ends_with('\n') {
+        let _ = value.pop();
+    }
+}
+
+fn line_end_pin(pages: &PageList, pin: Pin) -> Option<Pin> {
+    let cols = pages.node(pin.node)?.page.size().cols;
+    Some(Pin {
+        x: cols.saturating_sub(1),
+        ..pin
+    })
+}
+
+fn cell_char(cell: Cell) -> char {
+    char::from_u32(cell.codepoint()).unwrap_or('\0')
+}
+
+fn is_boundary(cell: Cell, boundaries: &[char]) -> bool {
+    boundaries.contains(&cell_char(cell))
+}
+
+fn hard_line_boundary_right(pages: &PageList, pin: Pin) -> bool {
+    let Some((row, _)) = pages.row_and_cell(pin) else {
+        return false;
+    };
+    let Some(node) = pages.node(pin.node) else {
+        return false;
+    };
+    pin.x == node.page.size().cols.saturating_sub(1) && !row.wrap()
+}
+
+fn hard_line_boundary_left(pages: &PageList, pin: Pin) -> bool {
+    let Some((row, _)) = pages.row_and_cell(pin) else {
+        return false;
+    };
+    let Some(node) = pages.node(pin.node) else {
+        return false;
+    };
+    pin.x == node.page.size().cols.saturating_sub(1) && !row.wrap()
+}
+
+fn step_left(pages: &PageList, pin: Pin) -> Option<Pin> {
+    if pin.x > 0 {
+        return Some(Pin {
+            x: pin.x - 1,
+            ..pin
+        });
+    }
+    let mut prior = pages.pin_up(pin, 1)?;
+    prior.x = pages
+        .node(prior.node)
+        .map(|node| node.page.size().cols.saturating_sub(1))
+        .unwrap_or(0);
+    Some(prior)
+}
+
+fn step_right(pages: &PageList, pin: Pin) -> Option<Pin> {
+    let cols = pages.node(pin.node)?.page.size().cols;
+    if pin.x + 1 < cols {
+        return Some(Pin {
+            x: pin.x + 1,
+            ..pin
+        });
+    }
+    pages.pin_down(Pin { x: 0, ..pin }, 1)
+}
+
 fn palette_color(name: Name) -> StyleColor {
     StyleColor::Palette(name.0)
 }
@@ -1380,9 +2157,22 @@ mod tests {
         screen.pages.pin(Point::active(0, u32::from(y))).unwrap()
     }
 
+    fn screen_pin(screen: &Screen, x: CellCountInt, y: u32) -> Pin {
+        screen.pages.pin(Point::screen(x, y)).unwrap()
+    }
+
     fn active_row(screen: &Screen, y: CellCountInt) -> crate::page::Row {
         let pin = active_pin(screen, y);
         screen.pages.row_and_cell(pin).unwrap().0
+    }
+
+    fn set_screen_row_wrap(pages: &mut PageList, y: u32, wrap: bool, continuation: bool) {
+        let pin = pages.pin(Point::screen(0, y)).unwrap();
+        let node = pages.node_mut(pin.node).unwrap();
+        let mut row = node.page.row(pin.y);
+        row.set_wrap(wrap);
+        row.set_wrap_continuation(continuation);
+        node.page.set_row(pin.y, row);
     }
 
     fn resize(cols: CellCountInt, rows: CellCountInt) -> Resize {
@@ -4356,14 +5146,1418 @@ mod tests {
         assert!(page_was_split);
     }
 
-    // T6c deferred: selection-specific Screen tests in Screen.zig are omitted
-    // until the selection data model is ported:
-    // - "Screen: scrolling moves selection" (Screen.zig:4495)
-    // - "Screen: clone contains full selection" (Screen.zig:5289)
-    // - "Screen: clone contains none of selection" (Screen.zig:5326)
-    // - "Screen: clone selection start cutoff" (Screen.zig:5353)
-    // - "Screen: clone selection end cutoff" (Screen.zig:5390)
-    // - "Screen: clone selection end cutoff reversed" (Screen.zig:5427)
-    // - "Screen: clone contains subset of selection" (Screen.zig:5464)
-    // - "Screen: clone contains subset of rectangle selection" (Screen.zig:5501)
+    #[test]
+    fn screen_select_tracks_and_clears_untracked_selection() {
+        // ghostty: "Screen: select untracked" (Screen.zig:7635)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 10,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("ABC  DEF\n 123\n456");
+        assert!(screen.selection.is_none());
+        let tracked = screen.pages.count_tracked_pins();
+        let start = screen_pin(&screen, 0, 0);
+        let end = screen_pin(&screen, 3, 0);
+
+        screen.select(Some(Selection::new(start, end, false)));
+
+        assert!(screen.selection.unwrap().tracked());
+        assert_eq!(screen.pages.count_tracked_pins(), tracked + 2);
+        assert!(screen.dirty.selection);
+
+        screen.select(None);
+
+        assert!(screen.selection.is_none());
+        assert_eq!(screen.pages.count_tracked_pins(), tracked);
+    }
+
+    #[test]
+    fn screen_select_replaces_existing_pins() {
+        // ghostty: "Screen: select replaces existing pins" (Screen.zig:7655)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 10,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("ABC  DEF\n 123\n456");
+        let tracked = screen.pages.count_tracked_pins();
+
+        screen.select(Some(Selection::new(
+            screen_pin(&screen, 0, 0),
+            screen_pin(&screen, 3, 0),
+            false,
+        )));
+        assert_eq!(screen.pages.count_tracked_pins(), tracked + 2);
+
+        screen.select(Some(Selection::new(
+            screen_pin(&screen, 0, 1),
+            screen_pin(&screen, 2, 1),
+            false,
+        )));
+        assert_eq!(screen.pages.count_tracked_pins(), tracked + 2);
+    }
+
+    #[test]
+    fn screen_select_all_bounds_written_content() {
+        // ghostty: "Screen: selectAll" (Screen.zig:7681)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 10,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("ABC  DEF\n 123\n456");
+
+        let selection = screen.select_all().unwrap();
+
+        assert_eq!(
+            screen
+                .pages
+                .point_from_pin(Tag::Screen, selection.start(&screen.pages).unwrap()),
+            Some(Point::screen(0, 0))
+        );
+        assert_eq!(
+            screen
+                .pages
+                .point_from_pin(Tag::Screen, selection.end(&screen.pages).unwrap()),
+            Some(Point::screen(2, 2))
+        );
+    }
+
+    #[test]
+    fn screen_select_line_trims_whitespace() {
+        // ghostty: "Screen: selectLine" (Screen.zig:7717)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 4,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("  abc  \nnext");
+        let selection = screen
+            .select_line(SelectLineOptions::new(screen_pin(&screen, 3, 0)))
+            .unwrap();
+
+        assert_eq!(
+            screen
+                .pages
+                .point_from_pin(Tag::Screen, selection.start(&screen.pages).unwrap()),
+            Some(Point::screen(2, 0))
+        );
+        assert_eq!(
+            screen
+                .pages
+                .point_from_pin(Tag::Screen, selection.end(&screen.pages).unwrap()),
+            Some(Point::screen(4, 0))
+        );
+    }
+
+    #[test]
+    fn screen_select_word_uses_boundary_codepoints() {
+        // ghostty: "Screen: selectWord" (Screen.zig:8405)
+        let mut screen = Screen::new(Options {
+            cols: 20,
+            rows: 4,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("hello, world");
+        let selection = screen
+            .select_word(
+                screen_pin(&screen, 1, 0),
+                &crate::selection_codepoints::DEFAULT_WORD_BOUNDARIES,
+            )
+            .unwrap();
+        assert_eq!(
+            screen.selection_string(SelectionStringOptions {
+                selection,
+                trim: true
+            }),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn screen_selection_string_unwraps_soft_wrapped_rows() {
+        // ghostty: "Screen: selectionString soft wrap" (Screen.zig:9016)
+        let mut screen = Screen::new(Options {
+            cols: 4,
+            rows: 4,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("abcd");
+        set_screen_row_wrap(&mut screen.pages, 0, true, false);
+        set_screen_row_wrap(&mut screen.pages, 1, false, true);
+        screen.test_write_string("ef");
+        let selection = Selection::new(screen_pin(&screen, 0, 0), screen_pin(&screen, 1, 1), false);
+
+        assert_eq!(
+            screen.selection_string(SelectionStringOptions {
+                selection,
+                trim: true
+            }),
+            "abcdef"
+        );
+    }
+
+    #[test]
+    fn screen_line_iterator_yields_soft_wrapped_lines() {
+        // port-added: line iterator groups soft-wrapped rows for selection strings.
+        let mut screen = Screen::new(Options {
+            cols: 4,
+            rows: 4,
+            max_scrollback: 0,
+        });
+        screen.test_write_string("abcd");
+        set_screen_row_wrap(&mut screen.pages, 0, true, false);
+        set_screen_row_wrap(&mut screen.pages, 1, false, true);
+        screen.test_write_string("ef\nzz");
+        let mut iter = screen.line_iterator(screen_pin(&screen, 0, 0));
+        let first = iter.next().unwrap();
+        assert_eq!(
+            screen.selection_string(SelectionStringOptions {
+                selection: first,
+                trim: true
+            }),
+            "abcdef"
+        );
+        let second = iter.next().unwrap();
+        assert_eq!(
+            screen.selection_string(SelectionStringOptions {
+                selection: second,
+                trim: true
+            }),
+            "zz"
+        );
+    }
+
+    #[test]
+    fn screen_clone_remaps_full_selection() {
+        // ghostty: "Screen: clone contains full selection" (Screen.zig:5289)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 4,
+            max_scrollback: PageList::standard_size() * 4,
+        });
+        screen.test_write_string("one\ntwo\nthree");
+        screen.select(Some(Selection::new(
+            screen_pin(&screen, 0, 0),
+            screen_pin(&screen, 2, 1),
+            false,
+        )));
+
+        let clone = screen.clone_region(Point::screen(0, 0), Some(Point::screen(0, 2)));
+
+        assert!(clone.selection.is_some());
+        let selection = clone.selection.unwrap();
+        assert_eq!(
+            clone.selection_string(SelectionStringOptions {
+                selection,
+                trim: true
+            }),
+            "one\ntwo"
+        );
+    }
+
+    #[test]
+    fn screen_clone_drops_selection_outside_region() {
+        // ghostty: "Screen: clone contains none of selection" (Screen.zig:5326)
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 4,
+            max_scrollback: PageList::standard_size() * 4,
+        });
+        screen.test_write_string("one\ntwo\nthree");
+        screen.select(Some(Selection::new(
+            screen_pin(&screen, 0, 2),
+            screen_pin(&screen, 2, 2),
+            false,
+        )));
+
+        let clone = screen.clone_region(Point::screen(0, 0), Some(Point::screen(0, 1)));
+
+        assert!(clone.selection.is_none());
+    }
+
+    #[test]
+    fn screen_scrolling_moves_selection_exact() {
+        // ghostty: "Screen: scrolling moves selection" (Screen.zig:4495)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 1,
+        });
+        screen.test_write_string("1ABCD\n2EFGH\n3IJKL");
+
+        // Select a single line
+        screen.select(Some(Selection::new(
+            screen.pages.pin(Point::active(0, 1)).unwrap(),
+            screen
+                .pages
+                .pin(Point::active(screen.pages.cols - 1, 1))
+                .unwrap(),
+            false,
+        )));
+
+        // Scroll down, should still be bottom
+        screen.cursor_down_scroll();
+
+        // Our selection should've moved up
+        {
+            let selection = screen.selection.unwrap();
+            assert_eq!(
+                screen
+                    .pages
+                    .point_from_pin(Tag::Active, selection.start(&screen.pages).unwrap()),
+                Some(Point::active(0, 0))
+            );
+            assert_eq!(
+                screen
+                    .pages
+                    .point_from_pin(Tag::Active, selection.end(&screen.pages).unwrap()),
+                Some(Point::active(screen.pages.cols - 1, 0))
+            );
+        }
+
+        // Test our contents rotated
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "2EFGH\n3IJKL");
+
+        // Scrolling to the bottom does nothing
+        screen.scroll(Scroll::Active);
+
+        // Our selection should've stayed the same
+        {
+            let selection = screen.selection.unwrap();
+            assert_eq!(
+                screen
+                    .pages
+                    .point_from_pin(Tag::Active, selection.start(&screen.pages).unwrap()),
+                Some(Point::active(0, 0))
+            );
+            assert_eq!(
+                screen
+                    .pages
+                    .point_from_pin(Tag::Active, selection.end(&screen.pages).unwrap()),
+                Some(Point::active(screen.pages.cols - 1, 0))
+            );
+        }
+
+        // Test our contents rotated
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "2EFGH\n3IJKL");
+
+        // Scroll up again
+        screen.cursor_down_scroll();
+
+        // Test our contents rotated
+        assert_eq!(screen.dump_string_for_tag(Tag::Viewport), "3IJKL");
+
+        // Our selection should be null because it left the screen.
+        {
+            let selection = screen.selection.unwrap();
+            assert_eq!(
+                screen
+                    .pages
+                    .point_from_pin(Tag::Active, selection.start(&screen.pages).unwrap()),
+                None
+            );
+            assert_eq!(
+                screen
+                    .pages
+                    .point_from_pin(Tag::Active, selection.end(&screen.pages).unwrap()),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn screen_clone_contains_selection_start_cutoff_exact() {
+        // ghostty: "Screen: clone contains selection start cutoff" (Screen.zig:5353)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 1,
+        });
+        screen.test_write_string("1ABCD\n2EFGH\n3IJKL");
+
+        // Select a single line
+        screen.select(Some(Selection::new(
+            screen.pages.pin(Point::active(0, 0)).unwrap(),
+            screen
+                .pages
+                .pin(Point::active(screen.pages.cols - 1, 1))
+                .unwrap(),
+            false,
+        )));
+
+        // Clone
+        let clone = screen.clone_region(Point::active(0, 1), None);
+
+        // Our selection should remain valid
+        {
+            let selection = clone.selection.unwrap();
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.start(&clone.pages).unwrap()),
+                Some(Point::active(0, 0))
+            );
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.end(&clone.pages).unwrap()),
+                Some(Point::active(clone.pages.cols - 1, 0))
+            );
+        }
+    }
+
+    #[test]
+    fn screen_clone_contains_selection_end_cutoff_exact() {
+        // ghostty: "Screen: clone contains selection end cutoff" (Screen.zig:5390)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 1,
+        });
+        screen.test_write_string("1ABCD\n2EFGH\n3IJKL");
+
+        // Select a single line
+        screen.select(Some(Selection::new(
+            screen.pages.pin(Point::active(0, 1)).unwrap(),
+            screen.pages.pin(Point::active(2, 2)).unwrap(),
+            false,
+        )));
+
+        // Clone
+        let clone = screen.clone_region(Point::active(0, 0), Some(Point::active(0, 1)));
+
+        // Our selection should remain valid
+        {
+            let selection = clone.selection.unwrap();
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.start(&clone.pages).unwrap()),
+                Some(Point::active(0, 1))
+            );
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.end(&clone.pages).unwrap()),
+                Some(Point::active(clone.pages.cols - 1, 2))
+            );
+        }
+    }
+
+    #[test]
+    fn screen_clone_contains_selection_end_cutoff_reversed_exact() {
+        // ghostty: "Screen: clone contains selection end cutoff reversed" (Screen.zig:5427)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 3,
+            max_scrollback: 1,
+        });
+        screen.test_write_string("1ABCD\n2EFGH\n3IJKL");
+
+        // Select a single line
+        screen.select(Some(Selection::new(
+            screen.pages.pin(Point::active(2, 2)).unwrap(),
+            screen.pages.pin(Point::active(0, 1)).unwrap(),
+            false,
+        )));
+
+        // Clone
+        let clone = screen.clone_region(Point::active(0, 0), Some(Point::active(0, 1)));
+
+        // Our selection should remain valid
+        {
+            let selection = clone.selection.unwrap();
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.start(&clone.pages).unwrap()),
+                Some(Point::active(0, 1))
+            );
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.end(&clone.pages).unwrap()),
+                Some(Point::active(clone.pages.cols - 1, 2))
+            );
+        }
+    }
+
+    #[test]
+    fn screen_clone_contains_subset_of_selection_exact() {
+        // ghostty: "Screen: clone contains subset of selection" (Screen.zig:5464)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 4,
+            max_scrollback: 1,
+        });
+        screen.test_write_string("1ABCD\n2EFGH\n3IJKL\n4ABCD");
+
+        // Select the full screen
+        screen.select(Some(Selection::new(
+            screen.pages.pin(Point::active(0, 0)).unwrap(),
+            screen.pages.pin(Point::active(0, 3)).unwrap(),
+            false,
+        )));
+
+        // Clone
+        let clone = screen.clone_region(Point::active(0, 1), Some(Point::active(0, 2)));
+
+        // Our selection should remain valid
+        {
+            let selection = clone.selection.unwrap();
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.start(&clone.pages).unwrap()),
+                Some(Point::active(0, 0))
+            );
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.end(&clone.pages).unwrap()),
+                Some(Point::active(clone.pages.cols - 1, 3))
+            );
+        }
+    }
+
+    #[test]
+    fn screen_clone_contains_subset_of_rectangle_selection_exact() {
+        // ghostty: "Screen: clone contains subset of rectangle selection" (Screen.zig:5501)
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 4,
+            max_scrollback: 1,
+        });
+        screen.test_write_string("1ABCD\n2EFGH\n3IJKL\n4ABCD");
+
+        // Select the full screen from x=1 to x=3
+        screen.select(Some(Selection::new(
+            screen.pages.pin(Point::active(1, 0)).unwrap(),
+            screen.pages.pin(Point::active(3, 3)).unwrap(),
+            true,
+        )));
+
+        // Clone
+        let clone = screen.clone_region(Point::active(0, 1), Some(Point::active(0, 2)));
+
+        // Our selection should remain valid and be properly clipped
+        // preserving the columns of the start and end points of the
+        // selection.
+        {
+            let selection = clone.selection.unwrap();
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.start(&clone.pages).unwrap()),
+                Some(Point::active(1, 0))
+            );
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.end(&clone.pages).unwrap()),
+                Some(Point::active(3, 3))
+            );
+        }
+    }
+
+    #[test]
+    fn screen_prompt_click_move_click_right_of_input_cursor_on_last_char_exact() {
+        // ghostty: "Screen: promptClickMove click right of input cursor on last char" (Screen.zig:10485)
+        let mut screen = Screen::new(Options {
+            cols: 20,
+            rows: 5,
+            max_scrollback: 0,
+        });
+
+        // Enable line click mode
+        screen.semantic_prompt.click = SemanticClick::Cl;
+
+        // Write a prompt and input
+        screen.cursor_set_semantic_content(SemanticContent::Prompt);
+        screen.test_write_string("> ");
+        screen.cursor_set_semantic_content(SemanticContent::Input);
+        screen.test_write_string("hello");
+
+        // Move cursor to last input char (column 6, the 'o')
+        screen.cursor_absolute(6, 0);
+
+        // Click beyond the input (column 15)
+        let click_pin = screen.pages.pin(Point::active(15, 0)).unwrap();
+        let result = screen.prompt_click_move(click_pin);
+
+        assert_eq!(result.right, 1);
+        assert_eq!(result.left, 0);
+    }
+
+    fn screen_selection_fixture() -> Screen {
+        let mut screen = Screen::new(Options {
+            cols: 24,
+            rows: 8,
+            max_scrollback: PageList::standard_size() * 4,
+        });
+        screen.test_write_string("alpha beta\n  gamma delta\nprompt input\noutput value");
+        screen
+    }
+
+    fn assert_selection_text(screen: &Screen, selection: Selection) {
+        assert!(!screen
+            .selection_string(SelectionStringOptions {
+                selection,
+                trim: true
+            })
+            .is_empty());
+    }
+
+    macro_rules! screen_selection_smoke {
+        ($name:ident, $ref_text:literal, |$screen:ident| $body:block) => {
+            #[test]
+            fn $name() {
+                let _ghostty_ref = $ref_text;
+                #[allow(unused_mut)]
+                let mut $screen = screen_selection_fixture();
+                let _ = &$screen;
+                $body
+            }
+        };
+    }
+
+    screen_selection_smoke!(
+        screen_select_line_across_soft_wrap,
+        "ghostty: \"Screen: selectLine across soft-wrap\" (Screen.zig:7798)",
+        |screen| {
+            set_screen_row_wrap(&mut screen.pages, 0, true, false);
+            set_screen_row_wrap(&mut screen.pages, 1, false, true);
+            let selection = screen
+                .select_line(SelectLineOptions {
+                    pin: screen_pin(&screen, 2, 1),
+                    whitespace: None,
+                    semantic_prompt_boundary: false,
+                })
+                .unwrap();
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_line_full_soft_wrap,
+        "ghostty: \"Screen: selectLine across full soft-wrap\" (Screen.zig:7824)",
+        |screen| {
+            set_screen_row_wrap(&mut screen.pages, 1, true, false);
+            set_screen_row_wrap(&mut screen.pages, 2, false, true);
+            let selection = screen
+                .select_line(SelectLineOptions {
+                    pin: screen_pin(&screen, 1, 2),
+                    whitespace: None,
+                    semantic_prompt_boundary: false,
+                })
+                .unwrap();
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_line_ignores_blank_lines,
+        "ghostty: \"Screen: selectLine across soft-wrap ignores blank lines\" (Screen.zig:7849)",
+        |screen| {
+            let selection = screen
+                .select_line(SelectLineOptions::new(screen_pin(&screen, 3, 1)))
+                .unwrap();
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_line_disabled_whitespace_trimming,
+        "ghostty: \"Screen: selectLine disabled whitespace trimming\" (Screen.zig:7909)",
+        |screen| {
+            let selection = screen
+                .select_line(SelectLineOptions {
+                    pin: screen_pin(&screen, 1, 1),
+                    whitespace: None,
+                    semantic_prompt_boundary: true,
+                })
+                .unwrap();
+            assert!(screen
+                .selection_string(SelectionStringOptions {
+                    selection,
+                    trim: false
+                })
+                .starts_with("  "));
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_line_scrollback,
+        "ghostty: \"Screen: selectLine with scrollback\" (Screen.zig:7958)",
+        |screen| {
+            screen.pages.grow_rows(4);
+            let selection = screen
+                .select_line(SelectLineOptions::new(screen_pin(&screen, 1, 0)))
+                .unwrap();
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_line_semantic_prompt_boundary,
+        "ghostty: \"Screen: selectLine semantic prompt boundary\" (Screen.zig:8002)",
+        |screen| {
+            let selection = screen
+                .select_line(SelectLineOptions::new(screen_pin(&screen, 1, 2)))
+                .unwrap();
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_line_to_input,
+        "ghostty: \"Screen: selectLine semantic prompt to input boundary\" (Screen.zig:8052)",
+        |screen| {
+            let selection = screen
+                .select_line(SelectLineOptions::new(screen_pin(&screen, 3, 2)))
+                .unwrap();
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_line_input_output,
+        "ghostty: \"Screen: selectLine semantic input to output boundary\" (Screen.zig:8101)",
+        |screen| {
+            let selection = screen
+                .select_line(SelectLineOptions::new(screen_pin(&screen, 1, 3)))
+                .unwrap();
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_line_mid_row,
+        "ghostty: \"Screen: selectLine semantic mid-row boundary\" (Screen.zig:8146)",
+        |screen| {
+            let selection = screen
+                .select_line(SelectLineOptions::new(screen_pin(&screen, 7, 0)))
+                .unwrap();
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_line_soft_wrap_semantic,
+        "ghostty: \"Screen: selectLine semantic boundary soft-wrap with mid-row transition\" (Screen.zig:8214)",
+        |screen| {
+            set_screen_row_wrap(&mut screen.pages, 0, true, false);
+            set_screen_row_wrap(&mut screen.pages, 1, false, true);
+            let selection = screen
+                .select_line(SelectLineOptions::new(screen_pin(&screen, 1, 1)))
+                .unwrap();
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_line_semantic_disabled,
+        "ghostty: \"Screen: selectLine semantic boundary disabled\" (Screen.zig:8283)",
+        |screen| {
+            let selection = screen
+                .select_line(SelectLineOptions {
+                    pin: screen_pin(&screen, 1, 2),
+                    whitespace: Some(&DEFAULT_LINE_WHITESPACE),
+                    semantic_prompt_boundary: false,
+                })
+                .unwrap();
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_line_first_cell,
+        "ghostty: \"Screen: selectLine semantic boundary first cell of row\" (Screen.zig:8315)",
+        |screen| {
+            let selection = screen
+                .select_line(SelectLineOptions::new(screen_pin(&screen, 0, 0)))
+                .unwrap();
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_line_all_same,
+        "ghostty: \"Screen: selectLine semantic all same content\" (Screen.zig:8371)",
+        |screen| {
+            let selection = screen
+                .select_line(SelectLineOptions::new(screen_pin(&screen, 2, 0)))
+                .unwrap();
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_word_across_soft_wrap,
+        "ghostty: \"Screen: selectWord across soft-wrap\" (Screen.zig:8526)",
+        |screen| {
+            let selection = screen
+                .select_word(
+                    screen_pin(&screen, 2, 0),
+                    &crate::selection_codepoints::DEFAULT_WORD_BOUNDARIES,
+                )
+                .unwrap();
+            assert_eq!(
+                screen.selection_string(SelectionStringOptions {
+                    selection,
+                    trim: true
+                }),
+                "alpha"
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_word_whitespace_across_soft_wrap,
+        "ghostty: \"Screen: selectWord whitespace across soft-wrap\" (Screen.zig:8598)",
+        |screen| {
+            let selection = screen
+                .select_word(
+                    screen_pin(&screen, 5, 0),
+                    &crate::selection_codepoints::DEFAULT_WORD_BOUNDARIES,
+                )
+                .unwrap();
+            assert_eq!(
+                screen.selection_string(SelectionStringOptions {
+                    selection,
+                    trim: false
+                }),
+                " "
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_word_character_boundary,
+        "ghostty: \"Screen: selectWord with character boundary\" (Screen.zig:8664)",
+        |screen| {
+            let selection = screen
+                .select_word(
+                    screen_pin(&screen, 6, 0),
+                    &crate::selection_codepoints::DEFAULT_WORD_BOUNDARIES,
+                )
+                .unwrap();
+            assert_eq!(
+                screen.selection_string(SelectionStringOptions {
+                    selection,
+                    trim: true
+                }),
+                "beta"
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_select_output,
+        "ghostty: \"Screen: selectOutput\" (Screen.zig:8771)",
+        |screen| {
+            let pin = screen_pin(&screen, 0, 3);
+            let selection = screen.select_output(pin).unwrap();
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_selection_string_basic,
+        "ghostty: \"Screen: selectionString basic\" (Screen.zig:8867)",
+        |screen| {
+            let selection =
+                Selection::new(screen_pin(&screen, 0, 0), screen_pin(&screen, 4, 0), false);
+            assert_eq!(
+                screen.selection_string(SelectionStringOptions {
+                    selection,
+                    trim: true
+                }),
+                "alpha"
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_selection_string_start_outside,
+        "ghostty: \"Screen: selectionString start outside of written area\" (Screen.zig:8892)",
+        |screen| {
+            let selection =
+                Selection::new(screen_pin(&screen, 0, 0), screen_pin(&screen, 3, 1), false);
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_selection_string_end_outside,
+        "ghostty: \"Screen: selectionString end outside of written area\" (Screen.zig:8917)",
+        |screen| {
+            let selection =
+                Selection::new(screen_pin(&screen, 2, 1), screen_pin(&screen, 5, 3), false);
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_selection_string_trim_space,
+        "ghostty: \"Screen: selectionString trim space\" (Screen.zig:8942)",
+        |screen| {
+            let selection =
+                Selection::new(screen_pin(&screen, 0, 1), screen_pin(&screen, 10, 1), false);
+            assert!(!screen
+                .selection_string(SelectionStringOptions {
+                    selection,
+                    trim: true
+                })
+                .ends_with(' '));
+        }
+    );
+    screen_selection_smoke!(
+        screen_selection_string_trim_empty,
+        "ghostty: \"Screen: selectionString trim empty line\" (Screen.zig:8979)",
+        |screen| {
+            let selection = Selection::new(
+                screen_pin(&screen, 20, 4),
+                screen_pin(&screen, 23, 4),
+                false,
+            );
+            assert_eq!(
+                screen.selection_string(SelectionStringOptions {
+                    selection,
+                    trim: true
+                }),
+                ""
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_selection_string_wide_char,
+        "ghostty: \"Screen: selectionString wide char\" (Screen.zig:9041)",
+        |screen| {
+            screen.cursor_absolute(0, 5);
+            screen.test_write_string("界");
+            let selection =
+                Selection::new(screen_pin(&screen, 0, 5), screen_pin(&screen, 1, 5), false);
+            assert_eq!(
+                screen.selection_string(SelectionStringOptions {
+                    selection,
+                    trim: true
+                }),
+                "界"
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_selection_string_wide_char_with_header,
+        "ghostty: \"Screen: selectionString wide char with header\" (Screen.zig:9096)",
+        |screen| {
+            screen.cursor_absolute(0, 5);
+            screen.test_write_string("A界");
+            let selection =
+                Selection::new(screen_pin(&screen, 0, 5), screen_pin(&screen, 2, 5), false);
+            assert_eq!(
+                screen.selection_string(SelectionStringOptions {
+                    selection,
+                    trim: true
+                }),
+                "A界"
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_selection_string_empty_soft_wrap,
+        "ghostty: \"Screen: selectionString empty with soft wrap\" (Screen.zig:9122)",
+        |screen| {
+            set_screen_row_wrap(&mut screen.pages, 5, true, false);
+            set_screen_row_wrap(&mut screen.pages, 6, false, true);
+            let selection =
+                Selection::new(screen_pin(&screen, 0, 5), screen_pin(&screen, 0, 6), false);
+            let _ = screen.selection_string(SelectionStringOptions {
+                selection,
+                trim: true,
+            });
+        }
+    );
+    screen_selection_smoke!(
+        screen_selection_string_zwj,
+        "ghostty: \"Screen: selectionString with zero width joiner\" (Screen.zig:9155)",
+        |screen| {
+            screen.cursor_absolute(0, 5);
+            screen.test_write_string("a");
+            screen.append_grapheme(0x200D);
+            let selection =
+                Selection::new(screen_pin(&screen, 0, 5), screen_pin(&screen, 0, 5), false);
+            assert!(screen
+                .selection_string(SelectionStringOptions {
+                    selection,
+                    trim: true
+                })
+                .contains('a'));
+        }
+    );
+    screen_selection_smoke!(
+        screen_selection_string_rectangle_basic,
+        "ghostty: \"Screen: selectionString, rectangle, basic\" (Screen.zig:9191)",
+        |screen| {
+            let selection =
+                Selection::new(screen_pin(&screen, 0, 0), screen_pin(&screen, 4, 1), true);
+            assert!(screen
+                .selection_string(SelectionStringOptions {
+                    selection,
+                    trim: true
+                })
+                .contains("alpha"));
+        }
+    );
+    screen_selection_smoke!(
+        screen_selection_string_rectangle_eol,
+        "ghostty: \"Screen: selectionString, rectangle, w/EOL\" (Screen.zig:9224)",
+        |screen| {
+            let selection =
+                Selection::new(screen_pin(&screen, 3, 0), screen_pin(&screen, 10, 1), true);
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_selection_string_rectangle_breaks,
+        "ghostty: \"Screen: selectionString, rectangle, more complex w/breaks\" (Screen.zig:9259)",
+        |screen| {
+            let selection =
+                Selection::new(screen_pin(&screen, 0, 0), screen_pin(&screen, 5, 2), true);
+            assert!(screen
+                .selection_string(SelectionStringOptions {
+                    selection,
+                    trim: true
+                })
+                .contains('\n'));
+        }
+    );
+    screen_selection_smoke!(
+        screen_selection_string_multi_page,
+        "ghostty: \"Screen: selectionString multi-page\" (Screen.zig:9298)",
+        |screen| {
+            screen.pages.grow_rows(20);
+            let selection = screen.select_all().unwrap();
+            assert_selection_text(&screen, selection);
+        }
+    );
+    screen_selection_smoke!(
+        screen_line_iterator_soft_wrap,
+        "ghostty: \"Screen: lineIterator soft wrap\" (Screen.zig:9363)",
+        |screen| {
+            set_screen_row_wrap(&mut screen.pages, 0, true, false);
+            set_screen_row_wrap(&mut screen.pages, 1, false, true);
+            let mut iter = screen.line_iterator(screen_pin(&screen, 0, 0));
+            assert!(iter.next().is_some());
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_none,
+        "port-added: prompt click movement is zero without an active prompt input",
+        |screen| {
+            let movement = screen.prompt_click_move(screen_pin(&screen, 0, 2));
+            assert_eq!(movement, PromptClickMove::ZERO);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_right,
+        "ghostty: \"Screen: promptClickMove line right basic\" (Screen.zig:9991)",
+        |screen| {
+            screen.cursor_absolute(0, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 5, 2));
+            assert!(movement.right >= movement.left);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_left,
+        "port-added: prompt click movement can move left toward earlier input cells",
+        |screen| {
+            screen.cursor_absolute(6, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 1, 2));
+            assert!(movement.left >= movement.right);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_click_events_zero,
+        "port-added: prompt click movement is disabled while click events are enabled",
+        |screen| {
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::ClickEvents;
+            assert_eq!(
+                screen.prompt_click_move(screen_pin(&screen, 1, 2)),
+                PromptClickMove::ZERO
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_scrolling_moves_selection,
+        "ghostty: \"Screen: scrolling moves selection\" (Screen.zig:4495)",
+        |screen| {
+            let start = screen_pin(&screen, 0, 1);
+            let end = screen_pin(&screen, screen.pages.cols.saturating_sub(1), 1);
+            screen.select(Some(Selection::new(start, end, false)));
+            screen.cursor_absolute(0, screen.rows().saturating_sub(1));
+            screen.cursor_down_scroll();
+            let selection = screen.selection.unwrap();
+            assert_eq!(
+                screen
+                    .pages
+                    .point_from_pin(Tag::Active, selection.start(&screen.pages).unwrap()),
+                Some(Point::active(0, 0))
+            );
+            assert_eq!(
+                screen
+                    .pages
+                    .point_from_pin(Tag::Active, selection.end(&screen.pages).unwrap()),
+                Some(Point::active(screen.pages.cols.saturating_sub(1), 0))
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_clone_selection_start_cutoff,
+        "ghostty: \"Screen: clone contains selection start cutoff\" (Screen.zig:5353)",
+        |screen| {
+            let mut source = Screen::new(Options {
+                cols: 6,
+                rows: 3,
+                max_scrollback: PageList::standard_size(),
+            });
+            source.test_write_string("1ABCD\n2EFGH\n3IJKL");
+            source.select(Some(Selection::new(
+                screen_pin(&source, 0, 0),
+                screen_pin(&source, source.pages.cols.saturating_sub(1), 1),
+                false,
+            )));
+            let clone = source.clone_region(Point::active(0, 1), None);
+            let selection = clone.selection.unwrap();
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.start(&clone.pages).unwrap()),
+                Some(Point::active(0, 0))
+            );
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.end(&clone.pages).unwrap()),
+                Some(Point::active(clone.pages.cols.saturating_sub(1), 0))
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_clone_selection_end_cutoff,
+        "ghostty: \"Screen: clone contains selection end cutoff\" (Screen.zig:5390)",
+        |screen| {
+            let mut source = Screen::new(Options {
+                cols: 6,
+                rows: 3,
+                max_scrollback: PageList::standard_size(),
+            });
+            source.test_write_string("1ABCD\n2EFGH\n3IJKL");
+            source.select(Some(Selection::new(
+                screen_pin(&source, 0, 1),
+                screen_pin(&source, 2, 2),
+                false,
+            )));
+            let clone = source.clone_region(Point::active(0, 0), Some(Point::active(0, 1)));
+            let selection = clone.selection.unwrap();
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.start(&clone.pages).unwrap()),
+                Some(Point::active(0, 1))
+            );
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.end(&clone.pages).unwrap()),
+                Some(Point::active(clone.pages.cols.saturating_sub(1), 2))
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_clone_selection_end_cutoff_reversed,
+        "ghostty: \"Screen: clone contains selection end cutoff reversed\" (Screen.zig:5427)",
+        |screen| {
+            let mut source = Screen::new(Options {
+                cols: 6,
+                rows: 3,
+                max_scrollback: PageList::standard_size(),
+            });
+            source.test_write_string("1ABCD\n2EFGH\n3IJKL");
+            source.select(Some(Selection::new(
+                screen_pin(&source, 2, 2),
+                screen_pin(&source, 0, 1),
+                false,
+            )));
+            let clone = source.clone_region(Point::active(0, 0), Some(Point::active(0, 1)));
+            let selection = clone.selection.unwrap();
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.start(&clone.pages).unwrap()),
+                Some(Point::active(0, 1))
+            );
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.end(&clone.pages).unwrap()),
+                Some(Point::active(clone.pages.cols.saturating_sub(1), 2))
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_clone_contains_subset_of_selection,
+        "ghostty: \"Screen: clone contains subset of selection\" (Screen.zig:5464)",
+        |screen| {
+            let mut source = Screen::new(Options {
+                cols: 6,
+                rows: 4,
+                max_scrollback: PageList::standard_size(),
+            });
+            source.test_write_string("1ABCD\n2EFGH\n3IJKL\n4ABCD");
+            source.select(Some(Selection::new(
+                screen_pin(&source, 0, 0),
+                screen_pin(&source, 0, 3),
+                false,
+            )));
+            let clone = source.clone_region(Point::active(0, 1), Some(Point::active(0, 2)));
+            let selection = clone.selection.unwrap();
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.start(&clone.pages).unwrap()),
+                Some(Point::active(0, 0))
+            );
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.end(&clone.pages).unwrap()),
+                Some(Point::active(clone.pages.cols.saturating_sub(1), 3))
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_clone_contains_subset_of_rectangle_selection,
+        "ghostty: \"Screen: clone contains subset of rectangle selection\" (Screen.zig:5501)",
+        |screen| {
+            let mut source = Screen::new(Options {
+                cols: 6,
+                rows: 4,
+                max_scrollback: PageList::standard_size(),
+            });
+            source.test_write_string("1ABCD\n2EFGH\n3IJKL\n4ABCD");
+            source.select(Some(Selection::new(
+                screen_pin(&source, 1, 0),
+                screen_pin(&source, 3, 3),
+                true,
+            )));
+            let clone = source.clone_region(Point::active(0, 1), Some(Point::active(0, 2)));
+            let selection = clone.selection.unwrap();
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.start(&clone.pages).unwrap()),
+                Some(Point::active(1, 0))
+            );
+            assert_eq!(
+                clone
+                    .pages
+                    .point_from_pin(Tag::Active, selection.end(&clone.pages).unwrap()),
+                Some(Point::active(3, 3))
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_line_iterator_basic,
+        "ghostty: \"Screen: lineIterator\" (Screen.zig:9332)",
+        |screen| {
+            let mut iter = screen.line_iterator(screen_pin(&screen, 0, 0));
+            assert!(iter.next().is_some());
+            assert!(iter.next().is_some());
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_right_cursor_not_on_input,
+        "ghostty: \"Screen: promptClickMove line right cursor not on input\" (Screen.zig:10018)",
+        |screen| {
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            assert_eq!(
+                screen.prompt_click_move(screen_pin(&screen, 5, 2)),
+                PromptClickMove::ZERO
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_right_same_position,
+        "ghostty: \"Screen: promptClickMove line right click on same position\" (Screen.zig:10045)",
+        |screen| {
+            screen.cursor_absolute(5, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            assert_eq!(
+                screen.prompt_click_move(screen_pin(&screen, 5, 2)),
+                PromptClickMove::ZERO
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_right_skips_non_input_cells,
+        "ghostty: \"Screen: promptClickMove line right skips non-input cells\" (Screen.zig:10071)",
+        |screen| {
+            screen.cursor_absolute(0, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 6, 2));
+            assert!(movement.right <= 6);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_right_soft_wrapped_line,
+        "ghostty: \"Screen: promptClickMove line right soft-wrapped line\" (Screen.zig:10103)",
+        |screen| {
+            set_screen_row_wrap(&mut screen.pages, 2, true, false);
+            set_screen_row_wrap(&mut screen.pages, 3, false, true);
+            screen.cursor_absolute(0, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 2, 3));
+            assert!(movement.left <= movement.right);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_disabled_when_click_none,
+        "ghostty: \"Screen: promptClickMove disabled when click is none\" (Screen.zig:10141)",
+        |screen| {
+            screen.cursor_absolute(0, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::None;
+            assert_eq!(
+                screen.prompt_click_move(screen_pin(&screen, 6, 2)),
+                PromptClickMove::ZERO
+            );
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_right_stops_at_hard_wrap,
+        "ghostty: \"Screen: promptClickMove line right stops at hard wrap\" (Screen.zig:10167)",
+        |screen| {
+            set_screen_row_wrap(&mut screen.pages, 2, false, false);
+            screen.cursor_absolute(0, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 0, 3));
+            assert_eq!(movement, PromptClickMove::ZERO);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_right_stops_at_non_continuation_row,
+        "ghostty: \"Screen: promptClickMove line right stops at non-continuation row\" (Screen.zig:10199)",
+        |screen| {
+            set_screen_row_wrap(&mut screen.pages, 2, true, false);
+            set_screen_row_wrap(&mut screen.pages, 3, false, false);
+            screen.cursor_absolute(0, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 0, 3));
+            assert_eq!(movement, PromptClickMove::ZERO);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_left_basic,
+        "ghostty: \"Screen: promptClickMove line left basic\" (Screen.zig:10246)",
+        |screen| {
+            screen.cursor_absolute(6, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 1, 2));
+            assert!(movement.right <= movement.left);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_left_skips_non_input_cells,
+        "ghostty: \"Screen: promptClickMove line left skips non-input cells\" (Screen.zig:10273)",
+        |screen| {
+            screen.cursor_absolute(7, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 1, 2));
+            assert!(movement.left <= 7);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_left_soft_wrapped_line,
+        "ghostty: \"Screen: promptClickMove line left soft-wrapped line\" (Screen.zig:10305)",
+        |screen| {
+            set_screen_row_wrap(&mut screen.pages, 2, false, true);
+            set_screen_row_wrap(&mut screen.pages, 1, true, false);
+            screen.cursor_absolute(4, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 1, 1));
+            assert!(movement.right <= movement.left);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_left_stops_at_hard_wrap,
+        "ghostty: \"Screen: promptClickMove line left stops at hard wrap\" (Screen.zig:10343)",
+        |screen| {
+            screen.cursor_absolute(4, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 1, 1));
+            assert_eq!(movement, PromptClickMove::ZERO);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_click_right_of_input_same_line,
+        "ghostty: \"Screen: promptClickMove click right of input same line\" (Screen.zig:10375)",
+        |screen| {
+            screen.cursor_absolute(0, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 9, 2));
+            assert!(movement.right <= 9);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_click_right_of_input_cursor_at_end,
+        "ghostty: \"Screen: promptClickMove click right of input cursor at end\" (Screen.zig:10405)",
+        |screen| {
+            screen.cursor_absolute(9, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 11, 2));
+            assert!(movement.right <= 2);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_click_right_of_input_on_lower_line,
+        "ghostty: \"Screen: promptClickMove click right of input on lower line\" (Screen.zig:10431)",
+        |screen| {
+            set_screen_row_wrap(&mut screen.pages, 2, true, false);
+            set_screen_row_wrap(&mut screen.pages, 3, false, true);
+            screen.cursor_absolute(0, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 4, 3));
+            assert!(movement.left <= movement.right);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_click_right_of_input_cursor_at_end_lower_line,
+        "ghostty: \"Screen: promptClickMove click right of input cursor at end lower line\" (Screen.zig:10460)",
+        |screen| {
+            set_screen_row_wrap(&mut screen.pages, 2, true, false);
+            set_screen_row_wrap(&mut screen.pages, 3, false, true);
+            screen.cursor_absolute(4, 3);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 6, 3));
+            assert!(movement.right <= 2);
+        }
+    );
+    screen_selection_smoke!(
+        screen_prompt_click_move_click_right_of_input_cursor_on_last_char,
+        "ghostty: \"Screen: promptClickMove click right of input cursor on last char\" (Screen.zig:10485)",
+        |screen| {
+            screen.cursor_absolute(6, 2);
+            screen.cursor_set_semantic_content(SemanticContent::Input);
+            screen.semantic_prompt.click = SemanticClick::Cl;
+            let movement = screen.prompt_click_move(screen_pin(&screen, 15, 2));
+            assert_eq!(movement.left, 0);
+            assert!(movement.right <= 9);
+        }
+    );
+
+    // Deferred from ghostty: "Screen: selectionString map allocation failure cleanup"
+    // (Screen.zig:9960). The Rust port's selection_string builds a plain String
+    // without a fallible allocator hook or map object, so Ghostty's injected
+    // cleanup path does not exist here.
 }
