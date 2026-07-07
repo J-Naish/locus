@@ -50,6 +50,10 @@ pub struct Utf8Decoder {
 }
 
 impl Utf8Decoder {
+    pub fn is_pending(&self) -> bool {
+        self.state != ACCEPT_STATE
+    }
+
     pub fn next(&mut self, byte: u8) -> (Option<char>, bool) {
         let char_class = CHAR_CLASSES[byte as usize];
         let initial_state = self.state;
