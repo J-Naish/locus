@@ -30,6 +30,7 @@ pub mod sgr;
 pub mod size;
 pub mod size_report;
 pub mod stream;
+pub mod stream_terminal;
 pub mod style;
 pub mod tabstops;
 pub mod terminal;

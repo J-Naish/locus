@@ -11,14 +11,14 @@ pub(crate) mod parsers;
 use std::ops::Range;
 
 use crate::color::{Dynamic, Special};
-use parsers::color_operation::{ColorOperationKind, ColorRequest};
+pub use parsers::color_operation::{ColorOperationKind, ColorRequest};
 use parsers::context_signal::ContextSignal;
 use parsers::kitty_clipboard_protocol::KittyClipboard;
-use parsers::kitty_color::{KittyColorRequest, KittySpecial};
+pub use parsers::kitty_color::{KittyColorRequest, KittySpecial};
 use parsers::kitty_dnd_protocol::KittyDnd;
 use parsers::kitty_text_sizing::KittyTextSizing;
 use parsers::osc9::{ConemuTabTitle, ProgressState};
-use parsers::semantic_prompt::{SemanticPrompt, SemanticPromptAction};
+pub use parsers::semantic_prompt::{SemanticPrompt, SemanticPromptAction};
 
 pub const MAX_BUF: usize = 2048;
 pub(crate) const FIXED_CAPTURE_MAX: usize = MAX_BUF - 1;

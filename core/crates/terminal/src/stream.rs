@@ -3,7 +3,11 @@
 //! `Parser` owns the byte-level state machine. This module only converts
 //! parser actions into typed handler callbacks and handles ground-state UTF-8.
 
+use crate::charsets::{ActiveSlot, Charset, Slots as CharsetSlots};
+use crate::device_attributes;
+use crate::device_status;
 use crate::modes::{mode_from_int, Mode, ModeTag};
+use crate::osc::{ColorOperationKind, ColorRequest, KittyColorRequest, Terminator};
 use crate::parser::{Action as ParserAction, Csi, Dcs, Esc, Parser};
 use crate::sgr;
 use crate::utf8::Utf8Decoder;
@@ -53,13 +57,27 @@ pub enum SizeReportStyle {
 
 pub trait Handler {
     fn print(&mut self, _cp: char) {}
+    fn print_repeat(&mut self, _count: usize) {}
     fn execute(&mut self, _byte: u8) {}
+    fn index(&mut self) {}
+    fn reverse_index(&mut self) {}
+    fn next_line(&mut self) {}
     fn cursor_up(&mut self, _value: u16) {}
     fn cursor_down(&mut self, _value: u16) {}
     fn cursor_right(&mut self, _value: u16) {}
     fn cursor_left(&mut self, _value: u16) {}
+    fn cursor_col(&mut self, _col: u16) {}
+    fn cursor_row(&mut self, _row: u16) {}
+    fn cursor_col_relative(&mut self, _value: u16) {}
+    fn cursor_row_relative(&mut self, _value: u16) {}
     fn cursor_position(&mut self, _row: u16, _col: u16) {}
     fn insert_blanks(&mut self, _value: usize) {}
+    fn delete_chars(&mut self, _value: usize) {}
+    fn erase_chars(&mut self, _value: usize) {}
+    fn insert_lines(&mut self, _value: usize) {}
+    fn delete_lines(&mut self, _value: usize) {}
+    fn scroll_up(&mut self, _value: usize) {}
+    fn scroll_down(&mut self, _value: usize) {}
     fn erase_display(&mut self, _mode: EraseDisplay, _protected: bool) {}
     fn erase_line(&mut self, _mode: EraseLine, _protected: bool) {}
     fn set_attribute(&mut self, _attribute: sgr::Attribute<'_>) {}
@@ -81,9 +99,32 @@ pub trait Handler {
     fn title_push(&mut self, _index: u16) {}
     fn title_pop(&mut self, _index: u16) {}
     fn tab_set(&mut self) {}
+    fn horizontal_tab(&mut self, _count: usize) {}
+    fn horizontal_tab_back(&mut self, _count: usize) {}
     fn tab_clear_current(&mut self) {}
     fn tab_clear_all(&mut self) {}
     fn tab_reset(&mut self) {}
+    fn configure_charset(&mut self, _slot: CharsetSlots, _charset: Charset) {}
+    fn invoke_charset(&mut self, _active: ActiveSlot, _slot: CharsetSlots, _single: bool) {}
+    fn decaln(&mut self) {}
+    fn full_reset(&mut self) {}
+    fn start_hyperlink(&mut self, _id: Option<&[u8]>, _uri: &[u8]) {}
+    fn end_hyperlink(&mut self) {}
+    fn semantic_prompt(&mut self, _cmd: crate::osc::SemanticPrompt<'_>) {}
+    fn mouse_shape(&mut self, _shape: &[u8]) {}
+    fn color_operation(
+        &mut self,
+        _kind: ColorOperationKind,
+        _requests: &[ColorRequest],
+        _terminator: Terminator,
+    ) {
+    }
+    fn kitty_color_protocol(&mut self, _requests: &[KittyColorRequest], _terminator: Terminator) {}
+    fn report_pwd(&mut self, _value: &[u8]) {}
+    fn xtversion(&mut self) {}
+    fn device_status(&mut self, _request: device_status::Request) {}
+    fn device_attributes(&mut self, _req: device_attributes::Req) {}
+    fn enquiry(&mut self) {}
     fn window_title(&mut self, _title: &str) {}
     fn window_icon(&mut self, _title: &str) {}
     fn dcs_hook(&mut self, _dcs: Dcs<'_>) {}
@@ -177,6 +218,22 @@ impl<H: Handler> Stream<H> {
                     handler.window_icon(title);
                 }
             }
+            crate::osc::Command::SemanticPrompt(cmd) => handler.semantic_prompt(cmd),
+            crate::osc::Command::ReportPwd { value } => handler.report_pwd(value),
+            crate::osc::Command::MouseShape { value } => handler.mouse_shape(value),
+            crate::osc::Command::ColorOperation {
+                kind,
+                requests,
+                terminator,
+            } => handler.color_operation(kind, requests, terminator),
+            crate::osc::Command::KittyColorProtocol {
+                requests,
+                terminator,
+            } => handler.kitty_color_protocol(requests, terminator),
+            crate::osc::Command::HyperlinkStart { id, uri } => {
+                handler.start_hyperlink(id, uri);
+            }
+            crate::osc::Command::HyperlinkEnd => handler.end_hyperlink(),
             _ => {}
         }
     }
@@ -185,6 +242,19 @@ impl<H: Handler> Stream<H> {
         match (esc.intermediates, esc.final_byte) {
             (b"", b'7') => handler.save_cursor(),
             (b"", b'8') => handler.restore_cursor(),
+            (b"", b'D') => handler.index(),
+            (b"", b'E') => handler.next_line(),
+            (b"", b'M') => handler.reverse_index(),
+            (b"", b'H') => handler.tab_set(),
+            (b"", b'c') => handler.full_reset(),
+            (b"#", b'8') => handler.decaln(),
+            (b"(", final_byte) => Self::dispatch_charset(handler, CharsetSlots::G0, final_byte),
+            (b")", final_byte) => Self::dispatch_charset(handler, CharsetSlots::G1, final_byte),
+            (b"*", final_byte) => Self::dispatch_charset(handler, CharsetSlots::G2, final_byte),
+            (b"+", final_byte) => Self::dispatch_charset(handler, CharsetSlots::G3, final_byte),
+            (b"%", b'G') => handler.configure_charset(CharsetSlots::G0, Charset::Utf8),
+            (b"", b'n') => handler.invoke_charset(ActiveSlot::Gl, CharsetSlots::G2, true),
+            (b"", b'o') => handler.invoke_charset(ActiveSlot::Gl, CharsetSlots::G3, true),
             _ => {}
         }
     }
@@ -204,14 +274,57 @@ impl<H: Handler> Stream<H> {
             b'D' => Self::dispatch_single_count(handler, csi, |handler, value| {
                 handler.cursor_left(value)
             }),
+            b'E' => Self::dispatch_single_count(handler, csi, |handler, value| {
+                for _ in 0..value {
+                    handler.next_line();
+                }
+            }),
+            b'G' | b'`' => Self::dispatch_single_count(handler, csi, |handler, value| {
+                handler.cursor_col(value)
+            }),
             b'H' | b'f' => Self::dispatch_cursor_position(handler, csi),
             b'J' => Self::dispatch_erase_display(handler, csi),
             b'K' => Self::dispatch_erase_line(handler, csi),
+            b'L' => Self::dispatch_usize_count(handler, csi, |handler, value| {
+                handler.insert_lines(value)
+            }),
+            b'M' => Self::dispatch_usize_count(handler, csi, |handler, value| {
+                handler.delete_lines(value)
+            }),
+            b'P' => Self::dispatch_usize_count(handler, csi, |handler, value| {
+                handler.delete_chars(value)
+            }),
+            b'S' => {
+                Self::dispatch_usize_count(handler, csi, |handler, value| handler.scroll_up(value))
+            }
+            b'T' => Self::dispatch_usize_count(handler, csi, |handler, value| {
+                handler.scroll_down(value)
+            }),
             b'W' => Self::dispatch_tab_set_clear(handler, csi),
+            b'X' => Self::dispatch_usize_count(handler, csi, |handler, value| {
+                handler.erase_chars(value)
+            }),
+            b'Z' => Self::dispatch_usize_count(handler, csi, |handler, value| {
+                handler.horizontal_tab_back(value)
+            }),
+            b'a' => Self::dispatch_single_count(handler, csi, |handler, value| {
+                handler.cursor_col_relative(value)
+            }),
+            b'b' => Self::dispatch_usize_count(handler, csi, |handler, value| {
+                handler.print_repeat(value)
+            }),
+            b'c' => Self::dispatch_device_attributes(handler, csi),
+            b'd' => Self::dispatch_single_count(handler, csi, |handler, value| {
+                handler.cursor_row(value)
+            }),
+            b'e' => Self::dispatch_single_count(handler, csi, |handler, value| {
+                handler.cursor_row_relative(value)
+            }),
             b'g' => Self::dispatch_tab_clear(handler, csi),
             b'h' => Self::dispatch_mode_set_reset(handler, csi, true),
             b'l' => Self::dispatch_mode_set_reset(handler, csi, false),
             b'm' => Self::dispatch_sgr(handler, csi),
+            b'n' => Self::dispatch_device_status(handler, csi),
             b'p' => Self::dispatch_decrqm(handler, csi),
             b'q' => Self::dispatch_q(handler, csi),
             b'r' => Self::dispatch_r(handler, csi),
@@ -222,11 +335,31 @@ impl<H: Handler> Stream<H> {
         }
     }
 
+    fn dispatch_charset(handler: &mut H, slot: CharsetSlots, final_byte: u8) {
+        let charset = match final_byte {
+            b'B' => Charset::Ascii,
+            b'0' => Charset::DecSpecial,
+            b'A' => Charset::British,
+            _ => return,
+        };
+        handler.configure_charset(slot, charset);
+    }
+
     fn dispatch_single_count(handler: &mut H, csi: Csi<'_>, action: fn(&mut H, u16)) {
         if !csi.intermediates.is_empty() || csi.params.len() > 1 {
             return;
         }
         action(handler, count_param(csi.params.first().copied()));
+    }
+
+    fn dispatch_usize_count(handler: &mut H, csi: Csi<'_>, action: fn(&mut H, usize)) {
+        if !csi.intermediates.is_empty() || csi.params.len() > 1 {
+            return;
+        }
+        action(
+            handler,
+            usize::from(count_param(csi.params.first().copied())),
+        );
     }
 
     fn dispatch_insert_blanks(handler: &mut H, csi: Csi<'_>) {
@@ -323,6 +456,12 @@ impl<H: Handler> Stream<H> {
 
     fn dispatch_q(handler: &mut H, csi: Csi<'_>) {
         match csi.intermediates {
+            b">" => {
+                if csi.params.len() > 1 || csi.params.first().copied().unwrap_or(0) != 0 {
+                    return;
+                }
+                handler.xtversion();
+            }
             b"\"" => {
                 if csi.params.len() > 1 {
                     return;
@@ -353,6 +492,33 @@ impl<H: Handler> Stream<H> {
             }
             _ => {}
         }
+    }
+
+    fn dispatch_device_status(handler: &mut H, csi: Csi<'_>) {
+        if csi.params.len() != 1 {
+            return;
+        }
+        let question = match csi.intermediates {
+            b"" => false,
+            b"?" => true,
+            _ => return,
+        };
+        if let Some(request) = device_status::Request::from_int(csi.params[0], question) {
+            handler.device_status(request);
+        }
+    }
+
+    fn dispatch_device_attributes(handler: &mut H, csi: Csi<'_>) {
+        if csi.params.len() > 1 || csi.params.first().copied().unwrap_or(0) != 0 {
+            return;
+        }
+        let req = match csi.intermediates {
+            b"" => device_attributes::Req::Primary,
+            b">" => device_attributes::Req::Secondary,
+            b"=" => device_attributes::Req::Tertiary,
+            _ => return,
+        };
+        handler.device_attributes(req);
     }
 
     fn dispatch_r(handler: &mut H, csi: Csi<'_>) {

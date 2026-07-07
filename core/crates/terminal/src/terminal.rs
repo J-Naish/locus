@@ -7,6 +7,7 @@
 //! intentionally left for later terminal phases.
 
 use crate::charsets::{ActiveSlot, Charset, Slots as CharsetSlots};
+use crate::color::{DynamicPalette, DynamicRgb, DEFAULT_PALETTE};
 use crate::modes::{Mode, ModeState};
 use crate::osc::parsers::semantic_prompt::{
     PromptKind, SemanticPrompt as SemanticPromptCommand, SemanticPromptAction,
@@ -95,6 +96,55 @@ pub struct Dirty {
     pub screen: bool,
     pub tabs: bool,
     pub title: bool,
+    pub palette: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalColors {
+    pub palette: DynamicPalette,
+    pub foreground: DynamicRgb,
+    pub background: DynamicRgb,
+    pub cursor: DynamicRgb,
+}
+
+impl Default for TerminalColors {
+    fn default() -> Self {
+        Self {
+            palette: DynamicPalette::new(DEFAULT_PALETTE),
+            foreground: DynamicRgb::UNSET,
+            background: DynamicRgb::UNSET,
+            cursor: DynamicRgb::UNSET,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MouseEvent {
+    #[default]
+    None,
+    X10,
+    Normal,
+    Button,
+    Any,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MouseFormat {
+    #[default]
+    X10,
+    Utf8,
+    Sgr,
+    Urxvt,
+    SgrPixels,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TerminalFlags {
+    pub mouse_shift_capture: bool,
+    pub mouse_event: MouseEvent,
+    pub mouse_format: MouseFormat,
+    pub modify_other_keys_2: bool,
+    pub shell_redraws_prompt: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -111,8 +161,11 @@ pub struct Terminal {
     pub modes: ModeState,
     pub protected_mode: ProtectedMode,
     pub dirty: Dirty,
+    pub colors: TerminalColors,
+    pub flags: TerminalFlags,
     pub title: Option<String>,
     pub pwd: Option<String>,
+    pub mouse_shape: Option<String>,
 }
 
 impl Terminal {
@@ -135,8 +188,11 @@ impl Terminal {
             modes: ModeState::default(),
             protected_mode: ProtectedMode::Off,
             dirty: Dirty::default(),
+            colors: TerminalColors::default(),
+            flags: TerminalFlags::default(),
             title: None,
             pwd: None,
+            mouse_shape: None,
         }
     }
 
@@ -165,6 +221,31 @@ impl Terminal {
     pub fn plain_string_unwrapped(&self) -> String {
         self.active_screen()
             .dump_string_for_tag_unwrapped(Tag::Viewport)
+    }
+
+    pub fn set_title(&mut self, title: &str) {
+        self.title = if title.is_empty() {
+            None
+        } else {
+            Some(title.to_owned())
+        };
+        self.dirty.title = true;
+    }
+
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    pub fn set_pwd(&mut self, pwd: &str) {
+        self.pwd = if pwd.is_empty() {
+            None
+        } else {
+            Some(pwd.to_owned())
+        };
+    }
+
+    pub fn pwd(&self) -> Option<&str> {
+        self.pwd.as_deref()
     }
 
     /// Whether the cell at `point` is marked dirty. Testing scaffolding
@@ -1910,6 +1991,8 @@ impl Terminal {
         self.title = None;
         self.status_display = StatusDisplay::Main;
         self.protected_mode = ProtectedMode::Off;
+        self.flags = TerminalFlags::default();
+        self.mouse_shape = None;
         self.tabstops = Tabstops::new(usize::from(self.cols), TABSTOP_INTERVAL);
         self.scrolling_region = ScrollingRegion::full(self.cols, self.rows);
 
@@ -2073,10 +2156,13 @@ impl Terminal {
                 let kind = cmd.read_prompt_kind().unwrap_or(PromptKind::Initial);
                 self.active_screen_mut().cursor_set_semantic_prompt(kind);
 
-                // Ghostty also reads the `redraw` option here to flip
-                // `flags.shell_redraws_prompt` (a Kitty extension that only
-                // influences resize reflow). The `flags` struct is deferred in
-                // this port, so we skip it; no test in this slice exercises it.
+                if let Some(redraw) = cmd.read_redraw() {
+                    self.flags.shell_redraws_prompt = matches!(
+                        redraw,
+                        crate::osc::parsers::semantic_prompt::PromptRedraw::True
+                            | crate::osc::parsers::semantic_prompt::PromptRedraw::Last
+                    );
+                }
 
                 // click_events takes priority over cl.
                 if let Some(events) = cmd.read_click_events() {
@@ -2415,6 +2501,10 @@ impl Handler for Terminal {
         Terminal::print(self, cp);
     }
 
+    fn print_repeat(&mut self, count: usize) {
+        self.print_repeat(count);
+    }
+
     fn execute(&mut self, byte: u8) {
         match byte {
             b'\n' | 0x0B | 0x0C => self.linefeed(),
@@ -2423,6 +2513,18 @@ impl Handler for Terminal {
             b'\t' => self.horizontal_tab(),
             _ => {}
         }
+    }
+
+    fn index(&mut self) {
+        self.index();
+    }
+
+    fn reverse_index(&mut self) {
+        self.reverse_index();
+    }
+
+    fn next_line(&mut self) {
+        self.next_line();
     }
 
     fn cursor_up(&mut self, value: u16) {
@@ -2441,12 +2543,54 @@ impl Handler for Terminal {
         self.cursor_left(usize::from(value));
     }
 
+    fn cursor_col(&mut self, col: u16) {
+        let row = self.active_screen().cursor.y.saturating_add(1);
+        self.set_cursor_pos(row, col);
+    }
+
+    fn cursor_row(&mut self, row: u16) {
+        let col = self.active_screen().cursor.x.saturating_add(1);
+        self.set_cursor_pos(row, col);
+    }
+
+    fn cursor_col_relative(&mut self, value: u16) {
+        self.cursor_right(usize::from(value));
+    }
+
+    fn cursor_row_relative(&mut self, value: u16) {
+        self.cursor_down(usize::from(value));
+    }
+
     fn cursor_position(&mut self, row: u16, col: u16) {
         self.set_cursor_pos(row, col);
     }
 
     fn insert_blanks(&mut self, value: usize) {
         self.insert_blanks(value);
+    }
+
+    fn delete_chars(&mut self, value: usize) {
+        self.delete_chars(value);
+    }
+
+    fn erase_chars(&mut self, value: usize) {
+        self.erase_chars(value);
+    }
+
+    fn insert_lines(&mut self, value: usize) {
+        self.insert_lines(value);
+    }
+
+    fn delete_lines(&mut self, value: usize) {
+        self.delete_lines(value);
+    }
+
+    fn scroll_up(&mut self, value: usize) {
+        self.scroll_up(value);
+    }
+
+    fn scroll_down(&mut self, value: usize) {
+        self.scroll_down(value);
     }
 
     fn erase_display(&mut self, mode: EraseDisplay, protected: bool) {
@@ -2493,6 +2637,10 @@ impl Handler for Terminal {
         };
     }
 
+    fn mouse_shift_capture(&mut self, enabled: bool) {
+        self.flags.mouse_shift_capture = enabled;
+    }
+
     fn left_and_right_margin(&mut self, left: u16, right: u16) {
         self.set_left_and_right_margin(left, right);
     }
@@ -2513,6 +2661,16 @@ impl Handler for Terminal {
         self.tab_set();
     }
 
+    fn horizontal_tab(&mut self, count: usize) {
+        for _ in 0..count {
+            self.horizontal_tab();
+        }
+    }
+
+    fn horizontal_tab_back(&mut self, count: usize) {
+        self.horizontal_tab_back(count);
+    }
+
     fn tab_clear_current(&mut self) {
         self.tab_clear_current();
     }
@@ -2525,9 +2683,40 @@ impl Handler for Terminal {
         self.tab_reset();
     }
 
+    fn configure_charset(&mut self, slot: CharsetSlots, charset: Charset) {
+        self.configure_charset(slot, charset);
+    }
+
+    fn invoke_charset(&mut self, active: ActiveSlot, slot: CharsetSlots, single: bool) {
+        self.invoke_charset(active, slot, single);
+    }
+
+    fn decaln(&mut self) {
+        self.decaln();
+    }
+
+    fn full_reset(&mut self) {
+        self.full_reset();
+    }
+
+    fn start_hyperlink(&mut self, id: Option<&[u8]>, uri: &[u8]) {
+        self.active_screen_mut().start_hyperlink(id, uri);
+    }
+
+    fn end_hyperlink(&mut self) {
+        self.active_screen_mut().end_hyperlink();
+    }
+
+    fn semantic_prompt(&mut self, cmd: crate::osc::SemanticPrompt<'_>) {
+        self.semantic_prompt(cmd);
+    }
+
+    fn mouse_shape(&mut self, shape: &[u8]) {
+        self.mouse_shape = std::str::from_utf8(shape).ok().map(ToOwned::to_owned);
+    }
+
     fn window_title(&mut self, title: &str) {
-        self.title = Some(title.to_owned());
-        self.dirty.title = true;
+        self.set_title(title);
     }
 
     fn window_icon(&mut self, title: &str) {
