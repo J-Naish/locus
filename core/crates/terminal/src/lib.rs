@@ -32,5 +32,7 @@ pub mod size_report;
 pub mod stream;
 pub mod style;
 pub mod tabstops;
+pub mod terminal;
+pub mod unicode;
 pub mod utf8;
 pub mod x11_color;

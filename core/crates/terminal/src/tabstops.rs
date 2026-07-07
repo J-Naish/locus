@@ -6,6 +6,7 @@ pub const PREALLOC_COUNT: usize = 64;
 pub const UNIT_BITS: usize = 8;
 pub const MASKS: [u8; UNIT_BITS] = [1, 2, 4, 8, 16, 32, 64, 128];
 
+#[derive(Debug, Clone)]
 pub struct Tabstops {
     cols: usize,
     prealloc_stops: [u8; PREALLOC_COUNT],

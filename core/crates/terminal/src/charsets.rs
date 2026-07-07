@@ -14,9 +14,10 @@ pub enum ActiveSlot {
     Gr,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Charset {
     Utf8,
+    #[default]
     Ascii,
     British,
     DecSpecial,

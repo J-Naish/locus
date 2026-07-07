@@ -80,19 +80,11 @@ pub enum CursorStyle {
     Underline,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Charset {
-    #[default]
-    Ascii,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CharsetSlot {
-    G0,
-    G1,
-    G2,
-    G3,
-}
+/// The set of charsets (ASCII, DEC special graphics, ...) reuses the shared
+/// `charsets` module so translation tables are defined once.
+pub use crate::charsets::Charset;
+/// The four designatable charset slots (G0-G3).
+pub use crate::charsets::Slots as CharsetSlot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CharsetState {
@@ -103,6 +95,30 @@ pub struct CharsetState {
     pub gl: CharsetSlot,
     pub gr: CharsetSlot,
     pub single_shift: Option<CharsetSlot>,
+}
+
+impl CharsetState {
+    /// Charset currently designated in the given slot. Mirrors Ghostty's
+    /// `charset.charsets.get(slot)`.
+    pub fn get(&self, slot: CharsetSlot) -> Charset {
+        match slot {
+            CharsetSlot::G0 => self.g0,
+            CharsetSlot::G1 => self.g1,
+            CharsetSlot::G2 => self.g2,
+            CharsetSlot::G3 => self.g3,
+        }
+    }
+
+    /// Designate `set` into the given slot. Mirrors Ghostty's
+    /// `charset.charsets.set(slot, set)`.
+    pub fn set(&mut self, slot: CharsetSlot, set: Charset) {
+        match slot {
+            CharsetSlot::G0 => self.g0 = set,
+            CharsetSlot::G1 => self.g1 = set,
+            CharsetSlot::G2 => self.g2 = set,
+            CharsetSlot::G3 => self.g3 = set,
+        }
+    }
 }
 
 impl Default for CharsetState {
@@ -304,6 +320,42 @@ impl Screen {
             .map(|node| node.page.cell(pin.y, pin.x))
     }
 
+    /// The cell `n` columns to the left of the cursor on the same row. Mirrors
+    /// Ghostty's `Screen.cursorCellLeft`. Saturates at column 0.
+    pub(crate) fn cursor_cell_left(&self, n: CellCountInt) -> Option<Cell> {
+        let pin = self.cursor_pin()?;
+        let x = pin.x.saturating_sub(n);
+        self.pages
+            .node(pin.node)
+            .map(|node| node.page.cell(pin.y, x))
+    }
+
+    /// Set the cursor cell's `wide` class and clear its codepoint (to 0),
+    /// preserving grapheme data (and its content tag). Used by print's grapheme
+    /// wide-wrap path (mirrors `prev.cell.wide = ...; prev.cell.content
+    /// .codepoint = 0;` in Ghostty).
+    pub(crate) fn set_cursor_cell_wide_and_clear_codepoint(&mut self, wide: CellWide) {
+        let Some(pin) = self.cursor_pin() else {
+            return;
+        };
+        if let Some(node) = self.pages.node_mut(pin.node) {
+            let mut cell = node.page.cell(pin.y, pin.x);
+            cell.set_wide(wide);
+            cell.set_codepoint(0);
+            node.page.set_cell(pin.y, pin.x, cell);
+        }
+    }
+
+    /// Append `codepoint` to the grapheme data of the cell `n` columns left of
+    /// the cursor.
+    pub(crate) fn append_grapheme_cursor_left(&mut self, n: CellCountInt, codepoint: u32) {
+        let Some(mut pin) = self.cursor_pin() else {
+            return;
+        };
+        pin.x = pin.x.saturating_sub(n);
+        self.append_grapheme_to_pin(pin, codepoint);
+    }
+
     pub fn cursor_copy(&self) -> Cursor {
         self.cursor.clone()
     }
@@ -335,13 +387,82 @@ impl Screen {
     }
 
     pub fn cursor_reset_wrap(&mut self) {
+        // ghostty: `Screen.cursorResetWrap` (Screen.zig:1231)
+        // Reset the cursor's pending wrap state.
         self.cursor.pending_wrap = false;
+
+        let Some(pin) = self.cursor_pin() else {
+            return;
+        };
+
+        // If this row does not soft-wrap, there is nothing else to do.
+        let row_wraps = self
+            .pages
+            .node(pin.node)
+            .map(|node| node.page.row(pin.y).wrap())
+            .unwrap_or(false);
+        if !row_wraps {
+            return;
+        }
+
+        // This row no longer wraps, so the next row no longer continues a wrap.
+        if let Some(node) = self.pages.node_mut(pin.node) {
+            let mut row = node.page.row(pin.y);
+            row.set_wrap(false);
+            node.page.set_row(pin.y, row);
+        }
+        if let Some(next) = self.pages.pin_down(pin, 1) {
+            if let Some(node) = self.pages.node_mut(next.node) {
+                let mut row = node.page.row(next.y);
+                row.set_wrap_continuation(false);
+                node.page.set_row(next.y, row);
+            }
+        }
+
+        // If the last cell in the row is a spacer head we need to clear it.
+        let cols = self
+            .pages
+            .node(pin.node)
+            .map(|node| node.page.size().cols)
+            .unwrap_or(0);
+        if cols > 0 {
+            let last_x = cols - 1;
+            let is_spacer_head = self
+                .pages
+                .node(pin.node)
+                .map(|node| node.page.cell(pin.y, last_x).wide() == CellWide::SpacerHead)
+                .unwrap_or(false);
+            if is_spacer_head {
+                let point = self
+                    .pages
+                    .point_from_pin(Tag::Active, Pin { x: last_x, ..pin });
+                if let Some(point) = point {
+                    self.clear_cells(point, point, false);
+                }
+            }
+        }
+
+        self.assert_integrity();
+    }
+
+    /// Move the cursor to column `x` on the current row, updating the tracked
+    /// pin in place. Mirrors the common body of Ghostty's `cursorLeft`,
+    /// `cursorRight`, and `cursorHorizontalAbsolute`: a horizontal move stays on
+    /// the same row, so it does NOT go through `cursorChangePin` and therefore
+    /// does not mark the row dirty, re-apply the cursor style, or apply the
+    /// active hyperlink (those happen only on row changes and in `printCell`).
+    fn cursor_set_column_in_row(&mut self, x: CellCountInt) {
+        self.cursor.x = x;
+        if let Some(pin) = self.pages.tracked_pin_mut(self.cursor.pin) {
+            pin.x = x;
+        }
+        self.assert_integrity();
     }
 
     pub fn cursor_horizontal_absolute(&mut self, x: CellCountInt) {
         let target_x = x.min(self.cols().saturating_sub(1));
         self.cursor.pending_wrap = false;
-        self.cursor_change_active_point(target_x, self.cursor.y);
+        self.cursor_set_column_in_row(target_x);
     }
 
     pub fn cursor_absolute(&mut self, x: CellCountInt, y: CellCountInt) {
@@ -366,17 +487,21 @@ impl Screen {
     }
 
     pub fn cursor_left(&mut self, cols: usize) {
+        // Mirrors Ghostty's `cursorLeft`: an in-row move that does not dirty the
+        // row or touch styles/hyperlinks.
         let x = self.cursor.x.saturating_sub(cols as CellCountInt);
-        self.cursor_change_active_point(x, self.cursor.y);
+        self.cursor_set_column_in_row(x);
     }
 
     pub fn cursor_right(&mut self, cols: usize) {
+        // Mirrors Ghostty's `cursorRight`: an in-row move that does not dirty the
+        // row or touch styles/hyperlinks.
         let x = self
             .cursor
             .x
             .saturating_add(cols as CellCountInt)
             .min(self.cols().saturating_sub(1));
-        self.cursor_change_active_point(x, self.cursor.y);
+        self.cursor_set_column_in_row(x);
     }
 
     pub fn cursor_down_or_scroll(&mut self) {
@@ -552,6 +677,20 @@ impl Screen {
         }
     }
 
+    /// The cell used to fill newly cleared space. Mirrors Ghostty's
+    /// `Screen.blankCell`: an empty cell, except that when the cursor carries a
+    /// non-default background color the blank cell adopts that background.
+    pub fn blank_cell(&self) -> Cell {
+        if self.cursor.style_id == DEFAULT_STYLE_ID {
+            return Cell::default();
+        }
+        match self.cursor.style.bg_color {
+            StyleColor::None => Cell::default(),
+            StyleColor::Palette(index) => Cell::bg_palette(index),
+            StyleColor::Rgb(rgb) => Cell::bg_rgb(rgb),
+        }
+    }
+
     pub fn clear_cells(&mut self, start: Point, end: Point, protected: bool) {
         let Some(start_pin) = self.pages.pin(start) else {
             return;
@@ -564,15 +703,17 @@ impl Screen {
         }
         let start_x = start_pin.x.min(end_pin.x);
         let end_x = start_pin.x.max(end_pin.x).saturating_add(1);
+        let fill = self.blank_cell();
         if let Some(node) = self.pages.node_mut(start_pin.node) {
             if protected {
                 for x in start_x..end_x {
                     if !node.page.cell(start_pin.y, x).protected() {
-                        node.page.clear_cells(start_pin.y, x, x.saturating_add(1));
+                        node.page
+                            .fill_cells(start_pin.y, x, x.saturating_add(1), fill);
                     }
                 }
             } else {
-                node.page.clear_cells(start_pin.y, start_x, end_x);
+                node.page.fill_cells(start_pin.y, start_x, end_x, fill);
             }
         }
     }
@@ -590,16 +731,112 @@ impl Screen {
     }
 
     pub fn split_cell_boundary(&mut self, point: Point) {
-        let Some(pin) = self.pages.pin(point) else {
+        // ghostty: `Screen.splitCellBoundary` (Screen.zig:1524). The boundary
+        // column `x` may be up to AND INCLUDING `cols`, which signifies the
+        // boundary to the right of the final cell. In all callers the point's
+        // row is the cursor's row, so we resolve the row from the point's
+        // coordinate rather than an out-of-range pin (x == cols has no pin).
+        let x = point.coord().x;
+        // Resolve the pin for this row using column 0 (x may be == cols).
+        let row_point = match point.tag() {
+            Tag::Active => Point::active(0, point.coord().y),
+            Tag::Viewport => Point::viewport(0, point.coord().y),
+            Tag::Screen => Point::screen(0, point.coord().y),
+            Tag::History => Point::history(0, point.coord().y),
+        };
+        let Some(pin) = self.pages.pin(row_point) else {
             return;
         };
-        let left = pin.x.saturating_sub(1);
-        if let Some(node) = self.pages.node_mut(pin.node) {
-            let cell = node.page.cell(pin.y, pin.x);
-            if matches!(cell.wide(), CellWide::SpacerTail) {
-                node.page.clear_cells(pin.y, left, pin.x.saturating_add(1));
-            } else if matches!(cell.wide(), CellWide::SpacerHead) {
-                node.page.clear_cells(pin.y, pin.x, pin.x.saturating_add(2));
+        let cols = self
+            .pages
+            .node(pin.node)
+            .map(|node| node.page.size().cols)
+            .unwrap_or(0);
+        if cols == 0 || x > cols {
+            return;
+        }
+
+        // [ A B C D E F|]  Boundary between final cell and row end.
+        if x == cols {
+            let row_wraps = self
+                .pages
+                .node(pin.node)
+                .map(|node| node.page.row(pin.y).wrap())
+                .unwrap_or(false);
+            if !row_wraps {
+                return;
+            }
+            // Spacer head at end of wrapped row.
+            let last_x = cols - 1;
+            let is_spacer_head = self
+                .pages
+                .node(pin.node)
+                .map(|node| node.page.cell(pin.y, last_x).wide() == CellWide::SpacerHead)
+                .unwrap_or(false);
+            if is_spacer_head {
+                if let Some(node) = self.pages.node_mut(pin.node) {
+                    node.page.clear_cells(pin.y, last_x, cols);
+                }
+            }
+            return;
+        }
+
+        // [|A B C D E F ] or [ A|B C D E F ]  Boundary at the row start or
+        // between the first two cells. A wrapped wide first cell may leave a
+        // spacer head on the previous row that needs clearing.
+        if x == 0 || x == 1 {
+            let wrap_continuation = self
+                .pages
+                .node(pin.node)
+                .map(|node| node.page.row(pin.y).wrap_continuation())
+                .unwrap_or(false);
+            let first_is_wide = self
+                .pages
+                .node(pin.node)
+                .map(|node| node.page.cell(pin.y, 0).wide() == CellWide::Wide)
+                .unwrap_or(false);
+            if wrap_continuation && first_is_wide {
+                if let Some(prev) = self.pages.pin_up(pin, 1) {
+                    let prev_cols = self
+                        .pages
+                        .node(prev.node)
+                        .map(|node| node.page.size().cols)
+                        .unwrap_or(0);
+                    if prev_cols > 0 {
+                        let prev_last = prev_cols - 1;
+                        let prev_is_spacer_head = self
+                            .pages
+                            .node(prev.node)
+                            .map(|node| {
+                                node.page.cell(prev.y, prev_last).wide() == CellWide::SpacerHead
+                            })
+                            .unwrap_or(false);
+                        if prev_is_spacer_head {
+                            if let Some(node) = self.pages.node_mut(prev.node) {
+                                node.page.clear_cells(prev.y, prev_last, prev_cols);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // If x is 0 then we're done.
+        if x == 0 {
+            return;
+        }
+
+        // [ ... X|Y ... ]  Boundary between two cells in the middle of the
+        // row. A wide char immediately to the left would be split, so clear it.
+        let left = x - 1;
+        let left_is_wide = self
+            .pages
+            .node(pin.node)
+            .map(|node| node.page.cell(pin.y, left).wide() == CellWide::Wide)
+            .unwrap_or(false);
+        if left_is_wide {
+            if let Some(node) = self.pages.node_mut(pin.node) {
+                node.page.clear_cells(pin.y, left, x + 1);
             }
         }
     }
@@ -746,7 +983,7 @@ impl Screen {
         self.append_grapheme_to_pin(pin, codepoint);
     }
 
-    fn append_grapheme_to_previous_cell(&mut self, codepoint: u32) {
+    pub(crate) fn append_grapheme_to_previous_cell(&mut self, codepoint: u32) {
         let target = if self.cursor.x > 0 {
             self.pages
                 .pin(Point::active(self.cursor.x - 1, u32::from(self.cursor.y)))
@@ -973,7 +1210,88 @@ impl Screen {
     }
 
     pub fn dump_string_alloc_unwrapped(&self, _unwrap: bool) -> String {
-        self.dump_string_for_tag(Tag::Screen)
+        self.dump_string_for_tag_unwrapped(Tag::Screen)
+    }
+
+    /// Dump a region, unwrapping soft-wrapped lines (Ghostty's
+    /// `dumpString` with `unwrap = true`). Soft-wrapped rows are joined with
+    /// no newline; blank cells carry across a wrap continuation. Mirrors the
+    /// plaintext path of `formatter.zig`'s `PageFormatter.formatWithState`
+    /// (with `trim = false`, matching `Screen.dumpString`).
+    pub fn dump_string_for_tag_unwrapped(&self, tag: Tag) -> String {
+        let top = self.pages.get_top_left(tag);
+        let Some(bottom) = self.pages.get_bottom_right(tag) else {
+            return String::new();
+        };
+        let mut out = String::new();
+        let mut blank_rows: usize = 0;
+        let mut blank_cells: usize = 0;
+        let mut current = Some(top);
+        while let Some(pin) = current {
+            let is_last = pin.node == bottom.node && pin.y == bottom.y;
+            if let Some(node) = self.pages.node(pin.node) {
+                let page = &node.page;
+                let cols = page.size().cols;
+                let row = page.row(pin.y);
+
+                // Does this row have any text at all?
+                let has_text = (0..cols).any(|x| page.cell(pin.y, x).has_text());
+                if !has_text {
+                    blank_rows += 1;
+                } else {
+                    // Flush any pending blank rows as newlines.
+                    for _ in 0..blank_rows {
+                        out.push('\n');
+                    }
+                    blank_rows = 0;
+
+                    // A non-wrapped row always emits a trailing newline later.
+                    if !row.wrap() {
+                        blank_rows += 1;
+                    }
+                    // Only continue accumulated blanks across a wrap continuation.
+                    if !row.wrap_continuation() {
+                        blank_cells = 0;
+                    }
+
+                    for x in 0..cols {
+                        let cell = page.cell(pin.y, x);
+                        match cell.wide() {
+                            CellWide::SpacerHead | CellWide::SpacerTail => continue,
+                            CellWide::Narrow | CellWide::Wide => {}
+                        }
+                        if !cell.has_text() {
+                            blank_cells += 1;
+                            continue;
+                        }
+                        // Flush accumulated blank cells as spaces.
+                        for _ in 0..blank_cells {
+                            out.push(' ');
+                        }
+                        blank_cells = 0;
+                        if cell.codepoint() != 0 {
+                            if let Some(ch) = char::from_u32(cell.codepoint()) {
+                                out.push(ch);
+                            }
+                        }
+                        if cell.has_grapheme() {
+                            if let Some(values) = page.grapheme(pin.y, x) {
+                                for value in values {
+                                    if let Some(ch) = char::from_u32(value) {
+                                        out.push(ch);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if is_last {
+                break;
+            }
+            current = self.pages.pin_down(pin, 1);
+        }
+        out
     }
 
     pub fn dump_string_for_tag(&self, tag: Tag) -> String {
@@ -1754,7 +2072,7 @@ impl Screen {
         self.cursor.pending_wrap = false;
     }
 
-    fn write_cell(&mut self, ch: char, width: usize) {
+    pub(crate) fn write_cell(&mut self, ch: char, width: usize) {
         let mut cell = Cell::new(ch);
         cell.set_protected(self.cursor.protected);
         cell.set_semantic_content(self.cursor.semantic_content);
@@ -1766,18 +2084,173 @@ impl Screen {
         self.cursor_set_hyperlink();
     }
 
-    fn write_spacer_tail(&mut self) {
+    pub(crate) fn write_spacer_tail(&mut self) {
         let mut cell = Cell::default();
         cell.set_wide(CellWide::SpacerTail);
         self.put_cell_at_cursor(cell);
         self.cursor_set_hyperlink();
     }
 
-    fn write_spacer_head(&mut self) {
+    pub(crate) fn write_spacer_head(&mut self) {
         let mut cell = Cell::default();
         cell.set_wide(CellWide::SpacerHead);
         self.put_cell_at_cursor(cell);
         self.cursor_set_hyperlink();
+    }
+
+    /// Append `codepoint` to the grapheme data of the cell at `pin`, growing
+    /// the page's grapheme capacity if needed. Mirrors Ghostty's
+    /// `appendGrapheme` for an arbitrary cell.
+    pub(crate) fn append_grapheme_pin(&mut self, pin: Pin, codepoint: u32) {
+        self.append_grapheme_to_pin(pin, codepoint);
+    }
+
+    /// Write a single cell at the cursor after charset translation, matching
+    /// Ghostty's `Terminal.printCell`. Handles clearing wide-char spacers when
+    /// the cell's width class changes, clearing stale grapheme data, style
+    /// reference counting, and hyperlink attachment.
+    pub(crate) fn print_cell(&mut self, unmapped_c: u32, wide: CellWide) {
+        let c = self.translate_charset(unmapped_c);
+
+        let Some(pin) = self.cursor_pin() else {
+            return;
+        };
+        let cell = self.cursor_cell().unwrap_or_default();
+
+        // If the wide property changes we may need to clear neighboring spacer
+        // cells so we don't orphan a wide char.
+        if cell.wide() != wide {
+            match cell.wide() {
+                CellWide::Narrow => {}
+                CellWide::Wide => {
+                    if self.cursor.x < self.cols().saturating_sub(1) {
+                        let spacer_x = self.cursor.x.saturating_add(1);
+                        if let Some(node) = self.pages.node_mut(pin.node) {
+                            node.page
+                                .clear_cells(pin.y, spacer_x, spacer_x.saturating_add(1));
+                        }
+                        self.clear_stale_spacer_head();
+                    }
+                }
+                CellWide::SpacerTail => {
+                    debug_assert!(self.cursor.x > 0);
+                    let wide_x = self.cursor.x.saturating_sub(1);
+                    if let Some(node) = self.pages.node_mut(pin.node) {
+                        node.page
+                            .clear_cells(pin.y, wide_x, wide_x.saturating_add(1));
+                    }
+                    self.clear_stale_spacer_head();
+                }
+                // Ghostty leaves this case unhandled (see printCell). Match that.
+                CellWide::SpacerHead => {}
+            }
+        }
+
+        // Clear any prior grapheme data on the cell being overwritten.
+        if cell.has_grapheme() {
+            if let Some(node) = self.pages.node_mut(pin.node) {
+                node.page.clear_grapheme(pin.y, pin.x);
+            }
+        }
+
+        // Release the old style ref if the style is changing.
+        let style_changed = cell.style_id() != self.cursor.style_id;
+        if style_changed && cell.style_id() != DEFAULT_STYLE_ID {
+            if let Some(node) = self.pages.node_mut(pin.node) {
+                node.page.release_style(cell.style_id());
+            }
+        }
+
+        let had_hyperlink = cell.hyperlink();
+
+        // Write the new cell wholesale.
+        let mut new_cell = Cell::new(c);
+        new_cell.set_style_id(self.cursor.style_id);
+        new_cell.set_wide(wide);
+        new_cell.set_protected(self.cursor.protected);
+        new_cell.set_semantic_content(self.cursor.semantic_content);
+        if let Some(node) = self.pages.node_mut(pin.node) {
+            node.page.set_cell(pin.y, pin.x, new_cell);
+        }
+
+        // Acquire the new style ref if the style changed.
+        if style_changed && self.cursor.style_id != DEFAULT_STYLE_ID {
+            if let Some(node) = self.pages.node_mut(pin.node) {
+                node.page.use_style(self.cursor.style_id);
+                let mut row = node.page.row(pin.y);
+                row.set_styled(true);
+                node.page.set_row(pin.y, row);
+            }
+        }
+
+        // Hyperlink handling: attach the active hyperlink, or clear a stale one.
+        if self.cursor.hyperlink_id > 0 {
+            self.cursor_set_hyperlink();
+        } else if had_hyperlink {
+            if let Some(node) = self.pages.node_mut(pin.node) {
+                node.page.clear_hyperlink(pin.y, pin.x);
+            }
+            self.update_row_hyperlink_flag(pin);
+        }
+
+        self.assert_integrity();
+    }
+
+    /// When overwriting a wide char near the left edge, a wide char may have
+    /// wrapped from the previous row leaving a `spacer_head` at the end of that
+    /// row. Clear it so the previous row doesn't keep a stale `spacer_head`.
+    fn clear_stale_spacer_head(&mut self) {
+        if self.cursor.y == 0 || self.cursor.x > 1 {
+            return;
+        }
+        let Some(pin) = self.cursor_pin() else {
+            return;
+        };
+        let Some(prev) = self.pages.pin_up(pin, 1) else {
+            return;
+        };
+        let last_x = self.cols().saturating_sub(1);
+        if let Some(node) = self.pages.node_mut(prev.node) {
+            let mut head = node.page.cell(prev.y, last_x);
+            if matches!(head.wide(), CellWide::SpacerHead) {
+                head.set_wide(CellWide::Narrow);
+                node.page.set_cell(prev.y, last_x, head);
+            }
+        }
+    }
+
+    fn update_row_hyperlink_flag(&mut self, pin: Pin) {
+        if let Some(node) = self.pages.node_mut(pin.node) {
+            node.page.update_row_grapheme_flag(pin.y);
+        }
+    }
+
+    fn translate_charset(&mut self, unmapped_c: u32) -> char {
+        // If we're single shifting, then we use the key exactly once.
+        let key = match self.charset.single_shift.take() {
+            Some(key_once) => key_once,
+            None => self.charset.gl,
+        };
+
+        let set = self.charset.get(key);
+
+        // UTF-8 or ASCII is used as-is.
+        if matches!(set, Charset::Utf8 | Charset::Ascii) {
+            return char::from_u32(unmapped_c).unwrap_or('\u{FFFD}');
+        }
+
+        // If we're outside of ASCII range this is an invalid value in this
+        // table so we just return space.
+        if unmapped_c > u32::from(u8::MAX) {
+            return ' ';
+        }
+
+        // Get our lookup table and map it.
+        let Some(table) = crate::charsets::table(set) else {
+            return char::from_u32(unmapped_c).unwrap_or('\u{FFFD}');
+        };
+        let mapped = u32::from(table[unmapped_c as usize]);
+        char::from_u32(mapped).unwrap_or('\u{FFFD}')
     }
 
     fn put_cell_at_cursor(&mut self, cell: Cell) {
@@ -1807,8 +2280,18 @@ impl Screen {
         }
     }
 
-    fn cursor_change_active_point(&mut self, x: CellCountInt, y: CellCountInt) {
+    pub(crate) fn cursor_change_active_point(&mut self, x: CellCountInt, y: CellCountInt) {
         if let Some(pin) = self.pages.pin(Point::active(x, u32::from(y))) {
+            // Moving the cursor affects text run splitting (ligatures) so we
+            // mark both the old and new rows dirty when the pin changes.
+            // Mirrors Ghostty's `cursorChangePin`.
+            let old_pin = self.cursor_pin();
+            if old_pin != Some(pin) {
+                if let Some(old_pin) = old_pin {
+                    self.pages.mark_dirty(old_pin);
+                }
+                self.pages.mark_dirty(pin);
+            }
             self.release_cursor_refs();
             let _ = self.pages.set_tracked_pin(self.cursor.pin, pin);
             self.cursor.x = x;
@@ -1938,7 +2421,7 @@ impl Screen {
         }
     }
 
-    fn set_cursor_row_semantic_prompt(&mut self, prompt: SemanticPrompt) {
+    pub(crate) fn set_cursor_row_semantic_prompt(&mut self, prompt: SemanticPrompt) {
         if let Some(pin) = self.cursor_pin() {
             if let Some(node) = self.pages.node_mut(pin.node) {
                 let mut row = node.page.row(pin.y);

@@ -289,6 +289,14 @@ impl Cell {
         }
     }
 
+    /// Overwrite the codepoint bits, preserving the content tag (codepoint vs
+    /// codepoint-grapheme) and all other fields. Mirrors assigning
+    /// `cell.content.codepoint` in Ghostty.
+    pub fn set_codepoint(&mut self, codepoint: u32) {
+        let bits = (u64::from(codepoint) & Self::CODEPOINT_MASK) << Self::CONTENT_SHIFT;
+        self.0 = (self.0 & !(Self::CODEPOINT_MASK << Self::CONTENT_SHIFT)) | bits;
+    }
+
     pub const fn palette_index(self) -> u8 {
         ((self.0 >> Self::CONTENT_SHIFT) & 0xFF) as u8
     }
@@ -950,6 +958,24 @@ impl Page {
         Ok(())
     }
 
+    pub(crate) fn swap_cells(
+        &mut self,
+        y: CellCountInt,
+        left: CellCountInt,
+        right: CellCountInt,
+    ) -> Result<(), OutOfMemory> {
+        if left == right {
+            return Ok(());
+        }
+        let left_snapshot = self.cell_snapshot(y, left);
+        let right_snapshot = self.cell_snapshot(y, right);
+        self.clear_cells(y, left, left.saturating_add(1));
+        self.clear_cells(y, right, right.saturating_add(1));
+        self.write_cell_snapshot(y, left, &right_snapshot)?;
+        self.write_cell_snapshot(y, right, &left_snapshot)?;
+        Ok(())
+    }
+
     pub(crate) fn write_cell_unmanaged_snapshot_for_reflow(
         &mut self,
         y: CellCountInt,
@@ -1350,6 +1376,13 @@ impl Page {
     }
 
     fn clear_cell(&mut self, y: CellCountInt, x: CellCountInt) {
+        self.clear_cell_with(y, x, Cell::default());
+    }
+
+    /// Clear a cell, releasing any managed data (grapheme/hyperlink/style)
+    /// and overwriting it with `fill`. Mirrors Ghostty's `clearCells` writing
+    /// `blankCell()`, which carries the current background color.
+    fn clear_cell_with(&mut self, y: CellCountInt, x: CellCountInt, fill: Cell) {
         let cell = self.cell(y, x);
         if cell.has_grapheme() {
             self.clear_grapheme(y, x);
@@ -1360,10 +1393,25 @@ impl Page {
         if cell.has_styling() && self.styles.get(&self.memory, cell.style_id()).is_some() {
             self.styles.release(&mut self.memory, cell.style_id());
         }
-        self.write_cell_raw(y, x, Cell::default());
+        self.write_cell_raw(y, x, fill);
         let mut row = self.row(y);
         row.set_dirty(true);
         self.set_row(y, row);
+    }
+
+    /// Clear a range of cells, filling them with `fill` (the current blank
+    /// cell). Mirrors Ghostty's `clearCells` memset with `blankCell()`.
+    pub fn fill_cells(
+        &mut self,
+        y: CellCountInt,
+        start: CellCountInt,
+        end: CellCountInt,
+        fill: Cell,
+    ) {
+        for x in start..end.min(self.size.cols) {
+            self.clear_cell_with(y, x, fill);
+        }
+        self.update_row_flags(y);
     }
 
     pub(crate) fn append_grapheme(
@@ -1415,6 +1463,34 @@ impl Page {
 
     pub(crate) fn grapheme_count(&self) -> usize {
         self.grapheme_map.count() as usize
+    }
+
+    /// Recompute the grapheme flag (and the other row flags) for a row. Mirrors
+    /// Ghostty's `updateRowGraphemeFlag`, called after moving grapheme data
+    /// between cells without going through `append_grapheme`/`clear_grapheme`.
+    pub(crate) fn update_row_grapheme_flag(&mut self, y: CellCountInt) {
+        self.update_row_flags(y);
+    }
+
+    /// Move grapheme data from one cell to another within the same page,
+    /// clearing it from the source. Mirrors Ghostty's `moveGrapheme`. The caller
+    /// is responsible for the destination cell's content/tag; this only moves
+    /// the attached codepoints. Row grapheme flags are NOT updated here (the
+    /// caller updates them, as in Ghostty).
+    pub(crate) fn move_grapheme(
+        &mut self,
+        src_y: CellCountInt,
+        src_x: CellCountInt,
+        dst_y: CellCountInt,
+        dst_x: CellCountInt,
+    ) {
+        let Some(codepoints) = self.grapheme(src_y, src_x) else {
+            return;
+        };
+        self.clear_grapheme(src_y, src_x);
+        for cp in codepoints {
+            let _ = self.append_grapheme(dst_y, dst_x, cp);
+        }
     }
 
     pub(crate) fn set_style(
@@ -1521,6 +1597,12 @@ impl Page {
         self.hyperlink_map.count() as usize
     }
 
+    /// The number of distinct hyperlinks (URIs) stored in this page. Mirrors
+    /// reading `page.hyperlink_set.count()` in Ghostty.
+    pub(crate) fn hyperlink_set_count(&self) -> usize {
+        self.hyperlink_set.count()
+    }
+
     pub(crate) fn hyperlink_id(&self, y: CellCountInt, x: CellCountInt) -> Option<HyperlinkId> {
         self.hyperlink_map.get(&self.memory, self.cell_offset(y, x))
     }
@@ -1551,7 +1633,7 @@ impl Page {
         Ok(id)
     }
 
-    fn clear_hyperlink(&mut self, y: CellCountInt, x: CellCountInt) {
+    pub(crate) fn clear_hyperlink(&mut self, y: CellCountInt, x: CellCountInt) {
         if let Some(id) = self.detach_hyperlink(y, x) {
             self.hyperlink_set.release(&mut self.memory, id);
         }
@@ -2044,6 +2126,22 @@ mod tests {
         assert_eq!(page.cell(0, 3).codepoint(), 'a' as u32);
         assert_eq!(page.cell(0, 4).codepoint(), 'b' as u32);
         assert!(page.cell(0, 0).is_empty());
+    }
+
+    #[test]
+    fn swap_cells_exchanges_values_and_marks_row_dirty() {
+        // port-added: T7b row-surgery primitive for insert/delete character paths.
+        let mut page = Page::init(Capacity::new(4, 1));
+        page.set_cell(0, 0, Cell::new('a'));
+        page.set_cell(0, 2, Cell::new('z'));
+        page.clear_dirty();
+
+        page.swap_cells(0, 0, 2)
+            .expect("plain cells fit existing capacity");
+
+        assert_eq!(page.cell(0, 0).codepoint(), 'z' as u32);
+        assert_eq!(page.cell(0, 2).codepoint(), 'a' as u32);
+        assert!(page.is_dirty(0));
     }
 
     #[test]

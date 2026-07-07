@@ -566,6 +566,19 @@ impl PageList {
         }
     }
 
+    /// Clear the dirty bits on every page. Mirrors Ghostty's `PageList
+    /// .clearDirty`, used as testing scaffolding by `Terminal.clearDirty`.
+    pub fn clear_dirty(&mut self) {
+        let mut current = self.first;
+        while let Some(id) = current {
+            let Some(node) = self.node_mut(id) else {
+                break;
+            };
+            node.page.clear_dirty();
+            current = self.node(id).and_then(|node| node.next);
+        }
+    }
+
     pub fn get_cell(&self, point: Point) -> Option<Cell> {
         let pin = self.pin(point)?;
         self.node(pin.node).map(|node| node.page.cell(pin.y, pin.x))
