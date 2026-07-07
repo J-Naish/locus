@@ -1712,6 +1712,11 @@ impl Page {
         self.hyperlink_set.get(&self.memory, id)
     }
 
+    pub(crate) fn hyperlink_uri(&self, y: CellCountInt, x: CellCountInt) -> Option<&[u8]> {
+        let entry = self.hyperlink_entry(y, x)?;
+        Some(self.bytes(entry.uri()))
+    }
+
     fn copy_hyperlink_entry(&mut self, source: &Page, entry: PageEntry) -> Option<PageEntry> {
         let uri = self.copy_bytes(source.bytes(entry.uri())).ok()?;
         Some(match entry.id() {

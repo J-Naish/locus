@@ -469,6 +469,10 @@ impl<E: Effects> Handler for TerminalHandler<E> {
         self.terminal.flags.mouse_shift_capture = enabled;
     }
 
+    fn modify_other_keys_2(&mut self, enabled: bool) {
+        self.terminal.flags.modify_other_keys_2 = enabled;
+    }
+
     fn kitty_keyboard_pop(&mut self, _count: u16) {
         // Deferred: Phase map marks kitty keyboard stack as out of scope.
     }

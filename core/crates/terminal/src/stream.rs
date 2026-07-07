@@ -89,6 +89,7 @@ pub trait Handler {
     fn protected_mode(&mut self, _mode: ProtectedMode) {}
     fn cursor_style(&mut self, _style: CursorStyle) {}
     fn mouse_shift_capture(&mut self, _enabled: bool) {}
+    fn modify_other_keys_2(&mut self, _enabled: bool) {}
     fn kitty_keyboard_pop(&mut self, _count: u16) {}
     fn left_and_right_margin(&mut self, _left: u16, _right: u16) {}
     fn left_and_right_margin_ambiguous(&mut self) {}
@@ -433,6 +434,16 @@ impl<H: Handler> Stream<H> {
     }
 
     fn dispatch_sgr(handler: &mut H, csi: Csi<'_>) {
+        if csi.intermediates == b">" {
+            if csi.params.len() == 2 && csi.params[0] == 4 {
+                match csi.params[1] {
+                    0 => handler.modify_other_keys_2(false),
+                    2 => handler.modify_other_keys_2(true),
+                    _ => {}
+                }
+            }
+            return;
+        }
         if !csi.intermediates.is_empty() {
             return;
         }

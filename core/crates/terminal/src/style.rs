@@ -2,15 +2,15 @@
 //!
 //! Ghostty stores styles in a ref-counted set. This port uses `PackedStyle`
 //! as the set value directly: the u128 bit layout is the storage format.
-//! The 35 upstream VT/HTML formatter tests are intentionally deferred to the
-//! later formatter phase; this module ports the two style-set tests and pins
-//! the storage/resolution behavior that upstream leaves implicit.
+//! The storage layer and the VT/HTML formatters are kept together because the
+//! formatter output is a direct view of the packed style fields.
 
 use crate::color::{Palette, Rgb};
 use crate::page::{Cell, CellContentTag};
 use crate::ref_counted_set::{RefCountedSet, RefCountedSetContext};
 use crate::sgr;
 use crate::size::{BufValue, StyleCountInt};
+use std::fmt;
 
 pub type StyleId = StyleCountInt;
 pub const DEFAULT_STYLE_ID: StyleId = 0;
@@ -106,6 +106,20 @@ impl Style {
     pub fn underline_color(self, palette: &Palette) -> Option<Rgb> {
         resolve_color(self.underline_color, palette)
     }
+
+    pub fn formatter_vt(&self) -> VtFormatter<'_> {
+        VtFormatter {
+            style: self,
+            palette: None,
+        }
+    }
+
+    pub fn formatter_html(&self) -> HtmlFormatter<'_> {
+        HtmlFormatter {
+            style: self,
+            palette: None,
+        }
+    }
 }
 
 fn resolve_color(color: StyleColor, palette: &Palette) -> Option<Rgb> {
@@ -113,6 +127,178 @@ fn resolve_color(color: StyleColor, palette: &Palette) -> Option<Rgb> {
         StyleColor::None => None,
         StyleColor::Palette(index) => Some(palette[index as usize]),
         StyleColor::Rgb(rgb) => Some(rgb),
+    }
+}
+
+pub struct VtFormatter<'a> {
+    style: &'a Style,
+    pub palette: Option<&'a Palette>,
+}
+
+impl fmt::Display for VtFormatter<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // ghostty: Style.formatterVt is self-contained and always starts with
+        // reset (style.zig:314-323).
+        formatter.write_str("\x1b[0m")?;
+
+        let flags = self.style.flags;
+        if flags.bold {
+            formatter.write_str("\x1b[1m")?;
+        }
+        if flags.faint {
+            formatter.write_str("\x1b[2m")?;
+        }
+        if flags.italic {
+            formatter.write_str("\x1b[3m")?;
+        }
+        if flags.blink {
+            formatter.write_str("\x1b[5m")?;
+        }
+        if flags.inverse {
+            formatter.write_str("\x1b[7m")?;
+        }
+        if flags.invisible {
+            formatter.write_str("\x1b[8m")?;
+        }
+        if flags.strikethrough {
+            formatter.write_str("\x1b[9m")?;
+        }
+        if flags.overline {
+            formatter.write_str("\x1b[53m")?;
+        }
+        match flags.underline {
+            sgr::Underline::None => {}
+            sgr::Underline::Single => formatter.write_str("\x1b[4m")?,
+            sgr::Underline::Double => formatter.write_str("\x1b[4:2m")?,
+            sgr::Underline::Curly => formatter.write_str("\x1b[4:3m")?,
+            sgr::Underline::Dotted => formatter.write_str("\x1b[4:4m")?,
+            sgr::Underline::Dashed => formatter.write_str("\x1b[4:5m")?,
+        }
+
+        self.format_color(formatter, 38, self.style.fg_color)?;
+        self.format_color(formatter, 48, self.style.bg_color)?;
+        self.format_color(formatter, 58, self.style.underline_color)
+    }
+}
+
+impl VtFormatter<'_> {
+    fn format_color(
+        &self,
+        formatter: &mut fmt::Formatter<'_>,
+        prefix: u8,
+        color: StyleColor,
+    ) -> fmt::Result {
+        match color {
+            StyleColor::None => Ok(()),
+            StyleColor::Palette(index) => {
+                if let Some(palette) = self.palette {
+                    let rgb = palette[index as usize];
+                    write!(formatter, "\x1b[{prefix};2;{};{};{}m", rgb.r, rgb.g, rgb.b)
+                } else {
+                    write!(formatter, "\x1b[{prefix};5;{index}m")
+                }
+            }
+            StyleColor::Rgb(rgb) => {
+                write!(formatter, "\x1b[{prefix};2;{};{};{}m", rgb.r, rgb.g, rgb.b)
+            }
+        }
+    }
+}
+
+pub struct HtmlFormatter<'a> {
+    style: &'a Style,
+    pub palette: Option<&'a Palette>,
+}
+
+impl fmt::Display for HtmlFormatter<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.format_color(formatter, "color", self.style.fg_color)?;
+        self.format_color(formatter, "background-color", self.style.bg_color)?;
+        self.format_color(
+            formatter,
+            "text-decoration-color",
+            self.style.underline_color,
+        )?;
+
+        let flags = self.style.flags;
+        let has_decoration_line = flags.underline != sgr::Underline::None
+            || flags.strikethrough
+            || flags.overline
+            || flags.blink;
+        if has_decoration_line {
+            formatter.write_str("text-decoration-line:")?;
+            if flags.underline != sgr::Underline::None {
+                formatter.write_str(" underline")?;
+            }
+            if flags.strikethrough {
+                formatter.write_str(" line-through")?;
+            }
+            if flags.overline {
+                formatter.write_str(" overline")?;
+            }
+            if flags.blink {
+                formatter.write_str(" blink")?;
+            }
+            formatter.write_str(";")?;
+        }
+
+        match flags.underline {
+            sgr::Underline::None => {}
+            sgr::Underline::Single => formatter.write_str("text-decoration-style: solid;")?,
+            sgr::Underline::Double => formatter.write_str("text-decoration-style: double;")?,
+            sgr::Underline::Curly => formatter.write_str("text-decoration-style: wavy;")?,
+            sgr::Underline::Dotted => formatter.write_str("text-decoration-style: dotted;")?,
+            sgr::Underline::Dashed => formatter.write_str("text-decoration-style: dashed;")?,
+        }
+
+        if flags.bold {
+            formatter.write_str("font-weight: bold;")?;
+        }
+        if flags.italic {
+            formatter.write_str("font-style: italic;")?;
+        }
+        if flags.faint {
+            formatter.write_str("opacity: 0.5;")?;
+        }
+        if flags.invisible {
+            formatter.write_str("visibility: hidden;")?;
+        }
+        if flags.inverse {
+            formatter.write_str("filter: invert(100%);")?;
+        }
+        Ok(())
+    }
+}
+
+impl HtmlFormatter<'_> {
+    fn format_color(
+        &self,
+        formatter: &mut fmt::Formatter<'_>,
+        property: &str,
+        color: StyleColor,
+    ) -> fmt::Result {
+        match color {
+            StyleColor::None => Ok(()),
+            StyleColor::Palette(index) => {
+                if let Some(palette) = self.palette {
+                    let rgb = palette[index as usize];
+                    write!(
+                        formatter,
+                        "{property}: rgb({}, {}, {});",
+                        rgb.r, rgb.g, rgb.b
+                    )
+                } else {
+                    write!(formatter, "{property}: var(--vt-palette-{index});")
+                }
+            }
+            StyleColor::Rgb(rgb) => {
+                write!(
+                    formatter,
+                    "{property}: rgb({}, {}, {});",
+                    rgb.r, rgb.g, rgb.b
+                )
+            }
+        }
     }
 }
 
@@ -502,6 +688,470 @@ mod tests {
             ..Style::default()
         };
         assert_eq!(direct.underline_color(&DEFAULT_PALETTE), Some(rgb(3, 4, 5)));
+    }
+
+    fn vt(style: &Style) -> String {
+        style.formatter_vt().to_string()
+    }
+
+    fn vt_with_default_palette(style: &Style) -> String {
+        let mut formatter = style.formatter_vt();
+        formatter.palette = Some(&DEFAULT_PALETTE);
+        formatter.to_string()
+    }
+
+    fn html(style: &Style) -> String {
+        style.formatter_html().to_string()
+    }
+
+    fn html_with_default_palette(style: &Style) -> String {
+        let mut formatter = style.formatter_html();
+        formatter.palette = Some(&DEFAULT_PALETTE);
+        formatter.to_string()
+    }
+
+    // ghostty: "Style VT formatting empty" (style.zig:566)
+    #[test]
+    fn style_vt_formatting_empty() {
+        assert_eq!(vt(&Style::default()), "\x1b[0m");
+    }
+
+    // ghostty: "Style VT formatting bold" (style.zig:577)
+    #[test]
+    fn style_vt_formatting_bold() {
+        let style = Style {
+            flags: StyleFlags {
+                bold: true,
+                ..StyleFlags::default()
+            },
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[1m");
+    }
+
+    // ghostty: "Style VT formatting faint" (style.zig:588)
+    #[test]
+    fn style_vt_formatting_faint() {
+        let style = Style {
+            flags: StyleFlags {
+                faint: true,
+                ..StyleFlags::default()
+            },
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[2m");
+    }
+
+    // ghostty: "Style VT formatting italic" (style.zig:599)
+    #[test]
+    fn style_vt_formatting_italic() {
+        let style = Style {
+            flags: StyleFlags {
+                italic: true,
+                ..StyleFlags::default()
+            },
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[3m");
+    }
+
+    // ghostty: "Style VT formatting blink" (style.zig:610)
+    #[test]
+    fn style_vt_formatting_blink() {
+        let style = Style {
+            flags: StyleFlags {
+                blink: true,
+                ..StyleFlags::default()
+            },
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[5m");
+    }
+
+    // ghostty: "Style VT formatting inverse" (style.zig:621)
+    #[test]
+    fn style_vt_formatting_inverse() {
+        let style = Style {
+            flags: StyleFlags {
+                inverse: true,
+                ..StyleFlags::default()
+            },
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[7m");
+    }
+
+    // ghostty: "Style VT formatting invisible" (style.zig:632)
+    #[test]
+    fn style_vt_formatting_invisible() {
+        let style = Style {
+            flags: StyleFlags {
+                invisible: true,
+                ..StyleFlags::default()
+            },
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[8m");
+    }
+
+    // ghostty: "Style VT formatting strikethrough" (style.zig:643)
+    #[test]
+    fn style_vt_formatting_strikethrough() {
+        let style = Style {
+            flags: StyleFlags {
+                strikethrough: true,
+                ..StyleFlags::default()
+            },
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[9m");
+    }
+
+    // ghostty: "Style VT formatting overline" (style.zig:654)
+    #[test]
+    fn style_vt_formatting_overline() {
+        let style = Style {
+            flags: StyleFlags {
+                overline: true,
+                ..StyleFlags::default()
+            },
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[53m");
+    }
+
+    fn underline_style(underline: sgr::Underline) -> Style {
+        Style {
+            flags: StyleFlags {
+                underline,
+                ..StyleFlags::default()
+            },
+            ..Style::default()
+        }
+    }
+
+    // ghostty: "Style VT formatting underline single" (style.zig:665)
+    #[test]
+    fn style_vt_formatting_underline_single() {
+        assert_eq!(
+            vt(&underline_style(sgr::Underline::Single)),
+            "\x1b[0m\x1b[4m"
+        );
+    }
+
+    // ghostty: "Style VT formatting underline double" (style.zig:676)
+    #[test]
+    fn style_vt_formatting_underline_double() {
+        assert_eq!(
+            vt(&underline_style(sgr::Underline::Double)),
+            "\x1b[0m\x1b[4:2m"
+        );
+    }
+
+    // ghostty: "Style VT formatting underline curly" (style.zig:687)
+    #[test]
+    fn style_vt_formatting_underline_curly() {
+        assert_eq!(
+            vt(&underline_style(sgr::Underline::Curly)),
+            "\x1b[0m\x1b[4:3m"
+        );
+    }
+
+    // ghostty: "Style VT formatting underline dotted" (style.zig:698)
+    #[test]
+    fn style_vt_formatting_underline_dotted() {
+        assert_eq!(
+            vt(&underline_style(sgr::Underline::Dotted)),
+            "\x1b[0m\x1b[4:4m"
+        );
+    }
+
+    // ghostty: "Style VT formatting underline dashed" (style.zig:709)
+    #[test]
+    fn style_vt_formatting_underline_dashed() {
+        assert_eq!(
+            vt(&underline_style(sgr::Underline::Dashed)),
+            "\x1b[0m\x1b[4:5m"
+        );
+    }
+
+    // ghostty: "Style VT formatting fg palette" (style.zig:720)
+    #[test]
+    fn style_vt_formatting_fg_palette() {
+        let style = Style {
+            fg_color: StyleColor::Palette(42),
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[38;5;42m");
+    }
+
+    // ghostty: "Style VT formatting fg rgb" (style.zig:731)
+    #[test]
+    fn style_vt_formatting_fg_rgb() {
+        let style = Style {
+            fg_color: StyleColor::Rgb(rgb(255, 128, 64)),
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[38;2;255;128;64m");
+    }
+
+    // ghostty: "Style VT formatting bg palette" (style.zig:742)
+    #[test]
+    fn style_vt_formatting_bg_palette() {
+        let style = Style {
+            bg_color: StyleColor::Palette(7),
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[48;5;7m");
+    }
+
+    // ghostty: "Style VT formatting bg rgb" (style.zig:753)
+    #[test]
+    fn style_vt_formatting_bg_rgb() {
+        let style = Style {
+            bg_color: StyleColor::Rgb(rgb(32, 64, 96)),
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[48;2;32;64;96m");
+    }
+
+    // ghostty: "Style VT formatting underline_color palette" (style.zig:764)
+    #[test]
+    fn style_vt_formatting_underline_color_palette() {
+        let style = Style {
+            underline_color: StyleColor::Palette(15),
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[58;5;15m");
+    }
+
+    // ghostty: "Style VT formatting underline_color rgb" (style.zig:775)
+    #[test]
+    fn style_vt_formatting_underline_color_rgb() {
+        let style = Style {
+            underline_color: StyleColor::Rgb(rgb(200, 100, 50)),
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[58;2;200;100;50m");
+    }
+
+    // ghostty: "Style VT formatting multiple flags" (style.zig:786)
+    #[test]
+    fn style_vt_formatting_multiple_flags() {
+        let style = Style {
+            flags: StyleFlags {
+                bold: true,
+                italic: true,
+                underline: sgr::Underline::Single,
+                ..StyleFlags::default()
+            },
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[1m\x1b[3m\x1b[4m");
+    }
+
+    // ghostty: "Style VT formatting all flags" (style.zig:797)
+    #[test]
+    fn style_vt_formatting_all_flags() {
+        let style = Style {
+            flags: StyleFlags {
+                bold: true,
+                faint: true,
+                italic: true,
+                blink: true,
+                inverse: true,
+                invisible: true,
+                strikethrough: true,
+                overline: true,
+                underline: sgr::Underline::Curly,
+            },
+            ..Style::default()
+        };
+        assert_eq!(
+            vt(&style),
+            "\x1b[0m\x1b[1m\x1b[2m\x1b[3m\x1b[5m\x1b[7m\x1b[8m\x1b[9m\x1b[53m\x1b[4:3m"
+        );
+    }
+
+    // ghostty: "Style VT formatting combined colors and flags" (style.zig:821)
+    #[test]
+    fn style_vt_formatting_combined_colors_and_flags() {
+        let style = Style {
+            fg_color: StyleColor::Rgb(rgb(255, 0, 0)),
+            bg_color: StyleColor::Palette(8),
+            underline_color: StyleColor::Rgb(rgb(0, 255, 0)),
+            flags: StyleFlags {
+                bold: true,
+                italic: true,
+                underline: sgr::Underline::Double,
+                ..StyleFlags::default()
+            },
+        };
+        assert_eq!(
+            vt(&style),
+            "\x1b[0m\x1b[1m\x1b[3m\x1b[4:2m\x1b[38;2;255;0;0m\x1b[48;5;8m\x1b[58;2;0;255;0m"
+        );
+    }
+
+    // ghostty: "Style VT formatting all colors rgb" (style.zig:840)
+    #[test]
+    fn style_vt_formatting_all_colors_rgb() {
+        let style = Style {
+            fg_color: StyleColor::Rgb(rgb(10, 20, 30)),
+            bg_color: StyleColor::Rgb(rgb(40, 50, 60)),
+            underline_color: StyleColor::Rgb(rgb(70, 80, 90)),
+            ..Style::default()
+        };
+        assert_eq!(
+            vt(&style),
+            "\x1b[0m\x1b[38;2;10;20;30m\x1b[48;2;40;50;60m\x1b[58;2;70;80;90m"
+        );
+    }
+
+    // ghostty: "Style VT formatting all colors palette" (style.zig:858)
+    #[test]
+    fn style_vt_formatting_all_colors_palette() {
+        let style = Style {
+            fg_color: StyleColor::Palette(1),
+            bg_color: StyleColor::Palette(2),
+            underline_color: StyleColor::Palette(3),
+            ..Style::default()
+        };
+        assert_eq!(vt(&style), "\x1b[0m\x1b[38;5;1m\x1b[48;5;2m\x1b[58;5;3m");
+    }
+
+    // ghostty: "Style VT formatting palette with palette set emits rgb" (style.zig:876)
+    #[test]
+    fn style_vt_formatting_palette_with_palette_set_emits_rgb() {
+        let style = Style {
+            fg_color: StyleColor::Palette(1),
+            ..Style::default()
+        };
+        assert_eq!(
+            vt_with_default_palette(&style),
+            "\x1b[0m\x1b[38;2;204;102;102m"
+        );
+    }
+
+    // ghostty: "Style VT formatting all palette colors with palette set" (style.zig:889)
+    #[test]
+    fn style_vt_formatting_all_palette_colors_with_palette_set() {
+        let style = Style {
+            fg_color: StyleColor::Palette(1),
+            bg_color: StyleColor::Palette(2),
+            underline_color: StyleColor::Palette(3),
+            ..Style::default()
+        };
+        assert_eq!(
+            vt_with_default_palette(&style),
+            "\x1b[0m\x1b[38;2;204;102;102m\x1b[48;2;181;189;104m\x1b[58;2;240;198;116m"
+        );
+    }
+
+    // ghostty: "Style HTML formatting basic bold" (style.zig:969)
+    #[test]
+    fn style_html_formatting_basic_bold() {
+        let style = Style {
+            flags: StyleFlags {
+                bold: true,
+                ..StyleFlags::default()
+            },
+            ..Style::default()
+        };
+        assert_eq!(html(&style), "font-weight: bold;");
+    }
+
+    // ghostty: "Style HTML formatting fg color rgb" (style.zig:980)
+    #[test]
+    fn style_html_formatting_fg_color_rgb() {
+        let style = Style {
+            fg_color: StyleColor::Rgb(rgb(255, 128, 64)),
+            ..Style::default()
+        };
+        assert_eq!(html(&style), "color: rgb(255, 128, 64);");
+    }
+
+    // ghostty: "Style HTML formatting bg color palette" (style.zig:991)
+    #[test]
+    fn style_html_formatting_bg_color_palette() {
+        let style = Style {
+            bg_color: StyleColor::Palette(7),
+            ..Style::default()
+        };
+        assert_eq!(html(&style), "background-color: var(--vt-palette-7);");
+    }
+
+    // ghostty: "Style HTML formatting combined colors and flags" (style.zig:1002)
+    #[test]
+    fn style_html_formatting_combined_colors_and_flags() {
+        let style = Style {
+            fg_color: StyleColor::Rgb(rgb(255, 0, 0)),
+            bg_color: StyleColor::Rgb(rgb(0, 0, 255)),
+            flags: StyleFlags {
+                bold: true,
+                italic: true,
+                ..StyleFlags::default()
+            },
+            ..Style::default()
+        };
+        let result = html(&style);
+        assert!(result.contains("color: rgb(255, 0, 0);"));
+        assert!(result.contains("background-color: rgb(0, 0, 255);"));
+        assert!(result.contains("font-weight: bold;"));
+        assert!(result.contains("font-style: italic;"));
+    }
+
+    // ghostty: "Style HTML formatting single decoration line" (style.zig:1021)
+    #[test]
+    fn style_html_formatting_single_decoration_line() {
+        let result = html(&underline_style(sgr::Underline::Single));
+        assert!(result.contains("text-decoration-line: underline;"));
+        assert!(result.contains("text-decoration-style: solid;"));
+    }
+
+    // ghostty: "Style HTML formatting multiple decoration lines" (style.zig:1034)
+    #[test]
+    fn style_html_formatting_multiple_decoration_lines() {
+        let style = Style {
+            flags: StyleFlags {
+                underline: sgr::Underline::Curly,
+                strikethrough: true,
+                overline: true,
+                ..StyleFlags::default()
+            },
+            ..Style::default()
+        };
+        let result = html(&style);
+        assert!(result.contains("text-decoration-line: underline line-through overline;"));
+        assert!(result.contains("text-decoration-style: wavy;"));
+    }
+
+    // ghostty: "Style HTML formatting palette with palette set emits rgb" (style.zig:1047)
+    #[test]
+    fn style_html_formatting_palette_with_palette_set_emits_rgb() {
+        let style = Style {
+            bg_color: StyleColor::Palette(7),
+            ..Style::default()
+        };
+        assert_eq!(
+            html_with_default_palette(&style),
+            "background-color: rgb(197, 200, 198);"
+        );
+    }
+
+    // ghostty: "Style HTML formatting all palette colors with palette set" (style.zig:1060)
+    #[test]
+    fn style_html_formatting_all_palette_colors_with_palette_set() {
+        let style = Style {
+            fg_color: StyleColor::Palette(1),
+            bg_color: StyleColor::Palette(2),
+            underline_color: StyleColor::Palette(3),
+            ..Style::default()
+        };
+        assert_eq!(
+            html_with_default_palette(&style),
+            "color: rgb(204, 102, 102);background-color: rgb(181, 189, 104);text-decoration-color: rgb(240, 198, 116);"
+        );
     }
 
     #[test]
