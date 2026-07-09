@@ -2912,6 +2912,17 @@ mod tests {
     }
 
     #[test]
+    fn combining_mark_flood_is_bounded() {
+        // port-added: hostile combining-mark streams must not grow one cell forever.
+        let mut t = terminal(10, 10);
+        t.print('a');
+        for _ in 0..20_000 {
+            print_cp(&mut t, 0x0301);
+        }
+        assert_eq!(t.plain_string().chars().count(), 129);
+    }
+
+    #[test]
     fn zero_width_character_attaches_to_pending_wrap_cell() {
         // ghostty: "Terminal: zero-width character attaches to pending wrap cell" (Terminal.zig:3356)
         let mut t = terminal(2, 2);

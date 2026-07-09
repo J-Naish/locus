@@ -3605,6 +3605,7 @@ impl PromptIterator {
 mod tests {
     use super::*;
     use crate::color::Rgb;
+    use crate::page::{GRAPHEME_CHUNK_LEN, GRAPHEME_MAX_PER_CELL};
     use crate::style::{PackedStyle, Style, StyleColor};
 
     fn cap_with_rows_below(rows: CellCountInt) -> Capacity {
@@ -7065,12 +7066,19 @@ mod tests {
     #[test]
     fn resize_reflow_exceeds_grapheme_memory_forcing_capacity_increase() {
         // ghostty: "PageList resize reflow exceeds grapheme memory forcing capacity increase" (PageList.zig:11975)
+        // Sanctioned deviation from the Zig setup: upstream bulk-loads nearly a
+        // full page budget into ONE cell via setGraphemes (unported). Our
+        // per-cell hardening cap (GRAPHEME_MAX_PER_CELL) and appendGrapheme's
+        // faithful alloc-before-free growth both forbid that shape, so the
+        // same over-budget pressure is spread across four wrapped cells, each
+        // safely below the cap. The assertion (reflow forces grapheme_bytes to
+        // grow) is unchanged and stronger than upstream's error-free resize.
         let mut list = PageList::new(2, 10, Some(0));
         let (first, second) = grow_until_second_page(&mut list);
         let first_y = list.node_page_size(first).unwrap().rows - 1;
         let original_grapheme_bytes = list.node_capacity(first).unwrap().grapheme_bytes;
-        let graphemes_per_cell =
-            (original_grapheme_bytes as usize / std::mem::size_of::<u32>()).max(1);
+        let graphemes_per_cell = GRAPHEME_CHUNK_LEN * 17;
+        assert!(graphemes_per_cell < GRAPHEME_MAX_PER_CELL);
         if let Some(node) = list.node_mut(first) {
             node.page
                 .set_cell(first_y.saturating_sub(1), 0, Cell::new('P'));
@@ -7082,16 +7090,17 @@ mod tests {
         }
         if let Some(node) = list.node_mut(second) {
             node.page.set_cell(0, 0, Cell::new('X'));
+            node.page.set_cell(0, 1, Cell::new('X'));
             let mut row = node.page.row(0);
-            row.set_wrap(true);
             row.set_wrap_continuation(true);
             node.page.set_row(0, row);
         }
         append_graphemes(&mut list, first, first_y, 0, graphemes_per_cell, 0x0300);
         append_graphemes(&mut list, first, first_y, 1, graphemes_per_cell, 0x0400);
         append_graphemes(&mut list, second, 0, 0, graphemes_per_cell, 0x0500);
+        append_graphemes(&mut list, second, 0, 1, graphemes_per_cell, 0x0600);
         list.resize(ResizeOptions {
-            cols: Some(3),
+            cols: Some(4),
             rows: None,
             reflow: true,
             cursor: None,

@@ -24,6 +24,11 @@ pub(crate) type StringAlloc = BitmapAllocator<STRING_CHUNK>;
 
 pub(crate) const GRAPHEME_CHUNK_LEN: usize = 4;
 pub(crate) const GRAPHEME_CHUNK: usize = GRAPHEME_CHUNK_LEN * u32::SIZE;
+/// Hard per-cell bound on extra grapheme codepoints. Ghostty has no such cap;
+/// this is deliberate input hardening so hostile combining-mark streams cannot
+/// grow one cell's grapheme data without bound. 128 exceeds legitimate clusters
+/// and the ported glitch fixture's longest combining run.
+pub(crate) const GRAPHEME_MAX_PER_CELL: usize = 128;
 pub(crate) type GraphemeAlloc = BitmapAllocator<GRAPHEME_CHUNK>;
 pub(crate) type GraphemeMap = AutoOffsetHashMap<Offset<Cell>, OffsetSlice<u32>>;
 pub(crate) const GRAPHEME_BYTES_DEFAULT: GraphemeBytesInt = 1024;
@@ -1429,26 +1434,68 @@ impl Page {
         codepoint: u32,
     ) -> Result<(), OutOfMemory> {
         let key = self.cell_offset(y, x);
-        let mut current = self
-            .detach_grapheme(y, x)
-            .map(|slice| {
-                let values = self.read_grapheme_slice(slice);
+        let cell = self.cell(y, x);
+
+        if !cell.has_grapheme() {
+            // ghostty: page.zig:1533 — first grapheme allocates one codepoint
+            // and only publishes the map entry after allocation succeeds.
+            let slice = self.grapheme_alloc.alloc::<u32>(&mut self.memory, 1)?;
+            slice.offset.set(&mut self.memory, 0, codepoint);
+            if self.grapheme_map.put(&mut self.memory, key, slice).is_err() {
                 self.grapheme_alloc.free(&mut self.memory, slice);
-                values
-            })
-            .unwrap_or_default();
-        current.push(codepoint);
-        let slice = self
-            .grapheme_alloc
-            .alloc::<u32>(&mut self.memory, current.len())?;
-        for (index, value) in current.into_iter().enumerate() {
-            slice.offset.set(&mut self.memory, index, value);
+                return Err(OutOfMemory);
+            }
+            let mut cell = cell;
+            cell.0 = (cell.0 & !Cell::CONTENT_TAG_MASK) | CellContentTag::CodepointGrapheme as u64;
+            self.write_cell_raw(y, x, cell);
+            self.update_row_flags(y);
+            return Ok(());
         }
-        self.grapheme_map.put(&mut self.memory, key, slice)?;
-        let mut cell = self.cell(y, x);
-        cell.0 = (cell.0 & !Cell::CONTENT_TAG_MASK) | CellContentTag::CodepointGrapheme as u64;
-        self.write_cell_raw(y, x, cell);
-        self.update_row_flags(y);
+
+        let Some(slice) = self.grapheme_map.get(&self.memory, key) else {
+            debug_assert!(false, "grapheme tag set but map entry missing");
+            let slice = self.grapheme_alloc.alloc::<u32>(&mut self.memory, 1)?;
+            slice.offset.set(&mut self.memory, 0, codepoint);
+            if self.grapheme_map.put(&mut self.memory, key, slice).is_err() {
+                self.grapheme_alloc.free(&mut self.memory, slice);
+                return Err(OutOfMemory);
+            }
+            self.update_row_flags(y);
+            return Ok(());
+        };
+
+        if slice.len >= GRAPHEME_MAX_PER_CELL {
+            return Ok(());
+        }
+
+        if slice.len % GRAPHEME_CHUNK_LEN != 0 {
+            // ghostty: page.zig:1557 — append into the already allocated chunk.
+            slice.offset.set(&mut self.memory, slice.len, codepoint);
+            let updated = self
+                .grapheme_map
+                .update(&mut self.memory, key, |mut value| {
+                    value.len += 1;
+                    value
+                });
+            debug_assert!(updated);
+            return Ok(());
+        }
+
+        // ghostty: page.zig:1566 — crossing a chunk boundary allocates a new
+        // slice first, so allocation failure leaves the existing entry intact.
+        let new_slice = self
+            .grapheme_alloc
+            .alloc::<u32>(&mut self.memory, slice.len + 1)?;
+        for index in 0..slice.len {
+            let value = slice.offset.get(&self.memory, index);
+            new_slice.offset.set(&mut self.memory, index, value);
+        }
+        new_slice.offset.set(&mut self.memory, slice.len, codepoint);
+        let updated = self
+            .grapheme_map
+            .update(&mut self.memory, key, |_| new_slice);
+        debug_assert!(updated);
+        self.grapheme_alloc.free(&mut self.memory, slice);
         Ok(())
     }
 
@@ -2477,6 +2524,63 @@ mod tests {
         page.append_grapheme(0, 0, 0x0301).unwrap();
         page.append_grapheme(0, 0, 0x0308).unwrap();
         assert_eq!(page.grapheme(0, 0), Some(vec![0x0301, 0x0308]));
+    }
+
+    #[test]
+    fn append_grapheme_contents_across_chunk_boundaries() {
+        // port-added: covers in-place and chunk-boundary append paths.
+        let mut page = Page::init(Capacity::new(2, 1));
+        page.set_cell(0, 0, Cell::new('a'));
+
+        let mut expected = Vec::new();
+        for codepoint in 0x0301..=0x0309 {
+            page.append_grapheme(0, 0, codepoint).unwrap();
+            expected.push(codepoint);
+            assert_eq!(page.grapheme(0, 0), Some(expected.clone()));
+        }
+    }
+
+    #[test]
+    fn append_grapheme_caps_per_cell() {
+        // port-added: hostile combining-mark flood must stop at a hard per-cell cap.
+        let mut page = Page::init(Capacity {
+            grapheme_bytes: 4096,
+            ..Capacity::new(2, 1)
+        });
+        page.set_cell(0, 0, Cell::new('a'));
+
+        let input: Vec<_> = (0..130).map(|offset| 0x0300 + offset).collect();
+        for codepoint in input.iter().copied() {
+            page.append_grapheme(0, 0, codepoint).unwrap();
+        }
+
+        let grapheme = page.grapheme(0, 0).unwrap();
+        assert_eq!(grapheme.len(), 128);
+        assert_eq!(grapheme, input[..128]);
+    }
+
+    #[test]
+    fn append_grapheme_out_of_space_preserves_existing() {
+        // port-added: OOM while growing a grapheme must not detach existing data.
+        let mut page = Page::init(Capacity {
+            grapheme_bytes: 64,
+            ..Capacity::new(2, 1)
+        });
+        page.set_cell(0, 0, Cell::new('a'));
+        let mut original = Vec::new();
+        let result: Result<(), OutOfMemory> = loop {
+            let codepoint = 0x0300 + original.len() as u32;
+            match page.append_grapheme(0, 0, codepoint) {
+                Ok(()) => {
+                    original.push(codepoint);
+                    assert!(original.len() < GRAPHEME_MAX_PER_CELL);
+                }
+                Err(error) => break Err(error),
+            }
+        };
+
+        assert_eq!(result, Err(OutOfMemory));
+        assert_eq!(page.grapheme(0, 0), Some(original));
     }
 
     #[test]
