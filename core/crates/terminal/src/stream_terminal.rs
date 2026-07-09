@@ -384,11 +384,31 @@ impl<E: Effects> Handler for TerminalHandler<E> {
     }
 
     fn cursor_col_relative(&mut self, value: u16) {
-        self.terminal.cursor_right(usize::from(value));
+        // ghostty: termio/stream_handler.zig:233 — HPR routes through
+        // setCursorPos rather than CUF.
+        let row = self.terminal.active_screen().cursor.y.saturating_add(1);
+        let col = self
+            .terminal
+            .active_screen()
+            .cursor
+            .x
+            .saturating_add(1)
+            .saturating_add(value);
+        self.terminal.set_cursor_pos(row, col);
     }
 
     fn cursor_row_relative(&mut self, value: u16) {
-        self.terminal.cursor_down(usize::from(value));
+        // ghostty: termio/stream_handler.zig:237 — VPR routes through
+        // setCursorPos rather than CUD.
+        let row = self
+            .terminal
+            .active_screen()
+            .cursor
+            .y
+            .saturating_add(1)
+            .saturating_add(value);
+        let col = self.terminal.active_screen().cursor.x.saturating_add(1);
+        self.terminal.set_cursor_pos(row, col);
     }
 
     fn cursor_position(&mut self, row: u16, col: u16) {
@@ -1013,6 +1033,135 @@ mod tests {
         assert_eq!(stream.handler.terminal.scrolling_region.top, 0);
         assert_eq!(stream.handler.terminal.scrolling_region.bottom, 23);
         assert!(stream.handler.terminal.modes.get(Mode::Wraparound));
+    }
+
+    #[test]
+    fn utf8_invalid_prefix_then_valid_multibyte() {
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.next_slice(b"\xF0\x9F\xC2\xA9");
+
+        assert_eq!(stream.handler.terminal.plain_string(), "\u{FFFD}\u{00A9}");
+    }
+
+    #[test]
+    fn utf8_invalid_then_escape_sequence() {
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.next_slice(b"A\xC2\x1B[2;3H");
+
+        assert_eq!(stream.handler.terminal.plain_string(), "A\u{FFFD}");
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 2);
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 1);
+    }
+
+    #[test]
+    fn utf8_invalid_then_c0_control() {
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.next_slice(b"AB\xC2\x08X");
+
+        assert_eq!(stream.handler.terminal.plain_string(), "ABX");
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 3);
+    }
+
+    #[test]
+    fn cud_from_above_top_margin_clamps_at_bottom_margin() {
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.next_slice(b"\x1b[5;10r\x1b[2;1H\x1b[20B");
+
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 9);
+    }
+
+    #[test]
+    fn cuu_from_below_bottom_margin_clamps_at_top_margin() {
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.next_slice(b"\x1b[5;10r\x1b[15;1H\x1b[20A");
+
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 4);
+    }
+
+    #[test]
+    fn cuu_from_above_top_margin_reaches_screen_top() {
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.next_slice(b"\x1b[5;10r\x1b[3;1H\x1b[9A");
+
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 0);
+    }
+
+    #[test]
+    fn cuf_from_left_of_left_margin_clamps_at_right_margin() {
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.next_slice(b"\x1b[?69h\x1b[10;20s\x1b[1;5H\x1b[40C");
+
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 19);
+    }
+
+    #[test]
+    fn hpr_crosses_right_margin_via_set_cursor_pos() {
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.next_slice(b"\x1b[?69h\x1b[10;20s\x1b[1;13H\x1b[30a");
+
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 42);
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 0);
+    }
+
+    #[test]
+    fn vpr_crosses_bottom_margin_via_set_cursor_pos() {
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.next_slice(b"\x1b[5;10r\x1b[7;1H\x1b[20e");
+
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 0);
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 23);
+    }
+
+    #[test]
+    fn xtrestore_without_save_keeps_mode_defaults() {
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.next_slice(b"\x1b[?7r");
+        assert!(stream.handler.terminal.modes.get(Mode::Wraparound));
+
+        stream.next_slice(b"\x1b[?25r");
+        assert!(stream.handler.terminal.modes.get(Mode::CursorVisible));
+    }
+
+    #[test]
+    fn full_reset_resets_saved_modes_to_defaults() {
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.next_slice(b"\x1b[?7l\x1b[?7s\x1bc\x1b[?7r");
+
+        assert!(stream.handler.terminal.modes.get(Mode::Wraparound));
+    }
+
+    #[test]
+    fn alt_screen_after_resize_uses_current_size() {
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.handler.terminal.resize(100, 30);
+        stream.next_slice(b"\x1b[?1049h");
+
+        assert_eq!(stream.handler.terminal.active_screen().cols(), 100);
+        assert_eq!(stream.handler.terminal.active_screen().rows(), 30);
+    }
+
+    #[test]
+    fn alt_screen_before_resize_then_resize_tracks() {
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.next_slice(b"\x1b[?1049h");
+        stream.handler.terminal.resize(100, 30);
+        stream.next_slice(b"\x1b[?1049l\x1b[?1049h");
+
+        assert_eq!(stream.handler.terminal.active_screen().cols(), 100);
+        assert_eq!(stream.handler.terminal.active_screen().rows(), 30);
     }
 
     // T-omitted (glyph protocol state is not ported): "glyph protocol APC with write_pty callback" (stream_terminal.zig:983)

@@ -931,7 +931,9 @@ impl Terminal {
 
     pub fn cursor_up(&mut self, count: usize) {
         let y = self.active_screen().cursor.y;
-        let top = if self.cursor_inside_vertical_region() {
+        // ghostty: Terminal.zig:963 — CUU clamps to the top margin whenever
+        // the cursor is at or below it; the bottom margin is not consulted.
+        let top = if y >= self.scrolling_region.top {
             self.scrolling_region.top
         } else {
             0
@@ -943,7 +945,9 @@ impl Terminal {
 
     pub fn cursor_down(&mut self, count: usize) {
         let y = self.active_screen().cursor.y;
-        let bottom = if self.cursor_inside_vertical_region() {
+        // ghostty: Terminal.zig:981 — CUD clamps to the bottom margin whenever
+        // the cursor is at or above it; the top margin is not consulted.
+        let bottom = if y <= self.scrolling_region.bottom {
             self.scrolling_region.bottom
         } else {
             self.rows.saturating_sub(1)
@@ -955,7 +959,9 @@ impl Terminal {
 
     pub fn cursor_right(&mut self, count: usize) {
         let x = self.active_screen().cursor.x;
-        let right = if self.cursor_inside_horizontal_region() {
+        // ghostty: Terminal.zig:998 — CUF clamps to the right margin whenever
+        // the cursor is at or left of it; the left margin is not consulted.
+        let right = if x <= self.scrolling_region.right {
             self.scrolling_region.right
         } else {
             self.cols.saturating_sub(1)
@@ -1959,6 +1965,7 @@ impl Terminal {
         // Set our size.
         self.cols = cols;
         self.rows = rows;
+        self.screens.set_size(cols, rows);
 
         // Reset the scrolling region.
         self.scrolling_region = ScrollingRegion::full(cols, rows);
@@ -2575,11 +2582,30 @@ impl Handler for Terminal {
     }
 
     fn cursor_col_relative(&mut self, value: u16) {
-        self.cursor_right(usize::from(value));
+        // ghostty: termio/stream_handler.zig:233 — HPR routes through
+        // setCursorPos rather than CUF so margin clamping matches absolute
+        // cursor positioning.
+        let row = self.active_screen().cursor.y.saturating_add(1);
+        let col = self
+            .active_screen()
+            .cursor
+            .x
+            .saturating_add(1)
+            .saturating_add(value);
+        self.set_cursor_pos(row, col);
     }
 
     fn cursor_row_relative(&mut self, value: u16) {
-        self.cursor_down(usize::from(value));
+        // ghostty: termio/stream_handler.zig:237 — VPR routes through
+        // setCursorPos rather than CUD.
+        let row = self
+            .active_screen()
+            .cursor
+            .y
+            .saturating_add(1)
+            .saturating_add(value);
+        let col = self.active_screen().cursor.x.saturating_add(1);
+        self.set_cursor_pos(row, col);
     }
 
     fn cursor_position(&mut self, row: u16, col: u16) {

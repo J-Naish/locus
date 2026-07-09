@@ -136,7 +136,9 @@ impl Default for ModeState {
         let default = ModeBits::default_values();
         Self {
             values: default,
-            saved: ModeBits::default(),
+            // ghostty: modes.zig:22 — `.{}`
+            // carries the per-mode declaration defaults, not all-zero bits.
+            saved: ModeBits::default_values(),
             default,
         }
     }
@@ -149,14 +151,16 @@ impl ModeState {
     pub fn with_default(default_modes: ModeBits) -> Self {
         Self {
             values: default_modes,
-            saved: ModeBits::default(),
+            // ghostty: modes.zig:22 — saved starts at the mode defaults.
+            saved: ModeBits::default_values(),
             default: default_modes,
         }
     }
 
     pub fn reset(&mut self) {
         self.values = self.default;
-        self.saved = ModeBits::default();
+        // ghostty: modes.zig:32 — reset restores saved modes to defaults too.
+        self.saved = ModeBits::default_values();
     }
 
     pub fn set(&mut self, mode: Mode, value: bool) {

@@ -169,17 +169,31 @@ impl<H: Handler> Stream<H> {
     }
 
     fn feed_utf8(&mut self, byte: u8) {
-        let mut consumed = false;
-        while !consumed {
-            let (decoded, did_consume) = self.utf8.next(byte);
-            consumed = did_consume;
-            if let Some(decoded) = decoded {
-                self.handler.print(decoded);
+        // ghostty: stream.zig:596 — a rejected byte is retried against the
+        // UTF-8 decoder exactly once; it must not go to the parser directly.
+        let (decoded, consumed) = self.utf8.next(byte);
+        if let Some(decoded) = decoded {
+            self.handle_codepoint(decoded);
+        }
+        if !consumed {
+            let (retry_decoded, retry_consumed) = self.utf8.next(byte);
+            debug_assert!(retry_consumed, "utf8 decoder must consume a byte on retry");
+            if let Some(decoded) = retry_decoded {
+                self.handle_codepoint(decoded);
             }
-            if !consumed {
-                self.feed_parser(byte);
-                consumed = true;
-            }
+        }
+    }
+
+    /// ghostty: stream.zig:624 — rejected UTF-8 can surface C0/ESC as
+    /// codepoints, so route those through terminal control handling.
+    fn handle_codepoint(&mut self, cp: char) {
+        let value = cp as u32;
+        if value <= 0xF {
+            self.handler.execute(value as u8);
+        } else if value == 0x1B {
+            self.feed_parser(0x1B);
+        } else {
+            self.handler.print(cp);
         }
     }
 

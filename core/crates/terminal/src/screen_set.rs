@@ -74,6 +74,18 @@ impl ScreenSet {
         }
     }
 
+    pub(crate) fn set_size(
+        &mut self,
+        cols: crate::size::CellCountInt,
+        rows: crate::size::CellCountInt,
+    ) {
+        // Locus lazily instantiates the alternate screen. Ghostty keeps both
+        // screens instantiated, so resizing updates both immediately; keep the
+        // lazy construction options in sync with the current terminal size.
+        self.options.cols = cols;
+        self.options.rows = rows;
+    }
+
     pub fn active(&self) -> &Screen {
         match self.active_key {
             ScreenKey::Primary => &self.primary,
