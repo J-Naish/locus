@@ -16,6 +16,7 @@
 		1A00000100000000000000A8 /* InitialFolderURLResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000A9 /* InitialFolderURLResolver.swift */; };
 		1A0000010000000000000002 /* CoreBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000012 /* CoreBridge.swift */; };
 		1A0000010000000000000FA0 /* TerminalBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FA1 /* TerminalBridge.swift */; };
+		1A0000010000000000000FA4 /* TerminalSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FA5 /* TerminalSession.swift */; };
 		1A00000100000000000000E2 /* TextBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000E3 /* TextBuffer.swift */; };
 		1A00000100000000000000E6 /* VirtualizedTextDocumentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000E7 /* VirtualizedTextDocumentView.swift */; };
 		1A0000010000000000000F30 /* LineRenderingTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F31 /* LineRenderingTextView.swift */; };
@@ -26,6 +27,7 @@
 		1A0000010000000000000003 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000013 /* HomeView.swift */; };
 		1A0000010000000000000004 /* CoreBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000014 /* CoreBridgeTests.swift */; };
 		1A0000010000000000000FA2 /* TerminalBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FA3 /* TerminalBridgeTests.swift */; };
+		1A0000010000000000000FA6 /* TerminalSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FA7 /* TerminalSessionTests.swift */; };
 		1A00000100000000000000AA /* InitialFolderURLResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */; };
 		1A0000010000000000000090 /* FileLocationShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000091 /* FileLocationShortcut.swift */; };
 		1A000001000000000000007E /* FileLocationBookmarkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000007F /* FileLocationBookmarkStore.swift */; };
@@ -119,6 +121,7 @@
 		1A00000100000000000000A9 /* InitialFolderURLResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InitialFolderURLResolver.swift; sourceTree = "<group>"; };
 		1A0000010000000000000012 /* CoreBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreBridge.swift; sourceTree = "<group>"; };
 		1A0000010000000000000FA1 /* TerminalBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalBridge.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FA5 /* TerminalSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSession.swift; sourceTree = "<group>"; };
 		1A00000100000000000000E3 /* TextBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextBuffer.swift; sourceTree = "<group>"; };
 		1A00000100000000000000E7 /* VirtualizedTextDocumentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualizedTextDocumentView.swift; sourceTree = "<group>"; };
 		1A0000010000000000000F31 /* LineRenderingTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LineRenderingTextView.swift; sourceTree = "<group>"; };
@@ -132,6 +135,7 @@
 		1A0000010000000000000F43 /* DocumentTabStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentTabStripView.swift; sourceTree = "<group>"; };
 		1A0000010000000000000014 /* CoreBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreBridgeTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000FA3 /* TerminalBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalBridgeTests.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FA7 /* TerminalSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000F45 /* DocumentTabsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentTabsTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InitialFolderURLResolverTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000015 /* LocusCoreBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LocusCoreBridge.h; sourceTree = "<group>"; };
@@ -244,6 +248,7 @@
 				1A0000010000000000000F61 /* Assets.xcassets */,
 				1A0000010000000000000022 /* App */,
 				1A0000010000000000000023 /* CoreBridge */,
+				1A0000010000000000000FA8 /* Terminal */,
 				1A0000010000000000000044 /* Services */,
 				1A0000010000000000000024 /* Views */,
 			);
@@ -279,6 +284,7 @@
 				1A0000010000000000000F35 /* TextWrapTests.swift */,
 				1A0000010000000000000F03 /* TextBufferStoreTests.swift */,
 				1A0000010000000000000FA3 /* TerminalBridgeTests.swift */,
+				1A0000010000000000000FA7 /* TerminalSessionTests.swift */,
 				1A00000100000000000000A7 /* WorkspaceDocumentSurfaceSupportTests.swift */,
 				1A00000100000000000000AF /* WorkspaceHomeVisibilityTests.swift */,
 				1A000001000000000000006B /* WorkspaceNavigationTests.swift */,
@@ -325,6 +331,14 @@
 				1A0000010000000000000015 /* LocusCoreBridge.h */,
 			);
 			path = CoreBridge;
+			sourceTree = "<group>";
+		};
+		1A0000010000000000000FA8 /* Terminal */ = {
+			isa = PBXGroup;
+			children = (
+				1A0000010000000000000FA5 /* TerminalSession.swift */,
+			);
+			path = Terminal;
 			sourceTree = "<group>";
 		};
 		1A0000010000000000000024 /* Views */ = {
@@ -551,6 +565,7 @@
 				1A0000010000000000000001 /* LocusApp.swift in Sources */,
 				1A0000010000000000000002 /* CoreBridge.swift in Sources */,
 				1A0000010000000000000FA0 /* TerminalBridge.swift in Sources */,
+				1A0000010000000000000FA4 /* TerminalSession.swift in Sources */,
 				1A00000100000000000000E2 /* TextBuffer.swift in Sources */,
 				1A000001000000000000006C /* ClipboardService.swift in Sources */,
 				1A0000010000000000000078 /* EmptyWorkspaceView.swift in Sources */,
@@ -630,6 +645,7 @@
 				1A0000010000000000000F34 /* TextWrapTests.swift in Sources */,
 				1A0000010000000000000F02 /* TextBufferStoreTests.swift in Sources */,
 				1A0000010000000000000FA2 /* TerminalBridgeTests.swift in Sources */,
+				1A0000010000000000000FA6 /* TerminalSessionTests.swift in Sources */,
 				1A00000100000000000000A6 /* WorkspaceDocumentSurfaceSupportTests.swift in Sources */,
 				1A00000100000000000000AE /* WorkspaceHomeVisibilityTests.swift in Sources */,
 				1A000001000000000000006A /* WorkspaceNavigationTests.swift in Sources */,

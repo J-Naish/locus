@@ -1,0 +1,219 @@
+import XCTest
+
+@testable import Locus
+
+@MainActor
+final class TerminalSessionTests: XCTestCase {
+  func testEchoCommandAppearsInSnapshot() throws {
+    let scriptURL = try makeExecutableShellScript(
+      """
+      #!/bin/sh
+      echo hello-world
+      """
+    )
+    defer {
+      try? FileManager.default.removeItem(at: scriptURL)
+    }
+
+    let session = TerminalSession(columns: 40, rows: 10)
+    defer {
+      session.terminate()
+    }
+
+    session.start(command: scriptURL.path)
+
+    XCTAssertTrue(
+      waitUntil { session.snapshot?.plainText.contains("hello-world") == true },
+      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+    )
+  }
+
+  func testShellEchoRoundTrip() {
+    let session = TerminalSession(columns: 40, rows: 10)
+    defer {
+      session.terminate()
+    }
+
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    session.send(Data("echo shell-roundtrip\n".utf8))
+
+    XCTAssertTrue(
+      waitUntil { session.snapshot?.plainText.contains("shell-roundtrip") == true },
+      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+    )
+  }
+
+  func testDeviceAttributesAutoReply() {
+    let session = TerminalSession(columns: 40, rows: 10)
+    defer {
+      session.terminate()
+    }
+
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    session.send(Data("printf '\\033[c'; sleep 0.2; echo da-ok\n".utf8))
+
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { session.snapshot?.plainText.contains("da-ok") == true },
+      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+    )
+  }
+
+  func testResizePropagatesToSttySize() throws {
+    let scriptURL = try makeExecutableShellScript(
+      """
+      #!/bin/sh
+      sleep 0.2
+      stty size
+      """
+    )
+    defer {
+      try? FileManager.default.removeItem(at: scriptURL)
+    }
+
+    let session = TerminalSession(columns: 40, rows: 10)
+    defer {
+      session.terminate()
+    }
+
+    session.start(command: scriptURL.path)
+    session.resize(columns: 44, rows: 11)
+    XCTAssertTrue(waitUntil { session.snapshot?.columns == 44 && session.snapshot?.rows == 11 })
+
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { session.snapshot?.plainText.contains("11 44") == true },
+      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+    )
+  }
+
+  func testExitUpdatesState() {
+    let session = TerminalSession(columns: 40, rows: 10)
+
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    session.send(Data("exit 3\n".utf8))
+
+    XCTAssertTrue(
+      waitUntil(timeout: 5) {
+        if case .exited(code: 3) = session.state {
+          return true
+        }
+        return false
+      },
+      "State was: \(session.state)"
+    )
+  }
+
+  func testTerminateStopsSession() {
+    let session = TerminalSession(columns: 40, rows: 10)
+
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    session.terminate()
+
+    XCTAssertTrue(
+      waitUntil {
+        if case .exited = session.state {
+          return true
+        }
+        return false
+      },
+      "State was: \(session.state)"
+    )
+
+    session.send(Data("echo after-terminate\n".utf8))
+  }
+
+  func testSnapshotGenerationIncreases() throws {
+    let scriptURL = try makeExecutableShellScript(
+      """
+      #!/bin/sh
+      echo first-generation
+      sleep 0.2
+      echo second-generation
+      """
+    )
+    defer {
+      try? FileManager.default.removeItem(at: scriptURL)
+    }
+
+    let session = TerminalSession(columns: 40, rows: 10)
+    defer {
+      session.terminate()
+    }
+
+    session.start(command: scriptURL.path)
+    XCTAssertTrue(waitUntil { session.snapshot?.plainText.contains("first-generation") == true })
+    guard let firstGeneration = session.snapshot?.generation else {
+      XCTFail("Missing first snapshot")
+      return
+    }
+
+    XCTAssertTrue(
+      waitUntil {
+        guard let snapshot = session.snapshot else {
+          return false
+        }
+        return snapshot.generation > firstGeneration
+          && snapshot.plainText.contains("second-generation")
+      },
+      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+    )
+  }
+
+  func testColumnsRowsReflectResize() {
+    let session = TerminalSession(columns: 40, rows: 10)
+    defer {
+      session.terminate()
+    }
+
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    session.resize(columns: 50, rows: 12)
+
+    XCTAssertTrue(
+      waitUntil {
+        session.snapshot?.columns == 50 && session.snapshot?.rows == 12
+      },
+      "Snapshot was: \(String(describing: session.snapshot))"
+    )
+  }
+}
+
+@MainActor
+private func waitUntil(
+  timeout: TimeInterval = 3.0,
+  interval: TimeInterval = 0.01,
+  condition: () -> Bool
+) -> Bool {
+  let deadline = Date().addingTimeInterval(timeout)
+  while Date() < deadline {
+    if condition() {
+      return true
+    }
+    RunLoop.current.run(until: Date().addingTimeInterval(interval))
+  }
+  return condition()
+}
+
+@MainActor
+private func waitForInitialShellFrame(_ session: TerminalSession) -> Bool {
+  waitUntil {
+    guard let plainText = session.snapshot?.plainText else {
+      return false
+    }
+    return !plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+}
+
+private func makeExecutableShellScript(_ contents: String) throws -> URL {
+  let scriptURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent("locus-terminal-session-\(UUID().uuidString).sh")
+  try contents.write(to: scriptURL, atomically: true, encoding: .utf8)
+  try FileManager.default.setAttributes(
+    [.posixPermissions: 0o755],
+    ofItemAtPath: scriptURL.path
+  )
+  return scriptURL
+}

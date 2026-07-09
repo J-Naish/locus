@@ -68,6 +68,11 @@ enum TerminalCellWidth: UInt8, Equatable {
 /// `.corePanic`, discard this instance and create a new one.
 final class TerminalCore {
   private static let logger = Logger(subsystem: "Locus", category: "TerminalBridge")
+  static let expectedABIVersion = LOCUS_TERM_ABI_VERSION
+
+  static var abiVersion: UInt32 {
+    locus_term_abi_version()
+  }
 
   private let handle: OpaquePointer
 

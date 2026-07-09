@@ -22,7 +22,7 @@ final class TerminalBridgeTests: XCTestCase {
   }
 
   func testABIVersionMatchesHeader() {
-    XCTAssertEqual(locus_term_abi_version(), LOCUS_TERM_ABI_VERSION)
+    XCTAssertEqual(TerminalCore.abiVersion, TerminalCore.expectedABIVersion)
   }
 
   func testFeedAndRenderPlainText() throws {
