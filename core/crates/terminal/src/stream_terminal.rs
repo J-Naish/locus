@@ -329,6 +329,18 @@ impl<E: Effects> Handler for TerminalHandler<E> {
                 }
             }
             0x07 => self.effects.bell(),
+            // ghostty: stream.zig:776 (SO — locking shift G1 into GL)
+            0x0E => self.terminal.invoke_charset(
+                crate::charsets::ActiveSlot::Gl,
+                crate::charsets::Slots::G1,
+                false,
+            ),
+            // ghostty: stream.zig:777 (SI — locking shift G0 into GL)
+            0x0F => self.terminal.invoke_charset(
+                crate::charsets::ActiveSlot::Gl,
+                crate::charsets::Slots::G0,
+                false,
+            ),
             _ => {}
         }
     }
@@ -479,6 +491,16 @@ impl<E: Effects> Handler for TerminalHandler<E> {
 
     fn left_and_right_margin(&mut self, left: u16, right: u16) {
         self.terminal.set_left_and_right_margin(left, right);
+    }
+
+    fn left_and_right_margin_ambiguous(&mut self) {
+        // ghostty: termio/stream_handler.zig:283 — DECSLRM when mode 69
+        // (enable_left_and_right_margin) is set, SCOSC (save cursor) otherwise.
+        if self.terminal.modes.get(Mode::EnableLeftAndRightMargin) {
+            self.terminal.set_left_and_right_margin(0, 0);
+        } else {
+            self.terminal.save_cursor();
+        }
     }
 
     fn top_and_bottom_margin(&mut self, top: u16, bottom: u16) {
@@ -1458,6 +1480,273 @@ mod tests {
         stream.next_slice(b"\x1B[>0q");
 
         assert_eq!(stream.handler.effects.pty, b"\x1BP>|ghostty 1.2.3\x1B\\");
+    }
+
+    // port-added: DECSTBM without params must reset to the full screen, matching common app behavior.
+    #[test]
+    fn decstbm_reset_no_params() {
+        let mut stream = stream_with_size(10, 5, CapturedEffects::default());
+        stream.next_slice(b"\x1B[2;4r");
+        assert_eq!(stream.handler.terminal.scrolling_region.top, 1);
+        assert_eq!(stream.handler.terminal.scrolling_region.bottom, 3);
+
+        stream.next_slice(b"\x1B[r");
+        assert_eq!(stream.handler.terminal.scrolling_region.top, 0);
+        assert_eq!(stream.handler.terminal.scrolling_region.bottom, 4);
+    }
+
+    // port-added: DECSTBM explicit zero parameters use the same reset path as missing params.
+    #[test]
+    fn decstbm_reset_explicit_zeros() {
+        let mut stream = stream_with_size(10, 5, CapturedEffects::default());
+        stream.next_slice(b"\x1B[2;4r");
+        stream.next_slice(b"\x1B[0;0r");
+
+        assert_eq!(stream.handler.terminal.scrolling_region.top, 0);
+        assert_eq!(stream.handler.terminal.scrolling_region.bottom, 4);
+    }
+
+    // port-added: reset DECSTBM must restore full-screen scrolling instead of leaving a partial region.
+    #[test]
+    fn decstbm_reset_unlocks_full_screen_scroll() {
+        let mut stream = stream_with_size(5, 3, CapturedEffects::default());
+        stream.next_slice(b"ABC\r\nDEF\r\nGHI");
+        stream.next_slice(b"\x1B[1;2r");
+        stream.next_slice(b"\x1B[r");
+        stream.next_slice(b"\x1B[3;1H\n");
+
+        assert_eq!(stream.handler.terminal.plain_string(), "DEF\nGHI");
+    }
+
+    // port-added: DCH explicit zero is a no-op; missing count remains one.
+    #[test]
+    fn csi_dch_zero_is_noop() {
+        let mut stream = stream_with_size(10, 3, CapturedEffects::default());
+        stream.next_slice(b"ABCDE\x1B[1;1H");
+        stream.next_slice(b"\x1B[0P");
+        assert_eq!(stream.handler.terminal.plain_string(), "ABCDE");
+
+        stream.next_slice(b"\x1B[P");
+        assert_eq!(stream.handler.terminal.plain_string(), "BCDE");
+    }
+
+    // port-added: IL and DL explicit zero counts must remain no-ops at the terminal layer.
+    #[test]
+    fn csi_il_dl_zero_are_noop() {
+        let mut stream = stream_with_size(10, 4, CapturedEffects::default());
+        stream.next_slice(b"AAA\r\nBBB");
+        stream.next_slice(b"\x1B[1;1H\x1B[0L");
+        assert_eq!(stream.handler.terminal.plain_string(), "AAA\nBBB");
+
+        stream.next_slice(b"\x1B[0M");
+        assert_eq!(stream.handler.terminal.plain_string(), "AAA\nBBB");
+    }
+
+    // port-added: SU and SD explicit zero counts must not disturb the screen.
+    #[test]
+    fn csi_su_sd_zero_are_noop() {
+        let mut stream = stream_with_size(10, 3, CapturedEffects::default());
+        stream.next_slice(b"AAA\r\nBBB\r\nCCC");
+        stream.next_slice(b"\x1B[0S");
+        assert_eq!(stream.handler.terminal.plain_string(), "AAA\nBBB\nCCC");
+
+        stream.next_slice(b"\x1B[0T");
+        assert_eq!(stream.handler.terminal.plain_string(), "AAA\nBBB\nCCC");
+    }
+
+    // port-added: CBT explicit zero must keep the cursor in place while missing count moves one tab stop.
+    #[test]
+    fn csi_cbt_zero_keeps_cursor() {
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\t");
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 8);
+
+        stream.next_slice(b"\x1B[0Z");
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 8);
+
+        stream.next_slice(b"\x1B[Z");
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 0);
+    }
+
+    // port-added: CHT was missing from dispatch; counts advance through tab stops.
+    #[test]
+    fn csi_cht_advances_tabstops() {
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\x1B[I");
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 8);
+
+        stream.next_slice(b"\x1B[2I");
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 24);
+    }
+
+    // port-added: CSI k/j are Ghostty cursor movement aliases for CUU/CUB.
+    #[test]
+    fn csi_k_j_alias_cursor_moves() {
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\x1B[5;5H");
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 4);
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 4);
+
+        stream.next_slice(b"\x1B[2k");
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 2);
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 4);
+
+        stream.next_slice(b"\x1B[2j");
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 2);
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 2);
+    }
+
+    // port-added: CNL is cursor-down plus carriage return, not NEL-style scrolling.
+    #[test]
+    fn csi_cnl_moves_down_and_returns() {
+        let mut stream = stream_with_size(10, 5, CapturedEffects::default());
+        stream.next_slice(b"\x1B[2;5H\x1B[2E");
+
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 3);
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 0);
+    }
+
+    // port-added: CNL clamps at the bottom instead of scrolling the region.
+    #[test]
+    fn csi_cnl_clamps_at_bottom_without_scroll() {
+        let mut stream = stream_with_size(10, 3, CapturedEffects::default());
+        stream.next_slice(b"TOP");
+        stream.next_slice(b"\x1B[3;5H\x1B[5E");
+
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 2);
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 0);
+        assert_eq!(stream.handler.terminal.plain_string(), "TOP");
+    }
+
+    // port-added: CPL is cursor-up plus carriage return and clamps at the top.
+    #[test]
+    fn csi_cpl_moves_up_and_returns() {
+        let mut stream = stream_with_size(10, 5, CapturedEffects::default());
+        stream.next_slice(b"\x1B[4;6H\x1B[2F");
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 1);
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 0);
+
+        stream.next_slice(b"\x1B[9F");
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 0);
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 0);
+    }
+
+    // port-added: SO/SI must lock GL to G1/G0 for DEC special line drawing.
+    #[test]
+    fn so_si_switch_gl() {
+        let mut stream = stream_with_size(10, 3, CapturedEffects::default());
+        stream.next_slice(b"\x1B)0q\x0Eqq\x0Fq");
+
+        assert_eq!(stream.handler.terminal.plain_string(), "q\u{2500}\u{2500}q");
+    }
+
+    // port-added: SS2 shifts only one printable character to G2.
+    #[test]
+    fn ss2_single_shift() {
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\x1B*0\x1BNqq");
+
+        assert_eq!(stream.handler.terminal.plain_string(), "\u{2500}q");
+    }
+
+    // port-added: SS3 shifts only one printable character to G3.
+    #[test]
+    fn ss3_single_shift() {
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\x1B+0\x1BOqq");
+
+        assert_eq!(stream.handler.terminal.plain_string(), "\u{2500}q");
+    }
+
+    // port-added: LS2 is a locking shift, not a single shift.
+    #[test]
+    fn ls2_locking_shift() {
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\x1B*0\x1Bnqq");
+
+        assert_eq!(stream.handler.terminal.plain_string(), "\u{2500}\u{2500}");
+    }
+
+    // port-added: LS3 is a locking shift, not a single shift.
+    #[test]
+    fn ls3_locking_shift() {
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\x1B+0\x1Boqq");
+
+        assert_eq!(stream.handler.terminal.plain_string(), "\u{2500}\u{2500}");
+    }
+
+    // port-added: DECKPAM/DECKPNM toggle keypad application mode.
+    #[test]
+    fn esc_keypad_application_mode() {
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\x1B=");
+        assert!(stream.handler.terminal.modes.get(Mode::KeypadKeys));
+
+        stream.next_slice(b"\x1B>");
+        assert!(!stream.handler.terminal.modes.get(Mode::KeypadKeys));
+    }
+
+    // port-added: DECSLRM with two params must reach the terminal when mode 69 is set.
+    #[test]
+    fn decslrm_two_params() {
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\x1B[?69h\x1B[2;4s");
+
+        assert_eq!(stream.handler.terminal.scrolling_region.left, 1);
+        assert_eq!(stream.handler.terminal.scrolling_region.right, 3);
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 0);
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 0);
+    }
+
+    // port-added: DECSLRM with one param defaults the right margin to the full width.
+    #[test]
+    fn decslrm_one_param() {
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\x1B[?69h\x1B[3s");
+
+        assert_eq!(stream.handler.terminal.scrolling_region.left, 2);
+        assert_eq!(stream.handler.terminal.scrolling_region.right, 79);
+    }
+
+    // port-added: ambiguous CSI s resets margins when mode 69 is enabled.
+    #[test]
+    fn decslrm_ambiguous_mode69_on_resets() {
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\x1B[?69h\x1B[2;4s\x1B[s");
+
+        assert_eq!(stream.handler.terminal.scrolling_region.left, 0);
+        assert_eq!(stream.handler.terminal.scrolling_region.right, 79);
+    }
+
+    // port-added: ambiguous CSI s saves the cursor when mode 69 is disabled.
+    #[test]
+    fn scosc_saves_cursor_mode69_off() {
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\x1B[3;4H\x1B[s\x1B[1;1H\x1B[u");
+
+        assert_eq!(stream.handler.terminal.active_screen().cursor.y, 2);
+        assert_eq!(stream.handler.terminal.active_screen().cursor.x, 3);
+    }
+
+    // port-added: Zig clamps oversized DECSTBM bottom values; upstream lacks this oversized test.
+    #[test]
+    fn decstbm_clamps_oversized_bottom() {
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\x1B[3;100r");
+
+        assert_eq!(stream.handler.terminal.scrolling_region.top, 2);
+        assert_eq!(stream.handler.terminal.scrolling_region.bottom, 23);
+    }
+
+    // port-added: Zig clamps oversized DECSLRM right values; upstream lacks this oversized test.
+    #[test]
+    fn decslrm_clamps_oversized_right() {
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\x1B[?69h\x1B[3;200s");
+
+        assert_eq!(stream.handler.terminal.scrolling_region.left, 2);
+        assert_eq!(stream.handler.terminal.scrolling_region.right, 79);
     }
 
     // ghostty: "xtversion with empty string effect" (stream_terminal.zig:1630)

@@ -247,6 +247,14 @@ impl<H: Handler> Stream<H> {
             (b"", b'E') => handler.next_line(),
             (b"", b'M') => handler.reverse_index(),
             (b"", b'H') => handler.tab_set(),
+            // ghostty: stream.zig:2227 (SS2 — single shift G2 into GL for one char)
+            (b"", b'N') => handler.invoke_charset(ActiveSlot::Gl, CharsetSlots::G2, true),
+            // ghostty: stream.zig:2241 (SS3 — single shift G3 into GL for one char)
+            (b"", b'O') => handler.invoke_charset(ActiveSlot::Gl, CharsetSlots::G3, true),
+            // ghostty: stream.zig:2351 (DECKPAM — application keypad)
+            (b"", b'=') => handler.set_mode(Mode::KeypadKeys),
+            // ghostty: stream.zig:2360 (DECKPNM — normal keypad)
+            (b"", b'>') => handler.reset_mode(Mode::KeypadKeys),
             (b"", b'c') => handler.full_reset(),
             (b"#", b'8') => handler.decaln(),
             (b"(", final_byte) => Self::dispatch_charset(handler, CharsetSlots::G0, final_byte),
@@ -254,8 +262,10 @@ impl<H: Handler> Stream<H> {
             (b"*", final_byte) => Self::dispatch_charset(handler, CharsetSlots::G2, final_byte),
             (b"+", final_byte) => Self::dispatch_charset(handler, CharsetSlots::G3, final_byte),
             (b"%", b'G') => handler.configure_charset(CharsetSlots::G0, Charset::Utf8),
-            (b"", b'n') => handler.invoke_charset(ActiveSlot::Gl, CharsetSlots::G2, true),
-            (b"", b'o') => handler.invoke_charset(ActiveSlot::Gl, CharsetSlots::G3, true),
+            // ghostty: stream.zig:2281 (LS2 — locking shift, not single)
+            (b"", b'n') => handler.invoke_charset(ActiveSlot::Gl, CharsetSlots::G2, false),
+            // ghostty: stream.zig:2295 (LS3 — locking shift, not single)
+            (b"", b'o') => handler.invoke_charset(ActiveSlot::Gl, CharsetSlots::G3, false),
             _ => {}
         }
     }
@@ -263,7 +273,8 @@ impl<H: Handler> Stream<H> {
     fn dispatch_csi(handler: &mut H, csi: Csi<'_>) {
         match csi.final_byte {
             b'@' => Self::dispatch_insert_blanks(handler, csi),
-            b'A' => {
+            // ghostty: stream.zig:810 (`k` is a CUU alias)
+            b'A' | b'k' => {
                 Self::dispatch_single_count(handler, csi, |handler, value| handler.cursor_up(value))
             }
             b'B' => Self::dispatch_single_count(handler, csi, |handler, value| {
@@ -272,40 +283,60 @@ impl<H: Handler> Stream<H> {
             b'C' => Self::dispatch_single_count(handler, csi, |handler, value| {
                 handler.cursor_right(value)
             }),
-            b'D' => Self::dispatch_single_count(handler, csi, |handler, value| {
+            // ghostty: stream.zig:876 (`j` is a CUB alias)
+            b'D' | b'j' => Self::dispatch_single_count(handler, csi, |handler, value| {
                 handler.cursor_left(value)
             }),
             b'E' => Self::dispatch_single_count(handler, csi, |handler, value| {
-                for _ in 0..value {
-                    handler.next_line();
-                }
+                // ghostty: stream.zig:896 — CNL is cursor_down + carriage_return;
+                // it clamps at the scroll region bottom instead of scrolling.
+                handler.cursor_down(value);
+                handler.execute(b'\r');
+            }),
+            b'F' => Self::dispatch_single_count(handler, csi, |handler, value| {
+                // ghostty: stream.zig:919 — CPL is cursor_up + carriage_return.
+                handler.cursor_up(value);
+                handler.execute(b'\r');
             }),
             b'G' | b'`' => Self::dispatch_single_count(handler, csi, |handler, value| {
                 handler.cursor_col(value)
             }),
             b'H' | b'f' => Self::dispatch_cursor_position(handler, csi),
+            b'I' => Self::dispatch_usize_count_raw(handler, csi, |handler, value| {
+                // ghostty: stream.zig:989 (CHT); count loop mirrors
+                // termio/stream_handler.zig:586.
+                handler.horizontal_tab(value)
+            }),
             b'J' => Self::dispatch_erase_display(handler, csi),
             b'K' => Self::dispatch_erase_line(handler, csi),
-            b'L' => Self::dispatch_usize_count(handler, csi, |handler, value| {
+            b'L' => Self::dispatch_usize_count_raw(handler, csi, |handler, value| {
+                // ghostty: stream.zig:1079 (IL)
                 handler.insert_lines(value)
             }),
-            b'M' => Self::dispatch_usize_count(handler, csi, |handler, value| {
+            b'M' => Self::dispatch_usize_count_raw(handler, csi, |handler, value| {
+                // ghostty: stream.zig:1097 (DL)
                 handler.delete_lines(value)
             }),
-            b'P' => Self::dispatch_usize_count(handler, csi, |handler, value| {
+            b'P' => Self::dispatch_usize_count_raw(handler, csi, |handler, value| {
+                // ghostty: stream.zig:1114 (DCH)
                 handler.delete_chars(value)
             }),
             b'S' => {
-                Self::dispatch_usize_count(handler, csi, |handler, value| handler.scroll_up(value))
+                Self::dispatch_usize_count_raw(handler, csi, |handler, value| {
+                    // ghostty: stream.zig:1132 (SU)
+                    handler.scroll_up(value)
+                })
             }
-            b'T' => Self::dispatch_usize_count(handler, csi, |handler, value| {
+            b'T' => Self::dispatch_usize_count_raw(handler, csi, |handler, value| {
+                // ghostty: stream.zig:1149 (SD)
                 handler.scroll_down(value)
             }),
             b'W' => Self::dispatch_tab_set_clear(handler, csi),
             b'X' => Self::dispatch_usize_count(handler, csi, |handler, value| {
                 handler.erase_chars(value)
             }),
-            b'Z' => Self::dispatch_usize_count(handler, csi, |handler, value| {
+            b'Z' => Self::dispatch_usize_count_raw(handler, csi, |handler, value| {
+                // ghostty: stream.zig:1230 (CBT)
                 handler.horizontal_tab_back(value)
             }),
             b'a' => Self::dispatch_single_count(handler, csi, |handler, value| {
@@ -360,6 +391,16 @@ impl<H: Handler> Stream<H> {
         action(
             handler,
             usize::from(count_param(csi.params.first().copied())),
+        );
+    }
+
+    fn dispatch_usize_count_raw(handler: &mut H, csi: Csi<'_>, action: fn(&mut H, usize)) {
+        if !csi.intermediates.is_empty() || csi.params.len() > 1 {
+            return;
+        }
+        action(
+            handler,
+            usize::from(raw_count_param(csi.params.first().copied())),
         );
     }
 
@@ -545,8 +586,11 @@ impl<H: Handler> Stream<H> {
                 if csi.params.len() > 2 {
                     return;
                 }
-                let top = count_param(csi.params.first().copied());
-                let bottom = count_param(csi.params.get(1).copied());
+                // ghostty: stream.zig:1656 — DECSTBM params pass through raw
+                // and default to 0 when missing, so the setter's bottom==0
+                // reset path handles `ESC[r` (full reset).
+                let top = csi.params.first().copied().unwrap_or(0);
+                let bottom = csi.params.get(1).copied().unwrap_or(0);
                 handler.top_and_bottom_margin(top, bottom);
             }
             _ => {}
@@ -555,7 +599,14 @@ impl<H: Handler> Stream<H> {
 
     fn dispatch_s(handler: &mut H, csi: Csi<'_>) {
         match csi.intermediates {
-            b"" => handler.left_and_right_margin_ambiguous(),
+            b"" => match csi.params.len() {
+                // ghostty: stream.zig:1698 — zero params is ambiguous between
+                // DECSLRM and SCOSC; the handler resolves it via mode 69.
+                0 => handler.left_and_right_margin_ambiguous(),
+                1 => handler.left_and_right_margin(csi.params[0], 0),
+                2 => handler.left_and_right_margin(csi.params[0], csi.params[1]),
+                _ => {}
+            },
             b"?" => {
                 for value in csi.params {
                     if let Some(mode) = mode_from_int(*value, false) {
@@ -642,6 +693,13 @@ fn count_param(value: Option<u16>) -> u16 {
     }
 }
 
+/// ghostty: stream.zig:1114 and sibling raw-count CSI dispatches pass
+/// params[0] through raw (missing → 1). An explicit 0 must reach the terminal
+/// layer so its own zero guards apply (e.g. `CSI 0 P` is a no-op).
+fn raw_count_param(value: Option<u16>) -> u16 {
+    value.unwrap_or(1)
+}
+
 fn title_stack_index(params: &[u16]) -> Option<u16> {
     let target = params.get(1).copied().unwrap_or(0);
     if target == 1 {
@@ -679,11 +737,15 @@ mod tests {
         mouse_shift_capture: Option<bool>,
         window_title_seen: bool,
         insert_blanks: Option<usize>,
+        delete_chars: Option<usize>,
+        left_right_margin: Vec<(u16, u16)>,
         left_right_ambiguous: bool,
+        top_bottom_margin: Vec<(u16, u16)>,
         restore_cursor: bool,
         size_report: Option<SizeReportStyle>,
         title_push: Option<u16>,
         title_pop: Option<u16>,
+        invoke_charset: Vec<(ActiveSlot, CharsetSlots, bool)>,
         tab_action: Option<&'static str>,
         set_attribute_called: bool,
         dcs_hooked: bool,
@@ -749,8 +811,20 @@ mod tests {
             self.insert_blanks = Some(value);
         }
 
+        fn delete_chars(&mut self, value: usize) {
+            self.delete_chars = Some(value);
+        }
+
+        fn left_and_right_margin(&mut self, left: u16, right: u16) {
+            self.left_right_margin.push((left, right));
+        }
+
         fn left_and_right_margin_ambiguous(&mut self) {
             self.left_right_ambiguous = true;
+        }
+
+        fn top_and_bottom_margin(&mut self, top: u16, bottom: u16) {
+            self.top_bottom_margin.push((top, bottom));
         }
 
         fn restore_cursor(&mut self) {
@@ -783,6 +857,10 @@ mod tests {
 
         fn tab_reset(&mut self) {
             self.tab_action = Some("reset");
+        }
+
+        fn invoke_charset(&mut self, active: ActiveSlot, slot: CharsetSlots, single: bool) {
+            self.invoke_charset.push((active, slot, single));
         }
 
         fn set_attribute(&mut self, _attribute: sgr::Attribute<'_>) {
@@ -1247,5 +1325,60 @@ mod tests {
         assert!(stream.handler.apc_started);
         assert_eq!(stream.handler.apc_bytes, b"XYZ");
         assert!(stream.handler.apc_ended);
+    }
+
+    // port-added: DECSTBM must pass missing parameters through as raw 0 so the terminal reset path runs.
+    #[test]
+    fn csi_r_dispatches_raw_margins() {
+        let mut stream = Stream::new(RecordingHandler::default());
+        stream.next_slice(b"\x1B[r");
+        assert_eq!(stream.handler.top_bottom_margin, [(0, 0)]);
+
+        stream.next_slice(b"\x1B[2;4r");
+        assert_eq!(stream.handler.top_bottom_margin, [(0, 0), (2, 4)]);
+    }
+
+    // port-added: CSI s has three distinct forms; zero params is ambiguous, params are DECSLRM.
+    #[test]
+    fn csi_s_dispatches_margin_forms() {
+        let mut stream = Stream::new(RecordingHandler::default());
+        stream.next_slice(b"\x1B[2;4s");
+        stream.next_slice(b"\x1B[3s");
+        stream.next_slice(b"\x1B[s");
+
+        assert_eq!(stream.handler.left_right_margin, [(2, 4), (3, 0)]);
+        assert!(stream.handler.left_right_ambiguous);
+    }
+
+    // port-added: explicit zero counts must reach the terminal layer; missing counts still default to one.
+    #[test]
+    fn csi_zero_count_dispatches_raw() {
+        let mut stream = Stream::new(RecordingHandler::default());
+        stream.next_slice(b"\x1B[0P");
+        assert_eq!(stream.handler.delete_chars, Some(0));
+
+        stream.next_slice(b"\x1B[P");
+        assert_eq!(stream.handler.delete_chars, Some(1));
+    }
+
+    // port-added: missing ESC charset shift and keypad dispatches are terminal compatibility basics.
+    #[test]
+    fn esc_charset_shift_and_keypad_dispatch() {
+        let mut stream = Stream::new(RecordingHandler::default());
+        stream.next_slice(b"\x1BN\x1Bn\x1BO\x1Bo");
+        stream.next_slice(b"\x1B=");
+        stream.next_slice(b"\x1B>");
+
+        assert_eq!(
+            stream.handler.invoke_charset,
+            [
+                (ActiveSlot::Gl, CharsetSlots::G2, true),
+                (ActiveSlot::Gl, CharsetSlots::G2, false),
+                (ActiveSlot::Gl, CharsetSlots::G3, true),
+                (ActiveSlot::Gl, CharsetSlots::G3, false),
+            ]
+        );
+        assert_eq!(stream.handler.mode, Some(Mode::KeypadKeys));
+        assert!(stream.handler.reset_mode_seen);
     }
 }

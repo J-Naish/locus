@@ -1066,8 +1066,14 @@ impl Terminal {
 
     pub fn set_top_and_bottom_margin(&mut self, top: u16, bottom: u16) {
         let top = top.max(1);
-        let bottom = if bottom == 0 { self.rows } else { bottom };
-        if top >= bottom || bottom > self.rows {
+        // ghostty: Terminal.zig:1645 clamps bottom with @min(rows, ...)
+        // instead of rejecting oversized requests.
+        let bottom = if bottom == 0 {
+            self.rows
+        } else {
+            bottom.min(self.rows)
+        };
+        if top >= bottom {
             return;
         }
         self.scrolling_region.top = top - 1;
@@ -1080,8 +1086,14 @@ impl Terminal {
             return;
         }
         let left = left.max(1);
-        let right = if right == 0 { self.cols } else { right };
-        if left >= right || right > self.cols {
+        // ghostty: Terminal.zig:1659 clamps right with @min(cols, ...)
+        // instead of rejecting oversized requests.
+        let right = if right == 0 {
+            self.cols
+        } else {
+            right.min(self.cols)
+        };
+        if left >= right {
             return;
         }
         self.scrolling_region.left = left - 1;
@@ -2516,6 +2528,10 @@ impl Handler for Terminal {
             b'\r' => self.carriage_return(),
             0x08 => self.backspace(),
             b'\t' => self.horizontal_tab(),
+            // ghostty: stream.zig:776 (SO — locking shift G1 into GL)
+            0x0E => self.invoke_charset(ActiveSlot::Gl, CharsetSlots::G1, false),
+            // ghostty: stream.zig:777 (SI — locking shift G0 into GL)
+            0x0F => self.invoke_charset(ActiveSlot::Gl, CharsetSlots::G0, false),
             _ => {}
         }
     }
@@ -2648,6 +2664,16 @@ impl Handler for Terminal {
 
     fn left_and_right_margin(&mut self, left: u16, right: u16) {
         self.set_left_and_right_margin(left, right);
+    }
+
+    fn left_and_right_margin_ambiguous(&mut self) {
+        // ghostty: termio/stream_handler.zig:283 — DECSLRM when mode 69
+        // (enable_left_and_right_margin) is set, SCOSC (save cursor) otherwise.
+        if self.modes.get(Mode::EnableLeftAndRightMargin) {
+            self.set_left_and_right_margin(0, 0);
+        } else {
+            self.save_cursor();
+        }
     }
 
     fn top_and_bottom_margin(&mut self, top: u16, bottom: u16) {
@@ -4758,6 +4784,27 @@ mod tests {
         assert!(t.is_dirty(Point::active(0, 2)));
         assert!(t.is_dirty(Point::active(0, 3)));
         assert_eq!(t.plain_string(), "\nABC\nDEF\nGHI");
+    }
+
+    // port-added: Zig clamps oversized DECSTBM bottom values; upstream lacks this oversized test.
+    #[test]
+    fn set_top_and_bottom_margin_clamps_bottom_to_rows() {
+        let mut t = terminal(5, 5);
+        t.set_top_and_bottom_margin(3, 100);
+
+        assert_eq!(t.scrolling_region.top, 2);
+        assert_eq!(t.scrolling_region.bottom, 4);
+    }
+
+    // port-added: Zig clamps oversized DECSLRM right values; upstream lacks this oversized test.
+    #[test]
+    fn set_left_and_right_margin_clamps_right_to_cols() {
+        let mut t = terminal(5, 5);
+        t.modes.set(Mode::EnableLeftAndRightMargin, true);
+        t.set_left_and_right_margin(2, 99);
+
+        assert_eq!(t.scrolling_region.left, 1);
+        assert_eq!(t.scrolling_region.right, 4);
     }
 
     #[test]
