@@ -214,6 +214,9 @@ impl Pty {
             return Err(error);
         }
 
+        let argv_ptrs = launch.argv_ptrs();
+        let envp_ptrs = launch.envp_ptrs();
+
         // SAFETY: fork duplicates the current process. The child immediately
         // performs only descriptor/session setup and execs or exits.
         let pid = unsafe { libc::fork() };
@@ -226,7 +229,15 @@ impl Pty {
         }
 
         if pid == 0 {
-            run_child(slave_fd, master_fd, error_pipe[0], error_pipe[1], &launch);
+            run_child(
+                slave_fd,
+                master_fd,
+                error_pipe[0],
+                error_pipe[1],
+                &launch,
+                &argv_ptrs,
+                &envp_ptrs,
+            );
         }
 
         close_fd(slave_fd);
@@ -491,7 +502,13 @@ fn run_child(
     error_read: RawFd,
     error_write: RawFd,
     launch: &LaunchPlan,
+    argv: &[*const libc::c_char],
+    envp: &[*const libc::c_char],
 ) -> ! {
+    // Between fork and execve the child must stay async-signal-safe: no heap
+    // allocation and no lock acquisition. argv/envp pointer arrays are built
+    // by the parent before fork and remain valid in the child's copied address
+    // space until execve.
     close_fd(master_fd);
     close_fd(error_read);
 
@@ -499,10 +516,9 @@ fn run_child(
         write_errno_and_exit(error_write);
     }
 
-    let argv = launch.argv_ptrs();
-    let envp = launch.envp_ptrs();
-    // SAFETY: program, argv, and envp point to NUL-terminated C strings that
-    // live until execve either succeeds or returns. argv/envp are null-terminated.
+    // SAFETY: program points to a NUL-terminated CString in launch. argv/envp
+    // were built before fork from CStrings owned by launch, are null-terminated,
+    // and all referenced storage remains alive until execve succeeds or returns.
     unsafe {
         libc::execve(launch.program.as_ptr(), argv.as_ptr(), envp.as_ptr());
     }
@@ -841,6 +857,41 @@ mod tests {
             String::from_utf8_lossy(&output)
         );
         assert!(status.success());
+    }
+
+    #[test]
+    fn spawn_with_many_args_and_env() {
+        let args: Vec<_> = (0..50)
+            .map(|index| OsString::from(format!("a{index}")))
+            .collect();
+        let mut shell_args = vec![
+            OsString::from("-c"),
+            OsString::from("printf '%s\\n' \"$LOCUS_PTY_MANY_ARGS\" \"$@\""),
+            OsString::from("locus-pty-test"),
+        ];
+        shell_args.extend(args.iter().cloned());
+
+        let mut pty = Pty::spawn(PtyOptions {
+            cols: 120,
+            rows: 24,
+            command: Some(PathBuf::from("/bin/sh")),
+            args: shell_args,
+            cwd: None,
+            env: vec![(OsString::from("LOCUS_PTY_MANY_ARGS"), OsString::from("yes"))],
+        })
+        .unwrap();
+        let output =
+            String::from_utf8_lossy(&read_available(&mut pty, Duration::from_secs(2))).to_string();
+        let status = pty.wait_blocking().unwrap().unwrap();
+
+        assert!(status.success());
+        assert!(output.contains("yes"));
+        for arg in &args {
+            assert!(
+                output.contains(arg.to_str().unwrap()),
+                "missing {arg:?} in {output:?}"
+            );
+        }
     }
 
     #[test]
