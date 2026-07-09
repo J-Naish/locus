@@ -28,6 +28,14 @@ pub const LOCUS_TERM_STATUS_INVALID_ARGUMENT: u32 = 300;
 pub const LOCUS_TERM_STATUS_PANIC: u32 = 301;
 pub const LOCUS_TERM_STATUS_UNSAFE_PASTE: u32 = 302;
 
+/// Upper bounds for terminal dimensions accepted over the ABI. These are
+/// generous for real displays while keeping hostile sizes from allocating
+/// billions of cells.
+pub const LOCUS_TERM_MAX_COLS: u16 = 4096;
+pub const LOCUS_TERM_MAX_ROWS: u16 = 4096;
+/// Upper bound for the scrollback budget accepted over the ABI.
+pub const LOCUS_TERM_MAX_SCROLLBACK: usize = 256 * 1024 * 1024;
+
 pub const LOCUS_TERM_DIRTY_NONE: u32 = 0;
 pub const LOCUS_TERM_DIRTY_PARTIAL: u32 = 1;
 pub const LOCUS_TERM_DIRTY_FULL: u32 = 2;
@@ -350,8 +358,9 @@ pub extern "C" fn locus_term_abi_version() -> u32 {
 pub extern "C" fn locus_term_new(cols: u16, rows: u16, max_scrollback: usize) -> *mut LocusTerm {
     match catch_unwind(AssertUnwindSafe(|| {
         clear_last_error_message();
-        if cols == 0 || rows == 0 {
-            set_last_error_message("terminal dimensions must be greater than zero");
+        if !validate_terminal_dimensions(cols, rows)
+            || !validate_terminal_scrollback(max_scrollback)
+        {
             return ptr::null_mut();
         }
         let terminal = Terminal::new(TerminalOptions {
@@ -477,8 +486,7 @@ pub unsafe extern "C" fn locus_term_bytes_free(bytes: *mut LocusTermBytes) {
 #[no_mangle]
 pub unsafe extern "C" fn locus_term_resize(term: *mut LocusTerm, cols: u16, rows: u16) -> u32 {
     term_status(|| {
-        if cols == 0 || rows == 0 {
-            set_last_error_message("terminal dimensions must be greater than zero");
+        if !validate_terminal_dimensions(cols, rows) {
             return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
         }
         let Some(term) = term_mut(term) else {
@@ -657,6 +665,32 @@ fn term_status(action: impl FnOnce() -> u32) -> u32 {
             LOCUS_TERM_STATUS_PANIC
         }
     }
+}
+
+fn validate_terminal_dimensions(cols: u16, rows: u16) -> bool {
+    if cols == 0 || rows == 0 {
+        set_last_error_message("terminal dimensions must be greater than zero");
+        return false;
+    }
+    if cols > LOCUS_TERM_MAX_COLS || rows > LOCUS_TERM_MAX_ROWS {
+        set_last_error_message(format!(
+            "terminal dimensions must be at most {} cols by {} rows",
+            LOCUS_TERM_MAX_COLS, LOCUS_TERM_MAX_ROWS
+        ));
+        return false;
+    }
+    true
+}
+
+fn validate_terminal_scrollback(max_scrollback: usize) -> bool {
+    if max_scrollback > LOCUS_TERM_MAX_SCROLLBACK {
+        set_last_error_message(format!(
+            "terminal scrollback budget must be at most {} bytes",
+            LOCUS_TERM_MAX_SCROLLBACK
+        ));
+        return false;
+    }
+    true
 }
 
 fn bytes_slice<'a>(bytes: *const u8, len: usize) -> Option<&'a [u8]> {
@@ -948,9 +982,19 @@ fn mods_from_bits(bits: u16) -> Mods {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CStr;
     use std::mem::{align_of, offset_of, size_of};
 
     use super::*;
+    use ::terminal::input::Side;
+
+    fn last_error_text() -> String {
+        // SAFETY: locus_last_error_message returns a non-null thread-local
+        // NUL-terminated pointer valid until the next FFI call on this thread.
+        unsafe { CStr::from_ptr(crate::locus_last_error_message()) }
+            .to_string_lossy()
+            .into_owned()
+    }
 
     fn render_plain(term: *mut LocusTerm) -> String {
         let frame = locus_term_frame_new();
@@ -1029,6 +1073,74 @@ mod tests {
     }
 
     #[test]
+    fn mods_bit_layout_is_pinned_for_ffi() {
+        let flag_cases = [
+            (
+                LOCUS_TERM_MOD_SHIFT,
+                Mods {
+                    shift: true,
+                    ..Mods::none()
+                },
+            ),
+            (
+                LOCUS_TERM_MOD_CTRL,
+                Mods {
+                    ctrl: true,
+                    ..Mods::none()
+                },
+            ),
+            (
+                LOCUS_TERM_MOD_ALT,
+                Mods {
+                    alt: true,
+                    ..Mods::none()
+                },
+            ),
+            (
+                LOCUS_TERM_MOD_SUPER,
+                Mods {
+                    super_key: true,
+                    ..Mods::none()
+                },
+            ),
+            (
+                LOCUS_TERM_MOD_CAPS_LOCK,
+                Mods {
+                    caps_lock: true,
+                    ..Mods::none()
+                },
+            ),
+            (
+                LOCUS_TERM_MOD_NUM_LOCK,
+                Mods {
+                    num_lock: true,
+                    ..Mods::none()
+                },
+            ),
+        ];
+
+        for (bit, mods) in flag_cases {
+            assert_eq!(mods.int(), bit);
+            assert_eq!(mods_from_bits(bit).int(), bit);
+        }
+
+        for (index, bit) in [(0, 1 << 6), (1, 1 << 7), (2, 1 << 8), (3, 1 << 9)] {
+            let mods = mods_from_bits(bit);
+            assert_eq!(mods.int(), bit);
+            let side = match index {
+                0 => mods.sides.shift,
+                1 => mods.sides.ctrl,
+                2 => mods.sides.alt,
+                _ => mods.sides.super_key,
+            };
+            assert_eq!(side, Side::Right);
+        }
+
+        let all_bits = (1 << 10) - 1;
+        assert_eq!(mods_from_bits(all_bits).int(), all_bits);
+    }
+
+    #[test]
     fn frame_prefix_layout_exposes_version_first() {
         assert_eq!(offset_of!(LocusTermFrame, abi_version), 0);
         assert!(offset_of!(LocusTermFrame, rows_ptr) > offset_of!(LocusTermFrame, row_count));
@@ -1038,6 +1150,26 @@ mod tests {
     fn new_rejects_zero_dimensions() {
         assert!(locus_term_new(0, 24, 0).is_null());
         assert!(locus_term_new(80, 0, 0).is_null());
+    }
+
+    #[test]
+    fn term_new_rejects_oversized_dimensions() {
+        // hardening: hostile dimensions must fail before allocating a frame.
+        assert!(locus_term_new(u16::MAX, u16::MAX, 0).is_null());
+        assert!(last_error_text().contains("at most 4096 cols by 4096 rows"));
+
+        let term = locus_term_new(LOCUS_TERM_MAX_COLS, LOCUS_TERM_MAX_ROWS, 0);
+        assert!(!term.is_null());
+        unsafe {
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn term_new_rejects_oversized_scrollback() {
+        // hardening: hostile scrollback budgets must fail before allocation.
+        assert!(locus_term_new(80, 24, LOCUS_TERM_MAX_SCROLLBACK + 1).is_null());
+        assert!(last_error_text().contains("scrollback budget"));
     }
 
     #[test]
@@ -1147,6 +1279,24 @@ mod tests {
                 locus_term_resize(term, 1, 0),
                 LOCUS_TERM_STATUS_INVALID_ARGUMENT
             );
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn term_resize_rejects_oversized_dimensions() {
+        // hardening: rejected resize must leave the existing handle usable.
+        let term = new_term();
+        unsafe {
+            assert_eq!(
+                locus_term_resize(term, 5000, 24),
+                LOCUS_TERM_STATUS_INVALID_ARGUMENT
+            );
+            assert_eq!(
+                locus_term_feed(term, b"ok".as_ptr(), b"ok".len()),
+                LOCUS_STATUS_OK
+            );
+            assert!(render_plain(term).contains("ok"));
             locus_term_free(term);
         }
     }

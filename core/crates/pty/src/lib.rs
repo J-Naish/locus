@@ -25,6 +25,7 @@ const DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
 const SHUTDOWN_POLL: Duration = Duration::from_millis(10);
 const DROP_REAP_GRACE: Duration = Duration::from_millis(5);
+const KILL_REAP_GRACE: Duration = Duration::from_millis(50);
 
 /// Options used to spawn a child process attached to a new pseudo-terminal.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,29 +176,7 @@ impl Pty {
             ws_ypixel: 0,
         };
 
-        let mut master_fd: RawFd = -1;
-        let mut slave_fd: RawFd = -1;
-        // SAFETY: openpty initializes the two output fd pointers on success.
-        // name/termios are null because the caller does not need a PTY name and
-        // wants default terminal attributes. winsize points to a valid value.
-        let open_result = unsafe {
-            libc::openpty(
-                &mut master_fd,
-                &mut slave_fd,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut winsize,
-            )
-        };
-        if open_result == -1 {
-            return Err(PtyError::Io(io::Error::last_os_error()));
-        }
-
-        if let Err(error) = set_cloexec(master_fd).and_then(|()| set_nonblocking(master_fd)) {
-            close_fd(master_fd);
-            close_fd(slave_fd);
-            return Err(error);
-        }
+        let (master_fd, slave_fd) = open_pty_pair(&mut winsize)?;
 
         let mut error_pipe = [-1; 2];
         // SAFETY: pipe writes two fds into the provided array on success.
@@ -262,6 +241,14 @@ impl Pty {
     /// valid until `shutdown`, `drop`, or an explicit free through FFI.
     pub fn master_fd(&self) -> RawFd {
         self.master_fd
+    }
+
+    pub fn child_pid(&self) -> libc::pid_t {
+        self.child_pid
+    }
+
+    pub fn kill_process_group_for_timeout(&self) {
+        send_process_group_signal(self.child_pid, libc::SIGKILL);
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
@@ -394,7 +381,7 @@ impl Pty {
         if self.exited.is_some() {
             return Ok(self.exited);
         }
-        send_signal(self.child_pid, libc::SIGHUP);
+        send_process_group_signal(self.child_pid, libc::SIGHUP);
         let deadline = Instant::now() + SHUTDOWN_GRACE;
         while Instant::now() < deadline {
             if let Some(status) = self.try_wait()? {
@@ -402,7 +389,7 @@ impl Pty {
             }
             thread::sleep(SHUTDOWN_POLL);
         }
-        send_signal(self.child_pid, libc::SIGKILL);
+        send_process_group_signal(self.child_pid, libc::SIGKILL);
         self.wait_blocking()
     }
 
@@ -440,8 +427,14 @@ impl Drop for Pty {
     fn drop(&mut self) {
         self.close_master();
         if self.exited.is_none() {
-            send_signal(self.child_pid, libc::SIGHUP);
+            send_process_group_signal(self.child_pid, libc::SIGHUP);
             self.exited = reap_child_nonblocking(self.child_pid, DROP_REAP_GRACE);
+            if self.exited.is_none() {
+                // A child that ignores SIGHUP must not outlive its Pty as a
+                // zombie or detached process group; SIGKILL cannot be ignored.
+                send_process_group_signal(self.child_pid, libc::SIGKILL);
+                self.exited = reap_child_nonblocking(self.child_pid, KILL_REAP_GRACE);
+            }
         }
     }
 }
@@ -560,6 +553,40 @@ fn duplicate_fd(source: RawFd, target: RawFd) -> Result<()> {
         return Err(PtyError::Io(io::Error::last_os_error()));
     }
     Ok(())
+}
+
+fn open_pty_pair(winsize: &mut libc::winsize) -> Result<(RawFd, RawFd)> {
+    let mut master_fd: RawFd = -1;
+    let mut slave_fd: RawFd = -1;
+    // SAFETY: openpty initializes the two output fd pointers on success.
+    // name/termios are null because the caller does not need a PTY name and
+    // wants default terminal attributes. winsize points to a valid value.
+    let open_result = unsafe {
+        libc::openpty(
+            &mut master_fd,
+            &mut slave_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            winsize,
+        )
+    };
+    if open_result == -1 {
+        return Err(PtyError::Io(io::Error::last_os_error()));
+    }
+
+    // openpty cannot create the fds O_CLOEXEC atomically; a concurrent
+    // fork+exec in the host between openpty and these fcntl calls can still
+    // briefly inherit them. Keep the window as small as possible.
+    if let Err(error) = set_cloexec(master_fd)
+        .and_then(|()| set_cloexec(slave_fd))
+        .and_then(|()| set_nonblocking(master_fd))
+    {
+        close_fd(master_fd);
+        close_fd(slave_fd);
+        return Err(error);
+    }
+
+    Ok((master_fd, slave_fd))
 }
 
 fn write_errno_and_exit(error_write: RawFd) -> ! {
@@ -770,12 +797,13 @@ fn close_fd(fd: RawFd) {
     }
 }
 
-fn send_signal(pid: libc::pid_t, signal: libc::c_int) {
+fn send_process_group_signal(pid: libc::pid_t, signal: libc::c_int) {
     if pid > 0 {
-        // SAFETY: pid is the child pid returned by fork. Failure is benign
-        // during cleanup because the child may have already exited.
+        // SAFETY: the child calls setsid before exec, making its pid the
+        // process-group id. Failure is benign during cleanup because the group
+        // may have already exited.
         unsafe {
-            libc::kill(pid, signal);
+            libc::killpg(pid, signal);
         }
     }
 }
@@ -826,6 +854,33 @@ mod tests {
         .unwrap()
     }
 
+    fn fd_has_cloexec(fd: RawFd) -> bool {
+        // SAFETY: tests pass a live fd and read its descriptor flags only.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_ne!(flags, -1);
+        flags & libc::FD_CLOEXEC != 0
+    }
+
+    fn process_is_gone(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 performs existence/permission checking only.
+        let result = unsafe { libc::kill(pid, 0) };
+        if result == -1 {
+            return io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        }
+        false
+    }
+
+    fn wait_until_process_is_gone(pid: libc::pid_t, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if process_is_gone(pid) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        process_is_gone(pid)
+    }
+
     fn read_available(pty: &mut Pty, timeout: Duration) -> Vec<u8> {
         let deadline = Instant::now() + timeout;
         let mut output = Vec::new();
@@ -857,6 +912,36 @@ mod tests {
             String::from_utf8_lossy(&output)
         );
         assert!(status.success());
+    }
+
+    #[test]
+    fn spawned_fds_are_cloexec() {
+        let mut winsize = libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let (master_fd, slave_fd) = open_pty_pair(&mut winsize).unwrap();
+
+        assert!(fd_has_cloexec(master_fd));
+        assert!(fd_has_cloexec(slave_fd));
+
+        close_fd(master_fd);
+        close_fd(slave_fd);
+    }
+
+    #[test]
+    fn drop_kills_child_that_ignores_sighup() {
+        let pty = spawn_command("/bin/sh", &["-c", "trap '' HUP; sleep 30"]);
+        let pid = pty.child_pid;
+
+        drop(pty);
+
+        assert!(
+            wait_until_process_is_gone(pid, Duration::from_secs(2)),
+            "child pid {pid} survived Pty drop"
+        );
     }
 
     #[test]

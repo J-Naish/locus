@@ -153,6 +153,7 @@ fn term_run_plain_dump(options: &TermRunOptions) -> Result<String, CliError> {
                     }
                 }
                 if Instant::now() >= deadline {
+                    kill_timed_out_process_group(&pty);
                     let _ = pty.shutdown();
                     return Err(CliError::Runtime(format!(
                         "term-run timed out after {}ms",
@@ -173,6 +174,12 @@ fn term_run_plain_dump(options: &TermRunOptions) -> Result<String, CliError> {
         |status| CliError::Runtime(format!("terminal replay failed with status {status}")),
     )?;
     Ok(report.text)
+}
+
+fn kill_timed_out_process_group(pty: &Pty) {
+    // The PTY child is a session leader; this killpg-backed operation kills the
+    // whole group so shell-spawned grandchildren do not survive `term-run`.
+    pty.kill_process_group_for_timeout();
 }
 
 #[derive(Debug)]
@@ -745,6 +752,8 @@ fn generate_buffer_text(size_bytes: usize) -> Vec<u8> {
 mod tests {
     use std::ffi::OsString;
     use std::path::Path;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
 
     use app_ffi::terminal::{replay_bytes, TermReplayDump};
 
@@ -950,6 +959,64 @@ mod tests {
         .unwrap();
 
         assert!(term_run_plain_dump(&options).unwrap().contains("hello"));
+    }
+
+    #[test]
+    fn term_run_timeout_kills_process_group() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "locus-term-run-grandchild-{}.pid",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&pid_file);
+        let script = format!(
+            "sleep 30 & echo $! > {}; sleep 30",
+            pid_file.to_string_lossy()
+        );
+        let options = TermRunOptions::parse(
+            [
+                "--cols".to_string(),
+                "40".to_string(),
+                "--rows".to_string(),
+                "8".to_string(),
+                "--timeout-ms".to_string(),
+                "100".to_string(),
+                "--".to_string(),
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                script,
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        let error = term_run_plain_dump(&options).unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        let grandchild_pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if !process_exists(&grandchild_pid) {
+                let _ = std::fs::remove_file(&pid_file);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_file(&pid_file);
+        panic!("grandchild sleep process {grandchild_pid} survived term-run timeout");
+    }
+
+    fn process_exists(pid: &str) -> bool {
+        Command::new("/bin/kill")
+            .arg("-0")
+            .arg(pid)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 
     #[test]

@@ -400,6 +400,7 @@ mod tests {
         locus_term_feed, locus_term_frame_free, locus_term_frame_new, locus_term_free,
         locus_term_new, locus_term_render, LocusTermCell, LOCUS_TERM_STATUS_INVALID_ARGUMENT,
     };
+    use std::mem::{align_of, offset_of, size_of};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -426,6 +427,46 @@ mod tests {
         };
         // SAFETY: all pointers in options remain valid for this call.
         unsafe { locus_pty_spawn(&options) }
+    }
+
+    #[test]
+    fn pty_string_layout_matches_the_hand_written_header() {
+        assert_eq!(size_of::<LocusPtyString>(), size_of::<usize>() * 2);
+        assert_eq!(align_of::<LocusPtyString>(), align_of::<usize>());
+        assert_eq!(offset_of!(LocusPtyString, ptr), 0);
+        assert_eq!(offset_of!(LocusPtyString, len), size_of::<usize>());
+    }
+
+    #[test]
+    fn pty_env_var_layout_matches_the_hand_written_header() {
+        assert_eq!(size_of::<LocusPtyEnvVar>(), size_of::<LocusPtyString>() * 2);
+        assert_eq!(align_of::<LocusPtyEnvVar>(), align_of::<LocusPtyString>());
+        assert_eq!(offset_of!(LocusPtyEnvVar, key), 0);
+        assert_eq!(
+            offset_of!(LocusPtyEnvVar, value),
+            size_of::<LocusPtyString>()
+        );
+    }
+
+    #[test]
+    fn pty_options_layout_matches_the_hand_written_header() {
+        assert_eq!(align_of::<LocusPtyOptions>(), align_of::<usize>());
+        assert_eq!(offset_of!(LocusPtyOptions, cols), 0);
+        assert_eq!(offset_of!(LocusPtyOptions, rows), 2);
+        assert!(offset_of!(LocusPtyOptions, command) > offset_of!(LocusPtyOptions, rows));
+        assert!(offset_of!(LocusPtyOptions, args) > offset_of!(LocusPtyOptions, command));
+        assert!(offset_of!(LocusPtyOptions, args_len) > offset_of!(LocusPtyOptions, args));
+        assert!(offset_of!(LocusPtyOptions, cwd) > offset_of!(LocusPtyOptions, args_len));
+        assert!(offset_of!(LocusPtyOptions, env) > offset_of!(LocusPtyOptions, cwd));
+        assert!(offset_of!(LocusPtyOptions, env_len) > offset_of!(LocusPtyOptions, env));
+    }
+
+    #[test]
+    fn pty_exit_status_layout_matches_the_hand_written_header() {
+        assert_eq!(offset_of!(LocusPtyExitStatus, exited), 0);
+        assert_eq!(offset_of!(LocusPtyExitStatus, code), 4);
+        assert_eq!(offset_of!(LocusPtyExitStatus, signal), 8);
+        assert_eq!(size_of::<LocusPtyExitStatus>(), 12);
     }
 
     fn read_until_done(handle: *mut LocusPty) -> Vec<u8> {

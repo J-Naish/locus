@@ -648,6 +648,13 @@ LocusStatus locus_large_file_position_for_line_column(
  * The terminal handle contains parser state only; it does not spawn or own a
  * PTY. Feed bytes from a platform-owned process, render into a reusable frame,
  * and release all Rust-owned byte/frame handles with the matching free calls.
+ *
+ * Thread-safety: terminal handles and frames are not thread-safe. Callers may
+ * use them from any thread, but each individual handle must be serialized by
+ * the caller and never used concurrently.
+ *
+ * Panic policy: if a terminal entry point returns LOCUS_TERM_STATUS_PANIC, the
+ * handle state is undefined. Free the handle and create a new one.
  */
 
 #define LOCUS_TERM_ABI_VERSION ((uint32_t)1u)
@@ -655,6 +662,11 @@ LocusStatus locus_large_file_position_for_line_column(
 #define LOCUS_TERM_STATUS_INVALID_ARGUMENT ((LocusStatus)300u)
 #define LOCUS_TERM_STATUS_PANIC ((LocusStatus)301u)
 #define LOCUS_TERM_STATUS_UNSAFE_PASTE ((LocusStatus)302u)
+
+/* Terminal resource limits; must match app-ffi. */
+#define LOCUS_TERM_MAX_COLS ((uint16_t)4096u)
+#define LOCUS_TERM_MAX_ROWS ((uint16_t)4096u)
+#define LOCUS_TERM_MAX_SCROLLBACK ((size_t)(256u * 1024u * 1024u))
 
 #define LOCUS_TERM_DIRTY_NONE ((uint32_t)0u)
 #define LOCUS_TERM_DIRTY_PARTIAL ((uint32_t)1u)
@@ -795,6 +807,13 @@ LocusStatus locus_term_scroll(LocusTerm *term, intptr_t delta);
  * watch locus_pty_master_fd() with a platform event source and drive reads when
  * readable. String inputs are UTF-8 byte slices; embedded NUL bytes are
  * rejected before spawning.
+ *
+ * Thread-safety: PTY handles are not thread-safe. Callers may use a handle from
+ * any thread, but each individual handle must be serialized by the caller and
+ * never used concurrently.
+ *
+ * Panic policy: if a PTY entry point returns LOCUS_PTY_STATUS_PANIC, the handle
+ * state is undefined. Free the handle and create a new one.
  */
 
 #define LOCUS_PTY_STATUS_INVALID_ARGUMENT ((LocusStatus)400u)
@@ -850,8 +869,8 @@ LocusStatus locus_pty_try_wait(
     LocusPty *pty, LocusPtyExitStatus *out_status);
 /*
  * Sends SIGHUP, waits briefly, then escalates to SIGKILL if the child is still
- * alive. Drop/free only closes the master, sends SIGHUP, and attempts a short
- * non-blocking reap.
+ * alive. Drop/free also closes the master, sends SIGHUP, and escalates to
+ * SIGKILL after a short non-blocking reap window.
  */
 LocusStatus locus_pty_shutdown(LocusPty *pty);
 void locus_pty_free(LocusPty *pty);
