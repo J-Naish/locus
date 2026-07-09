@@ -310,21 +310,27 @@ impl Screen {
     }
 
     pub fn assert_integrity(&self) {
-        debug_assert!(self.cursor.x < self.cols());
-        debug_assert!(self.cursor.y < self.rows());
-        let Some(pin) = self.cursor_pin() else {
-            return;
-        };
-        let Some(point) = self.pages.point_from_pin(Tag::Active, pin) else {
-            return;
-        };
-        debug_assert_eq!(
-            point.coord(),
-            Coordinate {
-                x: self.cursor.x,
-                y: u32::from(self.cursor.y),
-            }
-        );
+        // ghostty: Screen.zig:344 gates the whole body behind
+        // build_options.slow_runtime_safety; mirror that with debug_assertions
+        // so release builds skip the pin/point recomputation entirely.
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(self.cursor.x < self.cols());
+            debug_assert!(self.cursor.y < self.rows());
+            let Some(pin) = self.cursor_pin() else {
+                return;
+            };
+            let Some(point) = self.pages.point_from_pin(Tag::Active, pin) else {
+                return;
+            };
+            debug_assert_eq!(
+                point.coord(),
+                Coordinate {
+                    x: self.cursor.x,
+                    y: u32::from(self.cursor.y),
+                }
+            );
+        }
     }
 
     pub fn cursor_pin(&self) -> Option<Pin> {
