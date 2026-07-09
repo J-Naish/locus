@@ -2983,10 +2983,11 @@ impl PageList {
         let Some(node) = self.take_node(id) else {
             return;
         };
-        let mut memory = node.page.into_memory();
+        let memory = node.page.into_memory();
         self.page_size = self.page_size.saturating_sub(memory.len());
         if memory.len() == Self::standard_size() {
-            memory.fill(0);
+            // Recycled buffers are zeroed once at reuse time in create_page; zeroing
+            // again on return would double the memset traffic on the scroll hot path.
             self.page_buffers.push(memory);
         }
     }

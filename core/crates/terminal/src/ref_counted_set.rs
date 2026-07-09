@@ -253,12 +253,23 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
         if self.layout.table_cap == 0 {
             return None;
         }
-        for bucket in 0..self.layout.table_cap {
+        // ghostty: ref_counted_set.zig:499
+        // Hash through the probe backing. Values that compare equal must hash
+        // by their contents, and probe values may reference a different backing
+        // buffer than the stored item.
+        let hash = self.context.hash(probe_backing, &value);
+        let mask = usize::from(self.layout.table_mask);
+        for i in 0..=usize::from(self.max_psl) {
+            let bucket = (hash as usize).wrapping_add(i) & mask;
             let id = self.table.get(backing, bucket);
             if id == EMPTY_ID {
-                continue;
+                return None;
             }
-            if self.ref_count(backing, id) > 0 {
+            let psl = usize::from(read_psl::<T>(backing, self.items, id));
+            if psl < i {
+                return None;
+            }
+            if psl == i && self.ref_count(backing, id) > 0 {
                 let current = read_value::<T>(backing, self.items, id);
                 if self
                     .context
@@ -398,21 +409,45 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
     }
 
     fn delete_item(&mut self, backing: &mut [u8], id: Id) {
+        // ghostty: ref_counted_set.zig:452
         let bucket = read_bucket::<T>(backing, self.items, id);
-        if usize::from(bucket) >= self.layout.table_cap {
+        let bucket = usize::from(bucket);
+        if bucket >= self.layout.table_cap || self.table.get(backing, bucket) != id {
             return;
-        }
-        if self.table.get(backing, bucket as usize) == id {
-            self.table.set(backing, bucket as usize, EMPTY_ID);
         }
         let value = read_value::<T>(backing, self.items, id);
         self.context.deleted(backing, &value);
         let psl = read_psl::<T>(backing, self.items, id);
         self.psl_stats[psl as usize] = self.psl_stats[psl as usize].saturating_sub(1);
+        clear_item::<T>(backing, self.items, id);
+        self.table.set(backing, bucket, EMPTY_ID);
+
+        let mask = usize::from(self.layout.table_mask);
+        let mut previous = bucket;
+        let mut next = (previous + 1) & mask;
+        while self.table.get(backing, next) != EMPTY_ID {
+            let shift_id = self.table.get(backing, next);
+            let shift_psl = read_psl::<T>(backing, self.items, shift_id);
+            if shift_psl == 0 {
+                break;
+            }
+
+            write_bucket::<T>(backing, self.items, shift_id, previous as Id);
+            self.psl_stats[shift_psl as usize] =
+                self.psl_stats[shift_psl as usize].saturating_sub(1);
+            let new_psl = shift_psl - 1;
+            write_psl::<T>(backing, self.items, shift_id, new_psl);
+            self.psl_stats[new_psl as usize] += 1;
+            self.table.set(backing, previous, shift_id);
+
+            previous = next;
+            next = (previous + 1) & mask;
+        }
+        self.table.set(backing, previous, EMPTY_ID);
+
         while self.max_psl > 0 && self.psl_stats[self.max_psl as usize] == 0 {
             self.max_psl -= 1;
         }
-        clear_item::<T>(backing, self.items, id);
     }
 }
 
@@ -586,5 +621,47 @@ mod tests {
         set.release(&mut buf, id);
         assert_eq!(set.count(), 0);
         assert_eq!(set.lookup(&buf, 9), None);
+    }
+
+    #[test]
+    fn lookup_finds_all_live_values_after_delete_churn() {
+        // port-added: PSL lookup must remain correct after delete+add_with_id
+        // churn opens holes inside a Robin-Hood probe chain.
+        let (mut buf, mut set) = set_with_capacity(16);
+        let initial = [3, 19, 35, 51, 67, 83];
+        let mut live = Vec::new();
+        for value in initial {
+            let id = set.add(&mut buf, value).unwrap();
+            live.push((value, id));
+        }
+
+        for step in 0..initial.len() {
+            let (old_value, old_id) = live.remove(0);
+            set.release(&mut buf, old_id);
+            let new_value = 1000 + step as u64;
+            let replacement = set.add_with_id(&mut buf, new_value, old_id).unwrap();
+            let new_id = replacement.unwrap_or(old_id);
+            live.push((new_value, new_id));
+
+            assert_eq!(set.lookup(&buf, old_value), None, "dead value {old_value}");
+            assert_eq!(
+                set.lookup_with_probe(&buf, &buf, old_value),
+                None,
+                "dead probe value {old_value}"
+            );
+            assert_eq!(set.lookup(&buf, 10_000 + step as u64), None);
+            assert_eq!(
+                set.lookup_with_probe(&buf, &buf, 10_000 + step as u64),
+                None
+            );
+            for &(value, id) in &live {
+                assert_eq!(set.lookup(&buf, value), Some(id), "live value {value}");
+                assert_eq!(
+                    set.lookup_with_probe(&buf, &buf, value),
+                    Some(id),
+                    "live probe value {value}"
+                );
+            }
+        }
     }
 }

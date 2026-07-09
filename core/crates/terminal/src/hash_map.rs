@@ -300,11 +300,14 @@ impl<K: BufValue + Eq, V: BufValue> OffsetHashMap<K, V> {
 // deterministic FNV-1a over the key's little-endian bytes to avoid bringing in
 // Wyhash or dependencies. Semantic map behavior is independent of bucket order.
 fn fnv_hash_value<T: BufValue>(value: T) -> Hash {
-    let mut bytes = vec![0u8; T::SIZE];
-    value.write(&mut bytes, 0);
+    // Keys are small POD values (grapheme cell offsets, style ids); 64 bytes
+    // covers every BufValue used as a map key without heap traffic.
+    debug_assert!(T::SIZE <= 64);
+    let mut bytes = [0u8; 64];
+    value.write(&mut bytes[..T::SIZE], 0);
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for byte in bytes {
-        hash ^= u64::from(byte);
+    for byte in &bytes[..T::SIZE] {
+        hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
