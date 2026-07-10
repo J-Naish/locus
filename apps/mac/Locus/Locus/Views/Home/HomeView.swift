@@ -232,6 +232,9 @@ struct HomeView: View {
     } message: {
       Text(workspaceDeletionErrorMessage ?? "Locus couldn't move the item to the Trash.")
     }
+    .onDisappear {
+      terminalPanelState.shutdown()
+    }
   }
 
   @MainActor

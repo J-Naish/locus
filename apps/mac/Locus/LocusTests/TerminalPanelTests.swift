@@ -107,6 +107,25 @@ final class TerminalPanelTests: XCTestCase {
     XCTAssertTrue(
       browserReference?.session?.snapshot?.plainText.contains("browser-replacement-marker") == true)
   }
+
+  func testTerminateOnTeardown() throws {
+    var state: TerminalPanelState? = TerminalPanelState(startCommand: "/bin/sh")
+    state?.toggle()
+    let session = try XCTUnwrap(state?.session)
+    XCTAssertEqual(session.state, .running)
+
+    state = nil
+
+    XCTAssertTrue(
+      waitForTerminalPanelCondition {
+        if case .exited = session.state {
+          return true
+        }
+        return false
+      },
+      "State was: \(session.state)"
+    )
+  }
 }
 
 @MainActor

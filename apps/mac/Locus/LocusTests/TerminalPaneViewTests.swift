@@ -81,7 +81,6 @@ final class TerminalPaneViewTests: XCTestCase {
       width: metrics.cellWidth * 40,
       height: metrics.cellHeight * 10
     )
-
     session.start(command: "/bin/sh")
     session.send(Data("echo hi\n".utf8))
     XCTAssertTrue(
@@ -118,6 +117,7 @@ final class TerminalPaneViewTests: XCTestCase {
       width: metrics.cellWidth * 40,
       height: metrics.cellHeight * 10
     )
+    let host = TerminalPaneViewHost(view: view)
 
     session.start(command: "/bin/sh")
 
@@ -127,7 +127,90 @@ final class TerminalPaneViewTests: XCTestCase {
       },
       "Snapshot was: \(String(describing: session.snapshot))"
     )
+    withExtendedLifetime(host) {}
   }
+
+  func testResizeDebounceDeliversFinalSizeOnly() {
+    let metrics = TerminalCellMetrics()
+    var deliveredSizes: [TerminalGridSize] = []
+    let view = TerminalPaneView(metrics: metrics) { gridSize in
+      deliveredSizes.append(gridSize)
+    }
+    view.frame = gridFrame(columns: 40, rows: 10, metrics: metrics)
+    let host = TerminalPaneViewHost(view: view)
+    deliveredSizes.removeAll()
+
+    for columns in 41...45 {
+      view.setFrameSize(gridFrame(columns: UInt16(columns), rows: 10, metrics: metrics).size)
+    }
+
+    XCTAssertTrue(waitForPaneCondition { deliveredSizes.count == 1 })
+    XCTAssertEqual(deliveredSizes, [TerminalGridSize(columns: 45, rows: 10)])
+    withExtendedLifetime(host) {}
+  }
+
+  func testReshowSyncsCurrentSize() {
+    let metrics = TerminalCellMetrics()
+    let session = TerminalSession(columns: 40, rows: 10)
+    defer {
+      session.terminate()
+    }
+    let view = TerminalPaneView(session: session, metrics: metrics)
+    view.frame = gridFrame(columns: 40, rows: 10, metrics: metrics)
+    let host = TerminalPaneViewHost(view: view)
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(
+      waitForPaneCondition {
+        session.snapshot?.columns == 40 && session.snapshot?.rows == 10
+      },
+      "Snapshot was: \(String(describing: session.snapshot))"
+    )
+
+    view.removeFromSuperview()
+    view.setFrameSize(gridFrame(columns: 52, rows: 14, metrics: metrics).size)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.12))
+    XCTAssertEqual(session.snapshot?.columns, 40)
+    XCTAssertEqual(session.snapshot?.rows, 10)
+
+    host.contentView.addSubview(view)
+    XCTAssertTrue(
+      waitForPaneCondition {
+        session.snapshot?.columns == 52 && session.snapshot?.rows == 14
+      },
+      "Snapshot was: \(String(describing: session.snapshot))"
+    )
+  }
+}
+
+@MainActor
+private final class TerminalPaneViewHost {
+  let window: NSWindow
+  let contentView: NSView
+
+  init(view: TerminalPaneView) {
+    contentView = NSView(frame: view.frame)
+    window = NSWindow(
+      contentRect: contentView.frame,
+      styleMask: [.borderless],
+      backing: .buffered,
+      defer: false
+    )
+    window.contentView = contentView
+    contentView.addSubview(view)
+  }
+}
+
+private func gridFrame(
+  columns: UInt16,
+  rows: UInt16,
+  metrics: TerminalCellMetrics
+) -> NSRect {
+  NSRect(
+    x: 0,
+    y: 0,
+    width: metrics.cellWidth * CGFloat(columns),
+    height: metrics.cellHeight * CGFloat(rows)
+  )
 }
 
 @MainActor

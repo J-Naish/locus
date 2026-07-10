@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 enum TerminalPanelMetrics {
-  static let height: CGFloat = 240
+  static let defaultHeight: CGFloat = 240
 }
 
 @MainActor
@@ -14,6 +14,7 @@ final class TerminalPanelState: ObservableObject {
   private let startCommand: String?
   private weak var terminalView: TerminalPaneView?
   private weak var previousFirstResponder: NSResponder?
+  private var didRequestShutdown = false
 
   init(
     startCommand: String? = nil,
@@ -21,6 +22,12 @@ final class TerminalPanelState: ObservableObject {
   ) {
     self.startCommand = startCommand
     self.sessionFactory = sessionFactory
+  }
+
+  deinit {
+    MainActor.assumeIsolated {
+      shutdown()
+    }
   }
 
   func toggle(window: NSWindow? = nil) {
@@ -37,6 +44,14 @@ final class TerminalPanelState: ObservableObject {
       return
     }
     window.makeFirstResponder(view)
+  }
+
+  func shutdown() {
+    guard !didRequestShutdown else {
+      return
+    }
+    didRequestShutdown = true
+    session?.terminate()
   }
 
   private func show(in window: NSWindow?) {
@@ -89,7 +104,7 @@ struct TerminalPanelView: View {
       }
     }
     .frame(maxWidth: .infinity)
-    .frame(height: TerminalPanelMetrics.height)
+    .frame(height: TerminalPanelMetrics.defaultHeight)
     .modifier(DocumentCardModifier())
     .accessibilityElement(children: .contain)
     .accessibilityIdentifier("terminal-panel")

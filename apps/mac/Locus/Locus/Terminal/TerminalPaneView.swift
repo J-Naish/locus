@@ -9,6 +9,10 @@ struct TerminalGridSize: Equatable {
   let rows: UInt16
 }
 
+private enum TerminalPaneTiming {
+  static let resizeDebounce: Duration = .milliseconds(60)
+}
+
 struct TerminalColor: Equatable {
   let red: UInt8
   let green: UInt8
@@ -444,13 +448,16 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
         return
       }
       subscribeToSession()
-      updateTerminalSizeIfNeeded()
+      if window != nil {
+        synchronizeTerminalSize()
+      }
       hasPendingFrameChange = true
       needsDisplay = true
     }
   }
 
   private let metrics: TerminalCellMetrics
+  private let resizeObserver: ((TerminalGridSize) -> Void)?
   private var cancellable: AnyCancellable?
   private var hasPendingFrameChange = true
   private var lastScheduledGeneration: UInt64?
@@ -460,16 +467,20 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   private var markedTextStorage: NSAttributedString?
   private var markedSelection = NSRange(location: NSNotFound, length: 0)
   private var handledTextDuringKeyInterpretation = false
+  private var pendingGridSize: TerminalGridSize?
+  private var resizeTask: Task<Void, Never>?
 
   override var acceptsFirstResponder: Bool { true }
   override var isOpaque: Bool { true }
 
   init(
     session: TerminalSession? = nil,
-    metrics: TerminalCellMetrics = TerminalCellMetrics()
+    metrics: TerminalCellMetrics = TerminalCellMetrics(),
+    resizeObserver: ((TerminalGridSize) -> Void)? = nil
   ) {
     self.session = session
     self.metrics = metrics
+    self.resizeObserver = resizeObserver
     super.init(frame: .zero)
     wantsLayer = true
     subscribeToSession()
@@ -482,6 +493,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
 
   deinit {
     MainActor.assumeIsolated {
+      resizeTask?.cancel()
       stopDisplayLink()
     }
   }
@@ -489,21 +501,23 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
     if window == nil {
+      cancelPendingTerminalResize()
       stopDisplayLink()
     } else {
       startDisplayLink()
+      synchronizeTerminalSize()
     }
     onWindowChange?(self)
   }
 
   override func setFrameSize(_ newSize: NSSize) {
     super.setFrameSize(newSize)
-    updateTerminalSizeIfNeeded()
+    scheduleTerminalResizeIfNeeded()
   }
 
   override func layout() {
     super.layout()
-    updateTerminalSizeIfNeeded()
+    scheduleTerminalResizeIfNeeded()
   }
 
   override func mouseDown(with event: NSEvent) {
@@ -700,17 +714,68 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     needsDisplay = true
   }
 
-  private func updateTerminalSizeIfNeeded() {
-    guard bounds.width > 0, bounds.height > 0 else {
+  private func scheduleTerminalResizeIfNeeded() {
+    guard window != nil, let gridSize = currentGridSize() else {
       return
     }
 
-    let gridSize = TerminalCellMetrics.gridSize(for: bounds.size, metrics: metrics)
-    guard gridSize != lastGridSize else {
+    if gridSize == lastGridSize {
+      cancelPendingTerminalResize()
       return
     }
+
+    if gridSize == pendingGridSize {
+      return
+    }
+
+    pendingGridSize = gridSize
+    resizeTask?.cancel()
+    resizeTask = Task { @MainActor [weak self] in
+      do {
+        try await Task.sleep(for: TerminalPaneTiming.resizeDebounce)
+      } catch {
+        return
+      }
+      self?.deliverPendingTerminalResize()
+    }
+  }
+
+  private func synchronizeTerminalSize() {
+    cancelPendingTerminalResize()
+    guard let gridSize = currentGridSize() else {
+      return
+    }
+    deliverTerminalResize(gridSize)
+  }
+
+  private func currentGridSize() -> TerminalGridSize? {
+    guard bounds.width > 0, bounds.height > 0 else {
+      return nil
+    }
+    return TerminalCellMetrics.gridSize(for: bounds.size, metrics: metrics)
+  }
+
+  private func deliverPendingTerminalResize() {
+    guard let gridSize = pendingGridSize else {
+      return
+    }
+    pendingGridSize = nil
+    resizeTask = nil
+    deliverTerminalResize(gridSize)
+  }
+
+  private func deliverTerminalResize(_ gridSize: TerminalGridSize) {
     lastGridSize = gridSize
+    resizeObserver?(gridSize)
+    // TerminalSession performs a full terminal render after every delivered
+    // resize, so the final debounced dimensions repaint the complete frame.
     session?.resize(columns: gridSize.columns, rows: gridSize.rows)
+  }
+
+  private func cancelPendingTerminalResize() {
+    resizeTask?.cancel()
+    resizeTask = nil
+    pendingGridSize = nil
   }
 
   private var backgroundColor: NSColor {
