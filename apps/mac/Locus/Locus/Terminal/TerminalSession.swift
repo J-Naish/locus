@@ -305,16 +305,43 @@ private final class TerminalSessionWorker {
     do {
       var encoded = Data()
       for event in events {
-        let eventData = try event.withLocusEvent { rawEvent in
-          try terminal.encodeKey(rawEvent)
-        }
-        encoded.append(eventData)
+        encoded.append(try encodeWithLegacyFallback(event, terminal: terminal))
       }
       if !encoded.isEmpty {
         try writeAll(encoded)
       }
     } catch {
       fail(error)
+    }
+  }
+
+  private func encodeWithLegacyFallback(
+    _ event: TerminalKeyEvent,
+    terminal: TerminalCore
+  ) throws -> Data {
+    let encoded = try event.withLocusEvent { rawEvent in
+      try terminal.encodeKey(rawEvent)
+    }
+    guard TerminalKeyEncodingFallback.isUnrepresentableModifiedKey(encoded) else {
+      return encoded
+    }
+    // Ghostty's encoder emits fixterms/CSI-u (ESC[<cp>;<mods>u) and
+    // modifyOtherKeys (ESC[27;<mods>;<cp>~) sequences for modified keys with
+    // no legacy encoding (Shift+Enter, Ctrl+;). Plain shells echo those as
+    // junk. Match Apple Terminal instead: drop the modifiers and send the
+    // key's plain encoding. Revisit if the core ever exposes "kitty keyboard
+    // protocol active" so protocol-aware apps can keep the rich form.
+    let stripped = TerminalKeyEvent(
+      action: event.action,
+      key: event.key,
+      modifiers: [],
+      consumedModifiers: [],
+      composing: event.composing,
+      utf8: event.utf8,
+      unshiftedCodepoint: event.unshiftedCodepoint
+    )
+    return try stripped.withLocusEvent { rawEvent in
+      try terminal.encodeKey(rawEvent)
     }
   }
 
@@ -458,5 +485,41 @@ private final class TerminalSessionWorker {
     Task { @MainActor [publishSnapshot] in
       publishSnapshot(snapshot)
     }
+  }
+}
+
+/// Detects escape sequences that only protocol-aware applications understand.
+enum TerminalKeyEncodingFallback {
+  /// True for fixterms/CSI-u (`ESC[<params>u`) and xterm modifyOtherKeys
+  /// (`ESC[27;<mods>;<cp>~`) encodings. Never matches navigation or function
+  /// keys (`ESC[5~`, `ESC[15;2~`): their leading parameter is not 27 and
+  /// their final byte is not `u`.
+  static func isUnrepresentableModifiedKey(_ encoded: Data) -> Bool {
+    guard encoded.count >= 4,
+      encoded.first == 0x1B,
+      encoded.dropFirst().first == UInt8(ascii: "[")
+    else {
+      return false
+    }
+    let body = encoded.dropFirst(2)
+    guard let final = body.last else {
+      return false
+    }
+    let params = body.dropLast()
+    guard
+      !params.isEmpty,
+      params.allSatisfy({
+        ($0 >= UInt8(ascii: "0") && $0 <= UInt8(ascii: "9")) || $0 == UInt8(ascii: ";")
+      })
+    else {
+      return false
+    }
+    if final == UInt8(ascii: "u") {
+      return true
+    }
+    if final == UInt8(ascii: "~") {
+      return params.starts(with: Data("27;".utf8))
+    }
+    return false
   }
 }

@@ -65,6 +65,22 @@ final class TerminalKeyTranslationTests: XCTestCase {
     XCTAssertEqual(event.unshiftedCodepoint, UnicodeScalar("c").value)
   }
 
+  func testUnrepresentableModifiedKeyDetection() {
+    // CSI-u and modifyOtherKeys forms are protocol-only and must fall back.
+    XCTAssertTrue(
+      TerminalKeyEncodingFallback.isUnrepresentableModifiedKey(Data("\u{1B}[59;5u".utf8)))
+    XCTAssertTrue(
+      TerminalKeyEncodingFallback.isUnrepresentableModifiedKey(Data("\u{1B}[27;2;13~".utf8)))
+    // Navigation/function keys keep their modifiers, plain bytes pass through.
+    XCTAssertFalse(
+      TerminalKeyEncodingFallback.isUnrepresentableModifiedKey(Data("\u{1B}[15;2~".utf8)))
+    XCTAssertFalse(
+      TerminalKeyEncodingFallback.isUnrepresentableModifiedKey(Data("\u{1B}[5~".utf8)))
+    XCTAssertFalse(TerminalKeyEncodingFallback.isUnrepresentableModifiedKey(Data("\r".utf8)))
+    XCTAssertFalse(
+      TerminalKeyEncodingFallback.isUnrepresentableModifiedKey(Data("\u{1B}[A".utf8)))
+  }
+
   func testCommandDeleteTranslatesToKillLine() throws {
     // Cmd+Delete clears the whole shell line via Ctrl+U, like Terminal.app.
     let event = try XCTUnwrap(
