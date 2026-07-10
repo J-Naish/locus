@@ -155,8 +155,8 @@ final class TerminalCore {
     try Self.checkStatus(locus_term_scroll(handle, delta))
   }
 
-  func render(into frame: TerminalFrame) throws {
-    try Self.checkStatus(locus_term_render(handle, frame.rawPointer, false))
+  func render(into frame: TerminalFrame, full: Bool = false) throws {
+    try Self.checkStatus(locus_term_render(handle, frame.rawPointer, full))
   }
 
   private static func validateABI() throws {

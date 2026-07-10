@@ -1,10 +1,11 @@
 import Combine
+import Dispatch
 import Foundation
 
 /// Owns one shell session and publishes render snapshots for the future
 /// terminal view layer. The PTY, terminal core, and frame are deliberately kept
-/// off the main actor and are used only by `TerminalSessionWorker`'s actor
-/// executor; only value snapshots cross back to the main actor.
+/// off the main actor and are used only on `TerminalSessionWorker`'s serial
+/// queue; only value snapshots cross back to the main actor.
 @MainActor
 final class TerminalSession: ObservableObject {
   struct Snapshot: Equatable, Sendable {
@@ -55,27 +56,23 @@ final class TerminalSession: ObservableObject {
     state = .running
     let resolvedCommand = command ?? ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     let arguments = command == nil ? ["-l"] : []
-    Task {
-      await worker.start(command: resolvedCommand, arguments: arguments)
-    }
+    worker.start(command: resolvedCommand, arguments: arguments)
   }
 
   func send(_ data: Data) {
-    Task {
-      await worker.send(data)
-    }
+    worker.send(data)
   }
 
   func resize(columns: UInt16, rows: UInt16) {
-    Task {
-      await worker.resize(columns: columns, rows: rows)
-    }
+    worker.resize(columns: columns, rows: rows)
   }
 
   func terminate() {
-    Task {
-      await worker.terminate()
-    }
+    worker.terminate()
+  }
+
+  func withFrame(_ body: (TerminalFrame) -> Void) {
+    worker.withFrame(body)
   }
 
   fileprivate func publish(state: State) {
@@ -100,8 +97,16 @@ private final class TerminalSessionPublisher {
   }
 }
 
-private actor TerminalSessionWorker {
-  private let readQueue = DispatchQueue(label: "locus.terminal.session.read")
+private final class TerminalSessionWorker {
+  private enum Command: Sendable {
+    case start(command: String, arguments: [String])
+    case send(Data)
+    case resize(columns: UInt16, rows: UInt16)
+    case terminate
+  }
+
+  private let queue = DispatchQueue(label: "locus.terminal.session")
+  private let queueKey = DispatchSpecificKey<Void>()
   private let publishState: @MainActor (TerminalSession.State) -> Void
   private let publishSnapshot: @MainActor (TerminalSession.Snapshot) -> Void
 
@@ -123,9 +128,69 @@ private actor TerminalSessionWorker {
     self.rows = rows
     self.publishState = publishState
     self.publishSnapshot = publishSnapshot
+    queue.setSpecific(key: queueKey, value: ())
   }
 
   func start(command: String, arguments: [String]) {
+    enqueue(.start(command: command, arguments: arguments))
+  }
+
+  func send(_ data: Data) {
+    enqueue(.send(data))
+  }
+
+  func resize(columns: UInt16, rows: UInt16) {
+    enqueue(.resize(columns: columns, rows: rows))
+  }
+
+  func terminate() {
+    enqueue(.terminate)
+  }
+
+  func withFrame(_ body: (TerminalFrame) -> Void) {
+    if DispatchQueue.getSpecific(key: queueKey) != nil {
+      if let frame {
+        body(frame)
+      }
+      return
+    }
+
+    queue.sync {
+      if let frame {
+        body(frame)
+      }
+    }
+  }
+
+  private func enqueue(_ command: Command) {
+    let retained = Unmanaged.passRetained(self)
+    let opaqueAddress = UInt(bitPattern: retained.toOpaque())
+    queue.async {
+      guard let opaque = UnsafeMutableRawPointer(bitPattern: opaqueAddress) else {
+        preconditionFailure("Retained terminal session worker pointer was unexpectedly nil.")
+      }
+      let retained = Unmanaged<TerminalSessionWorker>.fromOpaque(opaque)
+      defer {
+        retained.release()
+      }
+      retained.takeUnretainedValue().perform(command)
+    }
+  }
+
+  private func perform(_ command: Command) {
+    switch command {
+    case .start(let command, let arguments):
+      startOnQueue(command: command, arguments: arguments)
+    case .send(let data):
+      sendOnQueue(data)
+    case .resize(let columns, let rows):
+      resizeOnQueue(columns: columns, rows: rows)
+    case .terminate:
+      terminate(publishExit: true)
+    }
+  }
+
+  private func startOnQueue(command: String, arguments: [String]) {
     guard pty == nil, terminal == nil, frame == nil, readSource == nil else {
       return
     }
@@ -145,7 +210,7 @@ private actor TerminalSessionWorker {
       let frame = try TerminalFrame()
       let source = DispatchSource.makeReadSource(
         fileDescriptor: pty.masterFileDescriptor,
-        queue: readQueue
+        queue: queue
       )
 
       self.pty = pty
@@ -154,9 +219,7 @@ private actor TerminalSessionWorker {
       readSource = source
 
       source.setEventHandler { [weak self] in
-        Task {
-          await self?.readAvailableData()
-        }
+        self?.readAvailableData()
       }
       source.setCancelHandler {}
       source.resume()
@@ -167,7 +230,7 @@ private actor TerminalSessionWorker {
     }
   }
 
-  func send(_ data: Data) {
+  private func sendOnQueue(_ data: Data) {
     guard pty != nil, !data.isEmpty else {
       return
     }
@@ -179,7 +242,7 @@ private actor TerminalSessionWorker {
     }
   }
 
-  func resize(columns: UInt16, rows: UInt16) {
+  private func resizeOnQueue(columns: UInt16, rows: UInt16) {
     self.columns = columns
     self.rows = rows
 
@@ -194,10 +257,6 @@ private actor TerminalSessionWorker {
     } catch {
       fail(error)
     }
-  }
-
-  func terminate() {
-    terminate(publishExit: true)
   }
 
   private func readAvailableData() {
@@ -242,7 +301,7 @@ private actor TerminalSessionWorker {
       return
     }
 
-    try terminal.render(into: frame)
+    try terminal.render(into: frame, full: true)
     generation &+= 1
     let cursor = frame.cursor
     let snapshot = TerminalSession.Snapshot(
