@@ -126,6 +126,59 @@ final class TerminalPanelTests: XCTestCase {
       "State was: \(session.state)"
     )
   }
+
+  func testRestartUsesLatestFolder() throws {
+    let root = URL(
+      filePath: "/tmp/locus-terminal-panel-\(UUID().uuidString)",
+      directoryHint: .isDirectory
+    )
+    let firstDirectory = root.appending(path: "first", directoryHint: .isDirectory)
+    let secondDirectory = root.appending(path: "second", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: firstDirectory, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: secondDirectory, withIntermediateDirectories: true)
+    defer {
+      try? FileManager.default.removeItem(at: root)
+    }
+    let state = TerminalPanelState(startCommand: "/bin/sh")
+    defer {
+      state.shutdown()
+    }
+    state.currentWorkspaceFolder = firstDirectory
+    state.toggle()
+    let firstSession = try XCTUnwrap(state.session)
+    firstSession.send(Data("pwd\n".utf8))
+    XCTAssertTrue(
+      waitForTerminalPanelCondition {
+        firstSession.snapshot?.plainText.contains(
+          firstDirectory.resolvingSymlinksInPath().path) == true
+      },
+      "Snapshot was: \(firstSession.snapshot?.plainText ?? "<nil>")"
+    )
+    firstSession.send(Data("exit\n".utf8))
+    XCTAssertTrue(
+      waitForTerminalPanelCondition {
+        if case .exited = firstSession.state {
+          return true
+        }
+        return false
+      }
+    )
+
+    state.currentWorkspaceFolder = secondDirectory
+    state.toggle()
+    state.toggle()
+    let restartedSession = try XCTUnwrap(state.session)
+    restartedSession.send(Data("pwd\n".utf8))
+
+    XCTAssertFalse(restartedSession === firstSession)
+    XCTAssertTrue(
+      waitForTerminalPanelCondition {
+        restartedSession.snapshot?.plainText.contains(
+          secondDirectory.resolvingSymlinksInPath().path) == true
+      },
+      "Snapshot was: \(restartedSession.snapshot?.plainText ?? "<nil>")"
+    )
+  }
 }
 
 @MainActor

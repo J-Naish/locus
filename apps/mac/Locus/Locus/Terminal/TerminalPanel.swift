@@ -9,6 +9,7 @@ enum TerminalPanelMetrics {
 final class TerminalPanelState: ObservableObject {
   @Published private(set) var isVisible = false
   @Published private(set) var session: TerminalSession?
+  var currentWorkspaceFolder: URL?
 
   private let sessionFactory: () -> TerminalSession
   private let startCommand: String?
@@ -59,7 +60,11 @@ final class TerminalPanelState: ObservableObject {
     previousFirstResponder = window?.firstResponder
     isVisible = true
     if session.state == .idle {
-      session.start(command: startCommand)
+      session.start(
+        command: startCommand,
+        currentDirectory: currentWorkspaceFolder
+          ?? FileManager.default.homeDirectoryForCurrentUser
+      )
     }
     if let terminalView, let terminalWindow = terminalView.window ?? window {
       terminalWindow.makeFirstResponder(terminalView)

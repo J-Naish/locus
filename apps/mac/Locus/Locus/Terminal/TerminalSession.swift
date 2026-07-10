@@ -48,7 +48,7 @@ final class TerminalSession: ObservableObject {
     publisher.session = self
   }
 
-  func start(command: String? = nil) {
+  func start(command: String? = nil, currentDirectory: URL? = nil) {
     guard state == .idle else {
       return
     }
@@ -56,7 +56,11 @@ final class TerminalSession: ObservableObject {
     state = .running
     let resolvedCommand = command ?? ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     let arguments = command == nil ? ["-l"] : []
-    worker.start(command: resolvedCommand, arguments: arguments)
+    worker.start(
+      command: resolvedCommand,
+      arguments: arguments,
+      currentDirectory: currentDirectory?.path
+    )
   }
 
   func send(_ data: Data) {
@@ -103,7 +107,7 @@ private final class TerminalSessionPublisher {
 
 private final class TerminalSessionWorker {
   private enum Command: Sendable {
-    case start(command: String, arguments: [String])
+    case start(command: String, arguments: [String], currentDirectory: String?)
     case send(Data)
     case sendKey(TerminalKeyEvent)
     case resize(columns: UInt16, rows: UInt16)
@@ -136,8 +140,14 @@ private final class TerminalSessionWorker {
     queue.setSpecific(key: queueKey, value: ())
   }
 
-  func start(command: String, arguments: [String]) {
-    enqueue(.start(command: command, arguments: arguments))
+  func start(command: String, arguments: [String], currentDirectory: String?) {
+    enqueue(
+      .start(
+        command: command,
+        arguments: arguments,
+        currentDirectory: currentDirectory
+      )
+    )
   }
 
   func send(_ data: Data) {
@@ -188,8 +198,12 @@ private final class TerminalSessionWorker {
 
   private func perform(_ command: Command) {
     switch command {
-    case .start(let command, let arguments):
-      startOnQueue(command: command, arguments: arguments)
+    case .start(let command, let arguments, let currentDirectory):
+      startOnQueue(
+        command: command,
+        arguments: arguments,
+        currentDirectory: currentDirectory
+      )
     case .send(let data):
       sendOnQueue(data)
     case .sendKey(let event):
@@ -201,7 +215,11 @@ private final class TerminalSessionWorker {
     }
   }
 
-  private func startOnQueue(command: String, arguments: [String]) {
+  private func startOnQueue(
+    command: String,
+    arguments: [String],
+    currentDirectory: String?
+  ) {
     guard pty == nil, terminal == nil, frame == nil, readSource == nil else {
       return
     }
@@ -219,6 +237,7 @@ private final class TerminalSessionWorker {
         command: command,
         arguments: arguments,
         environment: environment,
+        currentDirectory: currentDirectory,
         columns: columns,
         rows: rows
       )

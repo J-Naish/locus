@@ -179,6 +179,28 @@ final class TerminalSessionTests: XCTestCase {
       "Snapshot was: \(String(describing: session.snapshot))"
     )
   }
+
+  func testSessionStartsInWorkspaceFolder() throws {
+    let directory = try makeTerminalSessionDirectory()
+    defer {
+      try? FileManager.default.removeItem(at: directory)
+    }
+    let session = TerminalSession(columns: 100, rows: 12)
+    defer {
+      session.terminate()
+    }
+
+    session.start(command: "/bin/sh", currentDirectory: directory)
+    session.send(Data("pwd\n".utf8))
+
+    let expectedPath = directory.resolvingSymlinksInPath().path
+    XCTAssertTrue(
+      waitUntil {
+        session.snapshot?.plainText.contains(expectedPath) == true
+      },
+      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+    )
+  }
 }
 
 @MainActor
@@ -216,4 +238,11 @@ private func makeExecutableShellScript(_ contents: String) throws -> URL {
     ofItemAtPath: scriptURL.path
   )
   return scriptURL
+}
+
+private func makeTerminalSessionDirectory() throws -> URL {
+  let directory = URL(
+    filePath: "/tmp/locus-terminal-\(UUID().uuidString)", directoryHint: .isDirectory)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  return directory
 }

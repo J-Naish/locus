@@ -9,6 +9,19 @@ struct TerminalGridSize: Equatable {
   let rows: UInt16
 }
 
+struct TerminalContentInsets: Equatable {
+  let top: CGFloat
+  let left: CGFloat
+  let bottom: CGFloat
+  let right: CGFloat
+
+  static let zero = TerminalContentInsets(top: 0, left: 0, bottom: 0, right: 0)
+}
+
+enum TerminalPaneLayoutMetrics {
+  static let contentInsets = TerminalContentInsets(top: 4, left: 8, bottom: 4, right: 8)
+}
+
 private enum TerminalPaneTiming {
   static let resizeDebounce: Duration = .milliseconds(60)
 }
@@ -115,9 +128,15 @@ struct TerminalCellMetrics {
     }
   }
 
-  static func gridSize(for size: CGSize, metrics: TerminalCellMetrics) -> TerminalGridSize {
-    let columns = max(1, Int(floor(size.width / metrics.cellWidth)))
-    let rows = max(1, Int(floor(size.height / metrics.cellHeight)))
+  static func gridSize(
+    for size: CGSize,
+    metrics: TerminalCellMetrics,
+    insets: TerminalContentInsets = .zero
+  ) -> TerminalGridSize {
+    let contentWidth = max(0, size.width - insets.left - insets.right)
+    let contentHeight = max(0, size.height - insets.top - insets.bottom)
+    let columns = max(1, Int(floor(contentWidth / metrics.cellWidth)))
+    let rows = max(1, Int(floor(contentHeight / metrics.cellHeight)))
     return TerminalGridSize(
       columns: UInt16(clamping: columns),
       rows: UInt16(clamping: rows)
@@ -142,6 +161,7 @@ struct TerminalTextRun: Equatable {
   let startColumn: Int
   let cellCount: Int
   let style: TerminalTextStyle
+  let cells: [TerminalRenderableCell]
 }
 
 enum TerminalLineRunBuilder {
@@ -151,6 +171,7 @@ enum TerminalLineRunBuilder {
     var currentStyle: TerminalTextStyle?
     var currentStart = 0
     var currentCellCount = 0
+    var currentCells: [TerminalRenderableCell] = []
     var column = 0
 
     func flush() {
@@ -162,12 +183,14 @@ enum TerminalLineRunBuilder {
           text: currentText,
           startColumn: currentStart,
           cellCount: currentCellCount,
-          style: style
+          style: style,
+          cells: currentCells
         )
       )
       currentText = ""
       currentStyle = nil
       currentCellCount = 0
+      currentCells.removeAll(keepingCapacity: true)
     }
 
     for cell in cells {
@@ -178,10 +201,87 @@ enum TerminalLineRunBuilder {
       }
       currentText += cell.text
       currentCellCount += cell.cellCount
+      currentCells.append(cell)
       column += cell.cellCount
     }
     flush()
     return runs
+  }
+}
+
+struct TerminalGlyphGridCell: Equatable {
+  let utf16Range: Range<Int>
+  let startColumn: Int
+}
+
+enum TerminalGlyphGridLayout {
+  static func cells(for run: TerminalTextRun) -> [TerminalGlyphGridCell] {
+    var utf16Offset = 0
+    var column = 0
+    return run.cells.map { cell in
+      let length = cell.text.utf16.count
+      defer {
+        utf16Offset += length
+        column += cell.cellCount
+      }
+      return TerminalGlyphGridCell(
+        utf16Range: utf16Offset..<(utf16Offset + length),
+        startColumn: column
+      )
+    }
+  }
+
+  static func cellXPositions(
+    for run: TerminalTextRun,
+    cellWidth: CGFloat,
+    leftInset: CGFloat
+  ) -> [CGFloat] {
+    cells(for: run).map {
+      leftInset + CGFloat(run.startColumn + $0.startColumn) * cellWidth
+    }
+  }
+
+  static func cellsByUTF16Index(for run: TerminalTextRun) -> [TerminalGlyphGridCell] {
+    var result: [TerminalGlyphGridCell] = []
+    result.reserveCapacity(run.text.utf16.count)
+    for cell in cells(for: run) {
+      result.append(contentsOf: repeatElement(cell, count: cell.utf16Range.count))
+    }
+    return result
+  }
+}
+
+enum TerminalPaneGeometry {
+  static func rowTopOffset(
+    _ row: UInt16,
+    metrics: TerminalCellMetrics,
+    insets: TerminalContentInsets
+  ) -> CGFloat {
+    insets.top + CGFloat(row) * metrics.cellHeight
+  }
+
+  static func rowRectY(
+    _ row: UInt16,
+    bounds: NSRect,
+    metrics: TerminalCellMetrics,
+    insets: TerminalContentInsets
+  ) -> CGFloat {
+    bounds.height - rowTopOffset(row, metrics: metrics, insets: insets) - metrics.cellHeight
+  }
+
+  static func cursorCellRect(
+    cursor: LocusTermCursor,
+    bounds: NSRect,
+    metrics: TerminalCellMetrics,
+    insets: TerminalContentInsets
+  ) -> NSRect {
+    let column = cursor.wide_tail ? max(0, Int(cursor.x) - 1) : Int(cursor.x)
+    return NSRect(
+      x: insets.left + CGFloat(column) * metrics.cellWidth,
+      y: rowRectY(cursor.y, bounds: bounds, metrics: metrics, insets: insets),
+      width: cursor.wide_tail ? metrics.cellWidth * 2 : metrics.cellWidth,
+      height: metrics.cellHeight
+    )
   }
 }
 
@@ -621,17 +721,22 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
       return .zero
     }
 
-    var cursorX: UInt16 = 0
-    var cursorY: UInt16 = 0
+    var cursor = LocusTermCursor(
+      x: 0,
+      y: 0,
+      visible: false,
+      blinking: false,
+      wide_tail: false,
+      style: 0
+    )
     session?.withFrame { frame in
-      cursorX = frame.cursor.x
-      cursorY = frame.cursor.y
+      cursor = frame.cursor
     }
-    let localRect = NSRect(
-      x: CGFloat(cursorX) * metrics.cellWidth,
-      y: rowRectY(cursorY),
-      width: metrics.cellWidth,
-      height: metrics.cellHeight
+    let localRect = TerminalPaneGeometry.cursorCellRect(
+      cursor: cursor,
+      bounds: bounds,
+      metrics: metrics,
+      insets: TerminalPaneLayoutMetrics.contentInsets
     )
     return window.convertToScreen(convert(localRect, to: nil))
   }
@@ -752,7 +857,11 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     guard bounds.width > 0, bounds.height > 0 else {
       return nil
     }
-    return TerminalCellMetrics.gridSize(for: bounds.size, metrics: metrics)
+    return TerminalCellMetrics.gridSize(
+      for: bounds.size,
+      metrics: metrics,
+      insets: TerminalPaneLayoutMetrics.contentInsets
+    )
   }
 
   private func deliverPendingTerminalResize() {
@@ -815,7 +924,6 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     var column = 0
     for cell in cells[range] {
       guard TerminalCellWidth(rawValue: cell.wide) != .spacerTail else {
-        column += 1
         continue
       }
 
@@ -825,7 +933,8 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
       if colors.background != .defaultBackground {
         colors.background.nsColor.setFill()
         NSRect(
-          x: CGFloat(column) * metrics.cellWidth,
+          x: TerminalPaneLayoutMetrics.contentInsets.left
+            + CGFloat(column) * metrics.cellWidth,
           y: rowRectY(row.y),
           width: CGFloat(width) * metrics.cellWidth,
           height: metrics.cellHeight
@@ -861,18 +970,9 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
       )
     }
 
-    let baselineFromTop = rowTopOffset(row.y) + metrics.baselineOffset
+    let baselineY = bounds.height - rowTopOffset(row.y) - metrics.baselineOffset
     for run in TerminalLineRunBuilder.runs(for: renderableCells) where !run.text.isEmpty {
-      let attributed = attributedString(for: run)
-      let line = CTLineCreateWithAttributedString(attributed)
-      context.saveGState()
-      context.textMatrix = .identity
-      context.textPosition = CGPoint(
-        x: CGFloat(run.startColumn) * metrics.cellWidth,
-        y: bounds.height - baselineFromTop
-      )
-      CTLineDraw(line, context)
-      context.restoreGState()
+      drawGridAlignedText(run, baselineY: baselineY, in: context)
     }
   }
 
@@ -884,17 +984,142 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     }
 
     // TODO: blink, invisible, and overline require timing/decoration support.
-    var attributes: [NSAttributedString.Key: Any] = [
+    let attributes: [NSAttributedString.Key: Any] = [
       .font: metrics.font(for: run.style.flags),
       .foregroundColor: foreground,
+      .ligature: 0,
     ]
+    return NSAttributedString(string: run.text, attributes: attributes)
+  }
+
+  private func drawGridAlignedText(
+    _ run: TerminalTextRun,
+    baselineY: CGFloat,
+    in context: CGContext
+  ) {
+    let line = CTLineCreateWithAttributedString(attributedString(for: run))
+    let gridCellsByUTF16Index = TerminalGlyphGridLayout.cellsByUTF16Index(for: run)
+    let foreground = resolvedForegroundColor(for: run.style)
+
+    context.saveGState()
+    context.textMatrix = .identity
+    context.setFillColor(foreground.cgColor)
+
+    for case let glyphRun as CTRun in CTLineGetGlyphRuns(line) as NSArray {
+      drawGlyphRun(
+        glyphRun,
+        line: line,
+        terminalRun: run,
+        gridCellsByUTF16Index: gridCellsByUTF16Index,
+        baselineY: baselineY,
+        in: context
+      )
+    }
+    drawDecorations(for: run, baselineY: baselineY, color: foreground, in: context)
+    context.restoreGState()
+  }
+
+  private func drawGlyphRun(
+    _ glyphRun: CTRun,
+    line: CTLine,
+    terminalRun: TerminalTextRun,
+    gridCellsByUTF16Index: [TerminalGlyphGridCell],
+    baselineY: CGFloat,
+    in context: CGContext
+  ) {
+    let count = CTRunGetGlyphCount(glyphRun)
+    guard count > 0 else {
+      return
+    }
+
+    var glyphs = [CGGlyph](repeating: 0, count: count)
+    var naturalPositions = [CGPoint](repeating: .zero, count: count)
+    var stringIndices = [CFIndex](repeating: 0, count: count)
+    CTRunGetGlyphs(glyphRun, CFRange(location: 0, length: 0), &glyphs)
+    CTRunGetPositions(glyphRun, CFRange(location: 0, length: 0), &naturalPositions)
+    CTRunGetStringIndices(glyphRun, CFRange(location: 0, length: 0), &stringIndices)
+
+    var gridPositions: [CGPoint] = []
+    gridPositions.reserveCapacity(count)
+    for (index, naturalPosition) in zip(stringIndices, naturalPositions) {
+      guard
+        index != kCFNotFound,
+        index >= 0,
+        index < gridCellsByUTF16Index.count
+      else {
+        gridPositions.append(
+          CGPoint(
+            x: TerminalPaneLayoutMetrics.contentInsets.left
+              + CGFloat(terminalRun.startColumn) * metrics.cellWidth
+              + naturalPosition.x,
+            y: baselineY + naturalPosition.y
+          )
+        )
+        continue
+      }
+      let cell = gridCellsByUTF16Index[index]
+
+      let naturalCellX = CGFloat(
+        CTLineGetOffsetForStringIndex(line, cell.utf16Range.lowerBound, nil))
+      let gridCellX =
+        TerminalPaneLayoutMetrics.contentInsets.left
+        + CGFloat(terminalRun.startColumn + cell.startColumn) * metrics.cellWidth
+      gridPositions.append(
+        CGPoint(
+          x: gridCellX + naturalPosition.x - naturalCellX,
+          y: baselineY + naturalPosition.y
+        )
+      )
+    }
+
+    let attributes = CTRunGetAttributes(glyphRun) as NSDictionary
+    let runFont = attributes[kCTFontAttributeName as String] as? NSFont
+    let font = (runFont ?? metrics.font(for: terminalRun.style.flags)) as CTFont
+    glyphs.withUnsafeBufferPointer { glyphBuffer in
+      gridPositions.withUnsafeBufferPointer { positionBuffer in
+        guard
+          let glyphBaseAddress = glyphBuffer.baseAddress,
+          let positionBaseAddress = positionBuffer.baseAddress
+        else {
+          return
+        }
+        CTFontDrawGlyphs(
+          font,
+          glyphBaseAddress,
+          positionBaseAddress,
+          count,
+          context
+        )
+      }
+    }
+  }
+
+  private func drawDecorations(
+    for run: TerminalTextRun,
+    baselineY: CGFloat,
+    color: NSColor,
+    in context: CGContext
+  ) {
+    guard run.style.flags.contains(.underline) || run.style.flags.contains(.strikethrough) else {
+      return
+    }
+
+    let font = metrics.font(for: run.style.flags) as CTFont
+    let x =
+      TerminalPaneLayoutMetrics.contentInsets.left
+      + CGFloat(run.startColumn) * metrics.cellWidth
+    let width = CGFloat(run.cellCount) * metrics.cellWidth
+    context.setFillColor(color.cgColor)
     if run.style.flags.contains(.underline) {
-      attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+      let thickness = max(1, CGFloat(CTFontGetUnderlineThickness(font)))
+      let y = baselineY + CGFloat(CTFontGetUnderlinePosition(font))
+      context.fill(CGRect(x: x, y: y, width: width, height: thickness))
     }
     if run.style.flags.contains(.strikethrough) {
-      attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+      let thickness = max(1, CGFloat(CTFontGetUnderlineThickness(font)))
+      let y = baselineY + CGFloat(CTFontGetXHeight(font)) * 0.5
+      context.fill(CGRect(x: x, y: y, width: width, height: thickness))
     }
-    return NSAttributedString(string: run.text, attributes: attributes)
   }
 
   private func drawCursor(_ cursor: LocusTermCursor, in context: CGContext) {
@@ -902,25 +1127,25 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
       return
     }
 
-    let cursorWidth = cursor.wide_tail ? metrics.cellWidth * 2 : metrics.cellWidth
-    let cursorX =
-      cursor.wide_tail
-      ? CGFloat(cursor.x == 0 ? 0 : cursor.x - 1) * metrics.cellWidth
-      : CGFloat(cursor.x) * metrics.cellWidth
-    let cursorY = rowRectY(cursor.y)
+    let cellRect = TerminalPaneGeometry.cursorCellRect(
+      cursor: cursor,
+      bounds: bounds,
+      metrics: metrics,
+      insets: TerminalPaneLayoutMetrics.contentInsets
+    )
     let rect: NSRect
     switch cursor.style {
     case 2:
       rect = NSRect(
-        x: cursorX,
-        y: cursorY + metrics.cellHeight - 2,
-        width: cursorWidth,
+        x: cellRect.minX,
+        y: cellRect.minY + metrics.cellHeight - 2,
+        width: cellRect.width,
         height: 2
       )
     case 3:
-      rect = NSRect(x: cursorX, y: cursorY, width: 2, height: metrics.cellHeight)
+      rect = NSRect(x: cellRect.minX, y: cellRect.minY, width: 2, height: metrics.cellHeight)
     default:
-      rect = NSRect(x: cursorX, y: cursorY, width: cursorWidth, height: metrics.cellHeight)
+      rect = cellRect
     }
 
     NSColor.textColor.withAlphaComponent(cursor.style == 1 ? 0.28 : 0.9).setFill()
@@ -947,7 +1172,9 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
       metrics.cellWidth,
       CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
     )
-    let x = CGFloat(cursor.x) * metrics.cellWidth
+    let x =
+      TerminalPaneLayoutMetrics.contentInsets.left
+      + CGFloat(cursor.x) * metrics.cellWidth
     backgroundColor.setFill()
     NSRect(x: x, y: rowRectY(cursor.y), width: width, height: metrics.cellHeight).fill()
 
@@ -1026,11 +1253,28 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   }
 
   private func rowTopOffset(_ row: UInt16) -> CGFloat {
-    CGFloat(row) * metrics.cellHeight
+    TerminalPaneGeometry.rowTopOffset(
+      row,
+      metrics: metrics,
+      insets: TerminalPaneLayoutMetrics.contentInsets
+    )
   }
 
   private func rowRectY(_ row: UInt16) -> CGFloat {
-    bounds.height - rowTopOffset(row) - metrics.cellHeight
+    TerminalPaneGeometry.rowRectY(
+      row,
+      bounds: bounds,
+      metrics: metrics,
+      insets: TerminalPaneLayoutMetrics.contentInsets
+    )
+  }
+
+  private func resolvedForegroundColor(for style: TerminalTextStyle) -> NSColor {
+    var foreground = nsColor(forForeground: style.resolvedColors.foreground)
+    if style.flags.contains(.faint) {
+      foreground = foreground.withAlphaComponent(0.55)
+    }
+    return foreground
   }
 
   private func nsColor(forForeground color: TerminalColor) -> NSColor {

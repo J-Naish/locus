@@ -27,6 +27,27 @@ final class TerminalPaneViewTests: XCTestCase {
     XCTAssertEqual(clamped, TerminalGridSize(columns: 1, rows: 1))
   }
 
+  func testGridSizeAccountsForInsets() {
+    let metrics = TerminalCellMetrics()
+    let size = CGSize(width: 400, height: 300)
+    let insets = TerminalPaneLayoutMetrics.contentInsets
+
+    let grid = TerminalCellMetrics.gridSize(
+      for: size,
+      metrics: metrics,
+      insets: insets
+    )
+
+    XCTAssertEqual(
+      grid.columns,
+      UInt16(floor((size.width - insets.left - insets.right) / metrics.cellWidth))
+    )
+    XCTAssertEqual(
+      grid.rows,
+      UInt16(floor((size.height - insets.top - insets.bottom) / metrics.cellHeight))
+    )
+  }
+
   func testStyleRunGroupingBuildsAttributedLine() {
     let normal = TerminalTextStyle(
       foreground: .defaultForeground,
@@ -52,6 +73,61 @@ final class TerminalPaneViewTests: XCTestCase {
     XCTAssertEqual(runs.map(\.text), ["a", "bc", "d"])
   }
 
+  func testGlyphPositionsAreGridAligned() throws {
+    let metrics = TerminalCellMetrics()
+    let style = TerminalTextStyle(
+      foreground: .defaultForeground,
+      background: .defaultBackground,
+      flags: []
+    )
+    let run = try XCTUnwrap(
+      TerminalLineRunBuilder.runs(
+        for: [
+          TerminalRenderableCell(text: "a", cellCount: 1, style: style),
+          TerminalRenderableCell(text: "b", cellCount: 1, style: style),
+          TerminalRenderableCell(text: "c", cellCount: 1, style: style),
+        ]
+      ).first
+    )
+
+    let positions = TerminalGlyphGridLayout.cellXPositions(
+      for: run,
+      cellWidth: metrics.cellWidth,
+      leftInset: TerminalPaneLayoutMetrics.contentInsets.left
+    )
+
+    XCTAssertEqual(
+      positions,
+      [
+        TerminalPaneLayoutMetrics.contentInsets.left,
+        TerminalPaneLayoutMetrics.contentInsets.left + metrics.cellWidth,
+        TerminalPaneLayoutMetrics.contentInsets.left + metrics.cellWidth * 2,
+      ]
+    )
+  }
+
+  func testCursorRectMatchesColumnPosition() {
+    let metrics = TerminalCellMetrics()
+    let insets = TerminalPaneLayoutMetrics.contentInsets
+    let cursor = LocusTermCursor(
+      x: 30,
+      y: 2,
+      visible: true,
+      blinking: false,
+      wide_tail: false,
+      style: 1
+    )
+
+    let rect = TerminalPaneGeometry.cursorCellRect(
+      cursor: cursor,
+      bounds: NSRect(x: 0, y: 0, width: 800, height: 400),
+      metrics: metrics,
+      insets: insets
+    )
+
+    XCTAssertEqual(rect.minX, insets.left + 30 * metrics.cellWidth)
+  }
+
   func testInverseSwapsColors() {
     let style = TerminalTextStyle(
       foreground: TerminalColor(red: 1, green: 2, blue: 3),
@@ -75,12 +151,7 @@ final class TerminalPaneViewTests: XCTestCase {
       session.terminate()
     }
     let view = TerminalPaneView(session: session, metrics: metrics)
-    view.frame = NSRect(
-      x: 0,
-      y: 0,
-      width: metrics.cellWidth * 40,
-      height: metrics.cellHeight * 10
-    )
+    view.frame = gridFrame(columns: 40, rows: 10, metrics: metrics)
     session.start(command: "/bin/sh")
     session.send(Data("echo hi\n".utf8))
     XCTAssertTrue(
@@ -111,12 +182,7 @@ final class TerminalPaneViewTests: XCTestCase {
     }
     let metrics = TerminalCellMetrics()
     let view = TerminalPaneView(session: session, metrics: metrics)
-    view.frame = NSRect(
-      x: 0,
-      y: 0,
-      width: metrics.cellWidth * 40,
-      height: metrics.cellHeight * 10
-    )
+    view.frame = gridFrame(columns: 40, rows: 10, metrics: metrics)
     let host = TerminalPaneViewHost(view: view)
 
     session.start(command: "/bin/sh")
@@ -205,11 +271,12 @@ private func gridFrame(
   rows: UInt16,
   metrics: TerminalCellMetrics
 ) -> NSRect {
-  NSRect(
+  let insets = TerminalPaneLayoutMetrics.contentInsets
+  return NSRect(
     x: 0,
     y: 0,
-    width: metrics.cellWidth * CGFloat(columns),
-    height: metrics.cellHeight * CGFloat(rows)
+    width: insets.left + metrics.cellWidth * CGFloat(columns) + insets.right,
+    height: insets.top + metrics.cellHeight * CGFloat(rows) + insets.bottom
   )
 }
 

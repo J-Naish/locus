@@ -198,9 +198,13 @@ struct HomeView: View {
       minHeight: LocusWindowMetrics.minimumHeight
     )
     .task {
+      terminalPanelState.currentWorkspaceFolder = workspaceState.folderURL
       refreshFileLocationShortcuts()
       loadInitialFolderIfNeeded()
       openPendingWorkspaceFolderRequests()
+    }
+    .onChange(of: workspaceState.folderURL) { _, folderURL in
+      terminalPanelState.currentWorkspaceFolder = folderURL
     }
     .onOpenURL { url in
       openWorkspaceFolderURL(url)
