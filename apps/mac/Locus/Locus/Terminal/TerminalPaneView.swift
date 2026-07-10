@@ -9,6 +9,11 @@ struct TerminalGridSize: Equatable {
   let rows: UInt16
 }
 
+struct TerminalCellCoordinate: Equatable, Sendable {
+  let column: UInt16
+  let row: UInt16
+}
+
 struct TerminalContentInsets: Equatable {
   let top: CGFloat
   let left: CGFloat
@@ -20,6 +25,29 @@ struct TerminalContentInsets: Equatable {
 
 enum TerminalPaneLayoutMetrics {
   static let contentInsets = TerminalContentInsets(top: 10, left: 12, bottom: 10, right: 12)
+}
+
+private enum TerminalCursorMetrics {
+  static let thickness: CGFloat = 2
+  static let activeAlpha: CGFloat = 0.9
+  static let inactiveAlpha: CGFloat = 0.4
+}
+
+enum TerminalCaretBlink {
+  static let phaseDuration: TimeInterval = 0.6
+
+  static func caretVisible(
+    at time: TimeInterval,
+    lastInput: TimeInterval,
+    blinking: Bool
+  ) -> Bool {
+    guard blinking else {
+      return true
+    }
+    let elapsed = max(0, time - lastInput)
+    let phase = Int(floor(elapsed / phaseDuration))
+    return phase.isMultiple(of: 2)
+  }
 }
 
 private enum TerminalPaneTiming {
@@ -283,6 +311,43 @@ enum TerminalPaneGeometry {
       height: metrics.cellHeight
     )
   }
+
+  static func cursorBarRect(
+    cursor: LocusTermCursor,
+    bounds: NSRect,
+    metrics: TerminalCellMetrics,
+    insets: TerminalContentInsets
+  ) -> NSRect {
+    let cellRect = cursorCellRect(
+      cursor: cursor,
+      bounds: bounds,
+      metrics: metrics,
+      insets: insets
+    )
+    return NSRect(
+      x: cellRect.minX,
+      y: cellRect.minY,
+      width: TerminalCursorMetrics.thickness,
+      height: metrics.cellHeight
+    )
+  }
+
+  /// Converts a top-left-origin point in the terminal view into a clamped cell.
+  static func cellCoordinate(
+    for point: NSPoint,
+    metrics: TerminalCellMetrics,
+    insets: TerminalContentInsets,
+    grid: TerminalGridSize
+  ) -> TerminalCellCoordinate {
+    let rawColumn = Int(floor((point.x - insets.left) / metrics.cellWidth))
+    let rawRow = Int(floor((point.y - insets.top) / metrics.cellHeight))
+    let column = min(max(rawColumn, 0), max(0, Int(grid.columns) - 1))
+    let row = min(max(rawRow, 0), max(0, Int(grid.rows) - 1))
+    return TerminalCellCoordinate(
+      column: UInt16(clamping: column),
+      row: UInt16(clamping: row)
+    )
+  }
 }
 
 struct TerminalKeyInput: Equatable, Sendable {
@@ -345,6 +410,102 @@ struct TerminalKeyEvent: Equatable, Sendable {
   }
 }
 
+enum TerminalCaretMovement {
+  static func events(
+    from current: TerminalCellCoordinate,
+    to destination: TerminalCellCoordinate
+  ) -> [TerminalKeyEvent] {
+    guard current.row == destination.row else {
+      return []
+    }
+    let delta = Int(destination.column) - Int(current.column)
+    guard delta != 0 else {
+      return []
+    }
+    let key = delta > 0 ? LOCUS_TERM_KEY_ARROW_RIGHT : LOCUS_TERM_KEY_ARROW_LEFT
+    let event = TerminalKeyEvent.keyPress(key)
+    return Array(repeating: event, count: abs(delta))
+  }
+}
+
+enum TerminalCaretClickResolver {
+  static func resolveCaretClick(
+    row: Int,
+    column: Int,
+    cursorRow: Int,
+    frameRows: [Bool]
+  ) -> Int? {
+    guard
+      row >= 0,
+      row < frameRows.count,
+      cursorRow >= 0,
+      cursorRow < frameRows.count,
+      column >= 0
+    else {
+      return nil
+    }
+
+    if abs(row - cursorRow) <= 1 {
+      return column
+    }
+    if row > cursorRow, frameRows[row...].allSatisfy({ $0 }) {
+      return column
+    }
+    return nil
+  }
+}
+
+enum TerminalCommandKeyTranslator {
+  static func terminalKey(for selector: Selector) -> TerminalKeyEvent? {
+    let key: UInt32
+    switch NSStringFromSelector(selector) {
+    case "moveLeft:":
+      key = LOCUS_TERM_KEY_ARROW_LEFT
+    case "moveRight:":
+      key = LOCUS_TERM_KEY_ARROW_RIGHT
+    case "moveUp:":
+      key = LOCUS_TERM_KEY_ARROW_UP
+    case "moveDown:":
+      key = LOCUS_TERM_KEY_ARROW_DOWN
+    case "insertNewline:":
+      key = LOCUS_TERM_KEY_ENTER
+    case "deleteBackward:":
+      key = LOCUS_TERM_KEY_BACKSPACE
+    case "deleteForward:":
+      key = LOCUS_TERM_KEY_DELETE
+    case "insertTab:":
+      key = LOCUS_TERM_KEY_TAB
+    case "cancelOperation:":
+      key = LOCUS_TERM_KEY_ESCAPE
+    case "pageUp:":
+      key = LOCUS_TERM_KEY_PAGE_UP
+    case "pageDown:":
+      key = LOCUS_TERM_KEY_PAGE_DOWN
+    case "scrollToBeginningOfDocument:":
+      key = LOCUS_TERM_KEY_HOME
+    case "scrollToEndOfDocument:":
+      key = LOCUS_TERM_KEY_END
+    default:
+      return nil
+    }
+    return TerminalKeyEvent.keyPress(key)
+  }
+}
+
+extension TerminalKeyEvent {
+  fileprivate static func keyPress(_ key: UInt32) -> TerminalKeyEvent {
+    TerminalKeyEvent(
+      action: LOCUS_TERM_ACTION_PRESS,
+      key: key,
+      modifiers: [],
+      consumedModifiers: [],
+      composing: false,
+      utf8: Data(),
+      unshiftedCodepoint: 0
+    )
+  }
+}
+
 enum TerminalKeyTranslator {
   // Device-dependent masks from IOKit/hidsystem/IOLLEvent.h. NSEvent always
   // supplies the device-independent modifier, but these low bits are present
@@ -381,14 +542,6 @@ enum TerminalKeyTranslator {
       utf8: Data(text.utf8),
       unshiftedCodepoint: input.charactersIgnoringModifiers?.unicodeScalars.first?.value ?? 0
     )
-  }
-
-  static func shouldInterpretText(_ input: TerminalKeyInput) -> Bool {
-    let flags = NSEvent.ModifierFlags(rawValue: input.modifierFlagsRawValue)
-    guard !flags.contains(.command), !flags.contains(.control) else {
-      return false
-    }
-    return terminalKey(for: input.keyCode) == LOCUS_TERM_KEY_UNIDENTIFIED
   }
 
   private static func terminalText(
@@ -541,6 +694,10 @@ struct TerminalPane: NSViewRepresentable {
 }
 
 final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
+  private struct PendingClick {
+    let location: NSPoint
+  }
+
   var onWindowChange: ((TerminalPaneView) -> Void)?
   var session: TerminalSession? {
     didSet {
@@ -558,6 +715,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
 
   private let metrics: TerminalCellMetrics
   private let resizeObserver: ((TerminalGridSize) -> Void)?
+  private let keyEventObserver: ((TerminalKeyEvent) -> Void)?
   private var cancellable: AnyCancellable?
   private var hasPendingFrameChange = true
   private var lastScheduledGeneration: UInt64?
@@ -566,9 +724,12 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   private var frameDisplayLink: CADisplayLink?
   private var markedTextStorage: NSAttributedString?
   private var markedSelection = NSRange(location: NSNotFound, length: 0)
-  private var handledTextDuringKeyInterpretation = false
+  private var handledInputDuringKeyInterpretation = false
   private var pendingGridSize: TerminalGridSize?
   private var resizeTask: Task<Void, Never>?
+  private var pendingClick: PendingClick?
+  private var lastCaretInputTime = CACurrentMediaTime()
+  private var lastScheduledCaretVisibility: Bool?
 
   override var acceptsFirstResponder: Bool { true }
   override var isOpaque: Bool { true }
@@ -576,13 +737,16 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   init(
     session: TerminalSession? = nil,
     metrics: TerminalCellMetrics = TerminalCellMetrics(),
-    resizeObserver: ((TerminalGridSize) -> Void)? = nil
+    resizeObserver: ((TerminalGridSize) -> Void)? = nil,
+    keyEventObserver: ((TerminalKeyEvent) -> Void)? = nil
   ) {
     self.session = session
     self.metrics = metrics
     self.resizeObserver = resizeObserver
+    self.keyEventObserver = keyEventObserver
     super.init(frame: .zero)
     wantsLayer = true
+    observeActiveFocusChanges()
     subscribeToSession()
   }
 
@@ -595,6 +759,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     MainActor.assumeIsolated {
       resizeTask?.cancel()
       stopDisplayLink()
+      NotificationCenter.default.removeObserver(self)
     }
   }
 
@@ -622,42 +787,111 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
 
   override func mouseDown(with event: NSEvent) {
     window?.makeFirstResponder(self)
+    let significantModifiers = event.modifierFlags.intersection([
+      .command, .control, .option, .shift,
+    ])
+    if event.clickCount == 1, significantModifiers.isEmpty {
+      pendingClick = PendingClick(location: topLeftPoint(for: event))
+    } else {
+      pendingClick = nil
+    }
     super.mouseDown(with: event)
+  }
+
+  override func mouseDragged(with event: NSEvent) {
+    if let pendingClick,
+      distance(from: pendingClick.location, to: topLeftPoint(for: event))
+        > metrics.cellWidth
+    {
+      self.pendingClick = nil
+    }
+    super.mouseDragged(with: event)
+  }
+
+  override func mouseUp(with event: NSEvent) {
+    defer {
+      pendingClick = nil
+      super.mouseUp(with: event)
+    }
+    guard let pendingClick else {
+      return
+    }
+    let releasePoint = topLeftPoint(for: event)
+    guard
+      distance(from: pendingClick.location, to: releasePoint)
+        <= metrics.cellWidth,
+      let gridSize = currentGridSize()
+    else {
+      return
+    }
+    let destination = TerminalPaneGeometry.cellCoordinate(
+      for: releasePoint,
+      metrics: metrics,
+      insets: TerminalPaneLayoutMetrics.contentInsets,
+      grid: gridSize
+    )
+    moveCaret(to: destination)
+  }
+
+  override func becomeFirstResponder() -> Bool {
+    let didBecome = super.becomeFirstResponder()
+    if didBecome {
+      resetCaretBlink()
+    }
+    return didBecome
+  }
+
+  override func resignFirstResponder() -> Bool {
+    let didResign = super.resignFirstResponder()
+    if didResign {
+      needsDisplay = true
+    }
+    return didResign
   }
 
   override func keyDown(with event: NSEvent) {
     let input = TerminalKeyInput(event: event)
-    guard TerminalKeyTranslator.translate(input) != nil else {
+    guard let translated = TerminalKeyTranslator.translate(input) else {
       super.keyDown(with: event)
       return
     }
 
     let hadMarkedText = hasMarkedText()
-    handledTextDuringKeyInterpretation = false
-    if hadMarkedText || TerminalKeyTranslator.shouldInterpretText(input) {
+    handledInputDuringKeyInterpretation = false
+    if hadMarkedText {
       interpretKeyEvents([event])
-      if hadMarkedText || handledTextDuringKeyInterpretation {
-        return
-      }
+      return
     }
 
-    if let translated = TerminalKeyTranslator.translate(input) {
-      session?.sendKey(translated)
+    if translated.key != LOCUS_TERM_KEY_UNIDENTIFIED
+      || translated.modifiers.contains(.control)
+    {
+      sendTerminalKey(translated)
+      return
+    }
+
+    interpretKeyEvents([event])
+    if !handledInputDuringKeyInterpretation {
+      sendTerminalKey(translated)
     }
   }
 
   override func doCommand(by selector: Selector) {
-    // Key bindings such as arrows and Enter return to keyDown for terminal
-    // translation. Swallowing the AppKit command prevents the system beep.
+    handledInputDuringKeyInterpretation = true
+    guard let event = TerminalCommandKeyTranslator.terminalKey(for: selector) else {
+      return
+    }
+    sendTerminalKey(event)
   }
 
   func insertText(_ string: Any, replacementRange: NSRange) {
-    handledTextDuringKeyInterpretation = true
+    handledInputDuringKeyInterpretation = true
     clearMarkedText()
     let text = Self.string(fromTextInput: string)
     guard !text.isEmpty else {
       return
     }
+    resetCaretBlink()
     session?.send(Data(text.utf8))
   }
 
@@ -666,7 +900,8 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     selectedRange: NSRange,
     replacementRange: NSRange
   ) {
-    handledTextDuringKeyInterpretation = true
+    handledInputDuringKeyInterpretation = true
+    resetCaretBlink()
     let attributed = Self.attributedString(fromTextInput: string)
     if attributed.length == 0 {
       clearMarkedText()
@@ -674,11 +909,11 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     }
     markedTextStorage = attributed
     markedSelection = selectedRange
-    needsDisplay = true
   }
 
   func unmarkText() {
-    handledTextDuringKeyInterpretation = true
+    handledInputDuringKeyInterpretation = true
+    resetCaretBlink()
     let text = markedTextStorage?.string ?? ""
     clearMarkedText()
     if !text.isEmpty {
@@ -796,6 +1031,12 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   }
 
   @objc private func displayLinkDidTick(_ link: CADisplayLink) {
+    let caretVisibility = caretShouldBeVisible(at: CACurrentMediaTime())
+    if caretVisibility != lastScheduledCaretVisibility {
+      lastScheduledCaretVisibility = caretVisibility
+      needsDisplay = true
+    }
+
     guard hasPendingFrameChange, let generation = session?.snapshot?.generation else {
       return
     }
@@ -889,6 +1130,10 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
 
   private var backgroundColor: NSColor {
     .textBackgroundColor
+  }
+
+  private var hasActiveKeyboardFocus: Bool {
+    window?.firstResponder === self && window?.isKeyWindow == true && NSApp.isActive
   }
 
   private func draw(frame: TerminalFrame, in context: CGContext) {
@@ -1123,32 +1368,44 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   }
 
   private func drawCursor(_ cursor: LocusTermCursor, in context: CGContext) {
-    guard cursor.visible else {
+    guard
+      cursor.visible,
+      !hasActiveKeyboardFocus
+        || TerminalCaretBlink.caretVisible(
+          at: CACurrentMediaTime(),
+          lastInput: lastCaretInputTime,
+          blinking: cursor.blinking
+        )
+    else {
       return
     }
 
-    let cellRect = TerminalPaneGeometry.cursorCellRect(
-      cursor: cursor,
-      bounds: bounds,
-      metrics: metrics,
-      insets: TerminalPaneLayoutMetrics.contentInsets
-    )
     let rect: NSRect
-    switch cursor.style {
-    case 2:
+    if cursor.style == 2 {
+      let cellRect = TerminalPaneGeometry.cursorCellRect(
+        cursor: cursor,
+        bounds: bounds,
+        metrics: metrics,
+        insets: TerminalPaneLayoutMetrics.contentInsets
+      )
       rect = NSRect(
         x: cellRect.minX,
-        y: cellRect.minY + metrics.cellHeight - 2,
+        y: cellRect.minY,
         width: cellRect.width,
-        height: 2
+        height: TerminalCursorMetrics.thickness
       )
-    case 3:
-      rect = NSRect(x: cellRect.minX, y: cellRect.minY, width: 2, height: metrics.cellHeight)
-    default:
-      rect = cellRect
+    } else {
+      // The frame cannot distinguish the startup block cursor from an app's
+      // explicit block request, so both block and bar styles use the quiet bar.
+      rect = TerminalPaneGeometry.cursorBarRect(
+        cursor: cursor,
+        bounds: bounds,
+        metrics: metrics,
+        insets: TerminalPaneLayoutMetrics.contentInsets
+      )
     }
 
-    NSColor.textColor.withAlphaComponent(cursor.style == 1 ? 0.28 : 0.9).setFill()
+    cursorColor.setFill()
     rect.fill()
   }
 
@@ -1186,6 +1443,165 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     )
     CTLineDraw(line, context)
     context.restoreGState()
+
+    let cursorX = min(
+      x + width,
+      bounds.maxX
+        - TerminalPaneLayoutMetrics.contentInsets.right
+        - TerminalCursorMetrics.thickness
+    )
+    cursorColor.setFill()
+    NSRect(
+      x: cursorX,
+      y: rowRectY(cursor.y),
+      width: TerminalCursorMetrics.thickness,
+      height: metrics.cellHeight
+    ).fill()
+  }
+
+  private var cursorColor: NSColor {
+    NSColor.labelColor.withAlphaComponent(
+      hasActiveKeyboardFocus
+        ? TerminalCursorMetrics.activeAlpha
+        : TerminalCursorMetrics.inactiveAlpha
+    )
+  }
+
+  private func topLeftPoint(for event: NSEvent) -> NSPoint {
+    let localPoint = convert(event.locationInWindow, from: nil)
+    return NSPoint(x: localPoint.x, y: bounds.height - localPoint.y)
+  }
+
+  private func distance(from start: NSPoint, to end: NSPoint) -> CGFloat {
+    hypot(end.x - start.x, end.y - start.y)
+  }
+
+  private func moveCaret(to clickedCoordinate: TerminalCellCoordinate) {
+    guard let session else {
+      return
+    }
+    var cursorCoordinate: TerminalCellCoordinate?
+    var resolvedColumn: UInt16?
+    session.withFrame { frame in
+      guard frame.columns > 0, frame.rows > 0 else {
+        return
+      }
+      cursorCoordinate = TerminalCellCoordinate(
+        column: min(frame.cursor.x, frame.columns - 1),
+        row: min(frame.cursor.y, frame.rows - 1)
+      )
+      let frameRows = terminalBlankRows(frame: frame)
+      if let column = TerminalCaretClickResolver.resolveCaretClick(
+        row: Int(min(clickedCoordinate.row, frame.rows - 1)),
+        column: Int(min(clickedCoordinate.column, frame.columns - 1)),
+        cursorRow: Int(frame.cursor.y),
+        frameRows: frameRows
+      ) {
+        resolvedColumn = UInt16(clamping: column)
+      }
+    }
+    guard let cursorCoordinate, let resolvedColumn else {
+      return
+    }
+    let destination = TerminalCellCoordinate(
+      column: resolvedColumn,
+      row: cursorCoordinate.row
+    )
+    sendTerminalKeys(TerminalCaretMovement.events(from: cursorCoordinate, to: destination))
+  }
+
+  private func observeActiveFocusChanges() {
+    let center = NotificationCenter.default
+    center.addObserver(
+      self,
+      selector: #selector(activeFocusStateDidChange(_:)),
+      name: NSApplication.didBecomeActiveNotification,
+      object: nil
+    )
+    center.addObserver(
+      self,
+      selector: #selector(activeFocusStateDidChange(_:)),
+      name: NSApplication.didResignActiveNotification,
+      object: nil
+    )
+    center.addObserver(
+      self,
+      selector: #selector(activeFocusStateDidChange(_:)),
+      name: NSWindow.didBecomeKeyNotification,
+      object: nil
+    )
+    center.addObserver(
+      self,
+      selector: #selector(activeFocusStateDidChange(_:)),
+      name: NSWindow.didResignKeyNotification,
+      object: nil
+    )
+  }
+
+  @objc private func activeFocusStateDidChange(_ notification: Notification) {
+    if let notificationWindow = notification.object as? NSWindow,
+      notificationWindow !== window
+    {
+      return
+    }
+    lastScheduledCaretVisibility = nil
+    if hasActiveKeyboardFocus {
+      resetCaretBlink()
+    } else {
+      needsDisplay = true
+    }
+  }
+
+  private func caretShouldBeVisible(at time: TimeInterval) -> Bool {
+    guard hasActiveKeyboardFocus, !hasMarkedText() else {
+      return true
+    }
+    return TerminalCaretBlink.caretVisible(
+      at: time,
+      lastInput: lastCaretInputTime,
+      blinking: session?.snapshot?.cursorBlinking ?? false
+    )
+  }
+
+  private func resetCaretBlink() {
+    lastCaretInputTime = CACurrentMediaTime()
+    lastScheduledCaretVisibility = true
+    needsDisplay = true
+  }
+
+  private func sendTerminalKey(_ event: TerminalKeyEvent) {
+    keyEventObserver?(event)
+    session?.sendKey(event)
+    resetCaretBlink()
+  }
+
+  private func sendTerminalKeys(_ events: [TerminalKeyEvent]) {
+    guard !events.isEmpty else {
+      return
+    }
+    for event in events {
+      keyEventObserver?(event)
+    }
+    session?.sendKeys(events)
+    resetCaretBlink()
+  }
+
+  private func terminalBlankRows(frame: TerminalFrame) -> [Bool] {
+    var result = [Bool](repeating: true, count: Int(frame.rows))
+    frame.withRows { rows in
+      frame.withCells { cells in
+        for row in rows where Int(row.y) < result.count {
+          result[Int(row.y)] = cellRange(for: row, cells: cells).allSatisfy { index in
+            let codepoint = cells[index].codepoint
+            guard codepoint != 0 else {
+              return true
+            }
+            return UnicodeScalar(codepoint)?.properties.isWhitespace == true
+          }
+        }
+      }
+    }
+    return result
   }
 
   private func clearMarkedText() {

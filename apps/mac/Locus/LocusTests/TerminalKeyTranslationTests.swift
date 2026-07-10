@@ -86,6 +86,116 @@ final class TerminalKeyTranslationTests: XCTestCase {
     XCTAssertEqual(TerminalModifiers.rightCommand.rawValue, 1 << 9)
   }
 
+  func testCommandSelectorsMapToTerminalKeys() throws {
+    let expected: [(String, UInt32)] = [
+      ("moveLeft:", LOCUS_TERM_KEY_ARROW_LEFT),
+      ("moveRight:", LOCUS_TERM_KEY_ARROW_RIGHT),
+      ("moveUp:", LOCUS_TERM_KEY_ARROW_UP),
+      ("moveDown:", LOCUS_TERM_KEY_ARROW_DOWN),
+      ("insertNewline:", LOCUS_TERM_KEY_ENTER),
+      ("deleteBackward:", LOCUS_TERM_KEY_BACKSPACE),
+      ("deleteForward:", LOCUS_TERM_KEY_DELETE),
+      ("insertTab:", LOCUS_TERM_KEY_TAB),
+      ("cancelOperation:", LOCUS_TERM_KEY_ESCAPE),
+      ("pageUp:", LOCUS_TERM_KEY_PAGE_UP),
+      ("pageDown:", LOCUS_TERM_KEY_PAGE_DOWN),
+      ("scrollToBeginningOfDocument:", LOCUS_TERM_KEY_HOME),
+      ("scrollToEndOfDocument:", LOCUS_TERM_KEY_END),
+    ]
+
+    for (selectorName, key) in expected {
+      let event = try XCTUnwrap(
+        TerminalCommandKeyTranslator.terminalKey(for: Selector(selectorName))
+      )
+      XCTAssertEqual(event.key, key, "Unexpected key for \(selectorName)")
+      XCTAssertEqual(event.action, LOCUS_TERM_ACTION_PRESS)
+    }
+    XCTAssertNil(TerminalCommandKeyTranslator.terminalKey(for: Selector("unknownCommand:")))
+  }
+
+  func testMoveLeftCommandSendsLeftKey() {
+    var received: [TerminalKeyEvent] = []
+    let view = TerminalPaneView(keyEventObserver: { received.append($0) })
+
+    view.doCommand(by: Selector("moveLeft:"))
+
+    XCTAssertEqual(received.map(\.key), [LOCUS_TERM_KEY_ARROW_LEFT])
+  }
+
+  func testArrowKeyDownSendsExactlyOnce() throws {
+    var received: [TerminalKeyEvent] = []
+    let view = TerminalPaneView(keyEventObserver: { received.append($0) })
+    let event = try XCTUnwrap(
+      NSEvent.keyEvent(
+        with: .keyDown,
+        location: .zero,
+        modifierFlags: [],
+        timestamp: 0,
+        windowNumber: 0,
+        context: nil,
+        characters: "",
+        charactersIgnoringModifiers: "",
+        isARepeat: false,
+        keyCode: 123
+      )
+    )
+
+    view.keyDown(with: event)
+
+    XCTAssertEqual(received.map(\.key), [LOCUS_TERM_KEY_ARROW_LEFT])
+  }
+
+  func testMoveLeftCommandMovesCursorThroughPty() throws {
+    let scriptURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("locus-terminal-command-\(UUID().uuidString).sh")
+    try "#!/bin/sh\n/bin/stty raw -echo\nprintf READY\nexec /bin/cat\n".write(
+      to: scriptURL,
+      atomically: true,
+      encoding: .utf8
+    )
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o700],
+      ofItemAtPath: scriptURL.path
+    )
+    defer {
+      try? FileManager.default.removeItem(at: scriptURL)
+    }
+
+    let session = TerminalSession(columns: 40, rows: 10)
+    defer {
+      session.terminate()
+    }
+    let view = TerminalPaneView(session: session)
+    session.start(command: scriptURL.path)
+    XCTAssertTrue(
+      waitForTerminalInputCondition {
+        session.snapshot?.plainText.contains("READY") == true
+      },
+      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+    )
+
+    session.send(Data("abcd".utf8))
+    XCTAssertTrue(
+      waitForTerminalInputCondition {
+        session.snapshot?.plainText.contains("abcd") == true
+      },
+      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+    )
+    let before = try XCTUnwrap(session.snapshot?.cursorX)
+    XCTAssertGreaterThanOrEqual(before, 2)
+    let expected = before - 2
+
+    view.doCommand(by: Selector("moveLeft:"))
+    view.doCommand(by: Selector("moveLeft:"))
+
+    XCTAssertTrue(
+      waitForTerminalInputCondition {
+        session.snapshot?.cursorX == expected
+      },
+      "Cursor was: \(session.snapshot?.cursorX.description ?? "<nil>")"
+    )
+  }
+
   func testInsertTextSendsUtf8ToShell() {
     let session = TerminalSession(columns: 40, rows: 10)
     defer {

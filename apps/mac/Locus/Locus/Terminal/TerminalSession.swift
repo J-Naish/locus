@@ -17,6 +17,7 @@ final class TerminalSession: ObservableObject {
     let rows: UInt16
     let cursorX: UInt16
     let cursorY: UInt16
+    let cursorBlinking: Bool
   }
 
   enum State: Equatable, Sendable {
@@ -71,6 +72,10 @@ final class TerminalSession: ObservableObject {
     worker.sendKey(event)
   }
 
+  func sendKeys(_ events: [TerminalKeyEvent]) {
+    worker.sendKeys(events)
+  }
+
   func resize(columns: UInt16, rows: UInt16) {
     worker.resize(columns: columns, rows: rows)
   }
@@ -110,6 +115,7 @@ private final class TerminalSessionWorker {
     case start(command: String, arguments: [String], currentDirectory: String?)
     case send(Data)
     case sendKey(TerminalKeyEvent)
+    case sendKeys([TerminalKeyEvent])
     case resize(columns: UInt16, rows: UInt16)
     case terminate
   }
@@ -156,6 +162,13 @@ private final class TerminalSessionWorker {
 
   func sendKey(_ event: TerminalKeyEvent) {
     enqueue(.sendKey(event))
+  }
+
+  func sendKeys(_ events: [TerminalKeyEvent]) {
+    guard !events.isEmpty else {
+      return
+    }
+    enqueue(.sendKeys(events))
   }
 
   func resize(columns: UInt16, rows: UInt16) {
@@ -208,6 +221,8 @@ private final class TerminalSessionWorker {
       sendOnQueue(data)
     case .sendKey(let event):
       sendKeyOnQueue(event)
+    case .sendKeys(let events):
+      sendKeysOnQueue(events)
     case .resize(let columns, let rows):
       resizeOnQueue(columns: columns, rows: rows)
     case .terminate:
@@ -278,13 +293,21 @@ private final class TerminalSessionWorker {
   }
 
   private func sendKeyOnQueue(_ event: TerminalKeyEvent) {
+    sendKeysOnQueue([event])
+  }
+
+  private func sendKeysOnQueue(_ events: [TerminalKeyEvent]) {
     guard pty != nil, let terminal else {
       return
     }
 
     do {
-      let encoded = try event.withLocusEvent { rawEvent in
-        try terminal.encodeKey(rawEvent)
+      var encoded = Data()
+      for event in events {
+        let eventData = try event.withLocusEvent { rawEvent in
+          try terminal.encodeKey(rawEvent)
+        }
+        encoded.append(eventData)
       }
       if !encoded.isEmpty {
         try writeAll(encoded)
@@ -362,7 +385,8 @@ private final class TerminalSessionWorker {
       columns: frame.columns,
       rows: frame.rows,
       cursorX: cursor.x,
-      cursorY: cursor.y
+      cursorY: cursor.y,
+      cursorBlinking: cursor.blinking
     )
     publish(snapshot: snapshot)
   }

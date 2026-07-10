@@ -145,6 +145,152 @@ final class TerminalPaneViewTests: XCTestCase {
     XCTAssertEqual(rect.minX, insets.left + 30 * metrics.cellWidth)
   }
 
+  func testCursorBarRectAtColumn() {
+    let metrics = TerminalCellMetrics()
+    let insets = TerminalPaneLayoutMetrics.contentInsets
+    let cursor = LocusTermCursor(
+      x: 7,
+      y: 2,
+      visible: true,
+      blinking: false,
+      wide_tail: false,
+      style: 1
+    )
+
+    let rect = TerminalPaneGeometry.cursorBarRect(
+      cursor: cursor,
+      bounds: NSRect(x: 0, y: 0, width: 800, height: 400),
+      metrics: metrics,
+      insets: insets
+    )
+
+    XCTAssertEqual(rect.minX, insets.left + 7 * metrics.cellWidth)
+    XCTAssertEqual(rect.width, 2)
+    XCTAssertEqual(rect.height, metrics.cellHeight)
+  }
+
+  func testCellCoordinateFromPoint() {
+    let metrics = TerminalCellMetrics()
+    let insets = TerminalPaneLayoutMetrics.contentInsets
+    let grid = TerminalGridSize(columns: 10, rows: 5)
+
+    XCTAssertEqual(
+      TerminalPaneGeometry.cellCoordinate(
+        for: NSPoint(
+          x: insets.left + metrics.cellWidth * 2.5,
+          y: insets.top + metrics.cellHeight * 1.5
+        ),
+        metrics: metrics,
+        insets: insets,
+        grid: grid
+      ),
+      TerminalCellCoordinate(column: 2, row: 1)
+    )
+    XCTAssertEqual(
+      TerminalPaneGeometry.cellCoordinate(
+        for: NSPoint(x: -100, y: -100),
+        metrics: metrics,
+        insets: insets,
+        grid: grid
+      ),
+      TerminalCellCoordinate(column: 0, row: 0)
+    )
+    XCTAssertEqual(
+      TerminalPaneGeometry.cellCoordinate(
+        for: NSPoint(x: 10_000, y: 10_000),
+        metrics: metrics,
+        insets: insets,
+        grid: grid
+      ),
+      TerminalCellCoordinate(column: 9, row: 4)
+    )
+  }
+
+  func testCaretMoveEventsRightAndLeft() {
+    let rightEvents = TerminalCaretMovement.events(
+      from: TerminalCellCoordinate(column: 5, row: 2),
+      to: TerminalCellCoordinate(column: 9, row: 2)
+    )
+    let leftEvents = TerminalCaretMovement.events(
+      from: TerminalCellCoordinate(column: 9, row: 2),
+      to: TerminalCellCoordinate(column: 5, row: 2)
+    )
+    let unchangedEvents = TerminalCaretMovement.events(
+      from: TerminalCellCoordinate(column: 5, row: 2),
+      to: TerminalCellCoordinate(column: 5, row: 2)
+    )
+
+    XCTAssertEqual(rightEvents.count, 4)
+    XCTAssertTrue(rightEvents.allSatisfy { $0.key == LOCUS_TERM_KEY_ARROW_RIGHT })
+    XCTAssertEqual(leftEvents.count, 4)
+    XCTAssertTrue(leftEvents.allSatisfy { $0.key == LOCUS_TERM_KEY_ARROW_LEFT })
+    XCTAssertTrue(unchangedEvents.isEmpty)
+  }
+
+  func testCaretBlinkVisibilityResetsAndAlternates() {
+    XCTAssertTrue(TerminalCaretBlink.caretVisible(at: 10, lastInput: 10, blinking: true))
+    XCTAssertFalse(TerminalCaretBlink.caretVisible(at: 10.7, lastInput: 10, blinking: true))
+    XCTAssertTrue(TerminalCaretBlink.caretVisible(at: 10.7, lastInput: 10, blinking: false))
+  }
+
+  func testResolveCaretClickAcceptsCursorRow() {
+    XCTAssertEqual(
+      TerminalCaretClickResolver.resolveCaretClick(
+        row: 2,
+        column: 9,
+        cursorRow: 2,
+        frameRows: [false, false, false, true]
+      ),
+      9
+    )
+  }
+
+  func testResolveCaretClickAcceptsAdjacentRows() {
+    let rows = [false, false, false, false, true]
+
+    XCTAssertEqual(
+      TerminalCaretClickResolver.resolveCaretClick(
+        row: 1,
+        column: 7,
+        cursorRow: 2,
+        frameRows: rows
+      ),
+      7
+    )
+    XCTAssertEqual(
+      TerminalCaretClickResolver.resolveCaretClick(
+        row: 3,
+        column: 8,
+        cursorRow: 2,
+        frameRows: rows
+      ),
+      8
+    )
+  }
+
+  func testResolveCaretClickAcceptsTrailingBlankRows() {
+    XCTAssertEqual(
+      TerminalCaretClickResolver.resolveCaretClick(
+        row: 4,
+        column: 11,
+        cursorRow: 2,
+        frameRows: [false, false, false, false, true, true, true]
+      ),
+      11
+    )
+  }
+
+  func testResolveCaretClickRejectsDistantContentRow() {
+    XCTAssertNil(
+      TerminalCaretClickResolver.resolveCaretClick(
+        row: 1,
+        column: 6,
+        cursorRow: 3,
+        frameRows: [false, false, false, false, true]
+      )
+    )
+  }
+
   func testInverseSwapsColors() {
     let style = TerminalTextStyle(
       foreground: TerminalColor(red: 1, green: 2, blue: 3),
