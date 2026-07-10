@@ -36,6 +36,17 @@ private enum TerminalCursorMetrics {
 enum TerminalCaretBlink {
   static let phaseDuration: TimeInterval = 0.6
 
+  /// The frame's blinking flag mirrors DEC private mode 12, whose default is
+  /// false and which shells never touch. The app treats a focused caret as
+  /// blinking by default; the frame flag can only turn blinking ON (a DECSCUSR
+  /// steady request cannot opt out until the core exposes an "explicitly set"
+  /// marker).
+  static let defaultBlinks = true
+
+  static func effectiveBlinking(_ frameFlag: Bool) -> Bool {
+    frameFlag || defaultBlinks
+  }
+
   static func caretVisible(
     at time: TimeInterval,
     lastInput: TimeInterval,
@@ -47,6 +58,33 @@ enum TerminalCaretBlink {
     let elapsed = max(0, time - lastInput)
     let phase = Int(floor(elapsed / phaseDuration))
     return phase.isMultiple(of: 2)
+  }
+}
+
+enum TerminalCaretInvalidation {
+  static func shouldInvalidate(
+    previousDrawnVisible: Bool?,
+    currentVisible: Bool,
+    focused: Bool,
+    blinking: Bool
+  ) -> Bool {
+    guard focused, blinking, let previousDrawnVisible else {
+      return false
+    }
+    return previousDrawnVisible != currentVisible
+  }
+
+  static func invalidationRect(previous: NSRect?, current: NSRect?) -> NSRect? {
+    switch (previous, current) {
+    case (.some(let previous), .some(let current)):
+      return previous.union(current)
+    case (.some(let previous), .none):
+      return previous
+    case (.none, .some(let current)):
+      return current
+    case (.none, .none):
+      return nil
+    }
   }
 }
 
@@ -716,6 +754,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   private let metrics: TerminalCellMetrics
   private let resizeObserver: ((TerminalGridSize) -> Void)?
   private let keyEventObserver: ((TerminalKeyEvent) -> Void)?
+  private let caretResetObserver: (() -> Void)?
   private var cancellable: AnyCancellable?
   private var hasPendingFrameChange = true
   private var lastScheduledGeneration: UInt64?
@@ -729,7 +768,8 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   private var resizeTask: Task<Void, Never>?
   private var pendingClick: PendingClick?
   private var lastCaretInputTime = CACurrentMediaTime()
-  private var lastScheduledCaretVisibility: Bool?
+  private var lastDrawnCaretVisibility: Bool?
+  private var lastDrawnCaretRect: NSRect?
 
   override var acceptsFirstResponder: Bool { true }
   override var isOpaque: Bool { true }
@@ -738,12 +778,14 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     session: TerminalSession? = nil,
     metrics: TerminalCellMetrics = TerminalCellMetrics(),
     resizeObserver: ((TerminalGridSize) -> Void)? = nil,
-    keyEventObserver: ((TerminalKeyEvent) -> Void)? = nil
+    keyEventObserver: ((TerminalKeyEvent) -> Void)? = nil,
+    caretResetObserver: (() -> Void)? = nil
   ) {
     self.session = session
     self.metrics = metrics
     self.resizeObserver = resizeObserver
     self.keyEventObserver = keyEventObserver
+    self.caretResetObserver = caretResetObserver
     super.init(frame: .zero)
     wantsLayer = true
     observeActiveFocusChanges()
@@ -836,7 +878,8 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   override func becomeFirstResponder() -> Bool {
     let didBecome = super.becomeFirstResponder()
     if didBecome {
-      resetCaretBlink()
+      lastDrawnCaretVisibility = nil
+      needsDisplay = true
     }
     return didBecome
   }
@@ -855,6 +898,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
       super.keyDown(with: event)
       return
     }
+    resetCaretBlink()
 
     let hadMarkedText = hasMarkedText()
     handledInputDuringKeyInterpretation = false
@@ -881,6 +925,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     guard let event = TerminalCommandKeyTranslator.terminalKey(for: selector) else {
       return
     }
+    resetCaretBlink()
     sendTerminalKey(event)
   }
 
@@ -901,7 +946,6 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     replacementRange: NSRange
   ) {
     handledInputDuringKeyInterpretation = true
-    resetCaretBlink()
     let attributed = Self.attributedString(fromTextInput: string)
     if attributed.length == 0 {
       clearMarkedText()
@@ -913,7 +957,6 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
 
   func unmarkText() {
     handledInputDuringKeyInterpretation = true
-    resetCaretBlink()
     let text = markedTextStorage?.string ?? ""
     clearMarkedText()
     if !text.isEmpty {
@@ -992,8 +1035,15 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
       return
     }
 
+    let drawTime = CACurrentMediaTime()
     session.withFrame { frame in
-      draw(frame: frame, in: context)
+      let caretVisible = caretIsVisible(cursor: frame.cursor, at: drawTime)
+      draw(frame: frame, caretVisible: caretVisible, in: context)
+      lastDrawnCaretVisibility = caretVisible
+      lastDrawnCaretRect =
+        caretVisible && !hasMarkedText()
+        ? caretRect(for: frame.cursor)
+        : nil
     }
     lastDrawnGeneration = session.snapshot?.generation
   }
@@ -1031,11 +1081,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   }
 
   @objc private func displayLinkDidTick(_ link: CADisplayLink) {
-    let caretVisibility = caretShouldBeVisible(at: CACurrentMediaTime())
-    if caretVisibility != lastScheduledCaretVisibility {
-      lastScheduledCaretVisibility = caretVisibility
-      needsDisplay = true
-    }
+    invalidateCaretForBlinkIfNeeded(at: CACurrentMediaTime())
 
     guard hasPendingFrameChange, let generation = session?.snapshot?.generation else {
       return
@@ -1136,7 +1182,11 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     window?.firstResponder === self && window?.isKeyWindow == true && NSApp.isActive
   }
 
-  private func draw(frame: TerminalFrame, in context: CGContext) {
+  private func draw(
+    frame: TerminalFrame,
+    caretVisible: Bool,
+    in context: CGContext
+  ) {
     frame.withRows { rows in
       frame.withCells { cells in
         frame.withGraphemes { graphemes in
@@ -1152,7 +1202,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     if hasMarkedText() {
       drawMarkedText(frame.cursor, in: context)
     } else {
-      drawCursor(frame.cursor, in: context)
+      drawCursor(frame.cursor, visible: caretVisible, in: context)
     }
   }
 
@@ -1367,20 +1417,20 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     }
   }
 
-  private func drawCursor(_ cursor: LocusTermCursor, in context: CGContext) {
-    guard
-      cursor.visible,
-      !hasActiveKeyboardFocus
-        || TerminalCaretBlink.caretVisible(
-          at: CACurrentMediaTime(),
-          lastInput: lastCaretInputTime,
-          blinking: cursor.blinking
-        )
-    else {
+  private func drawCursor(
+    _ cursor: LocusTermCursor,
+    visible: Bool,
+    in context: CGContext
+  ) {
+    guard visible else {
       return
     }
 
-    let rect: NSRect
+    cursorColor.setFill()
+    caretRect(for: cursor).fill()
+  }
+
+  private func caretRect(for cursor: LocusTermCursor) -> NSRect {
     if cursor.style == 2 {
       let cellRect = TerminalPaneGeometry.cursorCellRect(
         cursor: cursor,
@@ -1388,25 +1438,22 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
         metrics: metrics,
         insets: TerminalPaneLayoutMetrics.contentInsets
       )
-      rect = NSRect(
+      return NSRect(
         x: cellRect.minX,
         y: cellRect.minY,
         width: cellRect.width,
         height: TerminalCursorMetrics.thickness
       )
-    } else {
-      // The frame cannot distinguish the startup block cursor from an app's
-      // explicit block request, so both block and bar styles use the quiet bar.
-      rect = TerminalPaneGeometry.cursorBarRect(
-        cursor: cursor,
-        bounds: bounds,
-        metrics: metrics,
-        insets: TerminalPaneLayoutMetrics.contentInsets
-      )
     }
 
-    cursorColor.setFill()
-    rect.fill()
+    // The frame cannot distinguish the startup block cursor from an app's
+    // explicit block request, so both block and bar styles use the quiet bar.
+    return TerminalPaneGeometry.cursorBarRect(
+      cursor: cursor,
+      bounds: bounds,
+      metrics: metrics,
+      insets: TerminalPaneLayoutMetrics.contentInsets
+    )
   }
 
   private func drawMarkedText(_ cursor: LocusTermCursor, in context: CGContext) {
@@ -1507,7 +1554,12 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
       column: resolvedColumn,
       row: cursorCoordinate.row
     )
-    sendTerminalKeys(TerminalCaretMovement.events(from: cursorCoordinate, to: destination))
+    let events = TerminalCaretMovement.events(from: cursorCoordinate, to: destination)
+    guard !events.isEmpty else {
+      return
+    }
+    resetCaretBlink()
+    sendTerminalKeys(events)
   }
 
   private func observeActiveFocusChanges() {
@@ -1544,35 +1596,77 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     {
       return
     }
-    lastScheduledCaretVisibility = nil
-    if hasActiveKeyboardFocus {
-      resetCaretBlink()
-    } else {
-      needsDisplay = true
-    }
+    lastDrawnCaretVisibility = nil
+    needsDisplay = true
   }
 
-  private func caretShouldBeVisible(at time: TimeInterval) -> Bool {
+  private func caretIsVisible(cursor: LocusTermCursor, at time: TimeInterval) -> Bool {
+    guard cursor.visible else {
+      return false
+    }
     guard hasActiveKeyboardFocus, !hasMarkedText() else {
       return true
     }
     return TerminalCaretBlink.caretVisible(
       at: time,
       lastInput: lastCaretInputTime,
-      blinking: session?.snapshot?.cursorBlinking ?? false
+      blinking: TerminalCaretBlink.effectiveBlinking(cursor.blinking)
     )
+  }
+
+  private func invalidateCaretForBlinkIfNeeded(at time: TimeInterval) {
+    guard
+      hasActiveKeyboardFocus,
+      !hasMarkedText(),
+      let snapshot = session?.snapshot,
+      snapshot.cursorVisible,
+      TerminalCaretInvalidation.shouldInvalidate(
+        previousDrawnVisible: lastDrawnCaretVisibility,
+        currentVisible: TerminalCaretBlink.caretVisible(
+          at: time,
+          lastInput: lastCaretInputTime,
+          blinking: TerminalCaretBlink.effectiveBlinking(snapshot.cursorBlinking)
+        ),
+        focused: true,
+        blinking: TerminalCaretBlink.effectiveBlinking(snapshot.cursorBlinking)
+      )
+    else {
+      return
+    }
+
+    let currentVisible = TerminalCaretBlink.caretVisible(
+      at: time,
+      lastInput: lastCaretInputTime,
+      blinking: snapshot.cursorBlinking
+    )
+    var currentRect: NSRect?
+    if currentVisible {
+      session?.withFrame { frame in
+        if frame.cursor.visible {
+          currentRect = caretRect(for: frame.cursor)
+        }
+      }
+    }
+    guard
+      let invalidationRect = TerminalCaretInvalidation.invalidationRect(
+        previous: lastDrawnCaretRect,
+        current: currentRect
+      )
+    else {
+      return
+    }
+    setNeedsDisplay(invalidationRect)
   }
 
   private func resetCaretBlink() {
     lastCaretInputTime = CACurrentMediaTime()
-    lastScheduledCaretVisibility = true
+    caretResetObserver?()
     needsDisplay = true
   }
 
   private func sendTerminalKey(_ event: TerminalKeyEvent) {
     keyEventObserver?(event)
     session?.sendKey(event)
-    resetCaretBlink()
   }
 
   private func sendTerminalKeys(_ events: [TerminalKeyEvent]) {
@@ -1583,7 +1677,6 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
       keyEventObserver?(event)
     }
     session?.sendKeys(events)
-    resetCaretBlink()
   }
 
   private func terminalBlankRows(frame: TerminalFrame) -> [Bool] {

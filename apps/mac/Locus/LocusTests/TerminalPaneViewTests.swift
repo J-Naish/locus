@@ -233,6 +233,79 @@ final class TerminalPaneViewTests: XCTestCase {
     XCTAssertTrue(TerminalCaretBlink.caretVisible(at: 10.7, lastInput: 10, blinking: false))
   }
 
+  func testDefaultCaretBlinksWhenFrameFlagFalse() {
+    // DEC mode 12 defaults to false and shells never touch it; the app-level
+    // default must keep a focused caret blinking regardless.
+    XCTAssertTrue(TerminalCaretBlink.effectiveBlinking(false))
+    XCTAssertTrue(TerminalCaretBlink.effectiveBlinking(true))
+    let blinking = TerminalCaretBlink.effectiveBlinking(false)
+    XCTAssertTrue(TerminalCaretBlink.caretVisible(at: 10, lastInput: 10, blinking: blinking))
+    XCTAssertFalse(TerminalCaretBlink.caretVisible(at: 10.7, lastInput: 10, blinking: blinking))
+  }
+
+  func testBlinkInvalidationTriggersOnPhaseFlip() {
+    XCTAssertTrue(
+      TerminalCaretInvalidation.shouldInvalidate(
+        previousDrawnVisible: true,
+        currentVisible: false,
+        focused: true,
+        blinking: true
+      )
+    )
+    XCTAssertFalse(
+      TerminalCaretInvalidation.shouldInvalidate(
+        previousDrawnVisible: true,
+        currentVisible: false,
+        focused: false,
+        blinking: true
+      )
+    )
+    XCTAssertFalse(
+      TerminalCaretInvalidation.shouldInvalidate(
+        previousDrawnVisible: true,
+        currentVisible: false,
+        focused: true,
+        blinking: false
+      )
+    )
+  }
+
+  func testBlinkInvalidationRectCoversOldAndNewCaret() throws {
+    let oldRect = NSRect(x: 10, y: 20, width: 2, height: 16)
+    let newRect = NSRect(x: 42, y: 36, width: 2, height: 16)
+
+    let invalidation = try XCTUnwrap(
+      TerminalCaretInvalidation.invalidationRect(previous: oldRect, current: newRect)
+    )
+
+    XCTAssertEqual(invalidation, oldRect.union(newRect))
+  }
+
+  func testLastInputNotResetByOutput() {
+    var resetCount = 0
+    let session = TerminalSession(columns: 40, rows: 10)
+    defer {
+      session.terminate()
+    }
+    let view = TerminalPaneView(
+      session: session,
+      caretResetObserver: { resetCount += 1 }
+    )
+
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForPaneCondition { session.snapshot != nil })
+    session.send(Data("printf OUTPUT-ONLY\\n".utf8))
+    XCTAssertTrue(
+      waitForPaneCondition {
+        session.snapshot?.plainText.contains("OUTPUT-ONLY") == true
+      },
+      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+    )
+
+    XCTAssertEqual(resetCount, 0)
+    withExtendedLifetime(view) {}
+  }
+
   func testResolveCaretClickAcceptsCursorRow() {
     XCTAssertEqual(
       TerminalCaretClickResolver.resolveCaretClick(
