@@ -48,6 +48,23 @@ final class TerminalPaneViewTests: XCTestCase {
     )
   }
 
+  func testInsetsAppliedSymmetrically() {
+    let metrics = TerminalCellMetrics()
+    let insets = TerminalPaneLayoutMetrics.contentInsets
+    let size = CGSize(
+      width: insets.left + metrics.cellWidth * 40 + insets.right,
+      height: insets.top + metrics.cellHeight * 10 + insets.bottom
+    )
+
+    XCTAssertEqual(insets, TerminalContentInsets(top: 10, left: 12, bottom: 10, right: 12))
+    XCTAssertEqual(insets.left, insets.right)
+    XCTAssertEqual(insets.top, insets.bottom)
+    XCTAssertEqual(
+      TerminalCellMetrics.gridSize(for: size, metrics: metrics, insets: insets),
+      TerminalGridSize(columns: 40, rows: 10)
+    )
+  }
+
   func testStyleRunGroupingBuildsAttributedLine() {
     let normal = TerminalTextStyle(
       foreground: .defaultForeground,

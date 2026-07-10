@@ -19,7 +19,7 @@ struct TerminalContentInsets: Equatable {
 }
 
 enum TerminalPaneLayoutMetrics {
-  static let contentInsets = TerminalContentInsets(top: 4, left: 8, bottom: 4, right: 8)
+  static let contentInsets = TerminalContentInsets(top: 10, left: 12, bottom: 10, right: 12)
 }
 
 private enum TerminalPaneTiming {

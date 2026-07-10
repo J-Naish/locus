@@ -3,13 +3,31 @@ import SwiftUI
 
 enum TerminalPanelMetrics {
   static let defaultHeight: CGFloat = 240
+  static let resizeHandleHeight: CGFloat = 8
+  static let maximumParentHeightFraction: CGFloat = 0.8
+
+  static var minimumHeight: CGFloat {
+    let metrics = TerminalCellMetrics()
+    let insets = TerminalPaneLayoutMetrics.contentInsets
+    return metrics.cellHeight * 3 + insets.top + insets.bottom
+  }
+
+  static func clampedHeight(_ proposedHeight: CGFloat, parentHeight: CGFloat) -> CGFloat {
+    let minimumHeight = minimumHeight
+    let maximumHeight = max(minimumHeight, parentHeight * maximumParentHeightFraction)
+    return min(max(proposedHeight, minimumHeight), maximumHeight)
+  }
 }
 
 @MainActor
 final class TerminalPanelState: ObservableObject {
   @Published private(set) var isVisible = false
   @Published private(set) var session: TerminalSession?
+  @Published private(set) var panelHeight: CGFloat
   var currentWorkspaceFolder: URL?
+
+  @AppStorage(LocusPersistedDefaults.terminalPanelHeight)
+  private var persistedPanelHeight = Double(TerminalPanelMetrics.defaultHeight)
 
   private let sessionFactory: () -> TerminalSession
   private let startCommand: String?
@@ -19,8 +37,24 @@ final class TerminalPanelState: ObservableObject {
 
   init(
     startCommand: String? = nil,
+    userDefaults: UserDefaults = .standard,
     sessionFactory: @escaping () -> TerminalSession = { TerminalSession() }
   ) {
+    _persistedPanelHeight = AppStorage(
+      wrappedValue: Double(TerminalPanelMetrics.defaultHeight),
+      LocusPersistedDefaults.terminalPanelHeight,
+      store: userDefaults
+    )
+    let storedHeight =
+      userDefaults.object(
+        forKey: LocusPersistedDefaults.terminalPanelHeight
+      ) as? Double
+    panelHeight =
+      if let storedHeight, storedHeight.isFinite {
+        max(CGFloat(storedHeight), TerminalPanelMetrics.minimumHeight)
+      } else {
+        TerminalPanelMetrics.defaultHeight
+      }
     self.startCommand = startCommand
     self.sessionFactory = sessionFactory
   }
@@ -37,6 +71,21 @@ final class TerminalPanelState: ObservableObject {
     } else {
       show(in: window)
     }
+  }
+
+  func updatePanelHeight(_ proposedHeight: CGFloat, parentHeight: CGFloat) {
+    guard proposedHeight.isFinite, parentHeight.isFinite else {
+      return
+    }
+    let clampedHeight = TerminalPanelMetrics.clampedHeight(
+      proposedHeight,
+      parentHeight: parentHeight
+    )
+    guard panelHeight != clampedHeight else {
+      return
+    }
+    panelHeight = clampedHeight
+    persistedPanelHeight = Double(clampedHeight)
   }
 
   func registerTerminalView(_ view: TerminalPaneView) {
@@ -97,6 +146,11 @@ final class TerminalPanelState: ObservableObject {
 
 struct TerminalPanelView: View {
   @ObservedObject var state: TerminalPanelState
+  let parentHeight: CGFloat
+
+  private var displayedHeight: CGFloat {
+    TerminalPanelMetrics.clampedHeight(state.panelHeight, parentHeight: parentHeight)
+  }
 
   var body: some View {
     Group {
@@ -109,10 +163,63 @@ struct TerminalPanelView: View {
       }
     }
     .frame(maxWidth: .infinity)
-    .frame(height: TerminalPanelMetrics.defaultHeight)
+    .frame(height: displayedHeight)
     .modifier(DocumentCardModifier())
+    .overlay(alignment: .top) {
+      TerminalPanelResizeHandle(
+        panelHeight: displayedHeight,
+        parentHeight: parentHeight,
+        onHeightChange: state.updatePanelHeight
+      )
+    }
     .accessibilityElement(children: .contain)
     .accessibilityIdentifier("terminal-panel")
+  }
+}
+
+private struct TerminalPanelResizeHandle: View {
+  let panelHeight: CGFloat
+  let parentHeight: CGFloat
+  let onHeightChange: (CGFloat, CGFloat) -> Void
+
+  @State private var dragStartHeight: CGFloat?
+  @State private var isHovering = false
+
+  var body: some View {
+    Color.clear
+      .frame(height: TerminalPanelMetrics.resizeHandleHeight)
+      .contentShape(Rectangle())
+      .gesture(
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
+          .onChanged { value in
+            if dragStartHeight == nil {
+              dragStartHeight = panelHeight
+            }
+            let proposedHeight = (dragStartHeight ?? panelHeight) - value.translation.height
+            onHeightChange(proposedHeight, parentHeight)
+          }
+          .onEnded { _ in
+            dragStartHeight = nil
+          }
+      )
+      .onHover { hovering in
+        guard hovering != isHovering else {
+          return
+        }
+        isHovering = hovering
+        if hovering {
+          NSCursor.resizeUpDown.push()
+        } else {
+          NSCursor.pop()
+        }
+      }
+      .onDisappear {
+        if isHovering {
+          NSCursor.pop()
+          isHovering = false
+        }
+      }
+      .accessibilityHidden(true)
   }
 }
 

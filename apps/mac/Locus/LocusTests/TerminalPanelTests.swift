@@ -4,6 +4,57 @@ import XCTest
 
 @MainActor
 final class TerminalPanelTests: XCTestCase {
+  func testPanelHeightClampsToBounds() {
+    let minimumHeight = TerminalPanelMetrics.minimumHeight
+
+    XCTAssertEqual(
+      TerminalPanelMetrics.clampedHeight(
+        minimumHeight - 40,
+        parentHeight: 500
+      ),
+      minimumHeight
+    )
+    XCTAssertEqual(
+      TerminalPanelMetrics.clampedHeight(
+        480,
+        parentHeight: 500
+      ),
+      400
+    )
+  }
+
+  func testPanelHeightPersistsAcrossState() throws {
+    let suiteName = "TerminalPanelTests.height.\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+    defer {
+      defaults.removePersistentDomain(forName: suiteName)
+    }
+    let firstState = TerminalPanelState(userDefaults: defaults)
+    firstState.updatePanelHeight(320, parentHeight: 600)
+
+    let restoredState = TerminalPanelState(userDefaults: defaults)
+
+    XCTAssertEqual(restoredState.panelHeight, 320)
+  }
+
+  func testPanelHeightSurvivesToggle() throws {
+    let suiteName = "TerminalPanelTests.toggleHeight.\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+    defer {
+      defaults.removePersistentDomain(forName: suiteName)
+    }
+    let state = TerminalPanelState(startCommand: "/bin/sh", userDefaults: defaults)
+    defer {
+      state.shutdown()
+    }
+    state.updatePanelHeight(300, parentHeight: 600)
+
+    state.toggle()
+    state.toggle()
+
+    XCTAssertEqual(state.panelHeight, 300)
+  }
+
   func testToggleShowsAndHidesPanel() throws {
     let state = TerminalPanelState(startCommand: "/bin/sh")
     defer {
