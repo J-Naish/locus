@@ -22,7 +22,7 @@ use terminal::terminal::{Options as TerminalOptions, Terminal};
 
 use crate::{clear_last_error_message, set_last_error_message, LOCUS_STATUS_OK};
 
-pub const LOCUS_TERM_ABI_VERSION: u32 = 1;
+pub const LOCUS_TERM_ABI_VERSION: u32 = 2;
 
 pub const LOCUS_TERM_STATUS_INVALID_ARGUMENT: u32 = 300;
 pub const LOCUS_TERM_STATUS_PANIC: u32 = 301;
@@ -601,6 +601,7 @@ pub unsafe extern "C" fn locus_term_paste(
     term: *mut LocusTerm,
     bytes: *const u8,
     len: usize,
+    allow_unsafe: bool,
     out: *mut LocusTermBytes,
 ) -> u32 {
     term_status(|| {
@@ -618,17 +619,18 @@ pub unsafe extern "C" fn locus_term_paste(
         let Some(bytes) = bytes_slice(bytes, len) else {
             return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
         };
-        if !input::paste::is_safe(bytes) {
+        let bracketed = term.stream.handler.terminal.modes.get(Mode::BracketedPaste);
+        // Bracketed paste is safe by construction: encode replaces every ESC
+        // byte, so an embedded end sentinel cannot survive in the payload.
+        // Unbracketed multiline paste can execute each line and therefore
+        // requires explicit caller confirmation. This deliberately improves
+        // on the pre-R1 port, which rejected all unsafe paste permanently.
+        if !bracketed && !allow_unsafe && !input::paste::is_safe(bytes) {
             set_last_error_message("paste contains unsafe control or newline data");
             return LOCUS_TERM_STATUS_UNSAFE_PASTE;
         }
         let mut owned = bytes.to_vec();
-        let encoded = input::paste::encode(
-            &mut owned,
-            input::paste::Options {
-                bracketed: term.stream.handler.terminal.modes.get(Mode::BracketedPaste),
-            },
-        );
+        let encoded = input::paste::encode(&mut owned, input::paste::Options { bracketed });
         let result = [encoded.prefix, encoded.body, encoded.suffix].concat();
         // SAFETY: out is still valid for this synchronous call.
         unsafe {
@@ -1369,9 +1371,10 @@ mod tests {
     fn paste_rejects_newline() {
         let term = new_term();
         let mut out = LocusTermBytes::default();
+        // SAFETY: term is live, the byte slice is readable, and out is writable.
         unsafe {
             assert_eq!(
-                locus_term_paste(term, b"a\nb".as_ptr(), 3, &mut out),
+                locus_term_paste(term, b"a\nb".as_ptr(), 3, false, &mut out),
                 LOCUS_TERM_STATUS_UNSAFE_PASTE
             );
             assert!(out.ptr.is_null());
@@ -1383,9 +1386,10 @@ mod tests {
     fn paste_encodes_safe_text() {
         let term = new_term();
         let mut out = LocusTermBytes::default();
+        // SAFETY: term is live, the byte slice is readable, and out is writable.
         unsafe {
             assert_eq!(
-                locus_term_paste(term, b"paste".as_ptr(), 5, &mut out),
+                locus_term_paste(term, b"paste".as_ptr(), 5, false, &mut out),
                 LOCUS_STATUS_OK
             );
             assert_eq!(std::slice::from_raw_parts(out.ptr, out.len), b"paste");
@@ -1398,18 +1402,81 @@ mod tests {
     fn paste_wraps_when_bracketed_mode_is_set() {
         let term = new_term();
         let mut out = LocusTermBytes::default();
+        // SAFETY: term is live, both byte slices are readable, and out is writable.
         unsafe {
             assert_eq!(
                 locus_term_feed(term, b"\x1b[?2004h".as_ptr(), 8),
                 LOCUS_STATUS_OK
             );
             assert_eq!(
-                locus_term_paste(term, b"paste".as_ptr(), 5, &mut out),
+                locus_term_paste(term, b"paste".as_ptr(), 5, false, &mut out),
                 LOCUS_STATUS_OK
             );
             assert_eq!(
                 std::slice::from_raw_parts(out.ptr, out.len),
                 b"\x1b[200~paste\x1b[201~"
+            );
+            locus_term_bytes_free(&mut out);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn paste_allows_newline_when_confirmed() {
+        let term = new_term();
+        let mut out = LocusTermBytes::default();
+        // SAFETY: term is live, the byte slice is readable, and out is writable.
+        unsafe {
+            assert_eq!(
+                locus_term_paste(term, b"a\nb".as_ptr(), 3, true, &mut out),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(std::slice::from_raw_parts(out.ptr, out.len), b"a\rb");
+            locus_term_bytes_free(&mut out);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn paste_bracketed_multiline_skips_confirmation() {
+        let term = new_term();
+        let mut out = LocusTermBytes::default();
+        // SAFETY: term is live, both byte slices are readable, and out is writable.
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, b"\x1b[?2004h".as_ptr(), 8),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_paste(term, b"a\nb".as_ptr(), 3, false, &mut out),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                std::slice::from_raw_parts(out.ptr, out.len),
+                b"\x1b[200~a\nb\x1b[201~"
+            );
+            locus_term_bytes_free(&mut out);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn paste_bracketed_neutralizes_end_sentinel() {
+        let term = new_term();
+        let mut out = LocusTermBytes::default();
+        // SAFETY: term is live, both byte slices are readable, and out is writable.
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, b"\x1b[?2004h".as_ptr(), 8),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_paste(term, b"x\x1b[201~y".as_ptr(), 8, false, &mut out),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                std::slice::from_raw_parts(out.ptr, out.len),
+                b"\x1b[200~x [201~y\x1b[201~"
             );
             locus_term_bytes_free(&mut out);
             locus_term_free(term);

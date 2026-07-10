@@ -107,6 +107,51 @@ final class TerminalBridgeTests: XCTestCase {
     XCTAssertEqual(try terminal.encodePaste("a\nb"), .unsafe)
   }
 
+  func testEncodePasteMultilineRequiresConfirmationWhenUnbracketed() throws {
+    let terminal = try TerminalCore(columns: 80, rows: 24)
+
+    XCTAssertEqual(try terminal.encodePaste("a\nb"), .unsafe)
+    XCTAssertEqual(
+      try terminal.encodePaste("a\nb", allowUnsafe: true),
+      .safe(Data("a\rb".utf8))
+    )
+  }
+
+  func testEncodePasteMultilineIsSafeInBracketedMode() throws {
+    let terminal = try TerminalCore(columns: 80, rows: 24)
+    try terminal.feed(Data("\u{1B}[?2004h".utf8))
+
+    let result = try terminal.encodePaste("a\nb")
+    guard case .safe(let data) = result else {
+      return XCTFail("Expected bracketed multiline paste to be safe")
+    }
+    let prefix = Data("\u{1B}[200~".utf8)
+    let suffix = Data("\u{1B}[201~".utf8)
+    XCTAssertTrue(data.starts(with: prefix))
+    XCTAssertEqual(data.suffix(suffix.count), suffix)
+  }
+
+  func testScrollbackRetainsHistoryAcrossScroll() throws {
+    let terminal = try TerminalCore(
+      columns: 20,
+      rows: 5,
+      maxScrollback: TerminalSession.defaultMaxScrollbackBytes
+    )
+    let frame = try TerminalFrame()
+    for line in 1...40 {
+      try terminal.feed(Data("L\(line)\r\n".utf8))
+    }
+
+    try terminal.render(into: frame, full: true)
+    XCTAssertFalse(frame.plainText().contains("L1"))
+    try terminal.scroll(byRows: -36)
+    try terminal.render(into: frame, full: true)
+    XCTAssertTrue(
+      frame.plainText().contains("L1"),
+      "Scrolled frame was: \(frame.plainText())"
+    )
+  }
+
   func testFrameCursorTracksPrinting() throws {
     let terminal = try TerminalCore(columns: 80, rows: 24)
     let frame = try TerminalFrame()

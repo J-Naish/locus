@@ -201,6 +201,137 @@ final class TerminalSessionTests: XCTestCase {
       "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
     )
   }
+
+  func testLargeWriteIntoRawModeSurvivesBackpressure() throws {
+    let scriptURL = try makeExecutableShellScript(
+      """
+      #!/bin/sh
+      /bin/stty raw -echo
+      printf READY
+      sleep 1
+      exec /bin/cat
+      """
+    )
+    defer {
+      try? FileManager.default.removeItem(at: scriptURL)
+    }
+    let session = TerminalSession(columns: 120, rows: 10)
+    defer {
+      session.terminate()
+    }
+
+    session.start(command: scriptURL.path)
+    XCTAssertTrue(
+      waitUntil { session.snapshot?.plainText.contains("READY") == true },
+      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+    )
+    let payload = Data((String(repeating: "A", count: 8_187) + "@END@").utf8)
+    session.send(payload)
+
+    XCTAssertTrue(
+      waitUntil(timeout: 6) { session.snapshot?.plainText.contains("@END@") == true },
+      "State was: \(session.state), snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+    )
+    XCTAssertEqual(session.state, .running)
+  }
+
+  func testWriteOrderingPreservedAcrossBackpressure() throws {
+    let scriptURL = try makeExecutableShellScript(
+      """
+      #!/bin/sh
+      /bin/stty raw -echo
+      printf READY
+      sleep 1
+      exec /bin/cat
+      """
+    )
+    defer {
+      try? FileManager.default.removeItem(at: scriptURL)
+    }
+    let session = TerminalSession(columns: 120, rows: 10)
+    defer {
+      session.terminate()
+    }
+
+    session.start(command: scriptURL.path)
+    XCTAssertTrue(waitUntil { session.snapshot?.plainText.contains("READY") == true })
+    session.send(Data((String(repeating: "A", count: 3_000) + "@ONE@").utf8))
+    session.send(Data("@TWO@".utf8))
+
+    XCTAssertTrue(
+      waitUntil(timeout: 6) {
+        guard let text = session.snapshot?.plainText,
+          let one = text.range(of: "@ONE@"),
+          let two = text.range(of: "@TWO@")
+        else {
+          return false
+        }
+        return one.lowerBound < two.lowerBound
+      },
+      "State was: \(session.state), snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+    )
+    XCTAssertEqual(session.state, .running)
+  }
+
+  func testPendingOutputCapFailsSession() throws {
+    let scriptURL = try makeExecutableShellScript(
+      """
+      #!/bin/sh
+      /bin/stty raw -echo
+      printf READY
+      exec /bin/sleep 30
+      """
+    )
+    defer {
+      try? FileManager.default.removeItem(at: scriptURL)
+    }
+    let session = TerminalSession(columns: 120, rows: 10)
+    defer {
+      session.terminate()
+    }
+
+    session.start(command: scriptURL.path)
+    XCTAssertTrue(waitUntil { session.snapshot?.plainText.contains("READY") == true })
+    session.send(Data(repeating: UInt8(ascii: "X"), count: 5 * 1024 * 1024))
+
+    XCTAssertTrue(
+      waitUntil(timeout: 5) {
+        if case .failed = session.state {
+          return true
+        }
+        return false
+      },
+      "State was: \(session.state)"
+    )
+  }
+
+  func testMultilinePasteRequiresConfirmationThenSends() {
+    let session = TerminalSession(columns: 80, rows: 10)
+    defer {
+      session.terminate()
+    }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+
+    var firstOutcome: TerminalSession.PasteOutcome?
+    session.paste("echo ONE\necho TWO") { outcome in
+      firstOutcome = outcome
+    }
+    XCTAssertTrue(waitUntil { firstOutcome != nil })
+    XCTAssertEqual(firstOutcome, .needsConfirmation)
+    XCTAssertFalse(session.snapshot?.plainText.contains("TWO") == true)
+
+    var confirmedOutcome: TerminalSession.PasteOutcome?
+    session.paste("echo ONE\necho TWO", allowUnsafe: true) { outcome in
+      confirmedOutcome = outcome
+    }
+    XCTAssertTrue(waitUntil { confirmedOutcome != nil })
+    XCTAssertEqual(confirmedOutcome, .sent)
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { session.snapshot?.plainText.contains("TWO") == true },
+      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+    )
+  }
 }
 
 @MainActor

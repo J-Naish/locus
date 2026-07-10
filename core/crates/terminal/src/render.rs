@@ -220,10 +220,15 @@ impl RenderState {
                             x: cursor_pin.x,
                             y: u32::from(y),
                         },
-                        wide_tail: screen
-                            .cursor_cell_left(1)
-                            .map(|cell| cell.wide() == CellWide::SpacerTail)
-                            .unwrap_or(false),
+                        // ghostty: render.zig:415-419
+                        wide_tail: if cursor_pin.x > 0 {
+                            screen
+                                .cursor_cell_left(1)
+                                .map(|cell| cell.wide() == CellWide::Wide)
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        },
                     });
                 }
             }
@@ -577,6 +582,41 @@ mod tests {
         render.update(&mut terminal);
         assert_eq!(render.cursor.active, Coordinate { x: 0, y: 1 });
         assert!(render.cursor.viewport.is_none());
+    }
+
+    #[test]
+    fn cursor_wide_tail_false_after_wide_char() {
+        let mut terminal = terminal_with_text(10, 3, "\u{3042}");
+        let mut render = RenderState::new(0, 0);
+        render.update(&mut terminal);
+
+        let viewport = render.cursor.viewport.expect("cursor must be visible");
+        assert_eq!(viewport.coord.x, 2);
+        assert!(!viewport.wide_tail);
+    }
+
+    #[test]
+    fn cursor_wide_tail_true_on_spacer_tail() {
+        let mut terminal = terminal_with_text(10, 3, "\u{3042}");
+        terminal.set_cursor_pos(1, 2);
+        let mut render = RenderState::new(0, 0);
+        render.update(&mut terminal);
+
+        let viewport = render.cursor.viewport.expect("cursor must be visible");
+        assert_eq!(viewport.coord.x, 1);
+        assert!(viewport.wide_tail);
+    }
+
+    #[test]
+    fn cursor_wide_tail_false_at_column_zero() {
+        let mut terminal = terminal_with_text(10, 3, "\u{3042}");
+        terminal.set_cursor_pos(1, 1);
+        let mut render = RenderState::new(0, 0);
+        render.update(&mut terminal);
+
+        let viewport = render.cursor.viewport.expect("cursor must be visible");
+        assert_eq!(viewport.coord.x, 0);
+        assert!(!viewport.wide_tail);
     }
 
     #[test]

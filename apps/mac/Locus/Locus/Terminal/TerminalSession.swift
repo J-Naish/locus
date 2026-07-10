@@ -8,6 +8,10 @@ import Foundation
 /// queue; only value snapshots cross back to the main actor.
 @MainActor
 final class TerminalSession: ObservableObject {
+  /// Scrollback byte budget for new sessions. The FFI caps this at 256 MiB;
+  /// 10 MB retains a few thousand typical 120-column rows.
+  nonisolated static let defaultMaxScrollbackBytes = 10_000_000
+
   struct Snapshot: Equatable, Sendable {
     let generation: UInt64
     /// Temporary text surface used until U3 renders directly from terminal
@@ -28,18 +32,29 @@ final class TerminalSession: ObservableObject {
     case failed(String)
   }
 
+  enum PasteOutcome: Equatable, Sendable {
+    case sent
+    case needsConfirmation
+    case dropped
+  }
+
   @Published private(set) var state: State = .idle
   @Published private(set) var snapshot: Snapshot?
 
   private let publisher: TerminalSessionPublisher
   private let worker: TerminalSessionWorker
 
-  init(columns: UInt16 = 80, rows: UInt16 = 24) {
+  init(
+    columns: UInt16 = 80,
+    rows: UInt16 = 24,
+    maxScrollback: Int = TerminalSession.defaultMaxScrollbackBytes
+  ) {
     let publisher = TerminalSessionPublisher()
     self.publisher = publisher
     worker = TerminalSessionWorker(
       columns: columns,
       rows: rows,
+      maxScrollback: maxScrollback,
       publishState: { [weak publisher] state in
         publisher?.publish(state: state)
       },
@@ -77,6 +92,14 @@ final class TerminalSession: ObservableObject {
     worker.sendKeys(events)
   }
 
+  func paste(
+    _ text: String,
+    allowUnsafe: Bool = false,
+    completion: @escaping @MainActor @Sendable (PasteOutcome) -> Void = { _ in }
+  ) {
+    worker.paste(text, allowUnsafe: allowUnsafe, completion: completion)
+  }
+
   func resize(columns: UInt16, rows: UInt16) {
     worker.resize(columns: columns, rows: rows)
   }
@@ -112,11 +135,21 @@ private final class TerminalSessionPublisher {
 }
 
 private final class TerminalSessionWorker {
+  /// Upper bound on buffered outgoing bytes while the child is not reading
+  /// (for example, while stopped with Ctrl+S). Beyond this the sink is treated
+  /// as dead so one terminal cannot grow memory without bound.
+  private static let maxPendingOutputBytes = 4 * 1024 * 1024
+
   private enum Command: Sendable {
     case start(command: String, arguments: [String], currentDirectory: String?)
     case send(Data)
     case sendKey(TerminalKeyEvent)
     case sendKeys([TerminalKeyEvent])
+    case paste(
+      text: String,
+      allowUnsafe: Bool,
+      completion: @MainActor @Sendable (TerminalSession.PasteOutcome) -> Void
+    )
     case resize(columns: UInt16, rows: UInt16)
     case terminate
   }
@@ -130,18 +163,24 @@ private final class TerminalSessionWorker {
   private var terminal: TerminalCore?
   private var frame: TerminalFrame?
   private var readSource: DispatchSourceRead?
+  private var writeSource: DispatchSourceWrite?
+  private var pendingOutput = Data()
+  private var writeSourceIsActive = false
   private var generation: UInt64 = 0
   private var columns: UInt16
   private var rows: UInt16
+  private let maxScrollback: Int
 
   init(
     columns: UInt16,
     rows: UInt16,
+    maxScrollback: Int,
     publishState: @escaping @MainActor (TerminalSession.State) -> Void,
     publishSnapshot: @escaping @MainActor (TerminalSession.Snapshot) -> Void
   ) {
     self.columns = columns
     self.rows = rows
+    self.maxScrollback = maxScrollback
     self.publishState = publishState
     self.publishSnapshot = publishSnapshot
     queue.setSpecific(key: queueKey, value: ())
@@ -170,6 +209,20 @@ private final class TerminalSessionWorker {
       return
     }
     enqueue(.sendKeys(events))
+  }
+
+  func paste(
+    _ text: String,
+    allowUnsafe: Bool,
+    completion: @escaping @MainActor @Sendable (TerminalSession.PasteOutcome) -> Void
+  ) {
+    enqueue(
+      .paste(
+        text: text,
+        allowUnsafe: allowUnsafe,
+        completion: completion
+      )
+    )
   }
 
   func resize(columns: UInt16, rows: UInt16) {
@@ -224,6 +277,8 @@ private final class TerminalSessionWorker {
       sendKeyOnQueue(event)
     case .sendKeys(let events):
       sendKeysOnQueue(events)
+    case .paste(let text, let allowUnsafe, let completion):
+      pasteOnQueue(text, allowUnsafe: allowUnsafe, completion: completion)
     case .resize(let columns, let rows):
       resizeOnQueue(columns: columns, rows: rows)
     case .terminate:
@@ -257,9 +312,17 @@ private final class TerminalSessionWorker {
         columns: columns,
         rows: rows
       )
-      let terminal = try TerminalCore(columns: columns, rows: rows)
+      let terminal = try TerminalCore(
+        columns: columns,
+        rows: rows,
+        maxScrollback: maxScrollback
+      )
       let frame = try TerminalFrame()
       let source = DispatchSource.makeReadSource(
+        fileDescriptor: pty.masterFileDescriptor,
+        queue: queue
+      )
+      let writeSource = DispatchSource.makeWriteSource(
         fileDescriptor: pty.masterFileDescriptor,
         queue: queue
       )
@@ -268,11 +331,16 @@ private final class TerminalSessionWorker {
       self.terminal = terminal
       self.frame = frame
       readSource = source
+      self.writeSource = writeSource
 
       source.setEventHandler { [weak self] in
         self?.readAvailableData()
       }
       source.setCancelHandler {}
+      writeSource.setEventHandler { [weak self] in
+        self?.flushPendingOutput()
+      }
+      writeSource.setCancelHandler {}
       source.resume()
 
       try renderAndPublish()
@@ -287,7 +355,7 @@ private final class TerminalSessionWorker {
     }
 
     do {
-      try writeAll(data)
+      try enqueueWrite(data)
     } catch {
       fail(error)
     }
@@ -308,10 +376,34 @@ private final class TerminalSessionWorker {
         encoded.append(try encodeWithLegacyFallback(event, terminal: terminal))
       }
       if !encoded.isEmpty {
-        try writeAll(encoded)
+        try enqueueWrite(encoded)
       }
     } catch {
       fail(error)
+    }
+  }
+
+  private func pasteOnQueue(
+    _ text: String,
+    allowUnsafe: Bool,
+    completion: @escaping @MainActor @Sendable (TerminalSession.PasteOutcome) -> Void
+  ) {
+    guard pty != nil, let terminal else {
+      completePaste(.dropped, completion: completion)
+      return
+    }
+
+    do {
+      switch try terminal.encodePaste(text, allowUnsafe: allowUnsafe) {
+      case .safe(let data):
+        try enqueueWrite(data)
+        completePaste(.sent, completion: completion)
+      case .unsafe:
+        completePaste(.needsConfirmation, completion: completion)
+      }
+    } catch {
+      fail(error)
+      completePaste(.dropped, completion: completion)
     }
   }
 
@@ -383,7 +475,7 @@ private final class TerminalSessionWorker {
         try terminal.feed(Data(buffer.prefix(count)))
         let responses = try terminal.takeResponses()
         if !responses.isEmpty {
-          try writeAll(responses)
+          try enqueueWrite(responses)
         }
       }
 
@@ -420,15 +512,86 @@ private final class TerminalSessionWorker {
     publish(snapshot: snapshot)
   }
 
-  private func writeAll(_ data: Data) throws {
+  private func enqueueWrite(_ data: Data) throws {
+    guard pty != nil, !data.isEmpty else {
+      return
+    }
+    if !pendingOutput.isEmpty {
+      try appendPendingOutput(data)
+      return
+    }
+
+    let leftover = try writeAvailable(data)
+    if !leftover.isEmpty {
+      try appendPendingOutput(leftover)
+    }
+  }
+
+  /// Writes until the PTY would block and returns the unwritten tail.
+  private func writeAvailable(_ data: Data) throws -> Data {
+    guard let pty else {
+      return Data()
+    }
     var offset = 0
     while offset < data.count {
-      let written = try pty?.write(data.dropFirst(offset)) ?? 0
-      guard written > 0 else {
-        throw PtyError.wouldBlock("PTY write accepted zero bytes.")
+      do {
+        let written = try pty.write(data.dropFirst(offset))
+        guard written > 0 else {
+          break
+        }
+        offset += written
+      } catch let error as PtyError {
+        if case .wouldBlock = error {
+          break
+        }
+        throw error
       }
-      offset += written
     }
+    return Data(data.dropFirst(offset))
+  }
+
+  private func appendPendingOutput(_ data: Data) throws {
+    guard data.count <= Self.maxPendingOutputBytes - pendingOutput.count else {
+      throw PtyError.io(
+        "Terminal pending output exceeded \(Self.maxPendingOutputBytes) bytes."
+      )
+    }
+    pendingOutput.append(data)
+    activateWriteSource()
+  }
+
+  private func flushPendingOutput() {
+    guard !pendingOutput.isEmpty else {
+      suspendWriteSource()
+      return
+    }
+
+    let queued = pendingOutput
+    pendingOutput.removeAll(keepingCapacity: true)
+    do {
+      pendingOutput = try writeAvailable(queued)
+      if pendingOutput.isEmpty {
+        suspendWriteSource()
+      }
+    } catch {
+      fail(error)
+    }
+  }
+
+  private func activateWriteSource() {
+    guard let writeSource, !writeSourceIsActive else {
+      return
+    }
+    writeSourceIsActive = true
+    writeSource.resume()
+  }
+
+  private func suspendWriteSource() {
+    guard let writeSource, writeSourceIsActive else {
+      return
+    }
+    writeSourceIsActive = false
+    writeSource.suspend()
   }
 
   private func finishExited(code: Int32) {
@@ -473,6 +636,15 @@ private final class TerminalSessionWorker {
   private func cancelSource() {
     readSource?.cancel()
     readSource = nil
+    if let writeSource {
+      if !writeSourceIsActive {
+        writeSource.resume()
+      }
+      writeSource.cancel()
+    }
+    writeSource = nil
+    writeSourceIsActive = false
+    pendingOutput.removeAll()
   }
 
   private func publish(state: TerminalSession.State) {
@@ -484,6 +656,15 @@ private final class TerminalSessionWorker {
   private func publish(snapshot: TerminalSession.Snapshot) {
     Task { @MainActor [publishSnapshot] in
       publishSnapshot(snapshot)
+    }
+  }
+
+  private func completePaste(
+    _ outcome: TerminalSession.PasteOutcome,
+    completion: @escaping @MainActor @Sendable (TerminalSession.PasteOutcome) -> Void
+  ) {
+    Task { @MainActor in
+      completion(outcome)
     }
   }
 }

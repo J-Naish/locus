@@ -767,6 +767,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   }
 
   private let metrics: TerminalCellMetrics
+  private let pasteboard: NSPasteboard
   private let resizeObserver: ((TerminalGridSize) -> Void)?
   private let keyEventObserver: ((TerminalKeyEvent) -> Void)?
   private let caretResetObserver: (() -> Void)?
@@ -792,12 +793,14 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   init(
     session: TerminalSession? = nil,
     metrics: TerminalCellMetrics = TerminalCellMetrics(),
+    pasteboard: NSPasteboard = .general,
     resizeObserver: ((TerminalGridSize) -> Void)? = nil,
     keyEventObserver: ((TerminalKeyEvent) -> Void)? = nil,
     caretResetObserver: (() -> Void)? = nil
   ) {
     self.session = session
     self.metrics = metrics
+    self.pasteboard = pasteboard
     self.resizeObserver = resizeObserver
     self.keyEventObserver = keyEventObserver
     self.caretResetObserver = caretResetObserver
@@ -942,6 +945,21 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     }
     resetCaretBlink()
     sendTerminalKey(event)
+  }
+
+  @objc func paste(_ sender: Any?) {
+    guard let session,
+      let text = pasteboard.string(forType: .string),
+      !text.isEmpty
+    else {
+      return
+    }
+    session.paste(text) { [weak self] outcome in
+      guard outcome == .needsConfirmation else {
+        return
+      }
+      self?.confirmUnsafePaste(text)
+    }
   }
 
   func insertText(_ string: Any, replacementRange: NSRange) {
@@ -1187,6 +1205,25 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     resizeTask?.cancel()
     resizeTask = nil
     pendingGridSize = nil
+  }
+
+  private func confirmUnsafePaste(_ text: String) {
+    guard let window else {
+      return
+    }
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Paste multi-line text?"
+    alert.informativeText =
+      "The running program is not using bracketed paste, so each line may run as a command as soon as it is pasted."
+    alert.addButton(withTitle: "Paste")
+    alert.addButton(withTitle: "Cancel")
+    alert.beginSheetModal(for: window) { [weak self] response in
+      guard response == .alertFirstButtonReturn else {
+        return
+      }
+      self?.session?.paste(text, allowUnsafe: true)
+    }
   }
 
   private var backgroundColor: NSColor {

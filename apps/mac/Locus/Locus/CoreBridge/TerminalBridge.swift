@@ -134,7 +134,10 @@ final class TerminalCore {
     return Self.copyAndFree(bytes: &bytes)
   }
 
-  func encodePaste(_ text: String) throws -> TerminalPasteResult {
+  func encodePaste(
+    _ text: String,
+    allowUnsafe: Bool = false
+  ) throws -> TerminalPasteResult {
     let data = Data(text.utf8)
     var bytes = LocusTermBytes(ptr: nil, len: 0, cap: 0)
     let status = data.withUnsafeBytes { buffer in
@@ -142,6 +145,7 @@ final class TerminalCore {
         handle,
         buffer.bindMemory(to: UInt8.self).baseAddress,
         buffer.count,
+        allowUnsafe,
         &bytes
       )
     }

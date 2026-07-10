@@ -657,7 +657,7 @@ LocusStatus locus_large_file_position_for_line_column(
  * handle state is undefined. Free the handle and create a new one.
  */
 
-#define LOCUS_TERM_ABI_VERSION ((uint32_t)1u)
+#define LOCUS_TERM_ABI_VERSION ((uint32_t)2u)
 
 #define LOCUS_TERM_STATUS_INVALID_ARGUMENT ((LocusStatus)300u)
 #define LOCUS_TERM_STATUS_PANIC ((LocusStatus)301u)
@@ -796,8 +796,15 @@ LocusTermFrame *locus_term_frame_new(void);
 void locus_term_frame_free(LocusTermFrame *frame);
 LocusStatus locus_term_key(
     LocusTerm *term, const LocusTermKeyEvent *event, LocusTermBytes *out);
+/*
+ * Returns LOCUS_TERM_STATUS_UNSAFE_PASTE only when bracketed paste is off,
+ * the input contains unsafe newline or control data, and allow_unsafe is
+ * false. After explicit user confirmation, callers may retry with
+ * allow_unsafe=true.
+ */
 LocusStatus locus_term_paste(
-    LocusTerm *term, const uint8_t *bytes, size_t len, LocusTermBytes *out);
+    LocusTerm *term, const uint8_t *bytes, size_t len, bool allow_unsafe,
+    LocusTermBytes *out);
 LocusStatus locus_term_scroll(LocusTerm *term, intptr_t delta);
 
 /*

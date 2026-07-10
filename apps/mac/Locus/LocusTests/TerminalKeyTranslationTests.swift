@@ -250,6 +250,29 @@ final class TerminalKeyTranslationTests: XCTestCase {
     )
   }
 
+  func testPasteSendsPasteboardTextThroughPty() {
+    let session = TerminalSession(columns: 40, rows: 10)
+    defer {
+      session.terminate()
+    }
+    let pasteboard = NSPasteboard(
+      name: NSPasteboard.Name("locus-test-paste-\(UUID().uuidString)"))
+    pasteboard.clearContents()
+    XCTAssertTrue(pasteboard.setString("echo PASTE-OK", forType: .string))
+    let view = TerminalPaneView(session: session, pasteboard: pasteboard)
+
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForTerminalInputCondition { session.snapshot != nil })
+    view.paste(nil)
+
+    XCTAssertTrue(
+      waitForTerminalInputCondition {
+        session.snapshot?.plainText.contains("PASTE-OK") == true
+      },
+      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+    )
+  }
+
   func testSendKeyEncodesEnterThroughPty() throws {
     let session = TerminalSession(columns: 80, rows: 10)
     defer {
