@@ -17,6 +17,7 @@ final class TerminalSession: ObservableObject {
     let rows: UInt16
     let cursorX: UInt16
     let cursorY: UInt16
+    let cursorVisible: Bool
     let cursorBlinking: Bool
   }
 
@@ -386,6 +387,7 @@ private final class TerminalSessionWorker {
       rows: frame.rows,
       cursorX: cursor.x,
       cursorY: cursor.y,
+      cursorVisible: cursor.visible,
       cursorBlinking: cursor.blinking
     )
     publish(snapshot: snapshot)
