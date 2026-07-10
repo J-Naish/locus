@@ -181,6 +181,232 @@ enum TerminalLineRunBuilder {
   }
 }
 
+struct TerminalKeyInput: Equatable, Sendable {
+  let keyCode: UInt16
+  let modifierFlagsRawValue: UInt
+  let characters: String?
+  let charactersIgnoringModifiers: String?
+  let isARepeat: Bool
+
+  init(
+    keyCode: UInt16,
+    modifierFlagsRawValue: UInt,
+    characters: String?,
+    charactersIgnoringModifiers: String?,
+    isARepeat: Bool
+  ) {
+    self.keyCode = keyCode
+    self.modifierFlagsRawValue = modifierFlagsRawValue
+    self.characters = characters
+    self.charactersIgnoringModifiers = charactersIgnoringModifiers
+    self.isARepeat = isARepeat
+  }
+
+  init(event: NSEvent) {
+    self.init(
+      keyCode: event.keyCode,
+      modifierFlagsRawValue: event.modifierFlags.rawValue,
+      characters: event.characters,
+      charactersIgnoringModifiers: event.charactersIgnoringModifiers,
+      isARepeat: event.isARepeat
+    )
+  }
+}
+
+struct TerminalKeyEvent: Equatable, Sendable {
+  let action: UInt32
+  let key: UInt32
+  let modifiers: TerminalModifiers
+  let consumedModifiers: TerminalModifiers
+  let composing: Bool
+  let utf8: Data
+  let unshiftedCodepoint: UInt32
+
+  func withLocusEvent<Result>(
+    _ body: (LocusTermKeyEvent) throws -> Result
+  ) rethrows -> Result {
+    try utf8.withUnsafeBytes { buffer in
+      let event = LocusTermKeyEvent(
+        action: action,
+        key: key,
+        mods: modifiers.rawValue,
+        consumed_mods: consumedModifiers.rawValue,
+        composing: composing,
+        utf8: buffer.bindMemory(to: UInt8.self).baseAddress,
+        utf8_len: buffer.count,
+        unshifted_codepoint: unshiftedCodepoint
+      )
+      return try body(event)
+    }
+  }
+}
+
+enum TerminalKeyTranslator {
+  // Device-dependent masks from IOKit/hidsystem/IOLLEvent.h. NSEvent always
+  // supplies the device-independent modifier, but these low bits are present
+  // only when macOS can identify the physical side. Unknown sides stay Left.
+  private enum DeviceMask {
+    static let leftControl: UInt = 0x0000_0001
+    static let leftShift: UInt = 0x0000_0002
+    static let rightShift: UInt = 0x0000_0004
+    static let leftCommand: UInt = 0x0000_0008
+    static let rightCommand: UInt = 0x0000_0010
+    static let leftOption: UInt = 0x0000_0020
+    static let rightOption: UInt = 0x0000_0040
+    static let rightControl: UInt = 0x0000_2000
+  }
+
+  static func translate(_ input: TerminalKeyInput) -> TerminalKeyEvent? {
+    let flags = NSEvent.ModifierFlags(rawValue: input.modifierFlagsRawValue)
+    let modifiers = terminalModifiers(
+      flags: flags,
+      rawValue: input.modifierFlagsRawValue
+    )
+    guard !modifiers.contains(.command) else {
+      return nil
+    }
+
+    let key = terminalKey(for: input.keyCode)
+    let text = terminalText(for: input, modifiers: modifiers, key: key)
+    return TerminalKeyEvent(
+      action: input.isARepeat ? LOCUS_TERM_ACTION_REPEAT : LOCUS_TERM_ACTION_PRESS,
+      key: key,
+      modifiers: modifiers,
+      consumedModifiers: [],
+      composing: false,
+      utf8: Data(text.utf8),
+      unshiftedCodepoint: input.charactersIgnoringModifiers?.unicodeScalars.first?.value ?? 0
+    )
+  }
+
+  static func shouldInterpretText(_ input: TerminalKeyInput) -> Bool {
+    let flags = NSEvent.ModifierFlags(rawValue: input.modifierFlagsRawValue)
+    guard !flags.contains(.command), !flags.contains(.control) else {
+      return false
+    }
+    return terminalKey(for: input.keyCode) == LOCUS_TERM_KEY_UNIDENTIFIED
+  }
+
+  private static func terminalText(
+    for input: TerminalKeyInput,
+    modifiers: TerminalModifiers,
+    key: UInt32
+  ) -> String {
+    guard key == LOCUS_TERM_KEY_UNIDENTIFIED else {
+      return ""
+    }
+    if modifiers.contains(.control) {
+      return input.charactersIgnoringModifiers ?? input.characters ?? ""
+    }
+    return input.characters ?? input.charactersIgnoringModifiers ?? ""
+  }
+
+  private static func terminalModifiers(
+    flags: NSEvent.ModifierFlags,
+    rawValue: UInt
+  ) -> TerminalModifiers {
+    var result: TerminalModifiers = []
+    let hasShift =
+      flags.contains(.shift)
+      || rawValue & (DeviceMask.leftShift | DeviceMask.rightShift) != 0
+    let hasControl =
+      flags.contains(.control)
+      || rawValue & (DeviceMask.leftControl | DeviceMask.rightControl) != 0
+    let hasOption =
+      flags.contains(.option)
+      || rawValue & (DeviceMask.leftOption | DeviceMask.rightOption) != 0
+    let hasCommand =
+      flags.contains(.command)
+      || rawValue & (DeviceMask.leftCommand | DeviceMask.rightCommand) != 0
+
+    if hasShift {
+      result.insert(.shift)
+      if rawValue & DeviceMask.rightShift != 0 {
+        result.insert(.rightShift)
+      }
+    }
+    if hasControl {
+      result.insert(.control)
+      if rawValue & DeviceMask.rightControl != 0 {
+        result.insert(.rightControl)
+      }
+    }
+    if hasOption {
+      result.insert(.option)
+      if rawValue & DeviceMask.rightOption != 0 {
+        result.insert(.rightOption)
+      }
+    }
+    if hasCommand {
+      result.insert(.command)
+      if rawValue & DeviceMask.rightCommand != 0 {
+        result.insert(.rightCommand)
+      }
+    }
+    if flags.contains(.capsLock) {
+      result.insert(.capsLock)
+    }
+    return result
+  }
+
+  private static func terminalKey(for keyCode: UInt16) -> UInt32 {
+    switch keyCode {
+    case 36, 76:
+      return LOCUS_TERM_KEY_ENTER
+    case 48:
+      return LOCUS_TERM_KEY_TAB
+    case 51:
+      return LOCUS_TERM_KEY_BACKSPACE
+    case 53:
+      return LOCUS_TERM_KEY_ESCAPE
+    case 123:
+      return LOCUS_TERM_KEY_ARROW_LEFT
+    case 124:
+      return LOCUS_TERM_KEY_ARROW_RIGHT
+    case 125:
+      return LOCUS_TERM_KEY_ARROW_DOWN
+    case 126:
+      return LOCUS_TERM_KEY_ARROW_UP
+    case 115:
+      return LOCUS_TERM_KEY_HOME
+    case 119:
+      return LOCUS_TERM_KEY_END
+    case 116:
+      return LOCUS_TERM_KEY_PAGE_UP
+    case 121:
+      return LOCUS_TERM_KEY_PAGE_DOWN
+    case 117:
+      return LOCUS_TERM_KEY_DELETE
+    case 122:
+      return LOCUS_TERM_KEY_F1
+    case 120:
+      return LOCUS_TERM_KEY_F2
+    case 99:
+      return LOCUS_TERM_KEY_F3
+    case 118:
+      return LOCUS_TERM_KEY_F4
+    case 96:
+      return LOCUS_TERM_KEY_F5
+    case 97:
+      return LOCUS_TERM_KEY_F6
+    case 98:
+      return LOCUS_TERM_KEY_F7
+    case 100:
+      return LOCUS_TERM_KEY_F8
+    case 101:
+      return LOCUS_TERM_KEY_F9
+    case 109:
+      return LOCUS_TERM_KEY_F10
+    case 103:
+      return LOCUS_TERM_KEY_F11
+    case 111:
+      return LOCUS_TERM_KEY_F12
+    default:
+      return LOCUS_TERM_KEY_UNIDENTIFIED
+    }
+  }
+}
+
 struct TerminalPane: NSViewRepresentable {
   let session: TerminalSession
 
@@ -193,7 +419,7 @@ struct TerminalPane: NSViewRepresentable {
   }
 }
 
-final class TerminalPaneView: NSView {
+final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   var session: TerminalSession? {
     didSet {
       guard oldValue !== session else {
@@ -213,8 +439,11 @@ final class TerminalPaneView: NSView {
   private var lastDrawnGeneration: UInt64?
   private var lastGridSize: TerminalGridSize?
   private var frameDisplayLink: CADisplayLink?
+  private var markedTextStorage: NSAttributedString?
+  private var markedSelection = NSRange(location: NSNotFound, length: 0)
+  private var handledTextDuringKeyInterpretation = false
 
-  override var acceptsFirstResponder: Bool { false }
+  override var acceptsFirstResponder: Bool { true }
   override var isOpaque: Bool { true }
 
   init(
@@ -256,6 +485,126 @@ final class TerminalPaneView: NSView {
   override func layout() {
     super.layout()
     updateTerminalSizeIfNeeded()
+  }
+
+  override func mouseDown(with event: NSEvent) {
+    window?.makeFirstResponder(self)
+    super.mouseDown(with: event)
+  }
+
+  override func keyDown(with event: NSEvent) {
+    let input = TerminalKeyInput(event: event)
+    guard TerminalKeyTranslator.translate(input) != nil else {
+      super.keyDown(with: event)
+      return
+    }
+
+    let hadMarkedText = hasMarkedText()
+    handledTextDuringKeyInterpretation = false
+    if hadMarkedText || TerminalKeyTranslator.shouldInterpretText(input) {
+      interpretKeyEvents([event])
+      if hadMarkedText || handledTextDuringKeyInterpretation {
+        return
+      }
+    }
+
+    if let translated = TerminalKeyTranslator.translate(input) {
+      session?.sendKey(translated)
+    }
+  }
+
+  override func doCommand(by selector: Selector) {
+    // Key bindings such as arrows and Enter return to keyDown for terminal
+    // translation. Swallowing the AppKit command prevents the system beep.
+  }
+
+  func insertText(_ string: Any, replacementRange: NSRange) {
+    handledTextDuringKeyInterpretation = true
+    clearMarkedText()
+    let text = Self.string(fromTextInput: string)
+    guard !text.isEmpty else {
+      return
+    }
+    session?.send(Data(text.utf8))
+  }
+
+  func setMarkedText(
+    _ string: Any,
+    selectedRange: NSRange,
+    replacementRange: NSRange
+  ) {
+    handledTextDuringKeyInterpretation = true
+    let attributed = Self.attributedString(fromTextInput: string)
+    if attributed.length == 0 {
+      clearMarkedText()
+      return
+    }
+    markedTextStorage = attributed
+    markedSelection = selectedRange
+    needsDisplay = true
+  }
+
+  func unmarkText() {
+    handledTextDuringKeyInterpretation = true
+    let text = markedTextStorage?.string ?? ""
+    clearMarkedText()
+    if !text.isEmpty {
+      session?.send(Data(text.utf8))
+    }
+  }
+
+  func hasMarkedText() -> Bool {
+    (markedTextStorage?.length ?? 0) > 0
+  }
+
+  func markedRange() -> NSRange {
+    guard let markedTextStorage, markedTextStorage.length > 0 else {
+      return NSRange(location: NSNotFound, length: 0)
+    }
+    return NSRange(location: 0, length: markedTextStorage.length)
+  }
+
+  func selectedRange() -> NSRange {
+    hasMarkedText() ? markedSelection : NSRange(location: NSNotFound, length: 0)
+  }
+
+  func attributedSubstring(
+    forProposedRange range: NSRange,
+    actualRange: NSRangePointer?
+  ) -> NSAttributedString? {
+    nil
+  }
+
+  func validAttributesForMarkedText() -> [NSAttributedString.Key] {
+    [.font, .foregroundColor, .underlineStyle]
+  }
+
+  func firstRect(
+    forCharacterRange range: NSRange,
+    actualRange: NSRangePointer?
+  ) -> NSRect {
+    actualRange?.pointee = range
+    guard let window else {
+      return .zero
+    }
+
+    var cursorX: UInt16 = 0
+    var cursorY: UInt16 = 0
+    session?.withFrame { frame in
+      cursorX = frame.cursor.x
+      cursorY = frame.cursor.y
+    }
+    let localRect = NSRect(
+      x: CGFloat(cursorX) * metrics.cellWidth,
+      y: rowRectY(cursorY),
+      width: metrics.cellWidth,
+      height: metrics.cellHeight
+    )
+    return window.convertToScreen(convert(localRect, to: nil))
+  }
+
+  func characterIndex(for point: NSPoint) -> Int {
+    0
   }
 
   override func draw(_ dirtyRect: NSRect) {
@@ -362,7 +711,11 @@ final class TerminalPaneView: NSView {
         }
       }
     }
-    drawCursor(frame.cursor, in: context)
+    if hasMarkedText() {
+      drawMarkedText(frame.cursor, in: context)
+    } else {
+      drawCursor(frame.cursor, in: context)
+    }
   }
 
   private func drawBackgrounds(
@@ -488,6 +841,63 @@ final class TerminalPaneView: NSView {
 
     NSColor.textColor.withAlphaComponent(cursor.style == 1 ? 0.28 : 0.9).setFill()
     rect.fill()
+  }
+
+  private func drawMarkedText(_ cursor: LocusTermCursor, in context: CGContext) {
+    guard let markedTextStorage, markedTextStorage.length > 0 else {
+      return
+    }
+
+    let attributed = NSMutableAttributedString(attributedString: markedTextStorage)
+    let range = NSRange(location: 0, length: attributed.length)
+    attributed.addAttributes(
+      [
+        .font: metrics.font,
+        .foregroundColor: NSColor.textColor,
+        .underlineStyle: NSUnderlineStyle.single.rawValue,
+      ],
+      range: range
+    )
+    let line = CTLineCreateWithAttributedString(attributed)
+    let width = max(
+      metrics.cellWidth,
+      CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+    )
+    let x = CGFloat(cursor.x) * metrics.cellWidth
+    backgroundColor.setFill()
+    NSRect(x: x, y: rowRectY(cursor.y), width: width, height: metrics.cellHeight).fill()
+
+    context.saveGState()
+    context.textMatrix = .identity
+    context.textPosition = CGPoint(
+      x: x,
+      y: bounds.height - rowTopOffset(cursor.y) - metrics.baselineOffset
+    )
+    CTLineDraw(line, context)
+    context.restoreGState()
+  }
+
+  private func clearMarkedText() {
+    markedTextStorage = nil
+    markedSelection = NSRange(location: NSNotFound, length: 0)
+    needsDisplay = true
+  }
+
+  private static func string(fromTextInput input: Any) -> String {
+    if let attributed = input as? NSAttributedString {
+      return attributed.string
+    }
+    if let string = input as? String {
+      return string
+    }
+    return String(describing: input)
+  }
+
+  private static func attributedString(fromTextInput input: Any) -> NSAttributedString {
+    if let attributed = input as? NSAttributedString {
+      return attributed
+    }
+    return NSAttributedString(string: string(fromTextInput: input))
   }
 
   private func cellRange(

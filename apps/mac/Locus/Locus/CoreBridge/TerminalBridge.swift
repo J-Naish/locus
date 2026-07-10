@@ -54,6 +54,10 @@ struct TerminalModifiers: OptionSet, Equatable {
   static let command = Self(rawValue: 1 << 3)
   static let capsLock = Self(rawValue: 1 << 4)
   static let numLock = Self(rawValue: 1 << 5)
+  static let rightShift = Self(rawValue: 1 << 6)
+  static let rightControl = Self(rawValue: 1 << 7)
+  static let rightOption = Self(rawValue: 1 << 8)
+  static let rightCommand = Self(rawValue: 1 << 9)
 }
 
 enum TerminalCellWidth: UInt8, Equatable {

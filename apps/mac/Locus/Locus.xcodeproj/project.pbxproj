@@ -30,6 +30,7 @@
 		1A0000010000000000000FA2 /* TerminalBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FA3 /* TerminalBridgeTests.swift */; };
 		1A0000010000000000000FA6 /* TerminalSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FA7 /* TerminalSessionTests.swift */; };
 		1A0000010000000000000FAB /* TerminalPaneViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FAC /* TerminalPaneViewTests.swift */; };
+		1A0000010000000000000FAE /* TerminalKeyTranslationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FAD /* TerminalKeyTranslationTests.swift */; };
 		1A00000100000000000000AA /* InitialFolderURLResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */; };
 		1A0000010000000000000090 /* FileLocationShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000091 /* FileLocationShortcut.swift */; };
 		1A000001000000000000007E /* FileLocationBookmarkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000007F /* FileLocationBookmarkStore.swift */; };
@@ -140,6 +141,7 @@
 		1A0000010000000000000FA3 /* TerminalBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalBridgeTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000FA7 /* TerminalSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000FAC /* TerminalPaneViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPaneViewTests.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FAD /* TerminalKeyTranslationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalKeyTranslationTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000F45 /* DocumentTabsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentTabsTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InitialFolderURLResolverTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000015 /* LocusCoreBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LocusCoreBridge.h; sourceTree = "<group>"; };
@@ -289,6 +291,7 @@
 				1A0000010000000000000F03 /* TextBufferStoreTests.swift */,
 				1A0000010000000000000FA3 /* TerminalBridgeTests.swift */,
 				1A0000010000000000000FAC /* TerminalPaneViewTests.swift */,
+				1A0000010000000000000FAD /* TerminalKeyTranslationTests.swift */,
 				1A0000010000000000000FA7 /* TerminalSessionTests.swift */,
 				1A00000100000000000000A7 /* WorkspaceDocumentSurfaceSupportTests.swift */,
 				1A00000100000000000000AF /* WorkspaceHomeVisibilityTests.swift */,
@@ -653,6 +656,7 @@
 				1A0000010000000000000F02 /* TextBufferStoreTests.swift in Sources */,
 				1A0000010000000000000FA2 /* TerminalBridgeTests.swift in Sources */,
 				1A0000010000000000000FAB /* TerminalPaneViewTests.swift in Sources */,
+				1A0000010000000000000FAE /* TerminalKeyTranslationTests.swift in Sources */,
 				1A0000010000000000000FA6 /* TerminalSessionTests.swift in Sources */,
 				1A00000100000000000000A6 /* WorkspaceDocumentSurfaceSupportTests.swift in Sources */,
 				1A00000100000000000000AE /* WorkspaceHomeVisibilityTests.swift in Sources */,

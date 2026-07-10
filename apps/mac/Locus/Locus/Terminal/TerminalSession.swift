@@ -63,6 +63,10 @@ final class TerminalSession: ObservableObject {
     worker.send(data)
   }
 
+  func sendKey(_ event: TerminalKeyEvent) {
+    worker.sendKey(event)
+  }
+
   func resize(columns: UInt16, rows: UInt16) {
     worker.resize(columns: columns, rows: rows)
   }
@@ -101,6 +105,7 @@ private final class TerminalSessionWorker {
   private enum Command: Sendable {
     case start(command: String, arguments: [String])
     case send(Data)
+    case sendKey(TerminalKeyEvent)
     case resize(columns: UInt16, rows: UInt16)
     case terminate
   }
@@ -137,6 +142,10 @@ private final class TerminalSessionWorker {
 
   func send(_ data: Data) {
     enqueue(.send(data))
+  }
+
+  func sendKey(_ event: TerminalKeyEvent) {
+    enqueue(.sendKey(event))
   }
 
   func resize(columns: UInt16, rows: UInt16) {
@@ -183,6 +192,8 @@ private final class TerminalSessionWorker {
       startOnQueue(command: command, arguments: arguments)
     case .send(let data):
       sendOnQueue(data)
+    case .sendKey(let event):
+      sendKeyOnQueue(event)
     case .resize(let columns, let rows):
       resizeOnQueue(columns: columns, rows: rows)
     case .terminate:
@@ -196,7 +207,12 @@ private final class TerminalSessionWorker {
     }
 
     do {
-      let environment = ProcessInfo.processInfo.environment
+      var processEnvironment = ProcessInfo.processInfo.environment
+      if processEnvironment["LC_CTYPE"] == nil {
+        processEnvironment["LC_CTYPE"] = "UTF-8"
+      }
+      let environment =
+        processEnvironment
         .map { key, value in (key, value) }
         .sorted { $0.0 < $1.0 }
       let pty = try PtySession(
@@ -237,6 +253,23 @@ private final class TerminalSessionWorker {
 
     do {
       try writeAll(data)
+    } catch {
+      fail(error)
+    }
+  }
+
+  private func sendKeyOnQueue(_ event: TerminalKeyEvent) {
+    guard pty != nil, let terminal else {
+      return
+    }
+
+    do {
+      let encoded = try event.withLocusEvent { rawEvent in
+        try terminal.encodeKey(rawEvent)
+      }
+      if !encoded.isEmpty {
+        try writeAll(encoded)
+      }
     } catch {
       fail(error)
     }
