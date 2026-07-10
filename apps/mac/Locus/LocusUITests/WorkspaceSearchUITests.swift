@@ -36,6 +36,19 @@ final class WorkspaceSearchUITests: XCTestCase {
   }
 
   @MainActor
+  func testCommandJTogglesTerminalPanel() throws {
+    let app = try launchAppWithBasicWorkspace()
+    let terminalPanel = app.descendants(matching: .any)["terminal-panel"]
+
+    XCTAssertFalse(terminalPanel.exists)
+    app.typeKey("j", modifierFlags: [.command])
+    XCTAssertTrue(terminalPanel.waitForExistence(timeout: 5), app.debugDescription)
+
+    app.typeKey("j", modifierFlags: [.command])
+    XCTAssertTrue(terminalPanel.waitForNonExistence(timeout: 5), app.debugDescription)
+  }
+
+  @MainActor
   func testCommandWClosesOpenFileWithoutClosingWindow() throws {
     let app = try launchAppWithBasicWorkspace()
 

@@ -409,17 +409,35 @@ enum TerminalKeyTranslator {
 
 struct TerminalPane: NSViewRepresentable {
   let session: TerminalSession
+  var onViewReady: ((TerminalPaneView) -> Void)?
+
+  init(
+    session: TerminalSession,
+    onViewReady: ((TerminalPaneView) -> Void)? = nil
+  ) {
+    self.session = session
+    self.onViewReady = onViewReady
+  }
 
   func makeNSView(context: Context) -> TerminalPaneView {
-    TerminalPaneView(session: session)
+    let view = TerminalPaneView(session: session)
+    view.onWindowChange = onViewReady
+    onViewReady?(view)
+    return view
   }
 
   func updateNSView(_ nsView: TerminalPaneView, context: Context) {
     nsView.session = session
+    nsView.onWindowChange = onViewReady
+  }
+
+  static func dismantleNSView(_ nsView: TerminalPaneView, coordinator: Void) {
+    nsView.onWindowChange = nil
   }
 }
 
 final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
+  var onWindowChange: ((TerminalPaneView) -> Void)?
   var session: TerminalSession? {
     didSet {
       guard oldValue !== session else {
@@ -475,6 +493,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     } else {
       startDisplayLink()
     }
+    onWindowChange?(self)
   }
 
   override func setFrameSize(_ newSize: NSSize) {

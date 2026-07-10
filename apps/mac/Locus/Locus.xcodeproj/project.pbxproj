@@ -31,6 +31,8 @@
 		1A0000010000000000000FA6 /* TerminalSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FA7 /* TerminalSessionTests.swift */; };
 		1A0000010000000000000FAB /* TerminalPaneViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FAC /* TerminalPaneViewTests.swift */; };
 		1A0000010000000000000FAE /* TerminalKeyTranslationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FAD /* TerminalKeyTranslationTests.swift */; };
+		1A0000010000000000000FB0 /* TerminalPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FAF /* TerminalPanel.swift */; };
+		1A0000010000000000000FB2 /* TerminalPanelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FB1 /* TerminalPanelTests.swift */; };
 		1A00000100000000000000AA /* InitialFolderURLResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */; };
 		1A0000010000000000000090 /* FileLocationShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000091 /* FileLocationShortcut.swift */; };
 		1A000001000000000000007E /* FileLocationBookmarkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000007F /* FileLocationBookmarkStore.swift */; };
@@ -142,6 +144,8 @@
 		1A0000010000000000000FA7 /* TerminalSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000FAC /* TerminalPaneViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPaneViewTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000FAD /* TerminalKeyTranslationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalKeyTranslationTests.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FAF /* TerminalPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPanel.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FB1 /* TerminalPanelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPanelTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000F45 /* DocumentTabsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentTabsTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InitialFolderURLResolverTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000015 /* LocusCoreBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LocusCoreBridge.h; sourceTree = "<group>"; };
@@ -292,6 +296,7 @@
 				1A0000010000000000000FA3 /* TerminalBridgeTests.swift */,
 				1A0000010000000000000FAC /* TerminalPaneViewTests.swift */,
 				1A0000010000000000000FAD /* TerminalKeyTranslationTests.swift */,
+				1A0000010000000000000FB1 /* TerminalPanelTests.swift */,
 				1A0000010000000000000FA7 /* TerminalSessionTests.swift */,
 				1A00000100000000000000A7 /* WorkspaceDocumentSurfaceSupportTests.swift */,
 				1A00000100000000000000AF /* WorkspaceHomeVisibilityTests.swift */,
@@ -345,6 +350,7 @@
 			isa = PBXGroup;
 			children = (
 				1A0000010000000000000FAA /* TerminalPaneView.swift */,
+				1A0000010000000000000FAF /* TerminalPanel.swift */,
 				1A0000010000000000000FA5 /* TerminalSession.swift */,
 			);
 			path = Terminal;
@@ -575,6 +581,7 @@
 				1A0000010000000000000002 /* CoreBridge.swift in Sources */,
 				1A0000010000000000000FA0 /* TerminalBridge.swift in Sources */,
 				1A0000010000000000000FA9 /* TerminalPaneView.swift in Sources */,
+				1A0000010000000000000FB0 /* TerminalPanel.swift in Sources */,
 				1A0000010000000000000FA4 /* TerminalSession.swift in Sources */,
 				1A00000100000000000000E2 /* TextBuffer.swift in Sources */,
 				1A000001000000000000006C /* ClipboardService.swift in Sources */,
@@ -657,6 +664,7 @@
 				1A0000010000000000000FA2 /* TerminalBridgeTests.swift in Sources */,
 				1A0000010000000000000FAB /* TerminalPaneViewTests.swift in Sources */,
 				1A0000010000000000000FAE /* TerminalKeyTranslationTests.swift in Sources */,
+				1A0000010000000000000FB2 /* TerminalPanelTests.swift in Sources */,
 				1A0000010000000000000FA6 /* TerminalSessionTests.swift in Sources */,
 				1A00000100000000000000A6 /* WorkspaceDocumentSurfaceSupportTests.swift in Sources */,
 				1A00000100000000000000AE /* WorkspaceHomeVisibilityTests.swift in Sources */,
