@@ -565,6 +565,21 @@ enum TerminalKeyTranslator {
       flags: flags,
       rawValue: input.modifierFlagsRawValue
     )
+    // Cmd+Delete clears the whole command line, like Terminal.app and
+    // Ghostty: translate it to Ctrl+U (kill-whole-line in the shell) instead
+    // of passing it to the system, which has no binding for it.
+    if modifiers.contains(.command), input.keyCode == 51 {
+      return TerminalKeyEvent(
+        action: LOCUS_TERM_ACTION_PRESS,
+        key: LOCUS_TERM_KEY_UNIDENTIFIED,
+        modifiers: .control,
+        consumedModifiers: [],
+        composing: false,
+        utf8: Data("u".utf8),
+        unshiftedCodepoint: UnicodeScalar("u").value
+      )
+    }
+
     guard !modifiers.contains(.command) else {
       return nil
     }

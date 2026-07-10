@@ -65,6 +65,25 @@ final class TerminalKeyTranslationTests: XCTestCase {
     XCTAssertEqual(event.unshiftedCodepoint, UnicodeScalar("c").value)
   }
 
+  func testCommandDeleteTranslatesToKillLine() throws {
+    // Cmd+Delete clears the whole shell line via Ctrl+U, like Terminal.app.
+    let event = try XCTUnwrap(
+      TerminalKeyTranslator.translate(
+        TerminalKeyInput(
+          keyCode: 51,
+          modifierFlagsRawValue: NSEvent.ModifierFlags.command.rawValue,
+          characters: nil,
+          charactersIgnoringModifiers: nil,
+          isARepeat: false
+        )
+      )
+    )
+
+    XCTAssertEqual(event.modifiers, .control)
+    XCTAssertEqual(event.utf8, Data("u".utf8))
+    XCTAssertEqual(event.unshiftedCodepoint, UnicodeScalar("u").value)
+  }
+
   func testCommandEventsAreNotTranslated() {
     let event = TerminalKeyTranslator.translate(
       TerminalKeyInput(
