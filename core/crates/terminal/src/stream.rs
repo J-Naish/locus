@@ -57,6 +57,13 @@ pub enum SizeReportStyle {
 
 pub trait Handler {
     fn print(&mut self, _cp: char) {}
+    /// A maximal run of printable ASCII observed while the parser is in the
+    /// ground state. Implementations may batch this operation.
+    fn print_run(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.print(char::from(*byte));
+        }
+    }
     fn print_repeat(&mut self, _count: usize) {}
     fn execute(&mut self, _byte: u8) {}
     fn index(&mut self) {}
@@ -153,8 +160,42 @@ impl<H: Handler> Stream<H> {
     }
 
     pub fn next_slice(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.next(*byte);
+        let mut index = 0;
+        while index < bytes.len() {
+            if self.parser.state() == crate::parser::State::Ground && !self.utf8.is_pending() {
+                let run_start = index;
+                while index < bytes.len() && matches!(bytes[index], 0x20..=0x7E) {
+                    index += 1;
+                }
+                if index - run_start >= 2 {
+                    self.handler.print_run(&bytes[run_start..index]);
+                    continue;
+                }
+                index = run_start;
+            }
+
+            // ghostty: stream.zig:520 — decode complete Ground-state UTF-8
+            // spans together. Invalid or slice-split sequences retain the
+            // scalar decoder's retry and pending-byte behavior unchanged.
+            if self.parser.state() == crate::parser::State::Ground
+                && !self.utf8.is_pending()
+                && bytes[index] >= 0x80
+            {
+                let utf8_start = index;
+                while index < bytes.len() && bytes[index] >= 0x80 {
+                    index += 1;
+                }
+                if let Ok(text) = std::str::from_utf8(&bytes[utf8_start..index]) {
+                    for cp in text.chars() {
+                        self.handle_codepoint(cp);
+                    }
+                    continue;
+                }
+                index = utf8_start;
+            }
+
+            self.next(bytes[index]);
+            index += 1;
         }
     }
 

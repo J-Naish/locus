@@ -313,6 +313,10 @@ impl<E: Effects> Handler for TerminalHandler<E> {
         self.terminal.print(cp);
     }
 
+    fn print_run(&mut self, bytes: &[u8]) {
+        self.terminal.print_run(bytes);
+    }
+
     fn print_repeat(&mut self, count: usize) {
         self.terminal.print_repeat(count);
     }

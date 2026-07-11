@@ -159,6 +159,7 @@ pub struct Terminal {
     pub height_px: u32,
     pub scrolling_region: ScrollingRegion,
     pub previous_char: Option<char>,
+    last_printed_class: Option<(u32, unicode::GraphemeBreak)>,
     pub modes: ModeState,
     pub protected_mode: ProtectedMode,
     pub dirty: Dirty,
@@ -186,6 +187,7 @@ impl Terminal {
             height_px: options.height_px,
             scrolling_region: ScrollingRegion::full(options.cols, options.rows),
             previous_char: None,
+            last_printed_class: None,
             modes: ModeState::default(),
             protected_mode: ProtectedMode::Off,
             dirty: Dirty::default(),
@@ -420,12 +422,14 @@ impl Terminal {
         // Perform grapheme clustering if grapheme support is enabled (mode
         // 2027). This is much slower than the normal path so the conditional is
         // ordered least-likely to most-likely to drop out quickly.
-        if c > 255
-            && self.modes.get(Mode::GraphemeCluster)
-            && self.active_screen().cursor.x > 0
-            && self.print_grapheme(c, right_limit)
-        {
-            return;
+        let tries_grapheme =
+            c > 255 && self.modes.get(Mode::GraphemeCluster) && self.active_screen().cursor.x > 0;
+        if tries_grapheme {
+            if self.print_grapheme(c, right_limit) {
+                return;
+            }
+        } else if c > 255 {
+            self.last_printed_class = Some((c, unicode::grapheme_break_class(c)));
         }
 
         // Determine the width of this character. Fast-path byte-sized code
@@ -434,7 +438,7 @@ impl Terminal {
         let width = if c <= 0xFF {
             1usize
         } else {
-            usize::from(unicode::props(c).width)
+            usize::from(unicode::width(c))
         };
 
         // Attach zero-width characters to our cell as grapheme data.
@@ -461,7 +465,9 @@ impl Terminal {
 
         match width {
             1 => {
-                self.active_screen_mut().cursor_mark_dirty();
+                // Row dirty marking happens inside Page::set_cell through
+                // print_cell. Ghostty's explicit cursorMarkDirty is cheap
+                // because its printCell writes through cached pointers.
                 self.active_screen_mut().print_cell(c, CellWide::Narrow);
             }
             2 => {
@@ -490,13 +496,11 @@ impl Terminal {
                         self.print_wrap();
                     }
 
-                    self.active_screen_mut().cursor_mark_dirty();
                     self.active_screen_mut().print_cell(c, CellWide::Wide);
                     self.active_screen_mut().cursor_right(1);
                     self.active_screen_mut().print_cell(0, CellWide::SpacerTail);
                 } else {
                     // Terminals should never be only 1-wide; guard anyway.
-                    self.active_screen_mut().cursor_mark_dirty();
                     self.active_screen_mut().print_cell(0, CellWide::Narrow);
                 }
             }
@@ -512,11 +516,81 @@ impl Terminal {
         self.active_screen_mut().cursor_right(1);
     }
 
+    /// Prints a Ground-state printable ASCII run in page-sized chunks.
+    ///
+    /// Insert mode, hyperlinks, charset translation, and disabled autowrap use
+    /// the scalar path unchanged. Ghostty gets equivalent throughput from a
+    /// cached cursor pointer; this port deliberately batches page writes to
+    /// avoid repeated generational-arena and tracked-pin resolution.
+    pub fn print_run(&mut self, bytes: &[u8]) {
+        debug_assert!(bytes.iter().all(|byte| matches!(byte, 0x20..=0x7E)));
+        let charset = self.active_screen().charset;
+        let active_charset = charset.get(charset.gl);
+        if self.status_display != StatusDisplay::Main
+            || self.modes.get(Mode::Insert)
+            || self.active_screen().cursor.hyperlink_id != 0
+            || charset.single_shift.is_some()
+            || !matches!(active_charset, Charset::Ascii | Charset::Utf8)
+            || !self.modes.get(Mode::Wraparound)
+        {
+            for byte in bytes {
+                self.print(char::from(*byte));
+            }
+            return;
+        }
+
+        let mut offset = 0;
+        while offset < bytes.len() {
+            if self.active_screen().cursor.pending_wrap {
+                self.print_wrap();
+            }
+
+            let right_limit = self.print_right_limit_exclusive();
+            let cursor_x = self.active_screen().cursor.x;
+            let available = usize::from(right_limit.saturating_sub(cursor_x));
+            if available == 0 {
+                self.print(char::from(bytes[offset]));
+                offset += 1;
+                continue;
+            }
+
+            let chunk_len = available.min(bytes.len() - offset);
+            let consumed = self
+                .active_screen_mut()
+                .print_run_cells(&bytes[offset..offset + chunk_len]);
+            if consumed == 0 {
+                self.print(char::from(bytes[offset]));
+                offset += 1;
+                continue;
+            }
+
+            self.previous_char = Some(char::from(bytes[offset + consumed - 1]));
+            let consumed_columns = consumed as CellCountInt;
+            if cursor_x.saturating_add(consumed_columns) == right_limit {
+                self.active_screen_mut()
+                    .cursor_right(consumed.saturating_sub(1));
+                self.active_screen_mut().cursor.pending_wrap = true;
+            } else {
+                self.active_screen_mut().cursor_right(consumed);
+            }
+            offset += consumed;
+
+            if consumed < chunk_len {
+                self.print(char::from(bytes[offset]));
+                offset += 1;
+            }
+        }
+    }
+
     /// Grapheme-clustering branch of [`print`]. Returns `true` if the code point
     /// was consumed as part of a grapheme (the caller should return), `false`
     /// if it turned out to be a grapheme break and normal printing should
     /// proceed. Mirrors the `grapheme:` block of Ghostty's `Terminal.print`.
     fn print_grapheme(&mut self, c: u32, right_limit: CellCountInt) -> bool {
+        let cached_previous = self.last_printed_class;
+        let current_class = unicode::grapheme_break_class(c);
+        self.last_printed_class = Some((c, current_class));
+
         // Determine the previous cell we're attaching to and the left offset.
         let left = self.grapheme_prev_left(right_limit);
         let Some(cursor_pin) = self.active_screen().cursor_pin() else {
@@ -551,7 +625,14 @@ impl Terminal {
                 }
             }
         }
-        let grapheme_break = unicode::grapheme_break(previous_codepoint, c, &mut state);
+        let previous_class = cached_previous
+            .filter(|(codepoint, _)| *codepoint == previous_codepoint)
+            .map_or_else(
+                || unicode::grapheme_break_class(previous_codepoint),
+                |(_, class)| class,
+            );
+        let grapheme_break =
+            unicode::grapheme_break_classified(previous_class, current_class, &mut state);
 
         // If we CAN break, `c` starts a new cell: fall back to normal printing.
         if grapheme_break {
@@ -571,7 +652,7 @@ impl Terminal {
             } else {
                 DesiredWide::Narrow
             };
-        } else if !unicode::props(c).width_zero_in_grapheme {
+        } else if unicode::width(c) != 0 {
             // A code point that contributes width means we're at least width 2,
             // since the first code point must be at least width 1.
             desired_wide = DesiredWide::Wide;
@@ -2525,6 +2606,10 @@ impl Handler for Terminal {
         Terminal::print(self, cp);
     }
 
+    fn print_run(&mut self, bytes: &[u8]) {
+        Terminal::print_run(self, bytes);
+    }
+
     fn print_repeat(&mut self, count: usize) {
         self.print_repeat(count);
     }
@@ -2790,6 +2875,7 @@ mod tests {
     use crate::page_list::Scroll;
     use crate::sgr::Attribute;
     use crate::stream::Stream;
+    use crate::stream_terminal::{NoopEffects, TerminalHandler};
 
     fn terminal(cols: CellCountInt, rows: CellCountInt) -> Terminal {
         Terminal::new(Options {
@@ -2809,6 +2895,100 @@ mod tests {
             width_px: 0,
             height_px: 0,
         })
+    }
+
+    fn assert_print_run_equivalent(cols: CellCountInt, rows: CellCountInt, payload: &[u8]) {
+        fn stream(cols: CellCountInt, rows: CellCountInt) -> Stream<TerminalHandler<NoopEffects>> {
+            Stream::new(TerminalHandler::new(terminal(cols, rows), NoopEffects))
+        }
+
+        let mut batched = stream(cols, rows);
+        batched.next_slice(payload);
+        let mut scalar = stream(cols, rows);
+        for byte in payload {
+            scalar.next_slice(std::slice::from_ref(byte));
+        }
+
+        let batched_terminal = &batched.handler.terminal;
+        let scalar_terminal = &scalar.handler.terminal;
+        assert_eq!(
+            batched_terminal.dump_string(),
+            scalar_terminal.dump_string()
+        );
+        assert_eq!(
+            (
+                batched_terminal.active_screen().cursor.x,
+                batched_terminal.active_screen().cursor.y,
+                batched_terminal.active_screen().cursor.pending_wrap,
+            ),
+            (
+                scalar_terminal.active_screen().cursor.x,
+                scalar_terminal.active_screen().cursor.y,
+                scalar_terminal.active_screen().cursor.pending_wrap,
+            )
+        );
+    }
+
+    #[test]
+    fn print_run_equivalence_wrap_heavy() {
+        let payload = b"abcdEFGH0123wxyz".repeat(25);
+        assert_eq!(payload.len(), 400);
+        assert_print_run_equivalent(10, 8, &payload);
+    }
+
+    #[test]
+    fn print_run_equivalence_right_margin_exact() {
+        assert_print_run_equivalent(10, 4, b"abcdefghijk");
+    }
+
+    #[test]
+    fn print_run_equivalence_left_right_margins() {
+        assert_print_run_equivalent(
+            20,
+            6,
+            b"\x1B[?69h\x1B[5;15sabcdefghijklmnopqrstuvwxyz0123456789",
+        );
+    }
+
+    #[test]
+    fn print_run_equivalence_insert_mode() {
+        assert_print_run_equivalent(12, 4, b"seed\x1B[1G\x1B[4hinserted-text");
+    }
+
+    #[test]
+    fn print_run_equivalence_no_autowrap() {
+        assert_print_run_equivalent(10, 4, b"\x1B[?7labcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[test]
+    fn print_run_equivalence_overwrites_wide_cells() {
+        let mut payload = "日本語日本語".as_bytes().to_vec();
+        payload.extend_from_slice(b"\x1B[Habcdefghijklmnop");
+        assert_print_run_equivalent(16, 4, &payload);
+    }
+
+    #[test]
+    fn print_run_equivalence_active_hyperlink() {
+        assert_print_run_equivalent(
+            40,
+            4,
+            b"\x1B]8;;https://example.com\x1B\\linked-text\x1B]8;;\x1B\\ plain-text",
+        );
+    }
+
+    #[test]
+    fn print_run_equivalence_rep_after_run() {
+        let payload = b"abc\x1B[3b";
+        assert_print_run_equivalent(20, 4, payload);
+
+        let mut stream = Stream::new(TerminalHandler::new(terminal(20, 4), NoopEffects));
+        stream.next_slice(payload);
+        assert_eq!(stream.handler.terminal.dump_string(), "abcccc");
+    }
+
+    #[test]
+    fn print_run_equivalence_styled() {
+        assert_print_run_equivalent(40, 4, b"\x1B[31mred-red-red\x1B[0mplain-plain-plain");
     }
 
     /// Print a raw code point (Ghostty's `print` takes a `u21`).

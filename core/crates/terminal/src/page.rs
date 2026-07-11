@@ -15,7 +15,7 @@ use crate::size::{
     align_backward, align_forward, BufValue, CellCountInt, GraphemeBytesInt, Offset, OffsetBuf,
     OffsetSlice, StringBytesInt, StyleCountInt,
 };
-use crate::style::{PackedStyle, StyleContext, StyleSet};
+use crate::style::{PackedStyle, StyleContext, StyleSet, DEFAULT_STYLE_ID};
 
 #[allow(dead_code)]
 pub(crate) const STRING_CHUNK: usize = 32;
@@ -743,6 +743,66 @@ impl Page {
             row.set_hyperlink(true);
         }
         self.set_row(y, row);
+    }
+
+    /// Writes the safe prefix of a printable ASCII run into one row and
+    /// returns the number of cells consumed. Complex existing cells are left
+    /// for the scalar print path, which performs their required cleanup.
+    pub(crate) fn print_ascii_run(
+        &mut self,
+        y: CellCountInt,
+        x: CellCountInt,
+        bytes: &[u8],
+        style_id: StyleCountInt,
+        protected: bool,
+        semantic_content: SemanticContent,
+    ) -> usize {
+        debug_assert!(y < self.size.rows);
+        debug_assert!(x < self.size.cols);
+        debug_assert!(bytes.iter().all(|byte| matches!(byte, 0x20..=0x7E)));
+
+        let mut row = self.row(y);
+        let cells = row.cells();
+        let available = usize::from(self.size.cols.saturating_sub(x));
+        let requested = bytes.len().min(available);
+        let safe_len = (0..requested)
+            .take_while(|offset| {
+                let cell = cells.get(&self.memory, usize::from(x) + offset);
+                matches!(cell.wide(), CellWide::Narrow) && !cell.has_grapheme() && !cell.hyperlink()
+            })
+            .count();
+        if safe_len == 0 {
+            return 0;
+        }
+
+        let mut new_style_refs: StyleCountInt = 0;
+        for (offset, byte) in bytes[..safe_len].iter().enumerate() {
+            let cell_index = usize::from(x) + offset;
+            let old_cell = cells.get(&self.memory, cell_index);
+            if old_cell.style_id() != style_id {
+                if old_cell.style_id() != DEFAULT_STYLE_ID {
+                    self.styles.release(&mut self.memory, old_cell.style_id());
+                }
+                if style_id != DEFAULT_STYLE_ID {
+                    new_style_refs = new_style_refs.saturating_add(1);
+                }
+            }
+
+            let mut new_cell = Cell::new(char::from(*byte));
+            new_cell.set_style_id(style_id);
+            new_cell.set_protected(protected);
+            new_cell.set_semantic_content(semantic_content);
+            cells.set(&mut self.memory, cell_index, new_cell);
+        }
+
+        if new_style_refs > 0 {
+            self.styles
+                .use_multiple(&mut self.memory, style_id, new_style_refs);
+            row.set_styled(true);
+        }
+        row.set_dirty(true);
+        self.set_row(y, row);
+        safe_len
     }
 
     pub fn is_dirty(&self, y: CellCountInt) -> bool {

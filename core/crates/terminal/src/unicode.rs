@@ -94,10 +94,27 @@ pub fn props(cp: u32) -> Properties {
     }
 }
 
+/// Width-only lookup for the print hot path: identical to
+/// [`props`]`.width` by construction, without computing grapheme and emoji
+/// properties that the caller does not use.
+#[inline]
+pub fn width(cp: u32) -> u8 {
+    char_width(cp)
+}
+
 /// Display width of a code point, clamped to `[0, 2]`. Control characters are
 /// filtered before print, so an unknown/`None` width maps to `0` (treated as a
 /// combining/zero-width member) exactly like Ghostty's clamp.
 fn char_width(cp: u32) -> u8 {
+    // These assigned East Asian ranges are uniformly width two in
+    // unicode-width. Keeping the common CJK print path out of its general
+    // property-table search is a deliberate Rust-port optimization.
+    if matches!(
+        cp,
+        0x3041..=0x3096 | 0x30A1..=0x30FA | 0x3400..=0x4DBF | 0x4E00..=0x9FFF
+    ) {
+        return 2;
+    }
     let Some(ch) = char::from_u32(cp) else {
         return 1;
     };
@@ -109,7 +126,7 @@ fn char_width(cp: u32) -> u8 {
 }
 
 /// Classify a code point into its UAX #29 grapheme-break class (no control).
-fn grapheme_break_class(cp: u32) -> GraphemeBreak {
+pub(crate) fn grapheme_break_class(cp: u32) -> GraphemeBreak {
     match cp {
         // Zero Width Joiner.
         0x200D => GraphemeBreak::Zwj,
@@ -263,10 +280,10 @@ pub struct BreakState {
 pub fn grapheme_break(cp1: u32, cp2: u32, state: &mut BreakState) -> bool {
     let gb1 = grapheme_break_class(cp1);
     let gb2 = grapheme_break_class(cp2);
-    grapheme_break_class_pair(gb1, gb2, state)
+    grapheme_break_classified(gb1, gb2, state)
 }
 
-fn grapheme_break_class_pair(
+pub(crate) fn grapheme_break_classified(
     gb1: GraphemeBreak,
     gb2: GraphemeBreak,
     state: &mut BreakState,
@@ -456,5 +473,62 @@ mod tests {
         assert!(props(0x094D).width_zero_in_grapheme);
         assert!(props(0x200D).width_zero_in_grapheme); // ZWJ
         assert!(!props(0x0937).width_zero_in_grapheme); // consonant
+    }
+
+    #[test]
+    fn width_matches_props_width() {
+        let representative = [
+            0x20, 0x61, 0x0300, 0x3042, 0x4E00, 0x1F600, 0x200D, 0xFE0F, 0x1F1EF, 0xE0100,
+        ];
+        for cp in (0x00..=0x2FF).chain(representative) {
+            assert_eq!(width(cp), props(cp).width, "code point U+{cp:04X}");
+        }
+    }
+
+    #[test]
+    fn common_cjk_fast_width_ranges_match_unicode_width() {
+        let ranges = [
+            0x3041..=0x3096,
+            0x30A1..=0x30FA,
+            0x3400..=0x4DBF,
+            0x4E00..=0x9FFF,
+        ];
+        for range in ranges {
+            for cp in range {
+                let ch = char::from_u32(cp).expect("range contains valid Unicode scalars");
+                assert_eq!(
+                    UnicodeWidthChar::width(ch),
+                    Some(2),
+                    "code point U+{cp:04X}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grapheme_break_classified_matches_grapheme_break() {
+        let sequences: &[&[u32]] = &[
+            &[0x4E00, 0x4E8C],
+            &[0x0061, 0x0300],
+            &[0x1F600, 0x200D],
+            &[0x1F600, 0x200D, 0x1F469],
+            &[0x1F1EF, 0x1F1F5, 0x1F1FA],
+            &[0x2764, 0xFE0F],
+        ];
+
+        for sequence in sequences {
+            let mut expected_state = BreakState::default();
+            let mut classified_state = BreakState::default();
+            for pair in sequence.windows(2) {
+                let expected = grapheme_break(pair[0], pair[1], &mut expected_state);
+                let classified = grapheme_break_classified(
+                    grapheme_break_class(pair[0]),
+                    grapheme_break_class(pair[1]),
+                    &mut classified_state,
+                );
+                assert_eq!(classified, expected, "sequence {sequence:X?}");
+                assert_eq!(classified_state, expected_state, "sequence {sequence:X?}");
+            }
+        }
     }
 }

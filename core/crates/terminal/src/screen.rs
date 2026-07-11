@@ -2249,6 +2249,33 @@ impl Screen {
         self.assert_integrity();
     }
 
+    /// Writes a printable ASCII prefix with one cursor-pin and page lookup.
+    /// Cursor advancement and wrapping remain the terminal's responsibility.
+    pub(crate) fn print_run_cells(&mut self, bytes: &[u8]) -> usize {
+        let Some(pin) = self.cursor_pin() else {
+            return 0;
+        };
+        let style_id = self.cursor.style_id;
+        let protected = self.cursor.protected;
+        let semantic_content = self.cursor.semantic_content;
+        let consumed = self
+            .pages
+            .node_mut(pin.node)
+            .map(|node| {
+                node.page.print_ascii_run(
+                    pin.y,
+                    pin.x,
+                    bytes,
+                    style_id,
+                    protected,
+                    semantic_content,
+                )
+            })
+            .unwrap_or(0);
+        self.assert_integrity();
+        consumed
+    }
+
     /// When overwriting a wide char near the left edge, a wide char may have
     /// wrapped from the previous row leaving a `spacer_head` at the end of that
     /// row. Clear it so the previous row doesn't keep a stale `spacer_head`.
