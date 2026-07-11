@@ -456,7 +456,11 @@ impl<E: Effects> Handler for TerminalHandler<E> {
     }
 
     fn set_attribute(&mut self, attribute: crate::sgr::Attribute<'_>) {
-        self.terminal.active_screen_mut().set_attribute(attribute);
+        self.terminal.apply_sgr_attribute(attribute);
+    }
+
+    fn sgr_sequence_end(&mut self) {
+        self.terminal.finish_sgr_sequence();
     }
 
     fn set_mode(&mut self, mode: Mode) {

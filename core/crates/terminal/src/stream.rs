@@ -88,6 +88,7 @@ pub trait Handler {
     fn erase_display(&mut self, _mode: EraseDisplay, _protected: bool) {}
     fn erase_line(&mut self, _mode: EraseLine, _protected: bool) {}
     fn set_attribute(&mut self, _attribute: sgr::Attribute<'_>) {}
+    fn sgr_sequence_end(&mut self) {}
     fn set_mode(&mut self, _mode: Mode) {}
     fn reset_mode(&mut self, _mode: Mode) {}
     fn save_mode(&mut self, _mode: Mode) {}
@@ -143,6 +144,81 @@ pub trait Handler {
     fn apc_end(&mut self) {}
 }
 
+fn simple_sgr_attribute(value: u16) -> Option<sgr::Attribute<'static>> {
+    match value {
+        0 => Some(sgr::Attribute::Unset),
+        1 => Some(sgr::Attribute::Bold),
+        2 => Some(sgr::Attribute::Faint),
+        3 => Some(sgr::Attribute::Italic),
+        4 => Some(sgr::Attribute::Underline(sgr::Underline::Single)),
+        5 | 6 => Some(sgr::Attribute::Blink),
+        7 => Some(sgr::Attribute::Inverse),
+        8 => Some(sgr::Attribute::Invisible),
+        9 => Some(sgr::Attribute::Strikethrough),
+        21 => Some(sgr::Attribute::Underline(sgr::Underline::Double)),
+        22 => Some(sgr::Attribute::ResetBold),
+        23 => Some(sgr::Attribute::ResetItalic),
+        24 => Some(sgr::Attribute::Underline(sgr::Underline::None)),
+        25 => Some(sgr::Attribute::ResetBlink),
+        27 => Some(sgr::Attribute::ResetInverse),
+        28 => Some(sgr::Attribute::ResetInvisible),
+        29 => Some(sgr::Attribute::ResetStrikethrough),
+        30..=37 => Some(sgr::Attribute::Fg8(crate::color::Name((value - 30) as u8))),
+        39 => Some(sgr::Attribute::ResetFg),
+        40..=47 => Some(sgr::Attribute::Bg8(crate::color::Name((value - 40) as u8))),
+        49 => Some(sgr::Attribute::ResetBg),
+        53 => Some(sgr::Attribute::Overline),
+        55 => Some(sgr::Attribute::ResetOverline),
+        59 => Some(sgr::Attribute::ResetUnderlineColor),
+        90..=97 => Some(sgr::Attribute::BrightFg8(crate::color::Name(
+            (value - 82) as u8,
+        ))),
+        100..=107 => Some(sgr::Attribute::BrightBg8(crate::color::Name(
+            (value - 92) as u8,
+        ))),
+        _ => None,
+    }
+}
+
+fn parse_sgr_decimal(bytes: &[u8]) -> Option<u16> {
+    if bytes.is_empty() {
+        return Some(0);
+    }
+    bytes.iter().try_fold(0u16, |value, byte| {
+        byte.is_ascii_digit()
+            .then_some(())
+            .and_then(|()| value.checked_mul(10))
+            .and_then(|value| value.checked_add(u16::from(*byte - b'0')))
+    })
+}
+
+fn fast_sgr_prefix(bytes: &[u8]) -> Option<(usize, sgr::Attribute<'static>)> {
+    let body = bytes.strip_prefix(b"\x1B[")?;
+    let end = body.iter().position(|&byte| byte == b'm')?;
+    if end > 11 {
+        return None;
+    }
+    let params = &body[..end];
+    let attribute = if params.contains(&b';') {
+        let mut parts = params.split(|&byte| byte == b';');
+        let kind = parse_sgr_decimal(parts.next()?)?;
+        let mode = parse_sgr_decimal(parts.next()?)?;
+        let value = parse_sgr_decimal(parts.next()?)?;
+        if parts.next().is_some() || mode != 5 || value > u16::from(u8::MAX) {
+            return None;
+        }
+        match kind {
+            38 => sgr::Attribute::Fg256(value as u8),
+            48 => sgr::Attribute::Bg256(value as u8),
+            58 => sgr::Attribute::UnderlineColor256(value as u8),
+            _ => return None,
+        }
+    } else {
+        simple_sgr_attribute(parse_sgr_decimal(params)?)?
+    };
+    Some((2 + end + 1, attribute))
+}
+
 #[derive(Debug)]
 pub struct Stream<H> {
     parser: Parser,
@@ -163,6 +239,12 @@ impl<H: Handler> Stream<H> {
         let mut index = 0;
         while index < bytes.len() {
             if self.parser.state() == crate::parser::State::Ground && !self.utf8.is_pending() {
+                if let Some((consumed, attribute)) = fast_sgr_prefix(&bytes[index..]) {
+                    self.handler.set_attribute(attribute);
+                    self.handler.sgr_sequence_end();
+                    index += consumed;
+                    continue;
+                }
                 let run_start = index;
                 while index < bytes.len() && matches!(bytes[index], 0x20..=0x7E) {
                     index += 1;
@@ -543,10 +625,58 @@ impl<H: Handler> Stream<H> {
         if !csi.intermediates.is_empty() {
             return;
         }
+        if csi.params_sep.is_empty() {
+            let fast_attribute = match csi.params {
+                [] | [0] => Some(sgr::Attribute::Unset),
+                [1] => Some(sgr::Attribute::Bold),
+                [2] => Some(sgr::Attribute::Faint),
+                [3] => Some(sgr::Attribute::Italic),
+                [4] => Some(sgr::Attribute::Underline(sgr::Underline::Single)),
+                [5 | 6] => Some(sgr::Attribute::Blink),
+                [7] => Some(sgr::Attribute::Inverse),
+                [8] => Some(sgr::Attribute::Invisible),
+                [9] => Some(sgr::Attribute::Strikethrough),
+                [21] => Some(sgr::Attribute::Underline(sgr::Underline::Double)),
+                [22] => Some(sgr::Attribute::ResetBold),
+                [23] => Some(sgr::Attribute::ResetItalic),
+                [24] => Some(sgr::Attribute::Underline(sgr::Underline::None)),
+                [25] => Some(sgr::Attribute::ResetBlink),
+                [27] => Some(sgr::Attribute::ResetInverse),
+                [28] => Some(sgr::Attribute::ResetInvisible),
+                [29] => Some(sgr::Attribute::ResetStrikethrough),
+                [value @ 30..=37] => {
+                    Some(sgr::Attribute::Fg8(crate::color::Name((*value - 30) as u8)))
+                }
+                [39] => Some(sgr::Attribute::ResetFg),
+                [value @ 40..=47] => {
+                    Some(sgr::Attribute::Bg8(crate::color::Name((*value - 40) as u8)))
+                }
+                [49] => Some(sgr::Attribute::ResetBg),
+                [53] => Some(sgr::Attribute::Overline),
+                [55] => Some(sgr::Attribute::ResetOverline),
+                [59] => Some(sgr::Attribute::ResetUnderlineColor),
+                [value @ 90..=97] => Some(sgr::Attribute::BrightFg8(crate::color::Name(
+                    (*value - 82) as u8,
+                ))),
+                [value @ 100..=107] => Some(sgr::Attribute::BrightBg8(crate::color::Name(
+                    (*value - 92) as u8,
+                ))),
+                [38, 5, value] => Some(sgr::Attribute::Fg256(*value as u8)),
+                [48, 5, value] => Some(sgr::Attribute::Bg256(*value as u8)),
+                [58, 5, value] => Some(sgr::Attribute::UnderlineColor256(*value as u8)),
+                _ => None,
+            };
+            if let Some(attribute) = fast_attribute {
+                handler.set_attribute(attribute);
+                handler.sgr_sequence_end();
+                return;
+            }
+        }
         let mut parser = sgr::Parser::new(csi.params, csi.params_sep);
         while let Some(attribute) = parser.next() {
             handler.set_attribute(attribute);
         }
+        handler.sgr_sequence_end();
     }
 
     fn dispatch_decrqm(handler: &mut H, csi: Csi<'_>) {
@@ -776,6 +906,21 @@ impl<H: Handler + Default> Default for Stream<H> {
 mod tests {
     use super::*;
     use crate::modes::Mode;
+
+    #[test]
+    fn fast_sgr_prefix_accepts_only_complete_unambiguous_sequences() {
+        assert_eq!(
+            fast_sgr_prefix(b"\x1B[31mtext"),
+            Some((5, sgr::Attribute::Fg8(crate::color::Name(1))))
+        );
+        assert_eq!(
+            fast_sgr_prefix(b"\x1B[38;5;196mtext"),
+            Some((11, sgr::Attribute::Fg256(196)))
+        );
+        assert_eq!(fast_sgr_prefix(b"\x1B[38;5;196"), None);
+        assert_eq!(fast_sgr_prefix(b"\x1B[1;31m"), None);
+        assert_eq!(fast_sgr_prefix(b"\x1B[38:5:196m"), None);
+    }
 
     #[derive(Default)]
     struct RecordingHandler {

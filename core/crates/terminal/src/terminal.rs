@@ -160,6 +160,7 @@ pub struct Terminal {
     pub scrolling_region: ScrollingRegion,
     pub previous_char: Option<char>,
     last_printed_class: Option<(u32, unicode::GraphemeBreak)>,
+    sgr_style_changed: bool,
     pub modes: ModeState,
     pub protected_mode: ProtectedMode,
     pub dirty: Dirty,
@@ -188,6 +189,7 @@ impl Terminal {
             scrolling_region: ScrollingRegion::full(options.cols, options.rows),
             previous_char: None,
             last_printed_class: None,
+            sgr_style_changed: false,
             modes: ModeState::default(),
             protected_mode: ProtectedMode::Off,
             dirty: Dirty::default(),
@@ -1896,6 +1898,23 @@ impl Terminal {
         }
     }
 
+    /// Apply and immediately intern one SGR attribute for direct callers.
+    /// Stream dispatch uses the [`Handler`] implementation below to batch the
+    /// synchronization until the complete CSI-m sequence has been applied.
+    pub fn set_attribute(&mut self, attribute: crate::sgr::Attribute<'_>) {
+        self.active_screen_mut().set_attribute(attribute);
+    }
+
+    pub(crate) fn apply_sgr_attribute(&mut self, attribute: crate::sgr::Attribute<'_>) {
+        self.sgr_style_changed |= self.active_screen_mut().apply_attribute(attribute);
+    }
+
+    pub(crate) fn finish_sgr_sequence(&mut self) {
+        if std::mem::take(&mut self.sgr_style_changed) {
+            self.active_screen_mut().manual_style_update();
+        }
+    }
+
     /// DECALN: fill the entire screen with `E` for alignment testing.
     /// ghostty: `Terminal.decaln` (Terminal.zig:2655).
     pub fn decaln(&mut self) {
@@ -2762,7 +2781,11 @@ impl Handler for Terminal {
     }
 
     fn set_attribute(&mut self, attribute: crate::sgr::Attribute<'_>) {
-        self.active_screen_mut().set_attribute(attribute);
+        self.apply_sgr_attribute(attribute);
+    }
+
+    fn sgr_sequence_end(&mut self) {
+        self.finish_sgr_sequence();
     }
 
     fn set_mode(&mut self, mode: Mode) {
@@ -8795,6 +8818,141 @@ mod tests {
         let mut stream = Stream::new(terminal(8, 3));
         stream.next_slice(b"ab\x1B[2;3Hcd");
         assert_eq!(stream.handler.dump_string(), "ab\n  cd");
+    }
+
+    #[test]
+    fn sgr_sequence_matches_per_attribute_result() {
+        // port-added: batching CSI-m must preserve per-attribute semantics.
+        let mut streamed = Stream::new(terminal(8, 3));
+        streamed.next_slice(b"\x1B[0;1;38;5;196;48;5;52mx");
+
+        let mut direct = terminal(8, 3);
+        for attribute in [
+            crate::sgr::Attribute::Unset,
+            crate::sgr::Attribute::Bold,
+            crate::sgr::Attribute::Fg256(196),
+            crate::sgr::Attribute::Bg256(52),
+        ] {
+            direct.active_screen_mut().set_attribute(attribute);
+        }
+        direct.print('x');
+
+        let streamed_cell = active_cell(&streamed.handler, 0, 0);
+        let direct_cell = active_cell(&direct, 0, 0);
+        let streamed_pin = streamed
+            .handler
+            .active_screen()
+            .pages
+            .pin(Point::active(0, 0))
+            .unwrap();
+        let direct_pin = direct
+            .active_screen()
+            .pages
+            .pin(Point::active(0, 0))
+            .unwrap();
+        let streamed_page = &streamed
+            .handler
+            .active_screen()
+            .pages
+            .node(streamed_pin.node)
+            .unwrap()
+            .page;
+        let direct_page = &direct
+            .active_screen()
+            .pages
+            .node(direct_pin.node)
+            .unwrap()
+            .page;
+
+        assert_eq!(
+            streamed_page.style_for_cell(streamed_pin.y, streamed_pin.x),
+            direct_page.style_for_cell(direct_pin.y, direct_pin.x)
+        );
+        assert_eq!(
+            streamed_page.style_ref_count(streamed_cell.style_id()),
+            direct_page.style_ref_count(direct_cell.style_id())
+        );
+    }
+
+    #[test]
+    fn sgr_fast_paths_match_ported_parser_for_all_params() {
+        // port-added: R4 introduced two stream-level SGR fast tables
+        // (fast_sgr_prefix in next_slice and the single-param match in
+        // dispatch_sgr) that duplicate sgr.rs. Any divergence would make
+        // rendering depend on pty read-chunk boundaries. Prove three routes
+        // agree for every single-param SGR and the 256-color triples:
+        //   (a) whole-slice feed   -> fast_sgr_prefix table
+        //   (b) byte-by-byte feed  -> parser + dispatch_sgr fast match
+        //   (c) doubled params     -> parser + the ported sgr::Parser table
+        // A rich prelude makes the reset-family params observable.
+        const PRELUDE: &[u8] = b"\x1B[1;3;4;5;7;8;9;53;31;41;58;5;9m";
+
+        fn style_after(feed_whole: bool, params: &str) -> Option<crate::style::PackedStyle> {
+            let mut stream = Stream::new(terminal(8, 3));
+            let sequence = format!("\x1B[{params}mx");
+            if feed_whole {
+                stream.next_slice(PRELUDE);
+                stream.next_slice(sequence.as_bytes());
+            } else {
+                for byte in PRELUDE.iter().chain(sequence.as_bytes()) {
+                    stream.next_slice(std::slice::from_ref(byte));
+                }
+            }
+            let screen = stream.handler.active_screen();
+            let pin = screen.pages.pin(Point::active(0, 0)).unwrap();
+            screen
+                .pages
+                .node(pin.node)
+                .unwrap()
+                .page
+                .style_for_cell(pin.y, pin.x)
+        }
+
+        for param in 0..=120u16 {
+            let single = param.to_string();
+            let doubled = format!("{param};{param}");
+            let whole = style_after(true, &single);
+            let bytewise = style_after(false, &single);
+            let iterator = style_after(true, &doubled);
+            assert_eq!(whole, bytewise, "SGR {param}: prefix vs dispatch table");
+            assert_eq!(whole, iterator, "SGR {param}: fast tables vs sgr::Parser");
+        }
+
+        for kind in [38u16, 48, 58] {
+            for value in [0u16, 161, 255, 300] {
+                let single = format!("{kind};5;{value}");
+                let doubled = format!("{single};{single}");
+                let whole = style_after(true, &single);
+                let bytewise = style_after(false, &single);
+                let iterator = style_after(true, &doubled);
+                assert_eq!(whole, bytewise, "SGR {single}: prefix vs dispatch table");
+                assert_eq!(whole, iterator, "SGR {single}: fast tables vs sgr::Parser");
+            }
+        }
+
+        // Colon subparameters and the empty form must also agree between the
+        // two feed granularities (both reject the prefix fast path).
+        for params in ["", "4:3"] {
+            assert_eq!(
+                style_after(true, params),
+                style_after(false, params),
+                "SGR {params:?}: whole-slice vs byte-wise"
+            );
+        }
+    }
+
+    #[test]
+    fn redundant_sgr_does_not_churn_style_set() {
+        // port-added: an unchanged cursor style keeps its interned reference.
+        let mut stream = Stream::new(terminal(8, 3));
+        stream.next_slice(b"\x1B[31ma\x1B[31mb");
+
+        assert_eq!(stream.handler.cursor_page_style_count(), 1);
+        assert_eq!(stream.handler.cursor_page_style_ref_count(), 3);
+        assert_eq!(
+            active_cell(&stream.handler, 0, 0).style_id(),
+            active_cell(&stream.handler, 1, 0).style_id()
+        );
     }
 
     // Helper: assert every cell in [x_range] on active row `y` is a red RGB bg.

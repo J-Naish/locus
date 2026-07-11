@@ -131,7 +131,12 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
     pub(crate) fn add(&mut self, backing: &mut [u8], value: T) -> Result<Id, AddError> {
         self.trim_trailing_dead(backing);
 
-        if let Some(id) = self.lookup(backing, value) {
+        let hash = self.context.hash(backing, &value);
+        if let Some(id) = self.lookup_with_hash(backing, backing, value, hash) {
+            // ghostty: ref_counted_set.zig:252-255
+            // The incoming duplicate owns context-managed resources that the
+            // stored value replaces, so release them before reusing the id.
+            self.context.deleted(backing, &value);
             let refs = self.ref_count(backing, id);
             write_ref::<T>(backing, self.items, id, refs + 1);
             return Ok(id);
@@ -145,7 +150,7 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
             return Err(AddError::OutOfMemory);
         }
 
-        let id = self.insert(backing, value, self.next_id)?;
+        let id = self.insert_with_hash(backing, value, self.next_id, hash)?;
         write_ref::<T>(backing, self.items, id, 1);
         self.living += 1;
         if id == self.next_id {
@@ -250,14 +255,24 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
         probe_backing: &[u8],
         value: T,
     ) -> Option<Id> {
-        if self.layout.table_cap == 0 {
-            return None;
-        }
         // ghostty: ref_counted_set.zig:499
         // Hash through the probe backing. Values that compare equal must hash
         // by their contents, and probe values may reference a different backing
         // buffer than the stored item.
         let hash = self.context.hash(probe_backing, &value);
+        self.lookup_with_hash(backing, probe_backing, value, hash)
+    }
+
+    fn lookup_with_hash(
+        self,
+        backing: &[u8],
+        probe_backing: &[u8],
+        value: T,
+        hash: u64,
+    ) -> Option<Id> {
+        if self.layout.table_cap == 0 {
+            return None;
+        }
         let mask = usize::from(self.layout.table_mask);
         for i in 0..=usize::from(self.max_psl) {
             let bucket = (hash as usize).wrapping_add(i) & mask;
@@ -296,6 +311,16 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
     /// Displaced existing items are re-homed in place as we pass them.
     fn insert(&mut self, backing: &mut [u8], value: T, new_id: Id) -> Result<Id, AddError> {
         let hash = self.context.hash(backing, &value);
+        self.insert_with_hash(backing, value, new_id, hash)
+    }
+
+    fn insert_with_hash(
+        &mut self,
+        backing: &mut [u8],
+        value: T,
+        new_id: Id,
+        hash: u64,
+    ) -> Result<Id, AddError> {
         let table_cap = self.layout.table_cap;
 
         // The item currently in hand. When `held_is_new` it is the new value
@@ -526,6 +551,7 @@ fn clear_item<T: BufValue>(buf: &mut [u8], items: Offset<u8>, id: Id) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[derive(Clone, Copy)]
     struct U64Context;
@@ -537,6 +563,25 @@ mod tests {
 
         fn eql(&self, _buf: &[u8], a: &u64, b: &u64) -> bool {
             a == b
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct CountingContext<'a> {
+        deleted: &'a Cell<usize>,
+    }
+
+    impl RefCountedSetContext<u64> for CountingContext<'_> {
+        fn hash(&self, _buf: &[u8], value: &u64) -> u64 {
+            value.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        }
+
+        fn eql(&self, _buf: &[u8], a: &u64, b: &u64) -> bool {
+            a == b
+        }
+
+        fn deleted(&self, _buf: &mut [u8], _value: &u64) {
+            self.deleted.set(self.deleted.get() + 1);
         }
     }
 
@@ -556,6 +601,26 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(set.ref_count(&buf, first), 2);
         assert_eq!(set.count(), 1);
+    }
+
+    #[test]
+    fn add_notifies_deleted_on_dedupe_hit() {
+        // ghostty: "addContext" (ref_counted_set.zig:241)
+        let deleted = Cell::new(0);
+        let layout = Layout::init::<u64>(8);
+        let mut buf = vec![0; layout.total_size];
+        let mut set = RefCountedSet::init(
+            OffsetBuf::init(),
+            layout,
+            &mut buf,
+            CountingContext { deleted: &deleted },
+        );
+
+        let first = set.add(&mut buf, 42).unwrap();
+        let second = set.add(&mut buf, 42).unwrap();
+
+        assert_eq!(second, first);
+        assert_eq!(deleted.get(), 1);
     }
 
     #[test]

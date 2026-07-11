@@ -406,7 +406,8 @@ impl Screen {
             let _ = self.pages.set_tracked_pin(self.cursor.pin, pin);
         }
         self.manual_style_update();
-        self.cursor_set_hyperlink();
+        let mut hyperlink_attempts = 0usize;
+        self.cursor_register_hyperlink(&mut hyperlink_attempts);
         self.assert_integrity();
     }
 
@@ -598,7 +599,8 @@ impl Screen {
             }
         }
         self.manual_style_update();
-        self.cursor_set_hyperlink();
+        let mut hyperlink_attempts = 0usize;
+        self.cursor_register_hyperlink(&mut hyperlink_attempts);
         self.assert_integrity();
     }
 
@@ -866,49 +868,80 @@ impl Screen {
     }
 
     pub fn set_attribute(&mut self, attribute: Attribute<'_>) {
+        self.apply_attribute(attribute);
+        self.manual_style_update();
+    }
+
+    pub fn apply_attribute(&mut self, attribute: Attribute<'_>) -> bool {
+        macro_rules! update {
+            ($field:expr, $value:expr) => {{
+                let value = $value;
+                if $field == value {
+                    false
+                } else {
+                    $field = value;
+                    true
+                }
+            }};
+        }
+
         match attribute {
-            Attribute::Unset => self.cursor.style = Style::default(),
-            Attribute::Bold => self.cursor.style.flags.bold = true,
+            Attribute::Unset => update!(self.cursor.style, Style::default()),
+            Attribute::Bold => update!(self.cursor.style.flags.bold, true),
             Attribute::ResetBold => {
+                let changed = self.cursor.style.flags.bold || self.cursor.style.flags.faint;
                 self.cursor.style.flags.bold = false;
                 self.cursor.style.flags.faint = false;
+                changed
             }
-            Attribute::Italic => self.cursor.style.flags.italic = true,
-            Attribute::ResetItalic => self.cursor.style.flags.italic = false,
-            Attribute::Faint => self.cursor.style.flags.faint = true,
-            Attribute::Underline(value) => self.cursor.style.flags.underline = value,
+            Attribute::Italic => update!(self.cursor.style.flags.italic, true),
+            Attribute::ResetItalic => update!(self.cursor.style.flags.italic, false),
+            Attribute::Faint => update!(self.cursor.style.flags.faint, true),
+            Attribute::Underline(value) => update!(self.cursor.style.flags.underline, value),
             Attribute::UnderlineColor(value) => {
-                self.cursor.style.underline_color = StyleColor::Rgb(value);
+                update!(self.cursor.style.underline_color, StyleColor::Rgb(value))
             }
-            Attribute::UnderlineColor256(value) => {
-                self.cursor.style.underline_color = StyleColor::Palette(value);
+            Attribute::UnderlineColor256(value) => update!(
+                self.cursor.style.underline_color,
+                StyleColor::Palette(value)
+            ),
+            Attribute::ResetUnderlineColor => {
+                update!(self.cursor.style.underline_color, StyleColor::None)
             }
-            Attribute::ResetUnderlineColor => self.cursor.style.underline_color = StyleColor::None,
-            Attribute::Overline => self.cursor.style.flags.overline = true,
-            Attribute::ResetOverline => self.cursor.style.flags.overline = false,
-            Attribute::Blink => self.cursor.style.flags.blink = true,
-            Attribute::ResetBlink => self.cursor.style.flags.blink = false,
-            Attribute::Inverse => self.cursor.style.flags.inverse = true,
-            Attribute::ResetInverse => self.cursor.style.flags.inverse = false,
-            Attribute::Invisible => self.cursor.style.flags.invisible = true,
-            Attribute::ResetInvisible => self.cursor.style.flags.invisible = false,
-            Attribute::Strikethrough => self.cursor.style.flags.strikethrough = true,
-            Attribute::ResetStrikethrough => self.cursor.style.flags.strikethrough = false,
-            Attribute::DirectColorFg(value) => self.cursor.style.fg_color = StyleColor::Rgb(value),
-            Attribute::DirectColorBg(value) => self.cursor.style.bg_color = StyleColor::Rgb(value),
+            Attribute::Overline => update!(self.cursor.style.flags.overline, true),
+            Attribute::ResetOverline => update!(self.cursor.style.flags.overline, false),
+            Attribute::Blink => update!(self.cursor.style.flags.blink, true),
+            Attribute::ResetBlink => update!(self.cursor.style.flags.blink, false),
+            Attribute::Inverse => update!(self.cursor.style.flags.inverse, true),
+            Attribute::ResetInverse => update!(self.cursor.style.flags.inverse, false),
+            Attribute::Invisible => update!(self.cursor.style.flags.invisible, true),
+            Attribute::ResetInvisible => update!(self.cursor.style.flags.invisible, false),
+            Attribute::Strikethrough => update!(self.cursor.style.flags.strikethrough, true),
+            Attribute::ResetStrikethrough => {
+                update!(self.cursor.style.flags.strikethrough, false)
+            }
+            Attribute::DirectColorFg(value) => {
+                update!(self.cursor.style.fg_color, StyleColor::Rgb(value))
+            }
+            Attribute::DirectColorBg(value) => {
+                update!(self.cursor.style.bg_color, StyleColor::Rgb(value))
+            }
             Attribute::Bg8(name) | Attribute::BrightBg8(name) => {
-                self.cursor.style.bg_color = palette_color(name);
+                update!(self.cursor.style.bg_color, palette_color(name))
             }
             Attribute::Fg8(name) | Attribute::BrightFg8(name) => {
-                self.cursor.style.fg_color = palette_color(name);
+                update!(self.cursor.style.fg_color, palette_color(name))
             }
-            Attribute::Bg256(value) => self.cursor.style.bg_color = StyleColor::Palette(value),
-            Attribute::Fg256(value) => self.cursor.style.fg_color = StyleColor::Palette(value),
-            Attribute::ResetFg => self.cursor.style.fg_color = StyleColor::None,
-            Attribute::ResetBg => self.cursor.style.bg_color = StyleColor::None,
-            Attribute::Unknown(_) => {}
+            Attribute::Bg256(value) => {
+                update!(self.cursor.style.bg_color, StyleColor::Palette(value))
+            }
+            Attribute::Fg256(value) => {
+                update!(self.cursor.style.fg_color, StyleColor::Palette(value))
+            }
+            Attribute::ResetFg => update!(self.cursor.style.fg_color, StyleColor::None),
+            Attribute::ResetBg => update!(self.cursor.style.bg_color, StyleColor::None),
+            Attribute::Unknown(_) => false,
         }
-        self.manual_style_update();
     }
 
     pub fn manual_style_update(&mut self) {
@@ -922,7 +955,19 @@ impl Screen {
     /// need to keep terminal state coherent (e.g. `restoreCursor`) should then
     /// reset `cursor.style` to default themselves.
     pub fn try_manual_style_update(&mut self) -> bool {
+        let packed = PackedStyle::from(self.cursor.style);
         let old = self.cursor.style_id;
+        if old != DEFAULT_STYLE_ID {
+            let unchanged = self
+                .cursor_pin()
+                .and_then(|pin| self.pages.node(pin.node))
+                .and_then(|node| node.page.style_for_id(old))
+                == Some(packed);
+            if unchanged {
+                return true;
+            }
+        }
+
         if old != DEFAULT_STYLE_ID {
             if let Some(pin) = self.cursor_pin() {
                 if let Some(node) = self.pages.node_mut(pin.node) {
@@ -931,12 +976,11 @@ impl Screen {
             }
         }
 
-        if self.cursor.style.is_default() {
+        if packed == PackedStyle::default() {
             self.cursor.style_id = DEFAULT_STYLE_ID;
             return true;
         }
 
-        let style = PackedStyle::from(self.cursor.style);
         loop {
             let Some(pin) = self.cursor_pin() else {
                 self.cursor.style_id = DEFAULT_STYLE_ID;
@@ -946,7 +990,7 @@ impl Screen {
                 self.cursor.style_id = DEFAULT_STYLE_ID;
                 return false;
             };
-            match node.page.add_style(style) {
+            match node.page.add_style(packed) {
                 Ok(id) => {
                     self.cursor.style_id = id;
                     return true;
@@ -1003,7 +1047,8 @@ impl Screen {
         let new_node = self.pages.increase_capacity(node, Some(dimension))?;
         if cursor_on_node {
             self.manual_style_update();
-            self.cursor_set_hyperlink();
+            let mut hyperlink_attempts = 0usize;
+            self.cursor_register_hyperlink(&mut hyperlink_attempts);
             self.cursor_reload();
         }
         self.assert_integrity();
@@ -1139,6 +1184,27 @@ impl Screen {
     }
 
     fn cursor_set_hyperlink_with_retries(&mut self, attempts: &mut usize) {
+        self.cursor_register_hyperlink(attempts);
+        if self.cursor.hyperlink_id == 0 {
+            return;
+        }
+        let Some(pin) = self.cursor_pin() else {
+            return;
+        };
+        if let Some(node) = self.pages.node_mut(pin.node) {
+            if node
+                .page
+                .set_hyperlink_id(pin.y, pin.x, self.cursor.hyperlink_id)
+                .is_err()
+                && self.increase_cursor_page_capacity_for_hyperlink(*attempts)
+            {
+                *attempts = attempts.saturating_add(1);
+                self.cursor_set_hyperlink_with_retries(attempts);
+            }
+        }
+    }
+
+    fn cursor_register_hyperlink(&mut self, attempts: &mut usize) {
         if self.cursor.hyperlink_id == 0 {
             let Some(link) = self.cursor.hyperlink.clone() else {
                 return;
@@ -1158,28 +1224,11 @@ impl Screen {
             let Ok(id) = inserted else {
                 if self.increase_cursor_page_capacity_for_hyperlink(*attempts) {
                     *attempts = attempts.saturating_add(1);
-                    self.cursor_set_hyperlink_with_retries(attempts);
+                    self.cursor_register_hyperlink(attempts);
                 }
                 return;
             };
             self.cursor.hyperlink_id = id;
-        }
-        if self.cursor.hyperlink_id == 0 {
-            return;
-        }
-        let Some(pin) = self.cursor_pin() else {
-            return;
-        };
-        if let Some(node) = self.pages.node_mut(pin.node) {
-            if node
-                .page
-                .set_hyperlink_id(pin.y, pin.x, self.cursor.hyperlink_id)
-                .is_err()
-                && self.increase_cursor_page_capacity_for_hyperlink(*attempts)
-            {
-                *attempts = attempts.saturating_add(1);
-                self.cursor_set_hyperlink_with_retries(attempts);
-            }
         }
     }
 
@@ -2377,7 +2426,8 @@ impl Screen {
             self.cursor.x = x;
             self.cursor.y = y;
             self.manual_style_update();
-            self.cursor_set_hyperlink();
+            let mut hyperlink_attempts = 0usize;
+            self.cursor_register_hyperlink(&mut hyperlink_attempts);
         }
         self.assert_integrity();
     }
@@ -4419,7 +4469,19 @@ mod tests {
         source.start_hyperlink(None, b"https://example.com/");
         target.cursor_copy_from(&source.cursor, true);
         assert_ne!(target.cursor.hyperlink_id, 0);
-        assert_eq!(cursor_page_hyperlink_count(&target), 1);
+        // Deliberate port correction: copying cursor state registers the URI
+        // but must not attach it to a cell until a print occurs.
+        assert_eq!(cursor_page_hyperlink_count(&target), 0);
+        let pin = target.cursor_pin().unwrap();
+        assert_eq!(
+            target
+                .pages
+                .node(pin.node)
+                .unwrap()
+                .page
+                .hyperlink_set_count(),
+            1
+        );
     }
 
     #[test]
@@ -5658,6 +5720,58 @@ mod tests {
         screen.test_write_string("x");
         assert!(active_cell(&screen, 0, 1).hyperlink());
         screen.end_hyperlink();
+    }
+
+    #[test]
+    fn cursor_moves_do_not_stamp_hyperlink_cells() {
+        // port-added: Ghostty only attaches OSC 8 links from print paths.
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 10,
+            max_scrollback: PageList::standard_size() * 4,
+        });
+        screen.start_hyperlink(Some(b"id"), b"https://example.com");
+        screen.test_write_string("x");
+        screen.cursor_change_active_point(5, 5);
+        screen.cursor_down(2);
+        screen.cursor_change_active_point(0, 0);
+
+        let linked_cells = (0..screen.rows())
+            .flat_map(|y| (0..screen.cols()).map(move |x| (x, y)))
+            .filter(|&(x, y)| active_cell(&screen, x, y).hyperlink())
+            .collect::<Vec<_>>();
+
+        assert_eq!(linked_cells, vec![(0, 0)]);
+    }
+
+    #[test]
+    fn hyperlink_survives_cursor_page_change() {
+        // port-added: cursor page migration re-registers without stamping.
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 3,
+            max_scrollback: PageList::standard_size() * 4,
+        });
+        let uri = b"https://example.com/page-change";
+        screen.start_hyperlink(Some(b"id"), uri);
+        let first_pin = screen.cursor_pin().unwrap();
+        screen.test_write_string("a");
+
+        force_cursor_to_next_page(&mut screen);
+        let second_pin = screen.cursor_pin().unwrap();
+        screen.test_write_string("b");
+
+        let first_uri = screen
+            .pages
+            .node(first_pin.node)
+            .and_then(|node| node.page.hyperlink_uri(first_pin.y, first_pin.x));
+        let second_uri = screen
+            .pages
+            .node(second_pin.node)
+            .and_then(|node| node.page.hyperlink_uri(second_pin.y, second_pin.x));
+        assert_eq!(first_uri, Some(&uri[..]));
+        assert_eq!(second_uri, Some(&uri[..]));
+        assert_ne!(screen.cursor.hyperlink_id, 0);
     }
 
     #[test]

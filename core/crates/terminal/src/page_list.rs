@@ -1233,7 +1233,18 @@ impl PageList {
             return None;
         }
 
-        let cap = Self::initial_capacity(self.cols);
+        let mut cap = Self::initial_capacity(self.cols);
+        if let Some(last_capacity) = self.node(last).map(|node| node.page.capacity()) {
+            // Deliberate Ghostty deviation: dynamic style/link capacity is a
+            // session-level high-water mark. New pages inherit it so output
+            // does not repeat the same capacity-growth ladder on every page.
+            // Grid dimensions and grapheme storage remain at their initial
+            // values because they follow different workload constraints.
+            cap.styles = last_capacity.styles;
+            cap.hyperlink_bytes = last_capacity.hyperlink_bytes;
+            cap.string_bytes = last_capacity.string_bytes;
+        }
+        let cap_layout_size = Page::layout(cap).total_size;
         if self.first.is_some()
             && self.first != self.last
             && self.page_size + Self::standard_size() > self.max_size()
@@ -1270,11 +1281,14 @@ impl PageList {
                     viewport_pin.garbage = false;
                 }
 
-                let standard = self
+                let reusable = self
                     .node(first)
-                    .map(|node| node.page.memory_len() == Self::standard_size())
+                    .map(|node| {
+                        node.page.memory_len() == Self::standard_size()
+                            && node.page.memory_len() == cap_layout_size
+                    })
                     .unwrap_or(false);
-                if standard {
+                if reusable {
                     let old_serial = self.node(first).map(|node| node.serial).unwrap_or(0);
                     let new_serial = self.page_serial;
                     self.page_serial = self.page_serial.saturating_add(1);
@@ -4018,6 +4032,31 @@ mod tests {
         assert_eq!(
             list.point_from_pin(Tag::Screen, bottom),
             Some(Point::screen(79, cap_rows as u32))
+        );
+    }
+
+    #[test]
+    fn grow_inherits_style_capacity_from_last_page() {
+        // Deliberate Ghostty deviation: once a session has paid to expand its
+        // style set, later pages inherit that capacity instead of climbing the
+        // same allocation ladder again.
+        let mut list = PageList::new(80, 24, None);
+        let initial_styles = PageList::initial_capacity(80).styles;
+        let last = list.last_node().unwrap();
+        let expanded = list
+            .increase_capacity(last, Some(IncreaseCapacity::Styles))
+            .unwrap();
+        let expanded_capacity = list.node_capacity(expanded).unwrap();
+        assert!(expanded_capacity.styles > initial_styles);
+
+        while node_rows(&list, expanded) < expanded_capacity.rows {
+            assert_eq!(list.grow(), None);
+        }
+        let new_last = list.grow().unwrap();
+
+        assert_eq!(
+            list.node_capacity(new_last).unwrap().styles,
+            expanded_capacity.styles
         );
     }
 

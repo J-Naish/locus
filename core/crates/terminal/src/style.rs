@@ -460,13 +460,16 @@ fn underline_from_bits(bits: u8) -> sgr::Underline {
     }
 }
 
-// Ghostty hashes packed styles by lo^hi and a Moremur-like integer mixer.
-// No upstream test pins concrete outputs, but matching the mixer keeps bucket
-// behavior stable for any future trace-based tests.
+// Deliberate Ghostty deviation: pre-mix the high half before combining it
+// with the low half. Ghostty's direct lo^hi fold permits constructible SGR
+// collisions where a flag bit cancels the corresponding foreground bit.
 fn hash_packed_style(value: PackedStyle) -> u64 {
     let lo = value.0 as u64;
     let hi = (value.0 >> 64) as u64;
-    let mut x = lo ^ hi;
+    let mut h = hi;
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    let mut x = lo ^ h;
     x ^= x >> 27;
     x = x.wrapping_mul(0x3C79_AC49_2BA7_B653);
     x ^= x >> 33;
@@ -563,6 +566,38 @@ mod tests {
         };
         assert_eq!(PackedStyle::from(a), PackedStyle::from(b));
         assert_ne!(PackedStyle::from(a), PackedStyle::from(c));
+    }
+
+    #[test]
+    fn packed_style_hash_no_trivial_fold_collisions() {
+        // port-added: unlike Ghostty's lo^hi fold, untrusted SGR flags must
+        // not cancel matching foreground RGB bits before the mixer runs.
+        let bold_black = PackedStyle::from(Style {
+            fg_color: StyleColor::Rgb(rgb(0, 0, 0)),
+            flags: StyleFlags {
+                bold: true,
+                ..StyleFlags::default()
+            },
+            ..Style::default()
+        });
+        let plain_green_bit = PackedStyle::from(Style {
+            fg_color: StyleColor::Rgb(rgb(0, 1, 0)),
+            ..Style::default()
+        });
+        assert_ne!(
+            hash_packed_style(bold_black),
+            hash_packed_style(plain_green_bit)
+        );
+
+        for bit in 0..16 {
+            let flag = PackedStyle(2 | (1u128 << (96 + bit)));
+            let paired_fg = PackedStyle(2 | (1u128 << (32 + bit)));
+            assert_ne!(
+                hash_packed_style(flag),
+                hash_packed_style(paired_fg),
+                "flag/foreground pair {bit} collided"
+            );
+        }
     }
 
     #[test]

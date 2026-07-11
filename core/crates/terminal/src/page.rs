@@ -1840,6 +1840,10 @@ impl Page {
         self.styles.ref_count(&self.memory, id)
     }
 
+    pub(crate) fn style_for_id(&self, id: StyleCountInt) -> Option<PackedStyle> {
+        self.styles.get(&self.memory, id)
+    }
+
     pub(crate) fn set_hyperlink_implicit(
         &mut self,
         y: CellCountInt,
@@ -1883,14 +1887,23 @@ impl Page {
     ) -> Result<(), OutOfMemory> {
         self.hyperlink_set.use_ref(&mut self.memory, id);
         let key = self.cell_offset(y, x);
+        let previous = self.hyperlink_map.get(&self.memory, key);
         if let Err(err) = self.hyperlink_map.put(&mut self.memory, key, id) {
             self.hyperlink_set.release(&mut self.memory, id);
             return Err(err);
         }
+        if let Some(previous) = previous.filter(|&previous| previous != id) {
+            // ghostty: page.zig:1423-1430
+            self.hyperlink_set.release(&mut self.memory, previous);
+        }
         let mut cell = self.cell(y, x);
         cell.set_hyperlink(true);
         self.write_cell_raw(y, x, cell);
-        self.update_row_flags(y);
+        let mut row = self.row(y);
+        // ghostty: page.zig:1439-1440
+        // The row flag is conservative; clear paths recompute it as needed.
+        row.set_hyperlink(true);
+        self.set_row(y, row);
         Ok(())
     }
 
@@ -3671,6 +3684,74 @@ mod tests {
         let mut cloned = Page::init(cap);
         clone_rows(&mut cloned, &page, 0, 5);
         assert_eq!(cloned.exact_row_capacity_range(0, 5), cap);
+    }
+
+    #[test]
+    fn repeated_same_uri_hyperlink_inserts_do_not_exhaust_strings() {
+        // port-added: deduplicated hyperlink probes must release temporary
+        // string chunks through RefCountedSetContext::deleted.
+        let item = ref_counted_set::item_byte_size::<crate::hyperlink::PageEntry>();
+        let mut page = Page::init(Capacity {
+            hyperlink_bytes: (8 * item) as u16,
+            string_bytes: (STRING_CHUNK * 2) as StringBytesInt,
+            ..Capacity::new(2, 1)
+        });
+        let uri = [b'x'; 100];
+        let retained = page.insert_hyperlink_implicit(1, &uri).unwrap();
+
+        for _ in 0..20 {
+            let duplicate = page.insert_hyperlink_implicit(1, &uri).unwrap();
+            assert_eq!(duplicate, retained);
+            page.release_hyperlink_id(duplicate);
+        }
+
+        assert_eq!(page.hyperlink_set_count(), 1);
+        page.release_hyperlink_id(retained);
+    }
+
+    #[test]
+    fn set_hyperlink_id_releases_overwritten_link() {
+        // ghostty: "setHyperlink" (page.zig:1405)
+        let mut page = Page::init(Capacity::new(2, 1));
+        let first = page
+            .insert_hyperlink_implicit(1, b"https://example.com/first")
+            .unwrap();
+        let second = page
+            .insert_hyperlink_implicit(2, b"https://example.com/second")
+            .unwrap();
+        let first_base_refs = page.hyperlink_set.ref_count(&page.memory, first);
+        let second_base_refs = page.hyperlink_set.ref_count(&page.memory, second);
+
+        page.set_hyperlink_id(0, 0, first).unwrap();
+        assert_eq!(
+            page.hyperlink_set.ref_count(&page.memory, first),
+            first_base_refs + 1
+        );
+
+        page.set_hyperlink_id(0, 0, second).unwrap();
+
+        assert_eq!(
+            page.hyperlink_set.ref_count(&page.memory, first),
+            first_base_refs
+        );
+        assert_eq!(
+            page.hyperlink_set.ref_count(&page.memory, second),
+            second_base_refs + 1
+        );
+    }
+
+    #[test]
+    fn set_hyperlink_id_sets_row_flag_directly() {
+        // ghostty: "setHyperlink" (page.zig:1405)
+        let mut page = Page::init(Capacity::new(2, 1));
+        let hyperlink = page
+            .insert_hyperlink_implicit(1, b"https://example.com")
+            .unwrap();
+
+        page.set_hyperlink_id(0, 1, hyperlink).unwrap();
+
+        assert!(page.cell(0, 1).hyperlink());
+        assert!(page.row(0).hyperlink());
     }
 
     #[test]
