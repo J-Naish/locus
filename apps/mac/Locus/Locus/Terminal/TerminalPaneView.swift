@@ -1671,26 +1671,28 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
       hasActiveKeyboardFocus,
       !hasMarkedText(),
       let snapshot = session?.snapshot,
-      snapshot.cursorVisible,
+      snapshot.cursorVisible
+    else {
+      return
+    }
+
+    let blinking = TerminalCaretBlink.effectiveBlinking(snapshot.cursorBlinking)
+    let currentVisible = TerminalCaretBlink.caretVisible(
+      at: time,
+      lastInput: lastCaretInputTime,
+      blinking: blinking
+    )
+    guard
       TerminalCaretInvalidation.shouldInvalidate(
         previousDrawnVisible: lastDrawnCaretVisibility,
-        currentVisible: TerminalCaretBlink.caretVisible(
-          at: time,
-          lastInput: lastCaretInputTime,
-          blinking: TerminalCaretBlink.effectiveBlinking(snapshot.cursorBlinking)
-        ),
+        currentVisible: currentVisible,
         focused: true,
-        blinking: TerminalCaretBlink.effectiveBlinking(snapshot.cursorBlinking)
+        blinking: blinking
       )
     else {
       return
     }
 
-    let currentVisible = TerminalCaretBlink.caretVisible(
-      at: time,
-      lastInput: lastCaretInputTime,
-      blinking: snapshot.cursorBlinking
-    )
     var currentRect: NSRect?
     if currentVisible {
       session?.withFrame { frame in
