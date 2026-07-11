@@ -819,10 +819,47 @@ impl Page {
     }
 
     pub fn clear_cells(&mut self, y: CellCountInt, start: CellCountInt, end: CellCountInt) {
-        for x in start..end.min(self.size.cols) {
-            self.clear_cell(y, x);
+        let end = end.min(self.size.cols);
+        if start >= end {
+            return;
         }
-        self.update_row_flags(y);
+
+        // ghostty: page.zig:1195 -- row flags gate all side-table work and
+        // the cell storage itself is cleared as one contiguous byte range.
+        let row = self.row(y);
+        for x in start..end {
+            let cell = self.cell(y, x);
+            if row.grapheme() && cell.has_grapheme() {
+                if let Some(slice) = self.detach_grapheme(y, x) {
+                    self.grapheme_alloc.free(&mut self.memory, slice);
+                }
+            }
+            if row.hyperlink() && cell.hyperlink() {
+                if let Some(id) = self.detach_hyperlink(y, x) {
+                    self.hyperlink_set.release(&mut self.memory, id);
+                }
+            }
+            if row.styled()
+                && cell.style_id() != DEFAULT_STYLE_ID
+                && self.styles.get(&self.memory, cell.style_id()).is_some()
+            {
+                self.styles.release(&mut self.memory, cell.style_id());
+            }
+        }
+
+        self.fill_cell_bytes(row, start, end, Cell::default());
+        let full_width = start == 0 && end == self.size.cols;
+        let mut row = self.row(y);
+        row.set_dirty(true);
+        if full_width {
+            row.set_grapheme(false);
+            row.set_hyperlink(false);
+            row.set_styled(false);
+            self.set_row(y, row);
+        } else {
+            self.set_row(y, row);
+            self.update_row_flags(y);
+        }
     }
 
     pub fn move_cells(
@@ -844,12 +881,45 @@ impl Page {
             return;
         }
 
+        let src_row_before = self.row(src_y);
+        if !src_row_before.managed_memory() {
+            if src_y != dst_y {
+                self.clear_cells(dst_y, dst_start, dst_start.saturating_add(count));
+            }
+
+            let src_range = self.cell_byte_range(src_row_before, src_start, src_start + count);
+            let dst_row = self.row(dst_y);
+            let dst_range = self.cell_byte_range(dst_row, dst_start, dst_start + count);
+            self.memory.copy_within(src_range, dst_range.start);
+            self.zero_vacated_source_cells(src_y, src_start, dst_y, dst_start, count);
+
+            let mut src_row = self.row(src_y);
+            src_row.set_dirty(true);
+            self.set_row(src_y, src_row);
+            if src_y != dst_y {
+                let mut dst_row = self.row(dst_y);
+                dst_row.set_dirty(true);
+                self.set_row(dst_y, dst_row);
+            }
+            return;
+        }
+
+        // ghostty: page.zig:1066 -- managed entries move with their cells;
+        // styles travel by ID and therefore need no ref-count adjustment.
         let mut moved = Vec::with_capacity(count as usize);
         for index in 0..count {
             let src_x = src_start + index;
             let cell = self.cell(src_y, src_x);
-            let grapheme = self.detach_grapheme(src_y, src_x);
-            let hyperlink = self.detach_hyperlink(src_y, src_x);
+            let grapheme = if src_row_before.grapheme() && cell.has_grapheme() {
+                self.detach_grapheme(src_y, src_x)
+            } else {
+                None
+            };
+            let hyperlink = if src_row_before.hyperlink() && cell.hyperlink() {
+                self.detach_hyperlink(src_y, src_x)
+            } else {
+                None
+            };
             moved.push((cell, grapheme, hyperlink));
         }
 
@@ -874,13 +944,7 @@ impl Page {
         // ranges overlap on the same row (a self-move, as insertBlanks does),
         // skip any source cell that now lives inside the destination range so
         // we don't clobber a cell we just wrote there.
-        for index in 0..count {
-            let src_x = src_start + index;
-            if src_y == dst_y && src_x >= dst_start && src_x < dst_start.saturating_add(count) {
-                continue;
-            }
-            self.write_cell_raw(src_y, src_x, Cell::default());
-        }
+        self.zero_vacated_source_cells(src_y, src_start, dst_y, dst_start, count);
 
         let mut src_row = self.row(src_y);
         src_row.set_dirty(true);
@@ -889,7 +953,9 @@ impl Page {
         dst_row.set_dirty(true);
         self.set_row(dst_y, dst_row);
 
-        if src_start == 0 && count >= self.size.cols {
+        if src_y == dst_y {
+            self.update_row_flags(src_y);
+        } else if src_start == 0 && count >= self.size.cols {
             let mut row = self.row(src_y);
             row.set_grapheme(false);
             row.set_hyperlink(false);
@@ -898,7 +964,9 @@ impl Page {
         } else {
             self.update_row_flags(src_y);
         }
-        self.update_row_flags(dst_y);
+        if src_y != dst_y {
+            self.update_row_flags(dst_y);
+        }
     }
 
     pub fn clone_partial_row_from(
@@ -1038,6 +1106,22 @@ impl Page {
         right: CellCountInt,
     ) -> Result<(), OutOfMemory> {
         if left == right {
+            return Ok(());
+        }
+        let left_cell = self.cell(y, left);
+        let right_cell = self.cell(y, right);
+        if !left_cell.has_grapheme()
+            && !left_cell.hyperlink()
+            && !right_cell.has_grapheme()
+            && !right_cell.hyperlink()
+        {
+            // ghostty: page.zig:1134 -- styles travel by ID, so a raw swap
+            // preserves aggregate refs and all row flags.
+            self.write_cell_raw(y, left, right_cell);
+            self.write_cell_raw(y, right, left_cell);
+            let mut row = self.row(y);
+            row.set_dirty(true);
+            self.set_row(y, row);
             return Ok(());
         }
         let left_snapshot = self.cell_snapshot(y, left);
@@ -1448,6 +1532,58 @@ impl Page {
         self.row(y).cells().set(&mut self.memory, x as usize, cell);
     }
 
+    fn cell_byte_range(
+        &self,
+        row: Row,
+        start: CellCountInt,
+        end: CellCountInt,
+    ) -> std::ops::Range<usize> {
+        let base = row.cells().offset as usize;
+        base + usize::from(start) * Cell::SIZE..base + usize::from(end) * Cell::SIZE
+    }
+
+    fn fill_cell_bytes(&mut self, row: Row, start: CellCountInt, end: CellCountInt, cell: Cell) {
+        let range = self.cell_byte_range(row, start, end);
+        if cell.is_zero() {
+            self.memory[range].fill(0);
+            return;
+        }
+
+        let bytes = cell.raw().to_le_bytes();
+        for chunk in self.memory[range].chunks_exact_mut(Cell::SIZE) {
+            chunk.copy_from_slice(&bytes);
+        }
+    }
+
+    fn zero_vacated_source_cells(
+        &mut self,
+        src_y: CellCountInt,
+        src_start: CellCountInt,
+        dst_y: CellCountInt,
+        dst_start: CellCountInt,
+        count: CellCountInt,
+    ) {
+        let src_end = src_start.saturating_add(count);
+        let row = self.row(src_y);
+        if src_y != dst_y {
+            let range = self.cell_byte_range(row, src_start, src_end);
+            self.memory[range].fill(0);
+            return;
+        }
+
+        let dst_end = dst_start.saturating_add(count);
+        let left_end = src_end.min(dst_start);
+        if src_start < left_end {
+            let range = self.cell_byte_range(row, src_start, left_end);
+            self.memory[range].fill(0);
+        }
+        let right_start = src_start.max(dst_end);
+        if right_start < src_end {
+            let range = self.cell_byte_range(row, right_start, src_end);
+            self.memory[range].fill(0);
+        }
+    }
+
     fn clear_cell(&mut self, y: CellCountInt, x: CellCountInt) {
         self.clear_cell_with(y, x, Cell::default());
     }
@@ -1481,10 +1617,51 @@ impl Page {
         end: CellCountInt,
         fill: Cell,
     ) {
-        for x in start..end.min(self.size.cols) {
-            self.clear_cell_with(y, x, fill);
+        let end = end.min(self.size.cols);
+        if start >= end {
+            return;
         }
-        self.update_row_flags(y);
+
+        let row = self.row(y);
+        for x in start..end {
+            let cell = self.cell(y, x);
+            if row.grapheme() && cell.has_grapheme() {
+                if let Some(slice) = self.detach_grapheme(y, x) {
+                    self.grapheme_alloc.free(&mut self.memory, slice);
+                }
+            }
+            if row.hyperlink() && cell.hyperlink() {
+                if let Some(id) = self.detach_hyperlink(y, x) {
+                    self.hyperlink_set.release(&mut self.memory, id);
+                }
+            }
+            if row.styled()
+                && cell.style_id() != DEFAULT_STYLE_ID
+                && self.styles.get(&self.memory, cell.style_id()).is_some()
+            {
+                self.styles.release(&mut self.memory, cell.style_id());
+            }
+        }
+
+        let count = end - start;
+        if fill.style_id() != DEFAULT_STYLE_ID {
+            self.styles
+                .use_multiple(&mut self.memory, fill.style_id(), count);
+        }
+        self.fill_cell_bytes(row, start, end, fill);
+
+        let full_width = start == 0 && end == self.size.cols;
+        let mut row = self.row(y);
+        row.set_dirty(true);
+        if full_width {
+            row.set_grapheme(fill.has_grapheme());
+            row.set_hyperlink(fill.hyperlink());
+            row.set_styled(fill.has_styling());
+            self.set_row(y, row);
+        } else {
+            self.set_row(y, row);
+            self.update_row_flags(y);
+        }
     }
 
     pub(crate) fn append_grapheme(
@@ -1806,7 +1983,7 @@ impl Page {
                 let _ = self.append_grapheme(dst_y, dst_x, codepoint);
             }
         }
-        self.update_row_flags(dst_y);
+        // clone_partial_row_from maintains destination flags once per row.
     }
 
     pub(crate) fn style_for_cell(&self, y: CellCountInt, x: CellCountInt) -> Option<PackedStyle> {
@@ -2251,6 +2428,62 @@ mod tests {
     }
 
     #[test]
+    fn clear_cells_full_width_clears_flags_without_rescan() {
+        let mut page = Page::init(Capacity {
+            styles: 8,
+            string_bytes: 256,
+            hyperlink_bytes: 256,
+            ..Capacity::new(4, 1)
+        });
+        page.set_cell(0, 0, Cell::new('a'));
+        page.append_grapheme(0, 0, 0x0301).unwrap();
+        let hyperlink = page
+            .insert_hyperlink_implicit(1, b"https://example.com")
+            .unwrap();
+        page.set_hyperlink_id(0, 1, hyperlink).unwrap();
+        let style = page.add_style(PackedStyle(7)).unwrap();
+        page.set_style_id_raw(0, 2, style);
+        page.clear_dirty();
+
+        page.clear_cells(0, 0, 4);
+
+        assert!((0..4).all(|x| page.cell(0, x).is_zero()));
+        assert!(!page.row(0).grapheme());
+        assert!(!page.row(0).hyperlink());
+        assert!(!page.row(0).styled());
+        assert_eq!(page.style_ref_count(style), 0);
+        assert!(page.row_dirty(0));
+    }
+
+    #[test]
+    fn clear_cells_partial_keeps_remaining_flags() {
+        let mut page = Page::init(Capacity {
+            styles: 8,
+            string_bytes: 256,
+            hyperlink_bytes: 256,
+            ..Capacity::new(4, 1)
+        });
+        page.set_cell(0, 0, Cell::new('a'));
+        page.append_grapheme(0, 0, 0x0301).unwrap();
+        let hyperlink = page
+            .insert_hyperlink_implicit(1, b"https://example.com")
+            .unwrap();
+        page.set_hyperlink_id(0, 1, hyperlink).unwrap();
+        let style = page.add_style(PackedStyle(7)).unwrap();
+        page.set_style_id_raw(0, 2, style);
+        page.use_style(style);
+        page.set_style_id_raw(0, 3, style);
+
+        page.clear_cells(0, 0, 3);
+
+        assert!(!page.row(0).grapheme());
+        assert!(!page.row(0).hyperlink());
+        assert!(page.row(0).styled());
+        assert_eq!(page.cell(0, 3).style_id(), style);
+        assert_eq!(page.style_ref_count(style), 1);
+    }
+
+    #[test]
     fn move_cells_moves_values_and_clears_source() {
         let mut page = Page::init(Capacity::new(5, 1));
         page.set_cell(0, 0, Cell::new('a'));
@@ -2259,6 +2492,41 @@ mod tests {
         assert_eq!(page.cell(0, 3).codepoint(), 'a' as u32);
         assert_eq!(page.cell(0, 4).codepoint(), 'b' as u32);
         assert!(page.cell(0, 0).is_empty());
+    }
+
+    #[test]
+    fn move_cells_unmanaged_row_bulk_copies() {
+        let mut page = Page::init(Capacity::new(6, 1));
+        page.set_cell(0, 0, Cell::new('a'));
+        page.set_cell(0, 1, Cell::new('b'));
+        page.set_cell(0, 2, Cell::new('c'));
+        page.clear_dirty();
+
+        page.move_cells(0, 0, 0, 3, 3);
+
+        assert_eq!(page.cell(0, 3).codepoint(), 'a' as u32);
+        assert_eq!(page.cell(0, 4).codepoint(), 'b' as u32);
+        assert_eq!(page.cell(0, 5).codepoint(), 'c' as u32);
+        assert!((0..3).all(|x| page.cell(0, x).is_zero()));
+        assert!(page.row_dirty(0));
+    }
+
+    #[test]
+    fn fill_cells_styled_fill_accounts_refs() {
+        let mut page = Page::init(Capacity {
+            styles: 8,
+            ..Capacity::new(5, 1)
+        });
+        let style = page.add_style(PackedStyle(9)).unwrap();
+        let before = page.style_ref_count(style);
+        let mut fill = Cell::default();
+        fill.set_style_id(style);
+
+        page.fill_cells(0, 1, 4, fill);
+
+        assert_eq!(page.style_ref_count(style), before + 3);
+        assert!((1..4).all(|x| page.cell(0, x).style_id() == style));
+        assert!(page.row(0).styled());
     }
 
     #[test]
@@ -2275,6 +2543,48 @@ mod tests {
         assert_eq!(page.cell(0, 0).codepoint(), 'z' as u32);
         assert_eq!(page.cell(0, 2).codepoint(), 'a' as u32);
         assert!(page.is_dirty(0));
+    }
+
+    #[test]
+    fn swap_cells_plain_cells_raw_swap() {
+        let mut page = Page::init(Capacity {
+            styles: 8,
+            ..Capacity::new(2, 1)
+        });
+        let left_style = page.add_style(PackedStyle(1)).unwrap();
+        let right_style = page.add_style(PackedStyle(2)).unwrap();
+        let mut left = Cell::new('a');
+        left.set_style_id(left_style);
+        let mut right = Cell::new('b');
+        right.set_style_id(right_style);
+        page.set_cell(0, 0, left);
+        page.set_cell(0, 1, right);
+        let left_refs = page.style_ref_count(left_style);
+        let right_refs = page.style_ref_count(right_style);
+        page.clear_dirty();
+
+        page.swap_cells(0, 0, 1).unwrap();
+
+        assert_eq!(page.cell(0, 0), right);
+        assert_eq!(page.cell(0, 1), left);
+        assert_eq!(page.style_ref_count(left_style), left_refs);
+        assert_eq!(page.style_ref_count(right_style), right_refs);
+        assert!(page.row_dirty(0));
+    }
+
+    #[test]
+    fn swap_cells_grapheme_cell_keeps_slow_path() {
+        let mut page = Page::init(Capacity::new(2, 1));
+        page.set_cell(0, 0, Cell::new('a'));
+        page.append_grapheme(0, 0, 0x0301).unwrap();
+        page.set_cell(0, 1, Cell::new('b'));
+
+        page.swap_cells(0, 0, 1).unwrap();
+
+        assert_eq!(page.cell(0, 0).codepoint(), 'b' as u32);
+        assert_eq!(page.cell(0, 1).codepoint(), 'a' as u32);
+        assert_eq!(page.grapheme(0, 1), Some(vec![0x0301]));
+        assert_eq!(page.grapheme(0, 0), None);
     }
 
     #[test]

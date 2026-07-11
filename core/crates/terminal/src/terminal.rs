@@ -940,7 +940,31 @@ impl Terminal {
         // Perform the actual line movement (scroll or cursor down).
         let y = self.active_screen().cursor.y;
         if y == self.scrolling_region.bottom && self.cursor_inside_horizontal_region() {
-            self.scroll_up(1);
+            let full_width_from_top = self.scrolling_region.top == 0
+                && self.scrolling_region.left == 0
+                && self.scrolling_region.right == self.cols.saturating_sub(1);
+            let has_horizontal_margins = self.scrolling_region.left != 0
+                || self.scrolling_region.right != self.cols.saturating_sub(1);
+            let blank_cell_is_styled = !self.active_screen().blank_cell().is_zero();
+            if full_width_from_top {
+                self.active_screen_mut().cursor_scroll_above();
+            } else if has_horizontal_margins || blank_cell_is_styled {
+                self.scroll_up(1);
+            } else {
+                // ghostty: Terminal.zig:1430-1545 -- this is the hot path for
+                // an unstyled interior scroll region. Erasing shifts the
+                // tracked cursor pin, so re-resolve its original active point.
+                let x = self.active_screen().cursor.x;
+                let y = self.active_screen().cursor.y;
+                let top = self.scrolling_region.top;
+                let limit = usize::from(self.scrolling_region.bottom - top);
+                let _ = self
+                    .active_screen_mut()
+                    .pages
+                    .erase_row_bounded(Point::active(0, u32::from(top)), limit);
+                self.active_screen_mut().cursor_absolute(x, y);
+                self.dirty.screen = true;
+            }
         } else {
             self.cursor_down(1);
         }
@@ -1420,13 +1444,18 @@ impl Terminal {
             }
 
             // We work backwards so we don't overwrite data.
-            let mut sx = x + (scroll_amount - 1);
-            loop {
-                self.swap_row_cells(y, sx, sx + adjusted_count);
-                if sx == x {
-                    break;
+            let pin = self.active_screen().pages.pin(Point::active(x, y));
+            if let Some(pin) = pin {
+                if let Some(node) = self.active_screen_mut().pages.node_mut(pin.node) {
+                    let mut sx = x + (scroll_amount - 1);
+                    loop {
+                        let _ = node.page.swap_cells(pin.y, sx, sx + adjusted_count);
+                        if sx == x {
+                            break;
+                        }
+                        sx -= 1;
+                    }
                 }
-                sx -= 1;
             }
         }
 
@@ -1478,9 +1507,14 @@ impl Terminal {
         let mut sx = x;
         if scroll_amount > 0 {
             let right_x = x + (scroll_amount - 1);
-            while sx <= right_x {
-                self.swap_row_cells(y, sx + count, sx);
-                sx += 1;
+            let pin = self.active_screen().pages.pin(Point::active(x, y));
+            if let Some(pin) = pin {
+                if let Some(node) = self.active_screen_mut().pages.node_mut(pin.node) {
+                    while sx <= right_x {
+                        let _ = node.page.swap_cells(pin.y, sx + count, sx);
+                        sx += 1;
+                    }
+                }
             }
         }
 
@@ -1505,17 +1539,6 @@ impl Terminal {
         self.get_cell(Point::active(x, y))
             .map(|c| c.wide())
             .unwrap_or(CellWide::Narrow)
-    }
-
-    /// Swap two cells in the cursor's active row, preserving graphemes and
-    /// hyperlinks. Mirrors Ghostty's `page.swapCells`.
-    fn swap_row_cells(&mut self, y: u32, a: CellCountInt, b: CellCountInt) {
-        let Some(pin) = self.active_screen().pages.pin(Point::active(a, y)) else {
-            return;
-        };
-        if let Some(node) = self.active_screen_mut().pages.node_mut(pin.node) {
-            let _ = node.page.swap_cells(pin.y, a, b);
-        }
     }
 
     pub fn erase_chars(&mut self, count_req: usize) {
@@ -2520,26 +2543,31 @@ impl Terminal {
         let len = right - left + 1;
 
         if src_pin.node == dst_pin.node {
-            // Same page: move the cells in place, carrying grapheme and
-            // hyperlink data without duplicating set entries.
             if let Some(node) = self.active_screen_mut().pages.node_mut(dst_pin.node) {
-                node.page.move_cells(src_pin.y, left, dst_pin.y, left, len);
+                if left_right {
+                    node.page.move_cells(src_pin.y, left, dst_pin.y, left, len);
+                } else {
+                    // ghostty: Terminal.zig insertLines/deleteLines -- a
+                    // full-width same-page shift swaps row headers so their
+                    // offset-keyed managed data travels without copying.
+                    let src_row = node.page.row(src_pin.y);
+                    let dst_row = node.page.row(dst_pin.y);
+                    node.page.set_row(src_pin.y, dst_row);
+                    node.page.set_row(dst_pin.y, src_row);
+                }
             }
             return;
         }
 
-        // Different pages: clone the bounded column range across.
-        let source_page = self
-            .active_screen()
+        // Different pages: borrow both arena nodes instead of cloning a full
+        // page-sized backing buffer to copy one row.
+        if let Some((src_node, dst_node)) = self
+            .active_screen_mut()
             .pages
-            .node(src_pin.node)
-            .map(|node| node.page.clone());
-        let Some(source_page) = source_page else {
-            return;
-        };
-        if let Some(node) = self.active_screen_mut().pages.node_mut(dst_pin.node) {
-            node.page.clone_partial_row_from(
-                CloneSource::Other(&source_page),
+            .nodes_pair_mut(src_pin.node, dst_pin.node)
+        {
+            dst_node.page.clone_partial_row_from(
+                CloneSource::Other(&src_node.page),
                 dst_pin.y,
                 src_pin.y,
                 left,
@@ -5102,6 +5130,91 @@ mod tests {
     }
 
     #[test]
+    fn shift_row_full_width_swaps_headers_with_managed_data() {
+        let mut t = terminal(4, 2);
+        let src = t.active_screen().pages.pin(Point::active(0, 1)).unwrap();
+        let dst = t.active_screen().pages.pin(Point::active(0, 0)).unwrap();
+        assert_eq!(src.node, dst.node);
+
+        let (style, hyperlink);
+        {
+            let node = t.active_screen_mut().pages.node_mut(src.node).unwrap();
+            node.page.set_cell(src.y, 0, Cell::new('a'));
+            node.page.append_grapheme(src.y, 0, 0x0301).unwrap();
+            style = node.page.add_style(crate::style::PackedStyle(7)).unwrap();
+            node.page.set_style_id_raw(src.y, 1, style);
+            hyperlink = node
+                .page
+                .insert_hyperlink_implicit(1, b"https://example.com")
+                .unwrap();
+            node.page.set_hyperlink_id(src.y, 2, hyperlink).unwrap();
+            node.page.set_cell(dst.y, 3, Cell::new('z'));
+        }
+
+        t.shift_row(src, dst, false);
+
+        let node = t.active_screen().pages.node(src.node).unwrap();
+        assert_eq!(node.page.cell(dst.y, 0).codepoint(), 'a' as u32);
+        assert_eq!(node.page.grapheme(dst.y, 0), Some(vec![0x0301]));
+        assert_eq!(node.page.cell(dst.y, 1).style_id(), style);
+        assert_eq!(node.page.hyperlink_id(dst.y, 2), Some(hyperlink));
+        assert_eq!(node.page.cell(src.y, 3).codepoint(), 'z' as u32);
+        assert_eq!(node.page.style_ref_count(style), 1);
+    }
+
+    #[test]
+    fn cross_page_shift_row_preserves_content() {
+        let mut t = terminal_opts(10, 3, 1024 * 1024);
+        let cap_rows = t.first_page_capacity_rows();
+        for _ in 0..cap_rows {
+            t.linefeed();
+        }
+        let first = t.active_screen().pages.first_node().unwrap();
+        let last = t.active_screen().pages.last_node().unwrap();
+        assert_ne!(first, last);
+        let dst_y = t
+            .active_screen()
+            .pages
+            .node(first)
+            .unwrap()
+            .page
+            .size()
+            .rows
+            .saturating_sub(1);
+        let src = Pin {
+            node: last,
+            x: 0,
+            y: 0,
+            garbage: false,
+        };
+        let dst = Pin {
+            node: first,
+            x: 0,
+            y: dst_y,
+            garbage: false,
+        };
+        t.active_screen_mut()
+            .pages
+            .node_mut(last)
+            .unwrap()
+            .page
+            .set_cell(0, 0, Cell::new('x'));
+
+        t.shift_row(src, dst, false);
+
+        assert_eq!(
+            t.active_screen()
+                .pages
+                .node(first)
+                .unwrap()
+                .page
+                .cell(dst_y, 0)
+                .codepoint(),
+            'x' as u32
+        );
+    }
+
+    #[test]
     fn insert_lines_outside_of_scroll_region() {
         // ghostty: "Terminal: insertLines outside of scroll region" (Terminal.zig:6219)
         let mut t = terminal(5, 5);
@@ -6571,6 +6684,89 @@ mod tests {
         assert_eq!(t.active_screen().cursor.y, 2);
         assert_eq!(t.active_screen().cursor.x, 0);
         assert_eq!(t.plain_string(), "AAAAAA\nAAAAAA\n   AAA");
+    }
+
+    #[test]
+    fn index_uses_bounded_erase_for_interior_region() {
+        let mut t = terminal(6, 12);
+        for (row, ch) in (0..12).zip("abcdefghijkl".chars()) {
+            t.set_cursor_pos(row + 1, 1);
+            t.print(ch);
+        }
+        t.set_top_and_bottom_margin(3, 10);
+        t.set_cursor_pos(10, 1);
+        let total_rows = t.active_screen().pages.total_rows();
+
+        t.index();
+
+        assert_eq!(active_cell(&t, 0, 0).codepoint(), 'a' as u32);
+        assert_eq!(active_cell(&t, 0, 1).codepoint(), 'b' as u32);
+        assert_eq!(active_cell(&t, 0, 2).codepoint(), 'd' as u32);
+        assert!(
+            active_cell(&t, 0, 9).is_empty(),
+            "bottom codepoint={} screen={:?}",
+            active_cell(&t, 0, 9).codepoint(),
+            t.plain_string()
+        );
+        assert_eq!(active_cell(&t, 0, 10).codepoint(), 'k' as u32);
+        assert_eq!(active_cell(&t, 0, 11).codepoint(), 'l' as u32);
+        assert_eq!(t.active_screen().cursor.y, 9);
+        assert_eq!(t.active_screen().cursor.x, 0);
+        assert_eq!(t.active_screen().pages.total_rows(), total_rows);
+    }
+
+    #[test]
+    fn index_full_screen_region_creates_scrollback() {
+        let mut t = terminal(5, 3);
+        t.set_cursor_pos(1, 1);
+        t.print('A');
+        t.set_cursor_pos(3, 1);
+        let total_rows = t.active_screen().pages.total_rows();
+
+        t.index();
+
+        assert_eq!(t.active_screen().pages.total_rows(), total_rows + 1);
+        assert_eq!(
+            t.get_cell(Point::history(0, 0))
+                .map(|cell| cell.codepoint()),
+            Some('A' as u32)
+        );
+    }
+
+    #[test]
+    fn index_bg_colored_blank_falls_back() {
+        let mut t = terminal(5, 5);
+        t.set_top_and_bottom_margin(2, 4);
+        t.set_cursor_pos(4, 1);
+        t.set_attribute(Attribute::DirectColorBg(Rgb { r: 255, g: 0, b: 0 }));
+
+        t.index();
+
+        for x in 0..t.cols {
+            let cell = active_cell(&t, x, 3);
+            assert_eq!(cell.content_tag(), CellContentTag::BgColorRgb);
+            assert_eq!(cell.rgb(), Rgb { r: 255, g: 0, b: 0 });
+        }
+    }
+
+    #[test]
+    fn index_left_right_margins_fall_back() {
+        let mut t = terminal(8, 4);
+        for row in 0..4 {
+            t.set_cursor_pos(row + 1, 1);
+            t.print_string("ABCDEFGH");
+        }
+        t.modes.set(Mode::EnableLeftAndRightMargin, true);
+        t.set_top_and_bottom_margin(1, 3);
+        t.set_left_and_right_margin(3, 6);
+        t.set_cursor_pos(3, 3);
+
+        t.index();
+
+        assert_eq!(active_cell(&t, 0, 2).codepoint(), 'A' as u32);
+        assert_eq!(active_cell(&t, 1, 2).codepoint(), 'B' as u32);
+        assert_eq!(active_cell(&t, 6, 2).codepoint(), 'G' as u32);
+        assert_eq!(active_cell(&t, 7, 2).codepoint(), 'H' as u32);
     }
 
     #[test]

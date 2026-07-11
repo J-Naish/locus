@@ -2548,20 +2548,14 @@ impl Screen {
         let Some(pin) = self.cursor_pin() else {
             return;
         };
+        let cell = match self.cursor.style.bg_color {
+            StyleColor::Rgb(rgb) => Cell::bg_rgb(rgb),
+            StyleColor::Palette(index) => Cell::bg_palette(index),
+            StyleColor::None => return,
+        };
         if let Some(node) = self.pages.node_mut(pin.node) {
-            for x in 0..node.page.size().cols {
-                // Ghostty has two independent clear paths: one for a local
-                // non-empty background color and one for a non-default cursor
-                // style whose bgCell() is present. The merged Rust path keeps
-                // the boundary pinned by the bold-only scroll test below.
-                let cell = match self.cursor.style.bg_color {
-                    StyleColor::Rgb(rgb) => Cell::bg_rgb(rgb),
-                    StyleColor::Palette(index) => Cell::bg_palette(index),
-                    StyleColor::None => return,
-                };
-                node.page.clear_cells(pin.y, x, x.saturating_add(1));
-                node.page.set_cell(pin.y, x, cell);
-            }
+            // ghostty: Screen.zig:896-905 -- one bulk row fill.
+            node.page.fill_cells(pin.y, 0, node.page.size().cols, cell);
         }
     }
 
@@ -2720,6 +2714,8 @@ fn palette_color(name: Name) -> StyleColor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::Rgb;
+    use crate::page::CellContentTag;
     use crate::style::StyleFlags;
 
     fn active_cell(screen: &Screen, x: CellCountInt, y: CellCountInt) -> Cell {
@@ -5621,6 +5617,36 @@ mod tests {
             assert_eq!(cell, Cell::default());
         }
         assert_eq!(cursor_page_style_count(&screen), 1);
+    }
+
+    #[test]
+    fn bg_fill_row_matches_per_cell_semantics() {
+        let mut screen = Screen::new(Options {
+            cols: 5,
+            rows: 2,
+            max_scrollback: PageList::standard_size(),
+        });
+        screen.set_attribute(Attribute::DirectColorBg(Rgb { r: 9, g: 8, b: 7 }));
+        let style_id = screen.cursor.style_id;
+        screen.cursor_down(1);
+        screen.cursor_down_scroll();
+
+        for x in 0..screen.cols() {
+            let cell = active_cell(&screen, x, 1);
+            assert_eq!(cell.content_tag(), CellContentTag::BgColorRgb);
+            assert_eq!(cell.rgb(), Rgb { r: 9, g: 8, b: 7 });
+            assert_eq!(cell.style_id(), DEFAULT_STYLE_ID);
+        }
+        let pin = screen.cursor_pin().unwrap();
+        assert_eq!(
+            screen
+                .pages
+                .node(pin.node)
+                .unwrap()
+                .page
+                .style_ref_count(style_id),
+            1
+        );
     }
 
     #[test]

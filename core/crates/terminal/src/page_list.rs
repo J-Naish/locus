@@ -2305,22 +2305,17 @@ impl PageList {
         // infallibly on capacity exhaustion, so this cascade cannot tear; the
         // Result is kept to match the ported API shape.
         while let Some(next) = self.node(current).and_then(|node| node.next) {
-            let source = self
-                .node(next)
-                .map(|node| node.page.clone())
-                .ok_or(CloneRowsError::OutOfSpace)?;
-            if let Some(node) = self.node_mut(current) {
-                let last_y = node.page.size().rows.saturating_sub(1);
-                node.page.clone_row_from_page(last_y, &source, 0);
-            }
-
-            let next_rows = self
-                .node(next)
-                .map(|node| node.page.size().rows)
-                .ok_or(CloneRowsError::OutOfSpace)?;
-            if let Some(node) = self.node_mut(next) {
-                node.page.rotate_rows_left_once(0, next_rows);
-                node.page.set_page_dirty(true);
+            {
+                let (current_node, next_node) = self
+                    .nodes_pair_mut(current, next)
+                    .ok_or(CloneRowsError::OutOfSpace)?;
+                let last_y = current_node.page.size().rows.saturating_sub(1);
+                current_node
+                    .page
+                    .clone_row_from_page(last_y, &next_node.page, 0);
+                let next_rows = next_node.page.size().rows;
+                next_node.page.rotate_rows_left_once(0, next_rows);
+                next_node.page.set_page_dirty(true);
             }
             let previous = current;
             let previous_last_y = self
@@ -2371,9 +2366,11 @@ impl PageList {
         if local_remaining > limit {
             let target_y = pin.y.saturating_add(limit as CellCountInt);
             if let Some(node) = self.node_mut(pin.node) {
-                node.page.clear_row(target_y);
                 node.page
                     .rotate_rows_left_once(pin.y, target_y.saturating_add(1));
+                // The erased row's header rotates to the region bottom; clear
+                // it there so the former bottom row is not rotated away.
+                node.page.clear_row(target_y);
                 node.page.set_page_dirty(true);
             }
             self.adjust_viewport_cache_for_bounded_row(pin.node, pin.y, limit);
@@ -2409,19 +2406,16 @@ impl PageList {
         }
 
         while let Some(next) = self.node(current).and_then(|node| node.next) {
-            let source = self
-                .node(next)
-                .map(|node| node.page.clone())
-                .ok_or(CloneRowsError::OutOfSpace)?;
-            if let Some(node) = self.node_mut(current) {
-                let last_y = node.page.size().rows.saturating_sub(1);
-                node.page.clone_row_from_page(last_y, &source, 0);
-            }
-
-            let next_rows = self
-                .node(next)
-                .map(|node| node.page.size().rows)
-                .ok_or(CloneRowsError::OutOfSpace)?;
+            let next_rows = {
+                let (current_node, next_node) = self
+                    .nodes_pair_mut(current, next)
+                    .ok_or(CloneRowsError::OutOfSpace)?;
+                let last_y = current_node.page.size().rows.saturating_sub(1);
+                current_node
+                    .page
+                    .clone_row_from_page(last_y, &next_node.page, 0);
+                next_node.page.size().rows
+            };
             let shifted_limit = limit.saturating_sub(shifted);
             if usize::from(next_rows) > shifted_limit {
                 let shifted_limit_y = shifted_limit as CellCountInt;
@@ -2566,16 +2560,16 @@ impl PageList {
     }
 
     fn erase_page(&mut self, id: NodeId) {
-        let Some(node) = self.node(id).cloned() else {
+        let Some((prev, next)) = self.node(id).map(|node| (node.prev, node.next)) else {
             return;
         };
-        if node.prev.is_none() && node.next.is_none() {
+        if prev.is_none() && next.is_none() {
             return;
         }
-        debug_assert!(node.prev.is_none() || node.next.is_none());
-        let target = node.prev.or(node.next);
-        if node.prev.is_none() {
-            if let Some(next) = node.next {
+        debug_assert!(prev.is_none() || next.is_none());
+        let target = prev.or(next);
+        if prev.is_none() {
+            if let Some(next) = next {
                 if let Some(next_serial) = self.node(next).map(|node| node.serial) {
                     self.page_serial_min = next_serial;
                 }
@@ -3028,6 +3022,36 @@ impl PageList {
         }
     }
 
+    /// Disjoint mutable borrows of two live arena nodes. Full generational
+    /// IDs are checked so recycled indices cannot alias stale callers.
+    pub(crate) fn nodes_pair_mut(
+        &mut self,
+        a: NodeId,
+        b: NodeId,
+    ) -> Option<(&mut PageNode, &mut PageNode)> {
+        if a == b {
+            return None;
+        }
+        let a_index = a.index as usize;
+        let b_index = b.index as usize;
+        let (a_slot, b_slot) = if a_index < b_index {
+            let (left, right) = self.nodes.split_at_mut(b_index);
+            (left.get_mut(a_index)?, right.first_mut()?)
+        } else {
+            let (left, right) = self.nodes.split_at_mut(a_index);
+            (right.first_mut()?, left.get_mut(b_index)?)
+        };
+        let a_node = match a_slot {
+            NodeSlot::Occupied { generation, node } if *generation == a.generation => node,
+            _ => return None,
+        };
+        let b_node = match b_slot {
+            NodeSlot::Occupied { generation, node } if *generation == b.generation => node,
+            _ => return None,
+        };
+        Some((a_node, b_node))
+    }
+
     fn node_rows(&self, id: NodeId) -> Option<CellCountInt> {
         self.node(id).map(|node| node.page.size().rows)
     }
@@ -3115,22 +3139,22 @@ impl PageList {
     }
 
     fn remove_node(&mut self, id: NodeId) {
-        let Some(node) = self.node(id).cloned() else {
+        let Some((prev, next)) = self.node(id).map(|node| (node.prev, node.next)) else {
             return;
         };
-        if let Some(prev) = node.prev {
+        if let Some(prev) = prev {
             if let Some(prev_node) = self.node_mut(prev) {
-                prev_node.next = node.next;
+                prev_node.next = next;
             }
         } else {
-            self.first = node.next;
+            self.first = next;
         }
-        if let Some(next) = node.next {
+        if let Some(next) = next {
             if let Some(next_node) = self.node_mut(next) {
-                next_node.prev = node.prev;
+                next_node.prev = prev;
             }
         } else {
-            self.last = node.prev;
+            self.last = prev;
         }
         if let Some(removed) = self.node_mut(id) {
             removed.prev = None;
@@ -7966,6 +7990,41 @@ mod tests {
         assert_ne!(stale.generation, fresh.generation);
         assert!(list.node(stale).is_none());
         assert!(list.node(fresh).is_some());
+    }
+
+    #[test]
+    fn nodes_pair_mut_disjoint_borrows() {
+        let mut list = PageList::new(10, 2, None);
+        let cap_rows = list
+            .node(list.first_node().unwrap())
+            .unwrap()
+            .page
+            .capacity()
+            .rows;
+        list.grow_rows(usize::from(cap_rows));
+        let first = list.first_node().unwrap();
+        let last = list.last_node().unwrap();
+        assert_ne!(first, last);
+
+        let (first_node, last_node) = list.nodes_pair_mut(first, last).unwrap();
+        first_node.page.set_page_dirty(true);
+        last_node.page.set_page_dirty(true);
+
+        assert!(list.node(first).unwrap().page.page_dirty());
+        assert!(list.node(last).unwrap().page.page_dirty());
+    }
+
+    #[test]
+    fn nodes_pair_mut_rejects_same_and_stale() {
+        let mut list = PageList::new(10, 2, None);
+        let first = list.first_node().unwrap();
+        let stale = NodeId {
+            generation: first.generation.saturating_add(1),
+            ..first
+        };
+
+        assert!(list.nodes_pair_mut(first, first).is_none());
+        assert!(list.nodes_pair_mut(first, stale).is_none());
     }
 
     #[test]
