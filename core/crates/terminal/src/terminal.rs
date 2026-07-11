@@ -148,7 +148,7 @@ pub struct TerminalFlags {
     pub password_input: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Terminal {
     pub screens: ScreenSet,
     pub status_display: StatusDisplay,
@@ -520,17 +520,16 @@ impl Terminal {
 
     /// Prints a Ground-state printable ASCII run in page-sized chunks.
     ///
-    /// Insert mode, hyperlinks, charset translation, and disabled autowrap use
-    /// the scalar path unchanged. Ghostty gets equivalent throughput from a
-    /// cached cursor pointer; this port deliberately batches page writes to
-    /// avoid repeated generational-arena and tracked-pin resolution.
+    /// Insert mode, charset translation, and disabled autowrap use the scalar
+    /// path unchanged. Ghostty gets equivalent throughput from a cached cursor
+    /// pointer; this port deliberately batches page writes, including active
+    /// hyperlink references, to avoid repeated arena and pin resolution.
     pub fn print_run(&mut self, bytes: &[u8]) {
         debug_assert!(bytes.iter().all(|byte| matches!(byte, 0x20..=0x7E)));
         let charset = self.active_screen().charset;
         let active_charset = charset.get(charset.gl);
         if self.status_display != StatusDisplay::Main
             || self.modes.get(Mode::Insert)
-            || self.active_screen().cursor.hyperlink_id != 0
             || charset.single_shift.is_some()
             || !matches!(active_charset, Charset::Ascii | Charset::Utf8)
             || !self.modes.get(Mode::Wraparound)

@@ -23,7 +23,7 @@ pub struct NodeId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PinId(pub usize);
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct PageNode {
     pub(crate) prev: Option<NodeId>,
     pub(crate) next: Option<NodeId>,
@@ -31,7 +31,7 @@ pub(crate) struct PageNode {
     pub(crate) serial: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum NodeSlot {
     Free {
         generation: u32,
@@ -272,7 +272,7 @@ pub enum CellSubset {
     Right,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PageList {
     nodes: Vec<NodeSlot>,
     free_nodes: Vec<u32>,
@@ -1235,16 +1235,17 @@ impl PageList {
 
         let mut cap = Self::initial_capacity(self.cols);
         if let Some(last_capacity) = self.node(last).map(|node| node.page.capacity()) {
-            // Deliberate Ghostty deviation: dynamic style/link capacity is a
+            // Deliberate Ghostty deviation: managed-data capacity is a
             // session-level high-water mark. New pages inherit it so output
             // does not repeat the same capacity-growth ladder on every page.
-            // Grid dimensions and grapheme storage remain at their initial
-            // values because they follow different workload constraints.
+            // Grid dimensions remain at their initial values.
             cap.styles = last_capacity.styles;
+            cap.grapheme_bytes = last_capacity.grapheme_bytes;
             cap.hyperlink_bytes = last_capacity.hyperlink_bytes;
             cap.string_bytes = last_capacity.string_bytes;
         }
         let cap_layout_size = Page::layout(cap).total_size;
+        let mut retired_non_standard_buffer = None;
         if self.first.is_some()
             && self.first != self.last
             && self.page_size + Self::standard_size() > self.max_size()
@@ -1302,11 +1303,20 @@ impl PageList {
                     self.page_serial_min = old_serial.saturating_add(1);
                     return Some(first);
                 }
-                self.destroy_node(first);
+                if let Some(node) = self.take_node(first) {
+                    let memory = node.page.into_memory();
+                    self.page_size = self.page_size.saturating_sub(memory.len());
+                    if memory.len() == Self::standard_size() {
+                        self.page_buffers.push(memory);
+                    } else {
+                        retired_non_standard_buffer = Some(memory);
+                    }
+                }
             }
         }
 
         let next = self.create_page(cap);
+        drop(retired_non_standard_buffer);
         if let Some(node) = self.node_mut(next) {
             node.page.set_size_rows(1);
         }
@@ -1371,10 +1381,12 @@ impl PageList {
         id: NodeId,
         adjustment: Option<IncreaseCapacity>,
     ) -> Result<NodeId, IncreaseCapacityError> {
-        let Some(old_node) = self.node(id).cloned() else {
+        let Some(old_node) = self.node(id) else {
             return Err(IncreaseCapacityError::OutOfSpace);
         };
         let mut cap = old_node.page.capacity();
+        let old_size = old_node.page.size();
+        let old_dirty = old_node.page.page_dirty();
         if let Some(adjustment) = adjustment {
             match adjustment {
                 IncreaseCapacity::Styles => {
@@ -1400,9 +1412,7 @@ impl PageList {
         }
 
         let new_id = self.create_page(cap);
-        let old_size = old_node.page.size();
-        let old_dirty = old_node.page.page_dirty();
-        if let Some(new_node) = self.node_mut(new_id) {
+        if let Some((old_node, new_node)) = self.nodes_pair_mut(id, new_id) {
             new_node.page.set_size(old_size);
             new_node
                 .page
@@ -1990,7 +2000,7 @@ impl PageList {
 
     fn move_last_row_to_new_page(&mut self, cursor: &mut ReflowCursor) -> Result<(), ResizeError> {
         debug_assert!(!cursor.pending_wrap);
-        let Some(current_node) = self.node(cursor.node).cloned() else {
+        let Some(current_node) = self.node(cursor.node) else {
             return Err(ResizeError::OutOfSpace);
         };
         let size = current_node.page.size();
@@ -2000,7 +2010,7 @@ impl PageList {
         }
         let cap = current_node.page.capacity();
         let new_id = self.create_reflow_page(cap);
-        if let Some(new_node) = self.node_mut(new_id) {
+        if let Some((current_node, new_node)) = self.nodes_pair_mut(cursor.node, new_id) {
             new_node
                 .page
                 .clone_row_from_page(0, &current_node.page, size.rows - 1);
@@ -2205,21 +2215,23 @@ impl PageList {
     }
 
     pub fn compact(&mut self, id: NodeId) -> Option<NodeId> {
-        let old_node = self.node(id)?.clone();
-        if old_node.page.memory_len() <= Self::standard_size() {
+        let old_node = self.node(id)?;
+        let old_memory_len = old_node.page.memory_len();
+        if old_memory_len <= Self::standard_size() {
             return None;
         }
         let size = old_node.page.size();
         let cap = old_node.page.exact_row_capacity_range(0, size.rows);
-        if Page::layout(cap).total_size >= old_node.page.memory_len() {
+        let old_dirty = old_node.page.page_dirty();
+        if Page::layout(cap).total_size >= old_memory_len {
             return None;
         }
 
         let new_id = self.create_page(cap);
-        if let Some(node) = self.node_mut(new_id) {
-            node.page.set_size(size);
-            node.page.clone_rows_from(&old_node.page, 0, size.rows);
-            node.page.set_page_dirty(old_node.page.page_dirty());
+        if let Some((old_node, new_node)) = self.nodes_pair_mut(id, new_id) {
+            new_node.page.set_size(size);
+            new_node.page.clone_rows_from(&old_node.page, 0, size.rows);
+            new_node.page.set_page_dirty(old_dirty);
         }
         for pin in self.tracked_pins.iter_mut().flatten() {
             if pin.node == id {
@@ -2234,7 +2246,7 @@ impl PageList {
 
     pub fn split(&mut self, pin: Pin) -> Result<NodeId, SplitError> {
         let split_pin = pin;
-        let Some(old_node) = self.node(split_pin.node).cloned() else {
+        let Some(old_node) = self.node(split_pin.node) else {
             return Err(SplitError::OutOfSpace);
         };
         let size = old_node.page.size();
@@ -2248,16 +2260,19 @@ impl PageList {
             return Err(SplitError::OutOfSpace);
         }
 
-        let new_id = self.create_page(old_node.page.capacity());
+        let capacity = old_node.page.capacity();
+        let old_dirty = old_node.page.page_dirty();
+        let new_id = self.create_page(capacity);
         let moved = size.rows - split_pin.y;
-        if let Some(node) = self.node_mut(new_id) {
-            node.page.set_size(PageSize {
+        if let Some((old_node, new_node)) = self.nodes_pair_mut(split_pin.node, new_id) {
+            new_node.page.set_size(PageSize {
                 cols: size.cols,
                 rows: moved,
             });
-            node.page
+            new_node
+                .page
                 .clone_rows_from(&old_node.page, split_pin.y, size.rows);
-            node.page.set_page_dirty(old_node.page.page_dirty());
+            new_node.page.set_page_dirty(old_dirty);
         }
 
         for pin in self.tracked_pins.iter_mut().flatten() {
@@ -2660,11 +2675,13 @@ impl PageList {
     fn grow_cols_without_reflow(&mut self, cols: CellCountInt) -> Result<(), ResizeError> {
         let ids = self.iter_node_ids().collect::<Vec<_>>();
         for id in ids {
-            let Some(node) = self.node(id).cloned() else {
+            let Some(node) = self.node(id) else {
                 continue;
             };
             let size = node.page.size();
             let cap = node.page.capacity();
+            let previous = node.prev;
+            let page_dirty = node.page.page_dirty();
             let has_spacer_head_at_old_edge = size.cols > 0
                 && (0..size.rows).any(|y| {
                     matches!(
@@ -2681,9 +2698,9 @@ impl PageList {
 
             let new_cap = Page::adjust(cap, cols);
             let mut start: CellCountInt = 0;
-            let mut insert_after_id = node.prev;
+            let mut insert_after_id = previous;
 
-            if let Some(prev_id) = node.prev {
+            if let Some(prev_id) = previous {
                 let spare = self
                     .node(prev_id)
                     .map(|prev| {
@@ -2703,11 +2720,14 @@ impl PageList {
                         .node(prev_id)
                         .map(|prev| prev.page.size().rows)
                         .unwrap_or(0);
-                    if let Some(prev) = self.node_mut(prev_id) {
+                    if let Some((source, prev)) = self.nodes_pair_mut(id, prev_id) {
                         prev.page.set_size_rows(prev_start + take);
                         for offset in 0..take {
-                            prev.page
-                                .clone_row_from_page(prev_start + offset, &node.page, offset);
+                            prev.page.clone_row_from_page(
+                                prev_start + offset,
+                                &source.page,
+                                offset,
+                            );
                             Self::sanitize_grown_row(
                                 &mut prev.page,
                                 prev_start + offset,
@@ -2724,12 +2744,12 @@ impl PageList {
             while start < size.rows {
                 let take = new_cap.rows.min(size.rows - start);
                 let new_id = self.create_page(new_cap);
-                if let Some(new_node) = self.node_mut(new_id) {
+                if let Some((source, new_node)) = self.nodes_pair_mut(id, new_id) {
                     new_node.page.set_size(PageSize { cols, rows: take });
                     new_node
                         .page
-                        .clone_rows_from(&node.page, start, start + take);
-                    new_node.page.set_page_dirty(node.page.page_dirty());
+                        .clone_rows_from(&source.page, start, start + take);
+                    new_node.page.set_page_dirty(page_dirty);
                     for offset in 0..take {
                         Self::sanitize_grown_row(&mut new_node.page, offset, size.cols);
                     }
@@ -4046,8 +4066,12 @@ mod tests {
         let expanded = list
             .increase_capacity(last, Some(IncreaseCapacity::Styles))
             .unwrap();
+        let expanded = list
+            .increase_capacity(expanded, Some(IncreaseCapacity::GraphemeBytes))
+            .unwrap();
         let expanded_capacity = list.node_capacity(expanded).unwrap();
         assert!(expanded_capacity.styles > initial_styles);
+        assert!(expanded_capacity.grapheme_bytes > PageList::initial_capacity(80).grapheme_bytes);
 
         while node_rows(&list, expanded) < expanded_capacity.rows {
             assert_eq!(list.grow(), None);
@@ -4057,6 +4081,10 @@ mod tests {
         assert_eq!(
             list.node_capacity(new_last).unwrap().styles,
             expanded_capacity.styles
+        );
+        assert_eq!(
+            list.node_capacity(new_last).unwrap().grapheme_bytes,
+            expanded_capacity.grapheme_bytes
         );
     }
 
@@ -4445,6 +4473,19 @@ mod tests {
             list.node_capacity(new_id).unwrap().string_bytes,
             old.string_bytes * 2
         );
+    }
+
+    #[test]
+    fn hyperlink_capacity_can_grow_past_u16_limit() {
+        let mut list = PageList::new(10, 4, None);
+        let mut id = list.first_node().unwrap();
+        while list.node_capacity(id).unwrap().hyperlink_bytes <= u32::from(u16::MAX) {
+            id = list
+                .increase_capacity(id, Some(IncreaseCapacity::HyperlinkBytes))
+                .unwrap();
+        }
+
+        assert!(list.node_capacity(id).unwrap().hyperlink_bytes > u32::from(u16::MAX));
     }
 
     #[test]
@@ -6715,7 +6756,9 @@ mod tests {
     fn reflow_more_cols_creates_multiple_pages() {
         // ghostty: "PageList resize reflow more cols creates multiple pages" (PageList.zig:11228)
         let rows = 100;
-        let new_cols = 600;
+        let new_cols = (1..=CellCountInt::MAX)
+            .find(|&cols| PageList::initial_capacity(cols).rows < rows)
+            .unwrap();
         assert!(PageList::initial_capacity(new_cols).rows < rows);
         let mut list = PageList::new(10, rows, Some(0));
         for y in 0..rows {

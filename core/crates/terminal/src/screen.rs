@@ -8,7 +8,9 @@ use unicode_width::UnicodeWidthChar;
 use crate::color::Name;
 use crate::hyperlink::{Hyperlink, HyperlinkId, HyperlinkIdKind};
 use crate::osc::parsers::semantic_prompt::{PromptClick, PromptClickEvents, PromptKind};
-use crate::page::{Cell, CellWide, Page, SemanticContent, SemanticPrompt};
+use crate::page::{
+    AsciiRunAttributes, CapacityFailure, Cell, CellWide, Page, SemanticContent, SemanticPrompt,
+};
 use crate::page_list::{
     CloneOptions, Direction, IncreaseCapacity, IncreaseCapacityError, PageList, Pin, PinId,
     ResizeCursor, ResizeError, ResizeOptions, Scroll,
@@ -240,7 +242,7 @@ impl Default for Options {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Screen {
     pub pages: PageList,
     pub no_scrollback: bool,
@@ -995,14 +997,22 @@ impl Screen {
                     self.cursor.style_id = id;
                     return true;
                 }
-                Err(_) => {
-                    if self
-                        .pages
-                        .increase_capacity(pin.node, Some(IncreaseCapacity::Styles))
-                        .is_err()
-                        && self
-                            .split_for_capacity(pin, IncreaseCapacity::Styles)
-                            .is_err()
+                Err(error) => {
+                    let adjustment = match error {
+                        CapacityFailure::StyleNeedsCompaction => None,
+                        CapacityFailure::StyleSet => Some(IncreaseCapacity::Styles),
+                        _ => {
+                            self.cursor.style_id = DEFAULT_STYLE_ID;
+                            return false;
+                        }
+                    };
+                    let rebuild_failed =
+                        self.pages.increase_capacity(pin.node, adjustment).is_err();
+                    if rebuild_failed
+                        && (adjustment.is_none()
+                            || self
+                                .split_for_capacity(pin, IncreaseCapacity::Styles)
+                                .is_err())
                     {
                         self.cursor.style_id = DEFAULT_STYLE_ID;
                         return false;
@@ -1104,24 +1114,35 @@ impl Screen {
     }
 
     pub fn start_hyperlink(&mut self, id: Option<&[u8]>, uri: &[u8]) {
-        if self.start_hyperlink_once(id, uri) {
-            return;
-        }
-        if let Some(pin) = self.cursor_pin() {
-            let _ = self
-                .pages
-                .increase_capacity(pin.node, Some(IncreaseCapacity::HyperlinkBytes));
-            let _ = self.start_hyperlink_once(id, uri);
+        let mut attempts = 0usize;
+        loop {
+            match self.try_start_hyperlink_once(id, uri) {
+                Ok(_) => return,
+                Err(failure) => {
+                    if !self.increase_cursor_page_capacity_for_hyperlink(failure, attempts) {
+                        return;
+                    }
+                    attempts = attempts.saturating_add(1);
+                }
+            }
         }
     }
 
     pub fn start_hyperlink_once(&mut self, id: Option<&[u8]>, uri: &[u8]) -> bool {
+        self.try_start_hyperlink_once(id, uri).unwrap_or(false)
+    }
+
+    fn try_start_hyperlink_once(
+        &mut self,
+        id: Option<&[u8]>,
+        uri: &[u8],
+    ) -> Result<bool, CapacityFailure> {
         self.end_hyperlink();
         let Some(pin) = self.cursor_pin() else {
-            return false;
+            return Ok(false);
         };
         let Some(node) = self.pages.node_mut(pin.node) else {
-            return false;
+            return Ok(false);
         };
         let inserted = match id {
             Some(id) => node
@@ -1154,16 +1175,19 @@ impl Screen {
             }
         };
 
-        let Ok((hyperlink_id, hyperlink)) = inserted else {
-            if id.is_none() {
-                self.cursor.hyperlink_implicit_id =
-                    self.cursor.hyperlink_implicit_id.saturating_sub(1);
+        let (hyperlink_id, hyperlink) = match inserted {
+            Ok(value) => value,
+            Err(error) => {
+                if id.is_none() {
+                    self.cursor.hyperlink_implicit_id =
+                        self.cursor.hyperlink_implicit_id.saturating_sub(1);
+                }
+                return Err(error);
             }
-            return false;
         };
         self.cursor.hyperlink_id = hyperlink_id;
         self.cursor.hyperlink = Some(hyperlink);
-        true
+        Ok(true)
     }
 
     pub fn end_hyperlink(&mut self) {
@@ -1192,14 +1216,14 @@ impl Screen {
             return;
         };
         if let Some(node) = self.pages.node_mut(pin.node) {
-            if node
+            if let Err(failure) = node
                 .page
                 .set_hyperlink_id(pin.y, pin.x, self.cursor.hyperlink_id)
-                .is_err()
-                && self.increase_cursor_page_capacity_for_hyperlink(*attempts)
             {
-                *attempts = attempts.saturating_add(1);
-                self.cursor_set_hyperlink_with_retries(attempts);
+                if self.increase_cursor_page_capacity_for_hyperlink(failure, *attempts) {
+                    *attempts = attempts.saturating_add(1);
+                    self.cursor_set_hyperlink_with_retries(attempts);
+                }
             }
         }
     }
@@ -1221,18 +1245,25 @@ impl Screen {
                 }
                 HyperlinkIdKind::Implicit(id) => node.page.insert_hyperlink_implicit(id, &link.uri),
             };
-            let Ok(id) = inserted else {
-                if self.increase_cursor_page_capacity_for_hyperlink(*attempts) {
-                    *attempts = attempts.saturating_add(1);
-                    self.cursor_register_hyperlink(attempts);
+            let id = match inserted {
+                Ok(id) => id,
+                Err(failure) => {
+                    if self.increase_cursor_page_capacity_for_hyperlink(failure, *attempts) {
+                        *attempts = attempts.saturating_add(1);
+                        self.cursor_register_hyperlink(attempts);
+                    }
+                    return;
                 }
-                return;
             };
             self.cursor.hyperlink_id = id;
         }
     }
 
-    fn increase_cursor_page_capacity_for_hyperlink(&mut self, attempt: usize) -> bool {
+    fn increase_cursor_page_capacity_for_hyperlink(
+        &mut self,
+        failure: CapacityFailure,
+        attempt: usize,
+    ) -> bool {
         if attempt >= 16 {
             return false;
         }
@@ -1240,10 +1271,12 @@ impl Screen {
             return false;
         };
         self.release_cursor_refs();
-        let dimension = if attempt.is_multiple_of(2) {
-            IncreaseCapacity::StringBytes
-        } else {
-            IncreaseCapacity::HyperlinkBytes
+        let dimension = match failure {
+            CapacityFailure::StringBytes => IncreaseCapacity::StringBytes,
+            CapacityFailure::HyperlinkMap | CapacityFailure::HyperlinkSet => {
+                IncreaseCapacity::HyperlinkBytes
+            }
+            _ => return false,
         };
         if self
             .pages
@@ -2304,22 +2337,16 @@ impl Screen {
         let Some(pin) = self.cursor_pin() else {
             return 0;
         };
-        let style_id = self.cursor.style_id;
-        let protected = self.cursor.protected;
-        let semantic_content = self.cursor.semantic_content;
+        let attributes = AsciiRunAttributes {
+            style_id: self.cursor.style_id,
+            protected: self.cursor.protected,
+            semantic_content: self.cursor.semantic_content,
+            hyperlink_id: (self.cursor.hyperlink_id != 0).then_some(self.cursor.hyperlink_id),
+        };
         let consumed = self
             .pages
             .node_mut(pin.node)
-            .map(|node| {
-                node.page.print_ascii_run(
-                    pin.y,
-                    pin.x,
-                    bytes,
-                    style_id,
-                    protected,
-                    semantic_content,
-                )
-            })
+            .map(|node| node.page.print_ascii_run(pin.y, pin.x, bytes, attributes))
             .unwrap_or(0);
         self.assert_integrity();
         consumed
@@ -5808,6 +5835,90 @@ mod tests {
         );
         screen.test_write_string("x");
         assert!(active_cell(&screen, 0, 0).hyperlink());
+    }
+
+    #[test]
+    fn add_style_reports_compaction_when_ids_reclaimable() {
+        let mut screen = Screen::new(Options::default());
+        let node_id = cursor_node(&screen);
+        let mut ids = Vec::new();
+        let mut value = 1_000u128;
+        loop {
+            let result = screen
+                .pages
+                .node_mut(node_id)
+                .unwrap()
+                .page
+                .add_style(PackedStyle(value));
+            match result {
+                Ok(id) => {
+                    ids.push(id);
+                    value += 1;
+                }
+                Err(CapacityFailure::StyleSet) => break,
+                Err(error) => panic!("unexpected style fill error: {error:?}"),
+            }
+        }
+        let retained = ids.pop().unwrap();
+        let page = &mut screen.pages.node_mut(node_id).unwrap().page;
+        for id in ids {
+            page.release_style(id);
+        }
+        assert_eq!(
+            page.add_style(PackedStyle(value)),
+            Err(CapacityFailure::StyleNeedsCompaction)
+        );
+        let capacity_before = page.capacity().styles;
+        assert!(page.style_ref_count(retained) > 0);
+
+        screen.cursor.style.flags.bold = true;
+        assert!(screen.try_manual_style_update());
+
+        let capacity_after = screen
+            .pages
+            .node(cursor_node(&screen))
+            .unwrap()
+            .page
+            .capacity()
+            .styles;
+        assert_eq!(capacity_after, capacity_before);
+        assert_ne!(screen.cursor.style_id, DEFAULT_STYLE_ID);
+    }
+
+    #[test]
+    fn hyperlink_retry_grows_reported_dimension() {
+        let mut string_limited = Page::init(crate::page::Capacity {
+            string_bytes: 0,
+            ..crate::page::Capacity::new(4, 2)
+        });
+        assert_eq!(
+            string_limited.insert_hyperlink_implicit(1, b"uri"),
+            Err(CapacityFailure::StringBytes)
+        );
+        let mut set_limited = Page::init(crate::page::Capacity {
+            hyperlink_bytes: 0,
+            ..crate::page::Capacity::new(4, 2)
+        });
+        assert_eq!(
+            set_limited.insert_hyperlink_implicit(1, b"uri"),
+            Err(CapacityFailure::HyperlinkSet)
+        );
+
+        let mut screen = Screen::new(Options::default());
+        let before = screen.pages.node_capacity(cursor_node(&screen)).unwrap();
+        assert!(screen.increase_cursor_page_capacity_for_hyperlink(CapacityFailure::StringBytes, 0));
+        let after_string = screen.pages.node_capacity(cursor_node(&screen)).unwrap();
+        assert!(after_string.string_bytes > before.string_bytes);
+        assert_eq!(after_string.hyperlink_bytes, before.hyperlink_bytes);
+
+        let mut screen = Screen::new(Options::default());
+        let before = screen.pages.node_capacity(cursor_node(&screen)).unwrap();
+        assert!(
+            screen.increase_cursor_page_capacity_for_hyperlink(CapacityFailure::HyperlinkSet, 0)
+        );
+        let after_set = screen.pages.node_capacity(cursor_node(&screen)).unwrap();
+        assert_eq!(after_set.string_bytes, before.string_bytes);
+        assert!(after_set.hyperlink_bytes > before.hyperlink_bytes);
     }
 
     #[test]

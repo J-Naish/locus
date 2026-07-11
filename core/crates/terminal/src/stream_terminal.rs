@@ -106,7 +106,7 @@ pub struct NoopEffects;
 
 impl Effects for NoopEffects {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TerminalHandler<E> {
     pub terminal: Terminal,
     pub effects: E,

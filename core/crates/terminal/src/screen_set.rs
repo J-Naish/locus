@@ -10,7 +10,7 @@ pub enum ScreenKey {
     Alternate,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ScreenSet {
     primary: Screen,
     alternate: Option<Screen>,

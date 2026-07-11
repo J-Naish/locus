@@ -57,7 +57,11 @@ impl<const CHUNK_SIZE: usize> BitmapAllocator<CHUNK_SIZE> {
         let bitmap_start = 0;
         let bitmap_end = u64::SIZE * bitmap_count;
         let chunks_start = align_forward(bitmap_end, u8::ALIGN);
-        let chunks_end = chunks_start + (aligned_capacity * CHUNK_SIZE);
+        // DEVIATION: Ghostty's bitmap_allocator.zig:222 multiplies the
+        // byte-aligned capacity by CHUNK_SIZE again. The bitmap addresses the
+        // 64-bit-aligned chunk count, so backing exactly that many chunks both
+        // covers its phantom tail bits and avoids reserving unusable space.
+        let chunks_end = chunks_start + aligned_chunk_count * CHUNK_SIZE;
 
         Layout {
             total_size: chunks_end,
@@ -154,20 +158,45 @@ impl<const CHUNK_SIZE: usize> BitmapAllocator<CHUNK_SIZE> {
     }
 
     fn find_free_chunks(self, backing: &mut [u8], n: usize) -> Option<usize> {
-        let mut bitmaps = self.bitmaps(backing);
-        let result = find_free_chunks(&mut bitmaps, n)?;
-        for (index, bitmap) in bitmaps.into_iter().enumerate() {
-            self.bitmap.set(backing, index, bitmap);
+        let start = find_free_chunk_start(self.bitmap_count, n, |index| {
+            self.bitmap.get(backing, index)
+        })?;
+        self.mark_chunks_allocated(backing, start, n);
+        Some(start)
+    }
+
+    fn mark_chunks_allocated(self, backing: &mut [u8], start: usize, n: usize) {
+        let mut bitmap_index = start / BITMAP_BIT_SIZE;
+        let mut bit = start % BITMAP_BIT_SIZE;
+        let mut remaining = n;
+
+        while remaining > 0 {
+            let bits = remaining.min(BITMAP_BIT_SIZE - bit);
+            let mask = (u64::MAX >> (BITMAP_BIT_SIZE - bits)) << bit;
+            let bitmap = self.bitmap.get(backing, bitmap_index) & !mask;
+            self.bitmap.set(backing, bitmap_index, bitmap);
+            remaining -= bits;
+            bitmap_index += 1;
+            bit = 0;
         }
-        Some(result)
     }
 }
 
 fn find_free_chunks(bitmaps: &mut [u64], n: usize) -> Option<usize> {
+    let start = find_free_chunk_start(bitmaps.len(), n, |index| bitmaps[index])?;
+    mark_chunks_allocated(bitmaps, start, n);
+    Some(start)
+}
+
+fn find_free_chunk_start(
+    bitmap_count: usize,
+    n: usize,
+    mut bitmap_at: impl FnMut(usize) -> u64,
+) -> Option<usize> {
     if n > BITMAP_BIT_SIZE {
         let mut i = 0usize;
-        'search: while i < bitmaps.len() {
-            let prefix = (!bitmaps[i]).leading_zeros() as usize;
+        'search: while i < bitmap_count {
+            let prefix = (!bitmap_at(i)).leading_zeros() as usize;
             if prefix == 0 {
                 i += 1;
                 continue;
@@ -179,30 +208,19 @@ fn find_free_chunks(bitmaps: &mut [u64], n: usize) -> Option<usize> {
 
             i += 1;
             while remaining > BITMAP_BIT_SIZE {
-                if i >= bitmaps.len() {
+                if i >= bitmap_count {
                     return None;
                 }
-                if bitmaps[i] != u64::MAX {
+                if bitmap_at(i) != u64::MAX {
                     continue 'search;
                 }
                 remaining -= BITMAP_BIT_SIZE;
                 i += 1;
             }
 
-            if i >= bitmaps.len() || ((!bitmaps[i]).trailing_zeros() as usize) < remaining {
+            if i >= bitmap_count || ((!bitmap_at(i)).trailing_zeros() as usize) < remaining {
                 continue;
             }
-
-            let suffix = (n - prefix) % BITMAP_BIT_SIZE;
-            bitmaps[start_bitmap] ^= (u64::MAX >> start_bit) << start_bit;
-            let full_bitmaps = (n - prefix - suffix) / BITMAP_BIT_SIZE;
-            for bitmap in bitmaps[start_bitmap + 1..].iter_mut().take(full_bitmaps) {
-                *bitmap = 0;
-            }
-            if suffix > 0 {
-                bitmaps[i] ^= u64::MAX >> (BITMAP_BIT_SIZE - suffix);
-            }
-
             return Some(start_bitmap * BITMAP_BIT_SIZE + start_bit);
         }
 
@@ -210,22 +228,36 @@ fn find_free_chunks(bitmaps: &mut [u64], n: usize) -> Option<usize> {
     }
 
     debug_assert!(n <= BITMAP_BIT_SIZE);
-    for (idx, bitmap) in bitmaps.iter_mut().enumerate() {
-        let mut shifted = *bitmap;
+    for idx in 0..bitmap_count {
+        let bitmap = bitmap_at(idx);
+        let mut shifted = bitmap;
         for shift in 1..n {
-            shifted &= *bitmap >> shift;
+            shifted &= bitmap >> shift;
         }
         if shifted == 0 {
             continue;
         }
 
         let bit = shifted.trailing_zeros() as usize;
-        let mask = (u64::MAX >> (BITMAP_BIT_SIZE - n)) << bit;
-        *bitmap ^= mask;
         return Some(idx * BITMAP_BIT_SIZE + bit);
     }
 
     None
+}
+
+fn mark_chunks_allocated(bitmaps: &mut [u64], start: usize, n: usize) {
+    let mut bitmap_index = start / BITMAP_BIT_SIZE;
+    let mut bit = start % BITMAP_BIT_SIZE;
+    let mut remaining = n;
+
+    while remaining > 0 {
+        let bits = remaining.min(BITMAP_BIT_SIZE - bit);
+        let mask = (u64::MAX >> (BITMAP_BIT_SIZE - bits)) << bit;
+        bitmaps[bitmap_index] &= !mask;
+        remaining -= bits;
+        bitmap_index += 1;
+        bit = 0;
+    }
 }
 
 #[cfg(test)]
@@ -501,5 +533,41 @@ mod tests {
         assert_eq!(BitmapAllocator::<16>::bytes_required::<u32>(5), 32);
         assert_eq!(BitmapAllocator::<4>::bytes_required::<u32>(2), 8);
         assert_eq!(BitmapAllocator::<32>::bytes_required::<u8>(33), 64);
+    }
+
+    #[test]
+    fn bitmap_layout_backs_every_addressable_chunk() {
+        for capacity in [1, 15, 16, 17, 1_023, 1_024, 1_025] {
+            let layout = BitmapAllocator::<16>::layout(capacity);
+            let mut backing = vec![0; layout.total_size];
+            let mut allocator =
+                BitmapAllocator::<16>::init(OffsetBuf::init(), layout, &mut backing);
+
+            for _ in 0..allocator.bitmap_count * BITMAP_BIT_SIZE {
+                let slice = allocator.alloc::<u8>(&mut backing, 1).unwrap();
+                let end = slice.offset.offset as usize + 16;
+                assert!(end <= layout.total_size);
+            }
+            assert!(allocator.alloc::<u8>(&mut backing, 1).is_err());
+        }
+    }
+
+    #[test]
+    fn alloc_mutates_only_touched_words() {
+        let (mut backing, mut allocator) = backing::<1>(BITMAP_BIT_SIZE * 4);
+        allocator.alloc::<u8>(&mut backing, 56).unwrap();
+        let before = allocator.bitmaps(&backing);
+
+        allocator.alloc::<u8>(&mut backing, 65).unwrap();
+
+        let after = allocator.bitmaps(&backing);
+        let changed: Vec<_> = before
+            .iter()
+            .zip(&after)
+            .enumerate()
+            .filter_map(|(index, (before, after))| (before != after).then_some(index))
+            .collect();
+        assert_eq!(changed, vec![0, 1]);
+        assert_eq!(&before[2..], &after[2..]);
     }
 }

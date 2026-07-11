@@ -10,7 +10,7 @@ use crate::bitmap_allocator::{BitmapAllocator, OutOfMemory};
 use crate::color::Rgb;
 use crate::hash_map::{AutoOffsetHashMap, OffsetHashMap};
 use crate::hyperlink::{HyperlinkId, HyperlinkMap, HyperlinkSet, PageEntry, PageEntryId};
-use crate::ref_counted_set::{self, Layout as SetLayout};
+use crate::ref_counted_set::{self, AddError, Layout as SetLayout};
 use crate::size::{
     align_backward, align_forward, BufValue, CellCountInt, GraphemeBytesInt, Offset, OffsetBuf,
     OffsetSlice, StringBytesInt, StyleCountInt,
@@ -422,7 +422,7 @@ pub struct Capacity {
     pub cols: CellCountInt,
     pub rows: CellCountInt,
     pub styles: StyleCountInt,
-    pub hyperlink_bytes: u16,
+    pub hyperlink_bytes: u32,
     pub grapheme_bytes: GraphemeBytesInt,
     pub string_bytes: StringBytesInt,
 }
@@ -433,7 +433,7 @@ impl Capacity {
             cols,
             rows,
             styles: 16,
-            hyperlink_bytes: HYPERLINK_BYTES_DEFAULT as u16,
+            hyperlink_bytes: HYPERLINK_BYTES_DEFAULT as u32,
             grapheme_bytes: GRAPHEME_BYTES_DEFAULT,
             string_bytes: STRING_BYTES_DEFAULT,
         }
@@ -444,7 +444,7 @@ pub const STD_CAPACITY: Capacity = Capacity {
     cols: 215,
     rows: 215,
     styles: 128,
-    hyperlink_bytes: HYPERLINK_BYTES_DEFAULT as u16,
+    hyperlink_bytes: HYPERLINK_BYTES_DEFAULT as u32,
     // Keep Page/PageList tests inline in this crate. Integration tests would
     // observe a different cfg(test) value and break the layout pin.
     grapheme_bytes: if cfg!(test) { 512 } else { 8192 },
@@ -500,6 +500,24 @@ pub(crate) enum CellSnapshotWriteError {
     GraphemeBytes,
     HyperlinkBytes,
     StringBytes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CapacityFailure {
+    StyleSet,
+    StyleNeedsCompaction,
+    GraphemeBytes,
+    HyperlinkMap,
+    HyperlinkSet,
+    StringBytes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AsciiRunAttributes {
+    pub(crate) style_id: StyleCountInt,
+    pub(crate) protected: bool,
+    pub(crate) semantic_content: SemanticContent,
+    pub(crate) hyperlink_id: Option<HyperlinkId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -753,9 +771,7 @@ impl Page {
         y: CellCountInt,
         x: CellCountInt,
         bytes: &[u8],
-        style_id: StyleCountInt,
-        protected: bool,
-        semantic_content: SemanticContent,
+        attributes: AsciiRunAttributes,
     ) -> usize {
         debug_assert!(y < self.size.rows);
         debug_assert!(x < self.size.cols);
@@ -765,44 +781,71 @@ impl Page {
         let cells = row.cells();
         let available = usize::from(self.size.cols.saturating_sub(x));
         let requested = bytes.len().min(available);
-        let safe_len = (0..requested)
+        let mut safe_len = (0..requested)
             .take_while(|offset| {
                 let cell = cells.get(&self.memory, usize::from(x) + offset);
                 matches!(cell.wide(), CellWide::Narrow) && !cell.has_grapheme() && !cell.hyperlink()
             })
             .count();
+        if attributes.hyperlink_id.is_some() {
+            let unused = self
+                .hyperlink_map
+                .capacity()
+                .saturating_sub(self.hyperlink_map.count());
+            safe_len = safe_len.min(unused as usize);
+        }
         if safe_len == 0 {
             return 0;
         }
 
         let mut new_style_refs: StyleCountInt = 0;
+        let mut consumed = 0usize;
         for (offset, byte) in bytes[..safe_len].iter().enumerate() {
             let cell_index = usize::from(x) + offset;
             let old_cell = cells.get(&self.memory, cell_index);
-            if old_cell.style_id() != style_id {
+            if let Some(hyperlink_id) = attributes.hyperlink_id {
+                let key = self.cell_offset(y, x + offset as CellCountInt);
+                self.hyperlink_map
+                    .put_assume_capacity(&mut self.memory, key, hyperlink_id);
+            }
+            if old_cell.style_id() != attributes.style_id {
                 if old_cell.style_id() != DEFAULT_STYLE_ID {
                     self.styles.release(&mut self.memory, old_cell.style_id());
                 }
-                if style_id != DEFAULT_STYLE_ID {
+                if attributes.style_id != DEFAULT_STYLE_ID {
                     new_style_refs = new_style_refs.saturating_add(1);
                 }
             }
 
             let mut new_cell = Cell::new(char::from(*byte));
-            new_cell.set_style_id(style_id);
-            new_cell.set_protected(protected);
-            new_cell.set_semantic_content(semantic_content);
+            new_cell.set_style_id(attributes.style_id);
+            new_cell.set_hyperlink(attributes.hyperlink_id.is_some());
+            new_cell.set_protected(attributes.protected);
+            new_cell.set_semantic_content(attributes.semantic_content);
             cells.set(&mut self.memory, cell_index, new_cell);
+            consumed += 1;
+        }
+
+        if consumed == 0 {
+            return 0;
         }
 
         if new_style_refs > 0 {
             self.styles
-                .use_multiple(&mut self.memory, style_id, new_style_refs);
+                .use_multiple(&mut self.memory, attributes.style_id, new_style_refs);
             row.set_styled(true);
+        }
+        if let Some(hyperlink_id) = attributes.hyperlink_id {
+            self.hyperlink_set.use_multiple(
+                &mut self.memory,
+                hyperlink_id,
+                consumed as StyleCountInt,
+            );
+            row.set_hyperlink(true);
         }
         row.set_dirty(true);
         self.set_row(y, row);
-        safe_len
+        consumed
     }
 
     pub fn is_dirty(&self, y: CellCountInt) -> bool {
@@ -985,9 +1028,10 @@ impl Page {
             }
             CloneSource::Other(page) => page,
         };
+        let mut caches = CloneCaches::default();
         self.clear_cells(dst_y, x_start, x_end);
         for x in x_start..x_end.min(self.size.cols).min(source_page.size.cols) {
-            self.clone_cell_from(source_page, src_y, x, dst_y, x);
+            self.clone_cell_from(source_page, src_y, x, dst_y, x, &mut caches);
         }
         if x_start == 0 && x_end >= self.size.cols {
             let mut row = source_page.row(src_y);
@@ -1009,17 +1053,29 @@ impl Page {
         end_y: CellCountInt,
     ) {
         let count = end_y.saturating_sub(start_y);
+        let mut caches = CloneCaches {
+            bulk_hyperlinks: true,
+            bulk_graphemes: true,
+            ..CloneCaches::default()
+        };
         for offset in 0..count {
             let source_y = start_y + offset;
-            self.clone_partial_row_from(
-                CloneSource::Other(source),
-                offset,
-                source_y,
-                0,
-                source.size.cols.min(self.size.cols),
-            );
+            let x_end = source.size.cols.min(self.size.cols);
+            let source_row = source.row(source_y);
+            let destination_row = self.row(offset);
+            let source_range = source.cell_byte_range(source_row, 0, x_end);
+            let destination_range = self.cell_byte_range(destination_row, 0, x_end);
+            self.memory[destination_range].copy_from_slice(&source.memory[source_range]);
+
+            if source_row.styled() {
+                for x in 0..x_end {
+                    self.clone_managed_cell_from(source, source_y, x, offset, x, &mut caches);
+                }
+            }
             self.clone_row_metadata_from(source, source_y, offset);
         }
+        self.clone_hyperlinks_from_rows(source, start_y, end_y);
+        self.clone_graphemes_from_rows(source, start_y, end_y);
     }
 
     pub(crate) fn clone_row_from_page(
@@ -1070,7 +1126,7 @@ impl Page {
         y: CellCountInt,
         x: CellCountInt,
         snapshot: &CellSnapshot,
-    ) -> Result<(), OutOfMemory> {
+    ) -> Result<(), CapacityFailure> {
         let mut cell = snapshot.cell;
         cell.set_style_id(0);
         cell.set_hyperlink(false);
@@ -1104,7 +1160,7 @@ impl Page {
         y: CellCountInt,
         left: CellCountInt,
         right: CellCountInt,
-    ) -> Result<(), OutOfMemory> {
+    ) -> Result<(), CapacityFailure> {
         if left == right {
             return Ok(());
         }
@@ -1181,9 +1237,13 @@ impl Page {
                 let uri = self
                     .copy_bytes(uri)
                     .map_err(|_| CellSnapshotWriteError::StringBytes)?;
-                let id = self
-                    .copy_bytes(id)
-                    .map_err(|_| CellSnapshotWriteError::StringBytes)?;
+                let id = match self.copy_bytes(id) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        self.string_alloc.free(&mut self.memory, uri);
+                        return Err(CellSnapshotWriteError::StringBytes);
+                    }
+                };
                 PageEntry::explicit(id, uri)
             }
             HyperlinkSnapshot::Implicit { id, uri } => {
@@ -1194,8 +1254,7 @@ impl Page {
             }
         };
         let hyperlink_id = self
-            .hyperlink_set
-            .add(&mut self.memory, entry)
+            .add_hyperlink_entry(entry)
             .map_err(|_| CellSnapshotWriteError::HyperlinkBytes)?;
         self.set_hyperlink_id(y, x, hyperlink_id)
             .map_err(|_| CellSnapshotWriteError::HyperlinkBytes)?;
@@ -1329,7 +1388,7 @@ impl Page {
             styles: StyleSet::capacity_for_count(style_ids.len()) as StyleCountInt,
             hyperlink_bytes: (HyperlinkSet::capacity_for_count(hyperlink_count)
                 * ref_counted_set::item_byte_size::<crate::hyperlink::PageEntry>())
-                as u16,
+                as u32,
             grapheme_bytes: grapheme_bytes as GraphemeBytesInt,
             string_bytes: string_bytes as StringBytesInt,
         }
@@ -1457,7 +1516,7 @@ impl Page {
                 continue;
             }
             if capacity.hyperlink_bytes > 0 {
-                let item = ref_counted_set::item_byte_size::<crate::hyperlink::PageEntry>() as u16;
+                let item = ref_counted_set::item_byte_size::<crate::hyperlink::PageEntry>() as u32;
                 capacity.hyperlink_bytes = capacity
                     .hyperlink_bytes
                     .saturating_sub(item)
@@ -1669,18 +1728,21 @@ impl Page {
         y: CellCountInt,
         x: CellCountInt,
         codepoint: u32,
-    ) -> Result<(), OutOfMemory> {
+    ) -> Result<(), CapacityFailure> {
         let key = self.cell_offset(y, x);
         let cell = self.cell(y, x);
 
         if !cell.has_grapheme() {
             // ghostty: page.zig:1533 — first grapheme allocates one codepoint
             // and only publishes the map entry after allocation succeeds.
-            let slice = self.grapheme_alloc.alloc::<u32>(&mut self.memory, 1)?;
+            let slice = self
+                .grapheme_alloc
+                .alloc::<u32>(&mut self.memory, 1)
+                .map_err(|_| CapacityFailure::GraphemeBytes)?;
             slice.offset.set(&mut self.memory, 0, codepoint);
             if self.grapheme_map.put(&mut self.memory, key, slice).is_err() {
                 self.grapheme_alloc.free(&mut self.memory, slice);
-                return Err(OutOfMemory);
+                return Err(CapacityFailure::GraphemeBytes);
             }
             let mut cell = cell;
             cell.0 = (cell.0 & !Cell::CONTENT_TAG_MASK) | CellContentTag::CodepointGrapheme as u64;
@@ -1691,11 +1753,14 @@ impl Page {
 
         let Some(slice) = self.grapheme_map.get(&self.memory, key) else {
             debug_assert!(false, "grapheme tag set but map entry missing");
-            let slice = self.grapheme_alloc.alloc::<u32>(&mut self.memory, 1)?;
+            let slice = self
+                .grapheme_alloc
+                .alloc::<u32>(&mut self.memory, 1)
+                .map_err(|_| CapacityFailure::GraphemeBytes)?;
             slice.offset.set(&mut self.memory, 0, codepoint);
             if self.grapheme_map.put(&mut self.memory, key, slice).is_err() {
                 self.grapheme_alloc.free(&mut self.memory, slice);
-                return Err(OutOfMemory);
+                return Err(CapacityFailure::GraphemeBytes);
             }
             self.update_row_flags(y);
             return Ok(());
@@ -1722,11 +1787,12 @@ impl Page {
         // slice first, so allocation failure leaves the existing entry intact.
         let new_slice = self
             .grapheme_alloc
-            .alloc::<u32>(&mut self.memory, slice.len + 1)?;
-        for index in 0..slice.len {
-            let value = slice.offset.get(&self.memory, index);
-            new_slice.offset.set(&mut self.memory, index, value);
-        }
+            .alloc::<u32>(&mut self.memory, slice.len + 1)
+            .map_err(|_| CapacityFailure::GraphemeBytes)?;
+        let source_start = slice.offset.offset as usize;
+        let source_end = source_start + slice.len * u32::SIZE;
+        self.memory
+            .copy_within(source_start..source_end, new_slice.offset.offset as usize);
         new_slice.offset.set(&mut self.memory, slice.len, codepoint);
         let updated = self
             .grapheme_map
@@ -1790,11 +1856,8 @@ impl Page {
         y: CellCountInt,
         x: CellCountInt,
         style: PackedStyle,
-    ) -> Result<StyleCountInt, OutOfMemory> {
-        let id = self
-            .styles
-            .add(&mut self.memory, style)
-            .map_err(|_| OutOfMemory)?;
+    ) -> Result<StyleCountInt, CapacityFailure> {
+        let id = self.add_style(style)?;
         let mut cell = self.cell(y, x);
         cell.set_style_id(id);
         self.write_cell_raw(y, x, cell);
@@ -1802,10 +1865,16 @@ impl Page {
         Ok(id)
     }
 
-    pub(crate) fn add_style(&mut self, style: PackedStyle) -> Result<StyleCountInt, OutOfMemory> {
+    pub(crate) fn add_style(
+        &mut self,
+        style: PackedStyle,
+    ) -> Result<StyleCountInt, CapacityFailure> {
         self.styles
             .add(&mut self.memory, style)
-            .map_err(|_| OutOfMemory)
+            .map_err(|error| match error {
+                AddError::OutOfMemory => CapacityFailure::StyleSet,
+                AddError::NeedsRehash => CapacityFailure::StyleNeedsCompaction,
+            })
     }
 
     pub(crate) fn use_style(&mut self, id: StyleCountInt) {
@@ -1850,8 +1919,10 @@ impl Page {
         x: CellCountInt,
         id: u32,
         uri: &[u8],
-    ) -> Result<HyperlinkId, OutOfMemory> {
-        let uri = self.copy_bytes(uri)?;
+    ) -> Result<HyperlinkId, CapacityFailure> {
+        let uri = self
+            .copy_bytes(uri)
+            .map_err(|_| CapacityFailure::StringBytes)?;
         let entry = PageEntry::implicit(id, uri);
         self.set_hyperlink_entry(y, x, entry)
     }
@@ -1860,23 +1931,29 @@ impl Page {
         &mut self,
         id: u32,
         uri: &[u8],
-    ) -> Result<HyperlinkId, OutOfMemory> {
-        let uri = self.copy_bytes(uri)?;
-        self.hyperlink_set
-            .add(&mut self.memory, PageEntry::implicit(id, uri))
-            .map_err(|_| OutOfMemory)
+    ) -> Result<HyperlinkId, CapacityFailure> {
+        let uri = self
+            .copy_bytes(uri)
+            .map_err(|_| CapacityFailure::StringBytes)?;
+        self.add_hyperlink_entry(PageEntry::implicit(id, uri))
     }
 
     pub(crate) fn insert_hyperlink_explicit(
         &mut self,
         id: &[u8],
         uri: &[u8],
-    ) -> Result<HyperlinkId, OutOfMemory> {
-        let id = self.copy_bytes(id)?;
-        let uri = self.copy_bytes(uri)?;
-        self.hyperlink_set
-            .add(&mut self.memory, PageEntry::explicit(id, uri))
-            .map_err(|_| OutOfMemory)
+    ) -> Result<HyperlinkId, CapacityFailure> {
+        let id = self
+            .copy_bytes(id)
+            .map_err(|_| CapacityFailure::StringBytes)?;
+        let uri = match self.copy_bytes(uri) {
+            Ok(uri) => uri,
+            Err(_) => {
+                self.string_alloc.free(&mut self.memory, id);
+                return Err(CapacityFailure::StringBytes);
+            }
+        };
+        self.add_hyperlink_entry(PageEntry::explicit(id, uri))
     }
 
     pub(crate) fn set_hyperlink_id(
@@ -1884,13 +1961,14 @@ impl Page {
         y: CellCountInt,
         x: CellCountInt,
         id: HyperlinkId,
-    ) -> Result<(), OutOfMemory> {
+    ) -> Result<(), CapacityFailure> {
         self.hyperlink_set.use_ref(&mut self.memory, id);
         let key = self.cell_offset(y, x);
         let previous = self.hyperlink_map.get(&self.memory, key);
         if let Err(err) = self.hyperlink_map.put(&mut self.memory, key, id) {
             self.hyperlink_set.release(&mut self.memory, id);
-            return Err(err);
+            let _ = err;
+            return Err(CapacityFailure::HyperlinkMap);
         }
         if let Some(previous) = previous.filter(|&previous| previous != id) {
             // ghostty: page.zig:1423-1430
@@ -1934,21 +2012,36 @@ impl Page {
         y: CellCountInt,
         x: CellCountInt,
         entry: PageEntry,
-    ) -> Result<HyperlinkId, OutOfMemory> {
-        let id = self
-            .hyperlink_set
-            .add(&mut self.memory, entry)
-            .map_err(|_| OutOfMemory)?;
+    ) -> Result<HyperlinkId, CapacityFailure> {
+        let id = self.add_hyperlink_entry(entry)?;
         let key = self.cell_offset(y, x);
         if let Err(err) = self.hyperlink_map.put(&mut self.memory, key, id) {
             self.hyperlink_set.release(&mut self.memory, id);
-            return Err(err);
+            let _ = err;
+            return Err(CapacityFailure::HyperlinkMap);
         }
         let mut cell = self.cell(y, x);
         cell.set_hyperlink(true);
         self.write_cell_raw(y, x, cell);
         self.update_row_flags(y);
         Ok(id)
+    }
+
+    fn add_hyperlink_entry(&mut self, entry: PageEntry) -> Result<HyperlinkId, CapacityFailure> {
+        match self.hyperlink_set.add(&mut self.memory, entry) {
+            Ok(id) => Ok(id),
+            Err(_) => {
+                self.free_hyperlink_entry_strings(entry);
+                Err(CapacityFailure::HyperlinkSet)
+            }
+        }
+    }
+
+    fn free_hyperlink_entry_strings(&mut self, entry: PageEntry) {
+        self.string_alloc.free(&mut self.memory, entry.uri());
+        if let PageEntryId::Explicit(id) = entry.id() {
+            self.string_alloc.free(&mut self.memory, id);
+        }
     }
 
     pub(crate) fn clear_hyperlink(&mut self, y: CellCountInt, x: CellCountInt) {
@@ -1967,36 +2060,179 @@ impl Page {
         src_x: CellCountInt,
         dst_y: CellCountInt,
         dst_x: CellCountInt,
+        caches: &mut CloneCaches,
+    ) {
+        self.write_cell_raw(dst_y, dst_x, source.cell(src_y, src_x));
+        self.clone_managed_cell_from(source, src_y, src_x, dst_y, dst_x, caches);
+    }
+
+    fn clone_managed_cell_from(
+        &mut self,
+        source: &Page,
+        src_y: CellCountInt,
+        src_x: CellCountInt,
+        dst_y: CellCountInt,
+        dst_x: CellCountInt,
+        caches: &mut CloneCaches,
     ) {
         let mut cell = source.cell(src_y, src_x);
-        if let Some(style) = source.style_for_cell(src_y, src_x) {
-            if let Ok(id) = self.styles.add(&mut self.memory, style) {
-                cell.set_style_id(id);
+        let source_style_id = cell.style_id();
+        if source_style_id != DEFAULT_STYLE_ID {
+            if let Some((_, id)) = caches
+                .styles
+                .iter()
+                .find(|(candidate, _)| *candidate == source_style_id)
+            {
+                self.styles.use_ref(&mut self.memory, *id);
+                cell.set_style_id(*id);
+            } else if let Some(style) = source.styles.get(&source.memory, source_style_id) {
+                if let Ok(id) = self.styles.add(&mut self.memory, style) {
+                    caches.styles.push((source_style_id, id));
+                    cell.set_style_id(id);
+                }
             }
         }
-        if source.grapheme(src_y, src_x).is_some() {
+        if !caches.bulk_graphemes && source.grapheme(src_y, src_x).is_some() {
             cell.0 = (cell.0 & !Cell::CONTENT_TAG_MASK) | CellContentTag::Codepoint as u64;
         }
-        if let Some(entry) = source.hyperlink_entry(src_y, src_x) {
+        if caches.bulk_hyperlinks {
+            self.write_cell_raw(dst_y, dst_x, cell);
+        } else if let Some(source_id) = source.hyperlink_id(src_y, src_x) {
             cell.set_hyperlink(false);
             self.write_cell_raw(dst_y, dst_x, cell);
-            if let Some(id) =
-                self.hyperlink_set
-                    .lookup_with_probe(&self.memory, &source.memory, entry)
+            if let Some((_, id)) = caches
+                .hyperlinks
+                .iter()
+                .find(|(candidate, _)| *candidate == source_id)
             {
-                let _ = self.set_hyperlink_id(dst_y, dst_x, id);
-            } else if let Some(copied) = self.copy_hyperlink_entry(source, entry) {
-                let _ = self.set_hyperlink_entry(dst_y, dst_x, copied);
+                let _ = self.set_hyperlink_id(dst_y, dst_x, *id);
+            } else if let Some(entry) = source.hyperlink_set.get(&source.memory, source_id) {
+                if let Some(copied) = self.copy_hyperlink_entry(source, entry) {
+                    if let Ok(id) = self.set_hyperlink_entry(dst_y, dst_x, copied) {
+                        caches.hyperlinks.push((source_id, id));
+                    }
+                }
             }
         } else {
             self.write_cell_raw(dst_y, dst_x, cell);
         }
-        if let Some(grapheme) = source.grapheme(src_y, src_x) {
+        if !caches.bulk_graphemes {
+            let Some(grapheme) = source.grapheme(src_y, src_x) else {
+                return;
+            };
             for codepoint in grapheme {
                 let _ = self.append_grapheme(dst_y, dst_x, codepoint);
             }
         }
         // clone_partial_row_from maintains destination flags once per row.
+    }
+
+    fn clone_hyperlinks_from_rows(
+        &mut self,
+        source: &Page,
+        start_y: CellCountInt,
+        end_y: CellCountInt,
+    ) {
+        let entries = source.hyperlink_map.entries(&source.memory);
+        if entries.is_empty() {
+            return;
+        }
+
+        let mut copied = Vec::<(HyperlinkId, HyperlinkId, StyleCountInt)>::new();
+        for (source_key, source_id) in entries {
+            let Some((source_y, x)) = source.cell_coordinates_for_offset(source_key) else {
+                continue;
+            };
+            if source_y < start_y || source_y >= end_y || x >= self.size.cols {
+                continue;
+            }
+            let destination_y = source_y - start_y;
+            let destination_id = if let Some((_, destination_id, refs)) = copied
+                .iter_mut()
+                .find(|(candidate, _, _)| *candidate == source_id)
+            {
+                *refs = refs.saturating_add(1);
+                *destination_id
+            } else {
+                let Some(entry) = source.hyperlink_set.get(&source.memory, source_id) else {
+                    continue;
+                };
+                let Some(entry) = self.copy_hyperlink_entry(source, entry) else {
+                    continue;
+                };
+                let Ok(destination_id) = self.add_hyperlink_entry(entry) else {
+                    continue;
+                };
+                copied.push((source_id, destination_id, 1));
+                destination_id
+            };
+            let destination_key = self.cell_offset(destination_y, x);
+            self.hyperlink_map.put_assume_capacity(
+                &mut self.memory,
+                destination_key,
+                destination_id,
+            );
+        }
+
+        for (_, id, refs) in copied {
+            if refs > 1 {
+                self.hyperlink_set
+                    .use_multiple(&mut self.memory, id, refs - 1);
+            }
+        }
+    }
+
+    fn clone_graphemes_from_rows(
+        &mut self,
+        source: &Page,
+        start_y: CellCountInt,
+        end_y: CellCountInt,
+    ) {
+        for (source_key, source_slice) in source.grapheme_map.entries(&source.memory) {
+            let Some((source_y, x)) = source.cell_coordinates_for_offset(source_key) else {
+                continue;
+            };
+            if source_y < start_y || source_y >= end_y || x >= self.size.cols {
+                continue;
+            }
+            let Ok(destination_slice) = self
+                .grapheme_alloc
+                .alloc::<u32>(&mut self.memory, source_slice.len)
+            else {
+                continue;
+            };
+            let source_start = source_slice.offset.offset as usize;
+            let source_end = source_start + source_slice.len * u32::SIZE;
+            let destination_start = destination_slice.offset.offset as usize;
+            self.memory[destination_start..destination_start + source_end - source_start]
+                .copy_from_slice(&source.memory[source_start..source_end]);
+            let destination_key = self.cell_offset(source_y - start_y, x);
+            self.grapheme_map.put_assume_capacity(
+                &mut self.memory,
+                destination_key,
+                destination_slice,
+            );
+        }
+    }
+
+    fn cell_coordinates_for_offset(
+        &self,
+        offset: Offset<Cell>,
+    ) -> Option<(CellCountInt, CellCountInt)> {
+        let first = self.row(0).cells().offset as usize;
+        let offset = offset.offset as usize;
+        let byte_offset = offset.checked_sub(first)?;
+        if !byte_offset.is_multiple_of(Cell::SIZE) {
+            return None;
+        }
+        let index = byte_offset / Cell::SIZE;
+        let capacity_cols = usize::from(self.capacity.cols);
+        let y = index / capacity_cols;
+        let x = index % capacity_cols;
+        if y >= usize::from(self.capacity.rows) {
+            return None;
+        }
+        Some((y as CellCountInt, x as CellCountInt))
     }
 
     pub(crate) fn style_for_cell(&self, y: CellCountInt, x: CellCountInt) -> Option<PackedStyle> {
@@ -2029,9 +2265,8 @@ impl Page {
         let slice = self
             .string_alloc
             .alloc::<u8>(&mut self.memory, bytes.len())?;
-        for (index, byte) in bytes.iter().copied().enumerate() {
-            slice.offset.set(&mut self.memory, index, byte);
-        }
+        let start = slice.offset.offset as usize;
+        self.memory[start..start + bytes.len()].copy_from_slice(bytes);
         Ok(slice)
     }
 
@@ -2063,6 +2298,14 @@ impl Page {
             .map(|index| slice.offset.get(&self.memory, index))
             .collect()
     }
+}
+
+#[derive(Default)]
+struct CloneCaches {
+    styles: Vec<(StyleCountInt, StyleCountInt)>,
+    hyperlinks: Vec<(HyperlinkId, HyperlinkId)>,
+    bulk_hyperlinks: bool,
+    bulk_graphemes: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -2247,8 +2490,25 @@ mod tests {
         // Replaces Ghostty's commented 512KiB pin with this port's exact
         // self-consistent byte layout.
         let layout = Page::layout(STD_CAPACITY);
-        assert_eq!(layout.total_size, 450_560);
+        assert_eq!(layout.total_size, 380_928);
         assert_eq!(layout.total_size % PAGE_SIZE_MIN, 0);
+    }
+
+    #[test]
+    fn production_page_layout_pin() {
+        let layout = Page::layout(Capacity {
+            grapheme_bytes: 8_192,
+            ..STD_CAPACITY
+        });
+        assert_eq!(layout.rows_start, 0);
+        assert_eq!(layout.cells_start, 1_720);
+        assert_eq!(layout.styles_start, 371_520);
+        assert_eq!(layout.grapheme_alloc_start, 374_064);
+        assert_eq!(layout.grapheme_map_start, 382_320);
+        assert_eq!(layout.string_alloc_start, 388_976);
+        assert_eq!(layout.hyperlink_set_start, 391_032);
+        assert_eq!(layout.hyperlink_map_start, 391_132);
+        assert_eq!(layout.total_size, 393_216);
     }
 
     #[test]
@@ -2259,10 +2519,7 @@ mod tests {
         assert_eq!(capacity.styles, 16);
         assert_eq!(capacity.grapheme_bytes, GRAPHEME_BYTES_DEFAULT);
         assert_eq!(capacity.string_bytes, STRING_BYTES_DEFAULT);
-        assert_eq!(
-            usize::from(capacity.hyperlink_bytes),
-            HYPERLINK_BYTES_DEFAULT
-        );
+        assert_eq!(capacity.hyperlink_bytes as usize, HYPERLINK_BYTES_DEFAULT);
     }
 
     #[test]
@@ -2335,6 +2592,18 @@ mod tests {
         let layout = Page::layout(cap);
         assert_eq!(layout.grapheme_map.capacity, 0);
         assert_eq!(layout.hyperlink_map.capacity, 0);
+    }
+
+    #[test]
+    fn hyperlink_capacity_field_accepts_more_than_u16_bytes() {
+        let hyperlink_bytes = u32::from(u16::MAX) + 1;
+        let layout = Page::layout(Capacity {
+            hyperlink_bytes,
+            ..Capacity::new(5, 2)
+        });
+
+        assert_eq!(layout.capacity.hyperlink_bytes, hyperlink_bytes);
+        assert!(layout.hyperlink_set.cap > 1_000);
     }
 
     #[test]
@@ -2654,7 +2923,7 @@ mod tests {
         let cap = page.exact_row_capacity(0);
         let item = ref_counted_set::item_byte_size::<crate::hyperlink::PageEntry>();
         assert_eq!(
-            usize::from(cap.hyperlink_bytes),
+            cap.hyperlink_bytes as usize,
             HyperlinkSet::capacity_for_count(2) * item
         );
     }
@@ -2951,7 +3220,7 @@ mod tests {
         });
         page.set_cell(0, 0, Cell::new('a'));
         let mut original = Vec::new();
-        let result: Result<(), OutOfMemory> = loop {
+        let result: Result<(), CapacityFailure> = loop {
             let codepoint = 0x0300 + original.len() as u32;
             match page.append_grapheme(0, 0, codepoint) {
                 Ok(()) => {
@@ -2962,7 +3231,7 @@ mod tests {
             }
         };
 
-        assert_eq!(result, Err(OutOfMemory));
+        assert_eq!(result, Err(CapacityFailure::GraphemeBytes));
         assert_eq!(page.grapheme(0, 0), Some(original));
     }
 
@@ -3463,7 +3732,7 @@ mod tests {
         // ghostty: "Page exactRowCapacity empty rows" (page.zig:3411)
         let page = Page::init(Capacity {
             styles: 8,
-            hyperlink_bytes: (32 * ref_counted_set::item_byte_size::<PageEntry>()) as u16,
+            hyperlink_bytes: (32 * ref_counted_set::item_byte_size::<PageEntry>()) as u32,
             string_bytes: 512,
             ..Capacity::new(10, 10)
         });
@@ -3632,7 +3901,7 @@ mod tests {
         let item = ref_counted_set::item_byte_size::<crate::hyperlink::PageEntry>();
         let mut page = Page::init(Capacity {
             styles: 8,
-            hyperlink_bytes: (32 * item) as u16,
+            hyperlink_bytes: (32 * item) as u32,
             string_bytes: 512,
             ..Capacity::new(10, 10)
         });
@@ -3692,7 +3961,7 @@ mod tests {
         // string chunks through RefCountedSetContext::deleted.
         let item = ref_counted_set::item_byte_size::<crate::hyperlink::PageEntry>();
         let mut page = Page::init(Capacity {
-            hyperlink_bytes: (8 * item) as u16,
+            hyperlink_bytes: (8 * item) as u32,
             string_bytes: (STRING_CHUNK * 2) as StringBytesInt,
             ..Capacity::new(2, 1)
         });
@@ -3755,11 +4024,50 @@ mod tests {
     }
 
     #[test]
+    fn hyperlink_map_exhaustion_reports_its_storage_dimension() {
+        let mut page = Page::init(Capacity {
+            cols: 80,
+            rows: 1,
+            string_bytes: 512,
+            ..Capacity::new(80, 1)
+        });
+        let id = page
+            .insert_hyperlink_implicit(1, b"https://example.com")
+            .unwrap();
+        let mut failure = None;
+        for x in 0..80 {
+            if let Err(error) = page.set_hyperlink_id(0, x, id) {
+                failure = Some(error);
+                break;
+            }
+        }
+
+        assert_eq!(failure, Some(CapacityFailure::HyperlinkMap));
+    }
+
+    #[test]
+    fn failed_hyperlink_set_insert_releases_unpublished_strings() {
+        let mut page = Page::init(Capacity {
+            hyperlink_bytes: 0,
+            string_bytes: 128,
+            ..Capacity::new(2, 1)
+        });
+        let used_before = page.string_alloc.used_bytes(&page.memory);
+
+        assert_eq!(
+            page.insert_hyperlink_explicit(b"id", b"https://example.com"),
+            Err(CapacityFailure::HyperlinkSet)
+        );
+
+        assert_eq!(page.string_alloc.used_bytes(&page.memory), used_before);
+    }
+
+    #[test]
     fn ghostty_exact_row_capacity_single_hyperlink_clone_round_trip() {
         // ghostty: "Page exactRowCapacity single hyperlink clone" (page.zig:3817)
         let mut page = Page::init(Capacity {
             styles: 8,
-            hyperlink_bytes: (32 * ref_counted_set::item_byte_size::<PageEntry>()) as u16,
+            hyperlink_bytes: (32 * ref_counted_set::item_byte_size::<PageEntry>()) as u32,
             string_bytes: 512,
             ..Capacity::new(10, 2)
         });
@@ -3787,7 +4095,7 @@ mod tests {
         let cols = 50;
         let mut page = Page::init(Capacity {
             styles: 8,
-            hyperlink_bytes: (32 * item) as u16,
+            hyperlink_bytes: (32 * item) as u32,
             string_bytes: 512,
             ..Capacity::new(cols, 2)
         });
