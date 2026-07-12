@@ -1819,6 +1819,20 @@ impl Page {
             .map(|slice| self.read_grapheme_slice(slice))
     }
 
+    pub(crate) fn for_each_grapheme(
+        &self,
+        y: CellCountInt,
+        x: CellCountInt,
+        mut visit: impl FnMut(u32),
+    ) {
+        let Some(slice) = self.grapheme_slice(y, x) else {
+            return;
+        };
+        for index in 0..slice.len {
+            visit(slice.offset.get(&self.memory, index));
+        }
+    }
+
     pub(crate) fn grapheme_count(&self) -> usize {
         self.grapheme_map.count() as usize
     }

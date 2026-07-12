@@ -1,30 +1,24 @@
-//! Minimal Unicode property lookups and grapheme segmentation used by the
-//! terminal's `print` path.
+//! Unicode properties and grapheme segmentation for the terminal print path.
 //!
-//! Ghostty derives these tables from the `uucode` package (see
-//! `.external/ghostty/src/unicode/props.zig` and `grapheme.zig`). We do not
-//! vendor a full Unicode segmentation library here; instead this module
-//! implements the exact UAX #29 grapheme-break state machine Ghostty relies on
-//! (`graphemeBreak`), driven by per-codepoint properties. Character widths come
-//! from the `unicode-width` crate; the remaining properties
-//! (`grapheme_break`, `width_zero_in_grapheme`, `emoji_vs_base`) are computed
-//! from focused classification tables that cover the codepoint classes the
-//! terminal actually distinguishes.
-//!
-//! The classification favors correctness for the standard cases (combining
-//! marks, ZWJ emoji sequences, regional indicators, emoji modifiers, Indic
-//! conjuncts, and emoji variation selectors) and falls back to `.other` /
-//! width-derived defaults for anything unclassified, matching how Ghostty's
-//! precomputed table degrades for uncommon input.
+//! Runtime classification uses a generated two-level lookup table derived from
+//! the vendored Unicode 16.0.0 data. The break engine follows UAX #29 with the
+//! same isolated emoji-modifier tailoring as Ghostty.
 
+mod tables;
+
+#[cfg(test)]
 use unicode_width::UnicodeWidthChar;
 
-/// UAX #29 grapheme cluster break property, minus the control/CR/LF classes
-/// which the terminal filters out before ever calling into this module. This
-/// mirrors Ghostty's `uucode.x.types.GraphemeBreakNoControl`.
+/// UAX #29 grapheme cluster break property plus Ghostty's emoji and Indic
+/// tailoring classes. The terminal filters controls before printing, while the
+/// classifier retains them so the official conformance suite can exercise the
+/// break engine independently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphemeBreak {
     Other,
+    Cr,
+    Lf,
+    Control,
     Prepend,
     Extend,
     Zwj,
@@ -41,11 +35,16 @@ pub enum GraphemeBreak {
     /// begin a new cluster. Ghostty's precomputed table reflects this behavior
     /// (a skin tone does not attach to, e.g., a quote character).
     EmojiModifier,
+    /// Emoji base allowed to accept an immediately following skin-tone
+    /// modifier under Ghostty's UTS #51 tailoring.
+    EmojiModifierBase,
     /// Indic conjunct "linker" (e.g. virama). This is an `Extend` code point
     /// that additionally participates in the Indic conjunct break rule
     /// (UAX #29 GB9c). Ghostty folds the InCB=Linker information into the
     /// break-state machine; we surface it as its own class for clarity.
     ExtendLinker,
+    /// InCB=Extend. It behaves as GCB=Extend and also advances GB9c state.
+    IndicConjunctExtend,
     /// Indic conjunct "consonant" (InCB=Consonant). These are `Other` for every
     /// rule except GB9c.
     ConsonantConjunct,
@@ -54,15 +53,22 @@ pub enum GraphemeBreak {
 impl GraphemeBreak {
     /// True if this class counts as `Extend` for the purposes of continuing an
     /// extended-pictographic (GB11) or Indic-conjunct (GB9c) run.
-    const fn is_extend(self) -> bool {
-        matches!(self, Self::Extend | Self::ExtendLinker)
+    const fn is_grapheme_extend(self) -> bool {
+        matches!(
+            self,
+            Self::Extend | Self::ExtendLinker | Self::IndicConjunctExtend
+        )
     }
 
     /// True if this class continues an existing cluster's "extend" run without
     /// itself forcing a break decision here (used to thread the GB11/GB9c run
     /// state). Emoji modifiers count so that a skin tone extends an emoji run.
     const fn continues_extend_run(self) -> bool {
-        self.is_extend() || matches!(self, Self::Zwj | Self::EmojiModifier)
+        self.is_grapheme_extend() || matches!(self, Self::EmojiModifier)
+    }
+
+    pub(crate) const fn is_extended_pictographic(self) -> bool {
+        matches!(self, Self::ExtendedPictographic | Self::EmojiModifierBase)
     }
 }
 
@@ -84,12 +90,11 @@ pub struct Properties {
 
 /// Look up the [`Properties`] for a code point.
 pub fn props(cp: u32) -> Properties {
-    let grapheme_break = grapheme_break_class(cp);
-    let width = char_width(cp);
+    let packed = tables::packed(cp);
     Properties {
-        width,
-        width_zero_in_grapheme: width == 0,
-        grapheme_break,
+        width: packed_width(packed),
+        width_zero_in_grapheme: packed & (1 << 6) != 0,
+        grapheme_break: packed_grapheme_break(packed),
         emoji_vs_base: emoji_vs_base(cp),
     }
 }
@@ -99,113 +104,58 @@ pub fn props(cp: u32) -> Properties {
 /// properties that the caller does not use.
 #[inline]
 pub fn width(cp: u32) -> u8 {
-    char_width(cp)
+    packed_width(tables::packed(cp))
 }
 
-/// Display width of a code point, clamped to `[0, 2]`. Control characters are
-/// filtered before print, so an unknown/`None` width maps to `0` (treated as a
-/// combining/zero-width member) exactly like Ghostty's clamp.
-fn char_width(cp: u32) -> u8 {
-    // These assigned East Asian ranges are uniformly width two in
-    // unicode-width. Keeping the common CJK print path out of its general
-    // property-table search is a deliberate Rust-port optimization.
-    if matches!(
-        cp,
-        0x3041..=0x3096 | 0x30A1..=0x30FA | 0x3400..=0x4DBF | 0x4E00..=0x9FFF
-    ) {
-        return 2;
-    }
-    let Some(ch) = char::from_u32(cp) else {
-        return 1;
-    };
-    match UnicodeWidthChar::width(ch) {
-        Some(w) if w >= 2 => 2,
-        Some(w) => w as u8,
-        None => 0,
-    }
+#[inline]
+const fn packed_width(packed: u16) -> u8 {
+    ((packed >> 4) & 0b11) as u8
 }
 
 /// Classify a code point into its UAX #29 grapheme-break class (no control).
+#[inline]
 pub(crate) fn grapheme_break_class(cp: u32) -> GraphemeBreak {
-    match cp {
-        // Zero Width Joiner.
-        0x200D => GraphemeBreak::Zwj,
+    packed_grapheme_break(tables::packed(cp))
+}
 
-        // Prepend: Arabic number sign and related format prefixes we test.
-        0x0600..=0x0605 | 0x06DD | 0x070F | 0x08E2 | 0x110BD | 0x110CD => GraphemeBreak::Prepend,
-
-        // Indic linker: Devanagari virama (and the common Indic viramas).
-        0x094D | 0x09CD | 0x0A4D | 0x0ACD | 0x0B4D | 0x0BCD | 0x0C4D | 0x0CCD | 0x0D4D | 0x0DCA => {
-            GraphemeBreak::ExtendLinker
-        }
-
-        // Regional indicators (flag halves).
-        0x1F1E6..=0x1F1FF => GraphemeBreak::RegionalIndicator,
-
-        // Emoji modifiers (Fitzpatrick skin tones).
-        0x1F3FB..=0x1F3FF => GraphemeBreak::EmojiModifier,
-
-        // Variation selectors are Extend.
-        0xFE00..=0xFE0F | 0xE0100..=0xE01EF => GraphemeBreak::Extend,
-
-        _ => {
-            if is_extend(cp) {
-                GraphemeBreak::Extend
-            } else if is_extended_pictographic(cp) {
-                GraphemeBreak::ExtendedPictographic
-            } else if is_consonant_conjunct(cp) {
-                GraphemeBreak::ConsonantConjunct
-            } else {
-                GraphemeBreak::Other
-            }
-        }
+#[inline]
+fn packed_grapheme_break(packed: u16) -> GraphemeBreak {
+    let grapheme = packed & 0b1111;
+    if grapheme == 5 {
+        return GraphemeBreak::Zwj;
     }
-}
-
-/// Combining marks and other `Extend` (Grapheme_Extend) code points, excluding
-/// the ranges handled explicitly above.
-fn is_extend(cp: u32) -> bool {
-    matches!(cp,
-        // Combining Diacritical Marks.
-        0x0300..=0x036F
-        // Combining Diacritical Marks Extended / Supplement / for Symbols.
-        | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF
-        // Combining Half Marks.
-        | 0xFE20..=0xFE2F
-        // Devanagari combining marks (nukta/vowel signs commonly attached),
-        // excluding the virama handled as a linker above.
-        | 0x0900..=0x0902 | 0x093A | 0x093C | 0x0941..=0x0948 | 0x094D
-    )
-}
-
-/// Extended_Pictographic code points. Covers the emoji ranges the terminal
-/// distinguishes for GB11 (ZWJ sequences) and the dingbat/symbol emoji used in
-/// variation-selector handling.
-fn is_extended_pictographic(cp: u32) -> bool {
-    matches!(cp,
-        0x00A9 | 0x00AE
-        | 0x203C | 0x2049 | 0x2122 | 0x2139
-        | 0x2194..=0x21AA
-        | 0x231A..=0x231B
-        | 0x2328
-        | 0x2600..=0x27BF
-        | 0x2934..=0x2935
-        | 0x2B00..=0x2BFF
-        | 0x3030 | 0x303D | 0x3297 | 0x3299
-        | 0x1F000..=0x1FAFF
-    )
-}
-
-/// InCB=Consonant code points (Indic conjunct consonants). Scoped to the
-/// scripts and blocks Ghostty's tables mark as conjunct consonants and that the
-/// terminal exercises (Devanagari primarily).
-fn is_consonant_conjunct(cp: u32) -> bool {
-    matches!(cp,
-        // Devanagari consonants.
-        0x0915..=0x0939 | 0x0958..=0x095F
-        // Bengali consonants.
-        | 0x0995..=0x09A8 | 0x09AA..=0x09B0 | 0x09B2 | 0x09B6..=0x09B9
-    )
+    if packed & (1 << 8) != 0 {
+        return GraphemeBreak::EmojiModifier;
+    }
+    if packed & (1 << 11) != 0 {
+        return GraphemeBreak::EmojiModifierBase;
+    }
+    match (packed >> 9) & 0b11 {
+        1 => return GraphemeBreak::ConsonantConjunct,
+        2 => return GraphemeBreak::ExtendLinker,
+        3 => return GraphemeBreak::IndicConjunctExtend,
+        _ => {}
+    }
+    if packed & (1 << 7) != 0 {
+        return GraphemeBreak::ExtendedPictographic;
+    }
+    match grapheme {
+        0 => GraphemeBreak::Other,
+        1 => GraphemeBreak::Cr,
+        2 => GraphemeBreak::Lf,
+        3 => GraphemeBreak::Control,
+        4 => GraphemeBreak::Extend,
+        5 => GraphemeBreak::Zwj,
+        6 => GraphemeBreak::RegionalIndicator,
+        7 => GraphemeBreak::Prepend,
+        8 => GraphemeBreak::SpacingMark,
+        9 => GraphemeBreak::L,
+        10 => GraphemeBreak::V,
+        11 => GraphemeBreak::T,
+        12 => GraphemeBreak::Lv,
+        13 => GraphemeBreak::Lvt,
+        _ => GraphemeBreak::Other,
+    }
 }
 
 /// Whether a code point is a valid base for an emoji presentation variation
@@ -256,7 +206,7 @@ fn emoji_vs_base(cp: u32) -> bool {
 pub struct BreakState {
     /// GB11: we saw `ExtendedPictographic Extend*` and are waiting to see if a
     /// ZWJ + ExtendedPictographic continues the sequence.
-    extended_pictographic: bool,
+    extended_pictographic: u8,
     /// GB12/GB13: parity of an unbroken run of regional indicators.
     regional_indicator: bool,
     /// GB9c: we are inside `Consonant [Extend Linker]*` and have seen at least
@@ -290,15 +240,13 @@ pub(crate) fn grapheme_break_classified(
 ) -> bool {
     use GraphemeBreak::*;
 
-    // Track the extended-pictographic run for GB11:
-    //   ExtendedPictographic Extend* ZWJ × ExtendedPictographic
-    // The flag is true once we've seen an ExtendedPictographic followed only by
-    // Extend/ZWJ code points.
-    let prev_extpict = state.extended_pictographic;
+    // Track whether the sequence ending at gb1 is Extended_Pictographic
+    // Extend* (1) or Extended_Pictographic Extend* ZWJ (2).
     state.extended_pictographic = match gb1 {
-        ExtendedPictographic => true,
-        _ if gb1.continues_extend_run() => prev_extpict,
-        _ => false,
+        _ if gb1.is_extended_pictographic() => 1,
+        Zwj if state.extended_pictographic == 1 => 2,
+        _ if gb1.continues_extend_run() && state.extended_pictographic == 1 => 1,
+        _ => 0,
     };
 
     // Track regional-indicator parity for GB12/GB13.
@@ -307,41 +255,37 @@ pub(crate) fn grapheme_break_classified(
 
     // Track the Indic-conjunct run for GB9c:
     //   Consonant [Extend Linker]* Linker [Extend Linker]* × Consonant
-    let prev_incb_consonant = state.incb_consonant;
-    let prev_incb_linker = state.incb_linker;
     match gb1 {
         ConsonantConjunct => {
             state.incb_consonant = true;
             state.incb_linker = false;
         }
         ExtendLinker => {
-            // A linker continues the run and records that a linker was seen.
-            state.incb_consonant = prev_incb_consonant;
-            state.incb_linker = prev_incb_consonant;
+            state.incb_linker = state.incb_consonant;
         }
-        Extend | Zwj | EmojiModifier => {
-            // Extend/ZWJ/modifiers continue the run without recording a linker.
-            state.incb_consonant = prev_incb_consonant;
-            state.incb_linker = prev_incb_linker;
-        }
+        IndicConjunctExtend | Zwj if state.incb_consonant => {}
         _ => {
             state.incb_consonant = false;
             state.incb_linker = false;
         }
     }
 
-    // GB3/GB4/GB5 (CR/LF/Control) are handled by the caller.
-
-    // GB9: × (Extend | ZWJ). Do not break before extending characters.
-    if gb2.is_extend() || matches!(gb2, Zwj) {
+    // GB3-GB5: controls are normally consumed by the terminal before this
+    // function, but retaining the rules makes the classifier independently
+    // conformant to the official Unicode suite.
+    if matches!((gb1, gb2), (Cr, Lf)) {
         return false;
     }
+    if matches!(gb1, Control | Cr | Lf) || matches!(gb2, Control | Cr | Lf) {
+        return true;
+    }
 
-    // Emoji modifier (skin tone): joins only an emoji (extended-pictographic)
-    // run. After any other base it starts a new cluster. `state
-    // .extended_pictographic` already reflects gb1's contribution to the run.
-    if matches!(gb2, EmojiModifier) {
-        return !state.extended_pictographic;
+    // GB6-GB8: Hangul syllable sequences.
+    match (gb1, gb2) {
+        (L, L | V | Lv | Lvt) => return false,
+        (Lv | V, V | T) => return false,
+        (Lvt | T, T) => return false,
+        _ => {}
     }
 
     // GB9a: × SpacingMark.
@@ -356,26 +300,30 @@ pub(crate) fn grapheme_break_classified(
 
     // GB9c: Indic conjunct. Consonant [Extend Linker]* Linker [Extend Linker]*
     // × Consonant.
-    if prev_incb_linker && matches!(gb2, ConsonantConjunct) {
+    if state.incb_linker && matches!(gb2, ConsonantConjunct) {
         return false;
     }
 
-    // GB6/GB7/GB8: Hangul syllable sequences.
-    match (gb1, gb2) {
-        (L, L | V | Lv | Lvt) => return false,
-        (Lv | V, V | T) => return false,
-        (Lvt | T, T) => return false,
-        _ => {}
+    // Ghostty tailors Emoji_Modifier away from GCB=Extend: a modifier only
+    // joins an immediately preceding Emoji_Modifier_Base. See
+    // `.external/ghostty/src/unicode/grapheme.zig:686-704`.
+    if matches!(gb2, EmojiModifier) {
+        return !matches!(gb1, EmojiModifierBase);
     }
 
     // GB11: ExtendedPictographic Extend* ZWJ × ExtendedPictographic.
-    if prev_extpict && matches!(gb1, Zwj) && matches!(gb2, ExtendedPictographic) {
+    if state.extended_pictographic == 2 && gb2.is_extended_pictographic() {
         return false;
     }
 
     // GB12/GB13: do not break between regional indicators if the number of RIs
     // before this point is even (i.e. this pair forms a flag).
-    if matches!(gb1, RegionalIndicator) && matches!(gb2, RegionalIndicator) && !prev_ri {
+    if matches!(gb1, RegionalIndicator) && matches!(gb2, RegionalIndicator) {
+        return !state.regional_indicator;
+    }
+
+    // GB9: × (Extend | ZWJ). Do not break before extending characters.
+    if gb2.is_grapheme_extend() || matches!(gb2, Zwj) {
         return false;
     }
 
@@ -386,6 +334,132 @@ pub(crate) fn grapheme_break_classified(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    const GRAPHEME_BREAK_TEST: &str = include_str!("../ucd/GraphemeBreakTest.txt");
+    // Ghostty tailors Emoji_Modifier so it only joins Emoji_Modifier_Base.
+    // Unicode 16 conformance lines 1100-1101 deliberately test the standard
+    // `Any × Emoji_Modifier` behavior. See Ghostty grapheme.zig:686-704.
+    const GHOSTTY_EMOJI_MODIFIER_EXCEPTIONS: [usize; 2] = [1100, 1101];
+    // `unicode-width` applies extra terminal tailoring to these assigned
+    // scalars. The generated table intentionally follows the pinned UCD/EAW
+    // recipe instead.
+    const UNICODE_WIDTH_ORACLE_TAILORING: [u32; 9] = [
+        0x00AD, 0x17A4, 0x17D8, 0x20E3, 0x2E3A, 0x2E3B, 0xA8FA, 0xFF9E, 0xFF9F,
+    ];
+
+    fn cluster_starts(text: &str) -> Vec<usize> {
+        let codepoints: Vec<(usize, u32)> = text
+            .char_indices()
+            .map(|(offset, character)| (offset, character as u32))
+            .collect();
+        let mut starts = vec![0];
+        let mut state = BreakState::default();
+        for pair in codepoints.windows(2) {
+            if grapheme_break(pair[0].1, pair[1].1, &mut state) {
+                starts.push(pair[1].0);
+            }
+        }
+        starts
+    }
+
+    fn parse_conformance_line(line: &str) -> Option<(Vec<u32>, Vec<bool>)> {
+        let body = line.split('#').next()?.trim();
+        if body.is_empty() {
+            return None;
+        }
+        let tokens: Vec<&str> = body.split_whitespace().collect();
+        let codepoints = tokens
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .map(|value| u32::from_str_radix(value, 16).ok())
+            .collect::<Option<Vec<_>>>()?;
+        let breaks = tokens
+            .iter()
+            .skip(2)
+            .step_by(2)
+            .take(codepoints.len().saturating_sub(1))
+            .map(|marker| *marker == "÷")
+            .collect();
+        Some((codepoints, breaks))
+    }
+
+    #[test]
+    fn tables_version_and_shape() {
+        assert_eq!(tables::UCD_VERSION, "16.0.0");
+        let leaf_count = tables::LEAF_COUNT;
+        assert!(leaf_count > 1);
+        assert_eq!(tables::packed(0x0E31) & 0b1111, 4);
+        assert_eq!(
+            grapheme_break_class(0x0E31),
+            GraphemeBreak::IndicConjunctExtend
+        );
+        assert_eq!(
+            grapheme_break_class(0x1F1E6),
+            GraphemeBreak::RegionalIndicator
+        );
+        assert_eq!(grapheme_break_class(0x11A8), GraphemeBreak::T);
+        assert_eq!(tables::packed(0x0300) & 0b1111, 4);
+        assert_eq!(
+            grapheme_break_class(0x0300),
+            GraphemeBreak::IndicConjunctExtend
+        );
+        assert_eq!(grapheme_break_class(0x200D), GraphemeBreak::Zwj);
+    }
+
+    #[test]
+    fn ucd_grapheme_break_conformance() {
+        let mut exceptions = Vec::new();
+        let mut unexpected = Vec::new();
+        for (line_index, line) in GRAPHEME_BREAK_TEST.lines().enumerate() {
+            let Some((codepoints, expected)) = parse_conformance_line(line) else {
+                continue;
+            };
+            let actual = brk(&codepoints);
+            if actual != expected {
+                let line_number = line_index + 1;
+                if GHOSTTY_EMOJI_MODIFIER_EXCEPTIONS.contains(&line_number) {
+                    exceptions.push(line_number);
+                } else {
+                    unexpected.push((line_number, codepoints, expected, actual));
+                }
+            }
+        }
+        assert!(unexpected.is_empty(), "grapheme failures: {unexpected:#X?}");
+        assert_eq!(exceptions, GHOSTTY_EMOJI_MODIFIER_EXCEPTIONS);
+    }
+
+    #[test]
+    fn classifier_matches_unicode_segmentation_oracle() {
+        let corpus = [
+            "日本語かなカナ",
+            "กำลังทดสอบ",
+            "हिन्दी क्ष",
+            "اَلْعَرَبِيَّةُ",
+            "한글 한글",
+            "👨‍👩‍👧 👩🏽‍💻",
+            "🇯🇵🇺🇸",
+            "1️⃣ #️⃣",
+            "©️ ♥️",
+        ];
+        for text in corpus {
+            let expected: Vec<usize> = text
+                .grapheme_indices(true)
+                .map(|(offset, _)| offset)
+                .collect();
+            assert_eq!(cluster_starts(text), expected, "text {text:?}");
+        }
+
+        // Same Ghostty tailoring exception as conformance lines 1100-1101.
+        assert_ne!(
+            cluster_starts("a🏿👶"),
+            "a🏿👶"
+                .grapheme_indices(true)
+                .map(|(offset, _)| offset)
+                .collect::<Vec<_>>()
+        );
+    }
 
     fn brk(seq: &[u32]) -> Vec<bool> {
         let mut state = BreakState::default();
@@ -470,9 +544,15 @@ mod tests {
         assert_eq!(props(0x26C8).width, 1); // thunder cloud (narrow)
         assert_eq!(props(0x0915).width, 1); // devanagari consonant
         assert_eq!(props(0x094D).width, 0); // virama
+        assert_eq!(props(0x093E).width, 0); // spacing matra follows wcwidth
         assert!(props(0x094D).width_zero_in_grapheme);
+        assert!(props(0x093E).width_zero_in_grapheme);
         assert!(props(0x200D).width_zero_in_grapheme); // ZWJ
         assert!(!props(0x0937).width_zero_in_grapheme); // consonant
+        assert_eq!(props(0x1F3FB).width, 2); // modifier is visible alone
+        assert!(props(0x1F3FB).width_zero_in_grapheme);
+        assert_eq!(props(0x0600).width, 1); // prepend is visible alone
+        assert!(props(0x0600).width_zero_in_grapheme);
     }
 
     #[test]
@@ -486,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn common_cjk_fast_width_ranges_match_unicode_width() {
+    fn common_cjk_width_ranges_match_unicode_width() {
         let ranges = [
             0x3041..=0x3096,
             0x30A1..=0x30FA,
@@ -503,6 +583,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn width_diverges_from_unicode_width_only_where_intended() {
+        let mut unexpected = Vec::new();
+        for cp in 0..=0x30000 {
+            let Some(character) = char::from_u32(cp) else {
+                continue;
+            };
+            let oracle = UnicodeWidthChar::width(character).unwrap_or(0).min(2) as u8;
+            let properties = props(cp);
+            if properties.width == oracle {
+                continue;
+            }
+            let raw_grapheme = tables::packed(cp) & 0b1111;
+            let assigned_in_unicode_16 = tables::packed(cp) & (1 << 12) != 0;
+            let intended = properties.width_zero_in_grapheme
+                || !assigned_in_unicode_16
+                || raw_grapheme == 6
+                || UNICODE_WIDTH_ORACLE_TAILORING.contains(&cp);
+            if !intended {
+                unexpected.push((cp, oracle, properties));
+                if unexpected.len() == 32 {
+                    break;
+                }
+            }
+        }
+        assert!(
+            unexpected.is_empty(),
+            "unexpected wcwidth divergences: {unexpected:#X?}"
+        );
     }
 
     #[test]

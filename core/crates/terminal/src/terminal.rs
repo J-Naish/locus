@@ -592,6 +592,25 @@ impl Terminal {
         let current_class = unicode::grapheme_break_class(c);
         self.last_printed_class = Some((c, current_class));
 
+        // UAX #29 GB6-GB13 only suppress a break before a non-Other class, or
+        // after Prepend. With a valid memo for the last printed code point,
+        // Other after a non-Prepend class therefore always starts a new cell.
+        // Return before resolving the cursor pin or reading the previous page.
+        if matches!(current_class, unicode::GraphemeBreak::Other)
+            && cached_previous
+                .is_some_and(|(_, class)| !matches!(class, unicode::GraphemeBreak::Prepend))
+        {
+            return false;
+        }
+
+        // Adjacent pictographic bases reach GB999 directly. GB11 can suppress
+        // this boundary only after a ZWJ, never between two pictographic bases.
+        if current_class.is_extended_pictographic()
+            && cached_previous.is_some_and(|(_, class)| class.is_extended_pictographic())
+        {
+            return false;
+        }
+
         // Determine the previous cell we're attaching to and the left offset.
         let left = self.grapheme_prev_left(right_limit);
         let Some(cursor_pin) = self.active_screen().cursor_pin() else {
@@ -619,11 +638,11 @@ impl Terminal {
         let mut previous_codepoint = prev_cell.codepoint();
         let mut state = unicode::BreakState::default();
         if prev_cell.has_grapheme() {
-            if let Some(cps) = self.grapheme_at_pin(prev_pin) {
-                for cp2 in cps {
+            if let Some(node) = self.active_screen().pages.node(prev_pin.node) {
+                node.page.for_each_grapheme(prev_pin.y, prev_pin.x, |cp2| {
                     let _ = unicode::grapheme_break(previous_codepoint, cp2, &mut state);
                     previous_codepoint = cp2;
-                }
+                });
             }
         }
         let previous_class = cached_previous
@@ -683,14 +702,6 @@ impl Terminal {
             .node(pin.node)
             .map(|node| node.page.cell(pin.y, pin.x))
             .unwrap_or_default()
-    }
-
-    /// Grapheme code points attached to the cell at an absolute pin.
-    fn grapheme_at_pin(&self, pin: Pin) -> Option<Vec<u32>> {
-        self.active_screen()
-            .pages
-            .node(pin.node)
-            .and_then(|node| node.page.grapheme(pin.y, pin.x))
     }
 
     /// Set the `wide` class of the cell at an absolute pin.
@@ -3345,6 +3356,7 @@ mod tests {
         // ghostty: "Terminal: print multicodepoint grapheme, disabled mode 2027" (Terminal.zig:3621)
         // This is: 👨‍👩‍👧
         let mut t = terminal(80, 80);
+        t.modes.set(Mode::GraphemeCluster, false);
         print_cp(&mut t, 0x1F468);
         print_cp(&mut t, 0x200D);
         print_cp(&mut t, 0x1F469);
@@ -3492,6 +3504,54 @@ mod tests {
         assert_eq!(c.codepoint(), 0);
         assert!(!c.has_grapheme());
         assert_eq!(c.wide(), CellWide::SpacerTail);
+    }
+
+    #[test]
+    fn zwj_family_occupies_single_cluster_by_default() {
+        let mut t = terminal(12, 2);
+        for cp in [0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467] {
+            print_cp(&mut t, cp);
+        }
+
+        assert_eq!(t.active_screen().cursor.x, 2);
+        assert_eq!(
+            t.grapheme_at(screen_point(0, 0)).unwrap(),
+            vec![0x200D, 0x1F469, 0x200D, 0x1F467]
+        );
+    }
+
+    #[test]
+    fn decrst_2027_restores_legacy_width() {
+        let mut t = terminal(12, 2);
+        t.reset_mode(Mode::GraphemeCluster);
+        for cp in [0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467] {
+            print_cp(&mut t, cp);
+        }
+
+        assert_eq!(t.active_screen().cursor.x, 6);
+    }
+
+    #[test]
+    fn cjk_on_cjk_breaks_without_page_reads() {
+        let mut t = terminal(24, 2);
+        t.modes.set(Mode::GraphemeCluster, true);
+        for cp in [
+            0x4E00, 0x4E8C, 0x3042, 0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467, 0x0065, 0x0301,
+        ] {
+            print_cp(&mut t, cp);
+        }
+
+        assert_eq!(t.active_screen().cursor.x, 9);
+        assert_eq!(cell(&t, 0, 0).codepoint(), 0x4E00);
+        assert_eq!(cell(&t, 2, 0).codepoint(), 0x4E8C);
+        assert_eq!(cell(&t, 4, 0).codepoint(), 0x3042);
+        assert_eq!(cell(&t, 6, 0).codepoint(), 0x1F468);
+        assert_eq!(
+            t.grapheme_at(screen_point(6, 0)).unwrap(),
+            vec![0x200D, 0x1F469, 0x200D, 0x1F467]
+        );
+        assert_eq!(cell(&t, 8, 0).codepoint(), 0x0065);
+        assert_eq!(t.grapheme_at(screen_point(8, 0)).unwrap(), vec![0x0301]);
     }
 
     #[test]

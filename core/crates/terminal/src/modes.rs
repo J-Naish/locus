@@ -470,7 +470,10 @@ const ENTRIES: [ModeEntry; 41] = [
         mode: Mode::GraphemeCluster,
         value: 2027,
         ansi: false,
-        default: false,
+        // Ghostty enables Unicode grapheme widths through configuration.
+        // Locus has no parallel config layer, so reset restores the equivalent
+        // behavior directly from the mode table.
+        default: true,
     },
     ModeEntry {
         mode: Mode::ReportColorScheme,
@@ -548,6 +551,7 @@ mod tests {
         assert!(!state.get(Mode::CursorKeys));
         assert!(state.get(Mode::Wraparound));
         assert!(state.get(Mode::SendReceiveMode));
+        assert!(state.get(Mode::GraphemeCluster));
 
         state.set(Mode::CursorKeys, true);
         assert!(state.get(Mode::CursorKeys));
@@ -562,6 +566,7 @@ mod tests {
         state.reset();
         assert!(!state.get(Mode::CursorKeys));
         assert!(state.get(Mode::Wraparound));
+        assert!(state.get(Mode::GraphemeCluster));
     }
 
     // ghostty: "getReport known DEC mode" (modes.zig:330)

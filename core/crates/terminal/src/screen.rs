@@ -3,8 +3,6 @@
 //! This ports the first structural slice of Ghostty's `terminal/Screen.zig`.
 //! Kitty-specific behavior is intentionally deferred to later terminal phases.
 
-use unicode_width::UnicodeWidthChar;
-
 use crate::color::Name;
 use crate::hyperlink::{Hyperlink, HyperlinkId, HyperlinkIdKind};
 use crate::osc::parsers::semantic_prompt::{PromptClick, PromptClickEvents, PromptKind};
@@ -21,6 +19,7 @@ use crate::selection_codepoints::DEFAULT_LINE_WHITESPACE;
 use crate::sgr::Attribute;
 use crate::size::CellCountInt;
 use crate::style::{PackedStyle, Style, StyleColor, StyleId, DEFAULT_STYLE_ID};
+use crate::unicode;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Dirty {
@@ -2154,7 +2153,7 @@ impl Screen {
         let width = if u32::from(ch) <= 0xFF {
             1
         } else {
-            UnicodeWidthChar::width(ch).unwrap_or(0)
+            usize::from(unicode::width(u32::from(ch)))
         };
         if width == 0 {
             self.append_grapheme_to_previous_cell(u32::from(ch));
