@@ -23,6 +23,7 @@ pub use parsers::semantic_prompt::{SemanticPrompt, SemanticPromptAction};
 pub const MAX_BUF: usize = 2048;
 pub(crate) const FIXED_CAPTURE_MAX: usize = MAX_BUF - 1;
 pub(crate) const ALLOCATING_CAPTURE_MAX: usize = 8 * 1024 * 1024;
+pub(crate) const RETAINED_CAPTURE_CAPACITY: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Terminator {
@@ -276,6 +277,10 @@ impl Parser {
     pub fn reset(&mut self) {
         self.state = State::Start;
         self.buffer.clear();
+        if self.buffer.capacity() > RETAINED_CAPTURE_CAPACITY {
+            // Large clipboard or kitty payloads must not pin their high-water allocation.
+            self.buffer.shrink_to(RETAINED_CAPTURE_CAPACITY);
+        }
         self.capture = None;
         self.pending = None;
     }
@@ -626,7 +631,7 @@ fn color_kind_for_state(state: State) -> Option<ColorOperationKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, Parser, ALLOCATING_CAPTURE_MAX};
+    use super::{Command, Parser, ALLOCATING_CAPTURE_MAX, RETAINED_CAPTURE_CAPACITY};
 
     fn parse(body: &[u8]) -> Parser {
         let mut parser = Parser::default();
@@ -654,6 +659,27 @@ mod tests {
         }
         parser.end(None);
         assert!(parser.command().is_none());
+    }
+
+    #[test]
+    fn oversized_capture_releases_memory_on_reset() {
+        let mut parser = Parser::default();
+        for byte in b"52;c;" {
+            parser.next(*byte);
+        }
+        for _ in 0..(2 * 1024 * 1024) {
+            parser.next(b'a');
+        }
+        parser.end(None);
+        assert!(matches!(
+            parser.command(),
+            Some(Command::ClipboardContents { .. })
+        ));
+        assert!(parser.buffer.capacity() > RETAINED_CAPTURE_CAPACITY);
+
+        parser.reset();
+
+        assert!(parser.buffer.capacity() <= RETAINED_CAPTURE_CAPACITY);
     }
 
     #[test]

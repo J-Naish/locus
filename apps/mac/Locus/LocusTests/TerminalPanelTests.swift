@@ -94,9 +94,9 @@ final class TerminalPanelTests: XCTestCase {
     session.send(Data("echo terminal-panel-marker\n".utf8))
     XCTAssertTrue(
       waitForTerminalPanelCondition {
-        session.snapshot?.plainText.contains("terminal-panel-marker") == true
+        session.plainTextForTesting()?.contains("terminal-panel-marker") == true
       },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
 
     state.toggle()
@@ -104,7 +104,7 @@ final class TerminalPanelTests: XCTestCase {
 
     XCTAssertTrue(state.isVisible)
     XCTAssertTrue(state.session === session)
-    XCTAssertTrue(state.session?.snapshot?.plainText.contains("terminal-panel-marker") == true)
+    XCTAssertTrue(state.session?.plainTextForTesting()?.contains("terminal-panel-marker") == true)
   }
 
   func testExitedSessionCanBeRestarted() throws {
@@ -144,9 +144,9 @@ final class TerminalPanelTests: XCTestCase {
     session.send(Data("echo browser-replacement-marker\n".utf8))
     XCTAssertTrue(
       waitForTerminalPanelCondition {
-        session.snapshot?.plainText.contains("browser-replacement-marker") == true
+        session.plainTextForTesting()?.contains("browser-replacement-marker") == true
       },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
 
     // WorkspaceContentView can replace WorkspaceBrowserView while loading a
@@ -156,7 +156,7 @@ final class TerminalPanelTests: XCTestCase {
 
     XCTAssertTrue(browserReference?.session === session)
     XCTAssertTrue(
-      browserReference?.session?.snapshot?.plainText.contains("browser-replacement-marker") == true)
+      browserReference?.session?.plainTextForTesting()?.contains("browser-replacement-marker") == true)
   }
 
   func testTerminateOnTeardown() throws {
@@ -200,10 +200,10 @@ final class TerminalPanelTests: XCTestCase {
     firstSession.send(Data("pwd\n".utf8))
     XCTAssertTrue(
       waitForTerminalPanelCondition {
-        firstSession.snapshot?.plainText.contains(
+        firstSession.plainTextForTesting()?.contains(
           firstDirectory.resolvingSymlinksInPath().path) == true
       },
-      "Snapshot was: \(firstSession.snapshot?.plainText ?? "<nil>")"
+      "Snapshot was: \(firstSession.plainTextForTesting() ?? "<nil>")"
     )
     firstSession.send(Data("exit\n".utf8))
     XCTAssertTrue(
@@ -224,10 +224,10 @@ final class TerminalPanelTests: XCTestCase {
     XCTAssertFalse(restartedSession === firstSession)
     XCTAssertTrue(
       waitForTerminalPanelCondition {
-        restartedSession.snapshot?.plainText.contains(
+        restartedSession.plainTextForTesting()?.contains(
           secondDirectory.resolvingSymlinksInPath().path) == true
       },
-      "Snapshot was: \(restartedSession.snapshot?.plainText ?? "<nil>")"
+      "Snapshot was: \(restartedSession.plainTextForTesting() ?? "<nil>")"
     )
   }
 }

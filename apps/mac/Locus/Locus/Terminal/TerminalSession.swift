@@ -2,6 +2,55 @@ import Combine
 import Dispatch
 import Foundation
 
+enum TerminalShellEnvironment {
+  static func overrides(
+    environment: [String: String],
+    locale: Locale,
+    localeExists: (String) -> Bool
+  ) -> [(String, String)] {
+    var overrides = environment.filter { key, _ in
+      key == "LANG" || key.hasPrefix("LC_")
+    }
+
+    if overrides["LANG"] == nil {
+      if let lang = synthesizedLang(locale: locale, localeExists: localeExists) {
+        overrides["LANG"] = lang
+      } else if overrides["LC_CTYPE"] == nil {
+        overrides["LC_CTYPE"] = "UTF-8"
+      }
+    }
+
+    return overrides.map { ($0.key, $0.value) }.sorted { $0.0 < $1.0 }
+  }
+
+  static func synthesizedLang(
+    locale: Locale,
+    localeExists: (String) -> Bool
+  ) -> String? {
+    guard
+      let language = locale.language.languageCode?.identifier,
+      let region = locale.region?.identifier
+    else {
+      return nil
+    }
+
+    let candidate = "\(language)_\(region).UTF-8"
+    return localeExists(candidate) ? candidate : nil
+  }
+
+  static func currentOverrides() -> [(String, String)] {
+    overrides(
+      environment: ProcessInfo.processInfo.environment,
+      locale: .current,
+      localeExists: { localeName in
+        FileManager.default.fileExists(
+          atPath: "/usr/share/locale/\(localeName)"
+        )
+      }
+    )
+  }
+}
+
 /// Owns one shell session and publishes render snapshots for the future
 /// terminal view layer. The PTY, terminal core, and frame are deliberately kept
 /// off the main actor and are used only on `TerminalSessionWorker`'s serial
@@ -14,9 +63,6 @@ final class TerminalSession: ObservableObject {
 
   struct Snapshot: Equatable, Sendable {
     let generation: UInt64
-    /// Temporary text surface used until U3 renders directly from terminal
-    /// frames. Every render currently stringifies the frame for headless tests.
-    let plainText: String
     let columns: UInt16
     let rows: UInt16
     let cursorX: UInt16
@@ -296,14 +342,7 @@ private final class TerminalSessionWorker {
     }
 
     do {
-      var processEnvironment = ProcessInfo.processInfo.environment
-      if processEnvironment["LC_CTYPE"] == nil {
-        processEnvironment["LC_CTYPE"] = "UTF-8"
-      }
-      let environment =
-        processEnvironment
-        .map { key, value in (key, value) }
-        .sorted { $0.0 < $1.0 }
+      let environment = TerminalShellEnvironment.currentOverrides()
       let pty = try PtySession(
         command: command,
         arguments: arguments,
@@ -336,11 +375,13 @@ private final class TerminalSessionWorker {
       source.setEventHandler { [weak self] in
         self?.readAvailableData()
       }
-      source.setCancelHandler {}
+      // A dispatch source's monitored descriptor must remain open until its
+      // cancellation handler runs. Retain the PTY through cancellation delivery.
+      source.setCancelHandler { _ = pty }
       writeSource.setEventHandler { [weak self] in
         self?.flushPendingOutput()
       }
-      writeSource.setCancelHandler {}
+      writeSource.setCancelHandler { _ = pty }
       source.resume()
 
       try renderAndPublish()
@@ -501,7 +542,6 @@ private final class TerminalSessionWorker {
     let cursor = frame.cursor
     let snapshot = TerminalSession.Snapshot(
       generation: generation,
-      plainText: frame.plainText(),
       columns: frame.columns,
       rows: frame.rows,
       cursorX: cursor.x,

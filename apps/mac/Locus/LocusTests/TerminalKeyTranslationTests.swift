@@ -181,51 +181,39 @@ final class TerminalKeyTranslationTests: XCTestCase {
   }
 
   func testMoveLeftCommandMovesCursorThroughPty() throws {
-    let scriptURL = FileManager.default.temporaryDirectory
-      .appendingPathComponent("locus-terminal-command-\(UUID().uuidString).sh")
-    try "#!/bin/sh\n/bin/stty raw -echo\nprintf READY\nexec /bin/cat\n".write(
-      to: scriptURL,
-      atomically: true,
-      encoding: .utf8
-    )
-    try FileManager.default.setAttributes(
-      [.posixPermissions: 0o700],
-      ofItemAtPath: scriptURL.path
-    )
-    defer {
-      try? FileManager.default.removeItem(at: scriptURL)
-    }
-
     let session = TerminalSession(columns: 40, rows: 10)
     defer {
       session.terminate()
     }
-    let view = TerminalPaneView(session: session)
-    session.start(command: scriptURL.path)
-    XCTAssertTrue(
-      waitForTerminalInputCondition {
-        session.snapshot?.plainText.contains("READY") == true
-      },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
-    )
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForTerminalInputCondition { session.snapshot != nil })
 
     session.send(Data("abcd".utf8))
     XCTAssertTrue(
       waitForTerminalInputCondition {
-        session.snapshot?.plainText.contains("abcd") == true
+        session.plainTextForTesting()?.contains("abcd") == true
       },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
-    let before = try XCTUnwrap(session.snapshot?.cursorX)
+    var currentCursorX: UInt16?
+    session.withFrame { frame in
+      currentCursorX = frame.cursor.x
+    }
+    let before = try XCTUnwrap(currentCursorX)
     XCTAssertGreaterThanOrEqual(before, 2)
     let expected = before - 2
+    let view = TerminalPaneView(session: session)
 
     view.doCommand(by: Selector("moveLeft:"))
     view.doCommand(by: Selector("moveLeft:"))
 
     XCTAssertTrue(
       waitForTerminalInputCondition {
-        session.snapshot?.cursorX == expected
+        var cursorX: UInt16?
+        session.withFrame { frame in
+          cursorX = frame.cursor.x
+        }
+        return cursorX == expected
       },
       "Cursor was: \(session.snapshot?.cursorX.description ?? "<nil>")"
     )
@@ -244,9 +232,9 @@ final class TerminalKeyTranslationTests: XCTestCase {
 
     XCTAssertTrue(
       waitForTerminalInputCondition {
-        session.snapshot?.plainText.contains("IME-テスト") == true
+        session.plainTextForTesting()?.contains("IME-テスト") == true
       },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
   }
 
@@ -267,9 +255,9 @@ final class TerminalKeyTranslationTests: XCTestCase {
 
     XCTAssertTrue(
       waitForTerminalInputCondition {
-        session.snapshot?.plainText.contains("PASTE-OK") == true
+        session.plainTextForTesting()?.contains("PASTE-OK") == true
       },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
   }
 
@@ -297,9 +285,9 @@ final class TerminalKeyTranslationTests: XCTestCase {
 
     XCTAssertTrue(
       waitForTerminalInputCondition {
-        session.snapshot?.plainText.contains("SENDKEY-OK") == true
+        session.plainTextForTesting()?.contains("SENDKEY-OK") == true
       },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
   }
 }

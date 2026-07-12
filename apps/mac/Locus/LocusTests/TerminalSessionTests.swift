@@ -4,27 +4,62 @@ import XCTest
 
 @MainActor
 final class TerminalSessionTests: XCTestCase {
-  func testEchoCommandAppearsInSnapshot() throws {
-    let scriptURL = try makeExecutableShellScript(
-      """
-      #!/bin/sh
-      echo hello-world
-      """
-    )
+  func testShellEnvironmentIsCleanAndLocalized() {
+    let session = TerminalSession(columns: 120, rows: 40)
     defer {
-      try? FileManager.default.removeItem(at: scriptURL)
+      session.terminate()
     }
 
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    session.send(Data("/usr/bin/env\n".utf8))
+
+    XCTAssertTrue(
+      waitUntil {
+        guard let text = session.plainTextForTesting() else {
+          return false
+        }
+        return text.contains("TERM=xterm-256color")
+          && (text.contains("LANG=") || text.contains("LC_CTYPE="))
+      },
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
+    )
+    let text = session.plainTextForTesting() ?? ""
+    XCTAssertFalse(text.contains("DYLD_"))
+    XCTAssertFalse(text.contains("XCTestConfigurationFilePath"))
+  }
+
+  func testLangSynthesisRequiresInstalledLocale() {
+    let locale = Locale(identifier: "ja_JP")
+
+    XCTAssertEqual(
+      TerminalShellEnvironment.synthesizedLang(
+        locale: locale,
+        localeExists: { $0 == "ja_JP.UTF-8" }
+      ),
+      "ja_JP.UTF-8"
+    )
+    XCTAssertNil(
+      TerminalShellEnvironment.synthesizedLang(
+        locale: locale,
+        localeExists: { _ in false }
+      )
+    )
+  }
+
+  func testEchoCommandAppearsInSnapshot() throws {
     let session = TerminalSession(columns: 40, rows: 10)
     defer {
       session.terminate()
     }
 
-    session.start(command: scriptURL.path)
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    session.send(Data("echo hello-world\n".utf8))
 
     XCTAssertTrue(
-      waitUntil { session.snapshot?.plainText.contains("hello-world") == true },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      waitUntil { session.plainTextForTesting()?.contains("hello-world") == true },
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
   }
 
@@ -39,8 +74,8 @@ final class TerminalSessionTests: XCTestCase {
     session.send(Data("echo shell-roundtrip\n".utf8))
 
     XCTAssertTrue(
-      waitUntil { session.snapshot?.plainText.contains("shell-roundtrip") == true },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      waitUntil { session.plainTextForTesting()?.contains("shell-roundtrip") == true },
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
   }
 
@@ -55,8 +90,8 @@ final class TerminalSessionTests: XCTestCase {
     session.send(Data("printf '\\033[c'; sleep 0.2; echo da-ok\n".utf8))
 
     XCTAssertTrue(
-      waitUntil(timeout: 5) { session.snapshot?.plainText.contains("da-ok") == true },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      waitUntil(timeout: 5) { session.plainTextForTesting()?.contains("da-ok") == true },
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
   }
 
@@ -66,6 +101,7 @@ final class TerminalSessionTests: XCTestCase {
       #!/bin/sh
       sleep 0.2
       stty size
+      sleep 1
       """
     )
     defer {
@@ -82,8 +118,8 @@ final class TerminalSessionTests: XCTestCase {
     XCTAssertTrue(waitUntil { session.snapshot?.columns == 44 && session.snapshot?.rows == 11 })
 
     XCTAssertTrue(
-      waitUntil(timeout: 5) { session.snapshot?.plainText.contains("11 44") == true },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      waitUntil(timeout: 5) { session.plainTextForTesting()?.contains("11 44") == true },
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
   }
 
@@ -125,6 +161,26 @@ final class TerminalSessionTests: XCTestCase {
     session.send(Data("echo after-terminate\n".utf8))
   }
 
+  func testRepeatedStartStopCyclesDoNotCrash() {
+    for _ in 0..<10 {
+      let session = TerminalSession(columns: 40, rows: 10)
+      session.start(command: "/bin/sh")
+      XCTAssertTrue(waitForInitialShellFrame(session))
+
+      session.terminate()
+
+      XCTAssertTrue(
+        waitUntil {
+          if case .exited = session.state {
+            return true
+          }
+          return false
+        },
+        "State was: \(session.state)"
+      )
+    }
+  }
+
   func testSnapshotGenerationIncreases() throws {
     let scriptURL = try makeExecutableShellScript(
       """
@@ -132,6 +188,7 @@ final class TerminalSessionTests: XCTestCase {
       echo first-generation
       sleep 0.2
       echo second-generation
+      sleep 1
       """
     )
     defer {
@@ -144,7 +201,7 @@ final class TerminalSessionTests: XCTestCase {
     }
 
     session.start(command: scriptURL.path)
-    XCTAssertTrue(waitUntil { session.snapshot?.plainText.contains("first-generation") == true })
+    XCTAssertTrue(waitUntil { session.plainTextForTesting()?.contains("first-generation") == true })
     guard let firstGeneration = session.snapshot?.generation else {
       XCTFail("Missing first snapshot")
       return
@@ -156,9 +213,9 @@ final class TerminalSessionTests: XCTestCase {
           return false
         }
         return snapshot.generation > firstGeneration
-          && snapshot.plainText.contains("second-generation")
+          && session.plainTextForTesting()?.contains("second-generation") == true
       },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
   }
 
@@ -196,9 +253,9 @@ final class TerminalSessionTests: XCTestCase {
     let expectedPath = directory.resolvingSymlinksInPath().path
     XCTAssertTrue(
       waitUntil {
-        session.snapshot?.plainText.contains(expectedPath) == true
+        session.plainTextForTesting()?.contains(expectedPath) == true
       },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
   }
 
@@ -222,15 +279,15 @@ final class TerminalSessionTests: XCTestCase {
 
     session.start(command: scriptURL.path)
     XCTAssertTrue(
-      waitUntil { session.snapshot?.plainText.contains("READY") == true },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      waitUntil { session.plainTextForTesting()?.contains("READY") == true },
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
     let payload = Data((String(repeating: "A", count: 8_187) + "@END@").utf8)
     session.send(payload)
 
     XCTAssertTrue(
-      waitUntil(timeout: 6) { session.snapshot?.plainText.contains("@END@") == true },
-      "State was: \(session.state), snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      waitUntil(timeout: 6) { session.plainTextForTesting()?.contains("@END@") == true },
+      "State was: \(session.state), snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
     XCTAssertEqual(session.state, .running)
   }
@@ -254,13 +311,13 @@ final class TerminalSessionTests: XCTestCase {
     }
 
     session.start(command: scriptURL.path)
-    XCTAssertTrue(waitUntil { session.snapshot?.plainText.contains("READY") == true })
+    XCTAssertTrue(waitUntil { session.plainTextForTesting()?.contains("READY") == true })
     session.send(Data((String(repeating: "A", count: 3_000) + "@ONE@").utf8))
     session.send(Data("@TWO@".utf8))
 
     XCTAssertTrue(
       waitUntil(timeout: 6) {
-        guard let text = session.snapshot?.plainText,
+        guard let text = session.plainTextForTesting(),
           let one = text.range(of: "@ONE@"),
           let two = text.range(of: "@TWO@")
         else {
@@ -268,7 +325,7 @@ final class TerminalSessionTests: XCTestCase {
         }
         return one.lowerBound < two.lowerBound
       },
-      "State was: \(session.state), snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      "State was: \(session.state), snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
     XCTAssertEqual(session.state, .running)
   }
@@ -291,7 +348,7 @@ final class TerminalSessionTests: XCTestCase {
     }
 
     session.start(command: scriptURL.path)
-    XCTAssertTrue(waitUntil { session.snapshot?.plainText.contains("READY") == true })
+    XCTAssertTrue(waitUntil { session.plainTextForTesting()?.contains("READY") == true })
     session.send(Data(repeating: UInt8(ascii: "X"), count: 5 * 1024 * 1024))
 
     XCTAssertTrue(
@@ -319,7 +376,7 @@ final class TerminalSessionTests: XCTestCase {
     }
     XCTAssertTrue(waitUntil { firstOutcome != nil })
     XCTAssertEqual(firstOutcome, .needsConfirmation)
-    XCTAssertFalse(session.snapshot?.plainText.contains("TWO") == true)
+    XCTAssertFalse(session.plainTextForTesting()?.contains("TWO") == true)
 
     var confirmedOutcome: TerminalSession.PasteOutcome?
     session.paste("echo ONE\necho TWO", allowUnsafe: true) { outcome in
@@ -328,9 +385,20 @@ final class TerminalSessionTests: XCTestCase {
     XCTAssertTrue(waitUntil { confirmedOutcome != nil })
     XCTAssertEqual(confirmedOutcome, .sent)
     XCTAssertTrue(
-      waitUntil(timeout: 5) { session.snapshot?.plainText.contains("TWO") == true },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      waitUntil(timeout: 5) { session.plainTextForTesting()?.contains("TWO") == true },
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
+  }
+}
+
+@MainActor
+extension TerminalSession {
+  func plainTextForTesting() -> String? {
+    var text: String?
+    withFrame { frame in
+      text = frame.plainText()
+    }
+    return text
   }
 }
 
@@ -353,7 +421,7 @@ private func waitUntil(
 @MainActor
 private func waitForInitialShellFrame(_ session: TerminalSession) -> Bool {
   waitUntil {
-    guard let plainText = session.snapshot?.plainText else {
+    guard let plainText = session.plainTextForTesting() else {
       return false
     }
     return !plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

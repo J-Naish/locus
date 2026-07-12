@@ -12,6 +12,7 @@ use crate::point::{Coordinate, Point, Tag};
 use crate::size::CellCountInt;
 
 pub const PAGE_PREHEAT: usize = 4;
+const PAGE_POOL_MAX: usize = 8;
 pub const STD_SIZE: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1306,7 +1307,10 @@ impl PageList {
                 if let Some(node) = self.take_node(first) {
                     let memory = node.page.into_memory();
                     self.page_size = self.page_size.saturating_sub(memory.len());
-                    if memory.len() == Self::standard_size() {
+                    if memory.len() == Self::standard_size()
+                        && self.page_buffers.len() < PAGE_POOL_MAX
+                    {
+                        // Keep modest resize headroom while returning cleared history to the allocator.
                         self.page_buffers.push(memory);
                     } else {
                         retired_non_standard_buffer = Some(memory);
@@ -3013,9 +3017,10 @@ impl PageList {
         };
         let memory = node.page.into_memory();
         self.page_size = self.page_size.saturating_sub(memory.len());
-        if memory.len() == Self::standard_size() {
+        if memory.len() == Self::standard_size() && self.page_buffers.len() < PAGE_POOL_MAX {
             // Recycled buffers are zeroed once at reuse time in create_page; zeroing
             // again on return would double the memset traffic on the scroll hot path.
+            // Cap retained buffers so clearing deep history releases memory.
             self.page_buffers.push(memory);
         }
     }
@@ -4616,6 +4621,18 @@ mod tests {
         list.reset();
         assert_eq!(list.total_rows(), 100);
         assert!(list.total_pages() > 1);
+    }
+
+    #[test]
+    fn page_pool_is_bounded_after_reset() {
+        let mut list = PageList::new(80, 24, None);
+        let page_rows = usize::from(list.node_capacity(list.first_node().unwrap()).unwrap().rows);
+        list.grow_rows(page_rows * (PAGE_POOL_MAX + 4));
+        assert!(list.total_pages() > PAGE_POOL_MAX);
+
+        list.reset();
+
+        assert!(list.page_buffers.len() <= PAGE_POOL_MAX);
     }
 
     #[test]

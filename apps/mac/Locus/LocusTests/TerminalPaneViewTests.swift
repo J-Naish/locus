@@ -297,9 +297,9 @@ final class TerminalPaneViewTests: XCTestCase {
     session.send(Data("printf OUTPUT-ONLY\\n".utf8))
     XCTAssertTrue(
       waitForPaneCondition {
-        session.snapshot?.plainText.contains("OUTPUT-ONLY") == true
+        session.plainTextForTesting()?.contains("OUTPUT-ONLY") == true
       },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
 
     XCTAssertEqual(resetCount, 0)
@@ -391,8 +391,8 @@ final class TerminalPaneViewTests: XCTestCase {
     session.start(command: "/bin/sh")
     session.send(Data("echo hi\n".utf8))
     XCTAssertTrue(
-      waitForPaneCondition { session.snapshot?.plainText.contains("hi") == true },
-      "Snapshot was: \(session.snapshot?.plainText ?? "<nil>")"
+      waitForPaneCondition { session.plainTextForTesting()?.contains("hi") == true },
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
     var frameText = ""
     session.withFrame { frame in

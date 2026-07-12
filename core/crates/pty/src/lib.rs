@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicI32, Ordering};
+
 #[cfg(target_os = "linux")]
 #[link(name = "util")]
 extern "C" {}
@@ -24,8 +27,12 @@ const FALLBACK_LOGIN_SHELL: &str = "/bin/zsh";
 const DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
 const SHUTDOWN_POLL: Duration = Duration::from_millis(10);
+const KILL_WAIT_GRACE: Duration = Duration::from_secs(2);
 const DROP_REAP_GRACE: Duration = Duration::from_millis(5);
 const KILL_REAP_GRACE: Duration = Duration::from_millis(50);
+
+#[cfg(test)]
+static LAST_FAILED_SPAWN_PID: AtomicI32 = AtomicI32::new(-1);
 
 /// Options used to spawn a child process attached to a new pseudo-terminal.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +63,28 @@ impl Default for PtyOptions {
 pub struct ExitStatus {
     pub code: Option<i32>,
     pub signal: Option<i32>,
+}
+
+#[derive(Debug)]
+enum WaitpidError {
+    Interrupted,
+    NoChild,
+    Other(io::Error),
+}
+
+fn classify_waitpid_error(error: io::Error) -> WaitpidError {
+    match error.raw_os_error() {
+        Some(libc::EINTR) => WaitpidError::Interrupted,
+        Some(libc::ECHILD) => WaitpidError::NoChild,
+        _ => WaitpidError::Other(error),
+    }
+}
+
+const fn unknown_exit_status() -> ExitStatus {
+    ExitStatus {
+        code: None,
+        signal: None,
+    }
 }
 
 impl ExitStatus {
@@ -226,7 +255,9 @@ impl Pty {
         close_fd(error_pipe[0]);
         if let Err(error) = exec_result {
             close_fd(master_fd);
-            reap_child_nonblocking(pid, DROP_REAP_GRACE);
+            reap_child_blocking(pid);
+            #[cfg(test)]
+            LAST_FAILED_SPAWN_PID.store(pid, Ordering::SeqCst);
             return Err(error);
         }
 
@@ -366,10 +397,14 @@ impl Pty {
                 return Ok(Some(status));
             }
             let error = io::Error::last_os_error();
-            match error.raw_os_error() {
-                Some(libc::EINTR) => continue,
-                Some(libc::ECHILD) => return Ok(self.exited),
-                _ => return Err(PtyError::Io(error)),
+            match classify_waitpid_error(error) {
+                WaitpidError::Interrupted => continue,
+                WaitpidError::NoChild => {
+                    let status = unknown_exit_status();
+                    self.exited = Some(status);
+                    return Ok(Some(status));
+                }
+                WaitpidError::Other(error) => return Err(PtyError::Io(error)),
             }
         }
     }
@@ -390,9 +425,23 @@ impl Pty {
             thread::sleep(SHUTDOWN_POLL);
         }
         send_process_group_signal(self.child_pid, libc::SIGKILL);
-        self.wait_blocking()
+        let deadline = Instant::now() + KILL_WAIT_GRACE;
+        while Instant::now() < deadline {
+            if let Some(status) = self.try_wait()? {
+                return Ok(Some(status));
+            }
+            thread::sleep(SHUTDOWN_POLL);
+        }
+        Err(PtyError::Timeout)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "kept as the blocking wait primitive for callers and tests"
+        )
+    )]
     fn wait_blocking(&mut self) -> Result<Option<ExitStatus>> {
         if let Some(status) = self.exited {
             return Ok(Some(status));
@@ -407,10 +456,14 @@ impl Pty {
                 return Ok(Some(status));
             }
             let error = io::Error::last_os_error();
-            match error.raw_os_error() {
-                Some(libc::EINTR) => continue,
-                Some(libc::ECHILD) => return Ok(self.exited),
-                _ => return Err(PtyError::Io(error)),
+            match classify_waitpid_error(error) {
+                WaitpidError::Interrupted => continue,
+                WaitpidError::NoChild => {
+                    let status = unknown_exit_status();
+                    self.exited = Some(status);
+                    return Ok(Some(status));
+                }
+                WaitpidError::Other(error) => return Err(PtyError::Io(error)),
             }
         }
     }
@@ -450,7 +503,7 @@ impl LaunchPlan {
     fn new(options: &PtyOptions) -> Result<Self> {
         let env = build_child_env(&options.env)?;
         let program_path = match options.command.as_ref() {
-            Some(command) => resolve_command(command, &env)?,
+            Some(command) => resolve_command(command, &env, options.cwd.as_deref())?,
             None => login_shell_path(),
         };
         let program = cstring_from_os_str(program_path.as_os_str())?;
@@ -519,6 +572,7 @@ fn run_child(
 }
 
 fn child_setup(slave_fd: RawFd, launch: &LaunchPlan) -> Result<()> {
+    reset_child_signal_state()?;
     // SAFETY: setsid affects only this freshly forked child process.
     if unsafe { libc::setsid() } == -1 {
         return Err(PtyError::Io(io::Error::last_os_error()));
@@ -540,6 +594,48 @@ fn child_setup(slave_fd: RawFd, launch: &LaunchPlan) -> Result<()> {
     duplicate_fd(slave_fd, libc::STDERR_FILENO)?;
     if slave_fd > libc::STDERR_FILENO {
         close_fd(slave_fd);
+    }
+    Ok(())
+}
+
+fn reset_child_signal_state() -> Result<()> {
+    // ghostty: pty.zig:228-248 — ignored dispositions and the blocked mask
+    // survive exec, so restore the conventional process-start signal state.
+    const SIGNALS: [libc::c_int; 13] = [
+        libc::SIGABRT,
+        libc::SIGALRM,
+        libc::SIGBUS,
+        libc::SIGCHLD,
+        libc::SIGFPE,
+        libc::SIGHUP,
+        libc::SIGILL,
+        libc::SIGINT,
+        libc::SIGPIPE,
+        libc::SIGSEGV,
+        libc::SIGTRAP,
+        libc::SIGTERM,
+        libc::SIGQUIT,
+    ];
+    for signal in SIGNALS {
+        // SAFETY: this runs only in the freshly forked child. SIG_DFL is a
+        // valid disposition and signal() retains no Rust-owned pointer.
+        if unsafe { libc::signal(signal, libc::SIG_DFL) } == libc::SIG_ERR {
+            return Err(PtyError::Io(io::Error::last_os_error()));
+        }
+    }
+
+    let mut mask = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    // SAFETY: sigemptyset initializes the stack value; sigprocmask reads it
+    // synchronously and no pointer escapes this child-only setup function.
+    if unsafe { libc::sigemptyset(mask.as_mut_ptr()) } == -1 {
+        return Err(PtyError::Io(io::Error::last_os_error()));
+    }
+    // SAFETY: the preceding call initialized mask completely.
+    let mask = unsafe { mask.assume_init() };
+    // SAFETY: mask is valid and SIG_SETMASK replaces the child's inherited
+    // signal mask without retaining either pointer.
+    if unsafe { libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) } == -1 {
+        return Err(PtyError::Io(io::Error::last_os_error()));
     }
     Ok(())
 }
@@ -659,6 +755,19 @@ fn build_child_env(overrides: &[(OsString, OsString)]) -> Result<Vec<(OsString, 
     for (key, value) in overrides {
         set_env_pair(&mut env_pairs, key.clone(), value.clone())?;
     }
+    // TERM describes this core's emulation contract, not the host terminal.
+    // Callers may add environment entries but cannot advertise unsupported
+    // terminal capabilities by overriding these two pinned values.
+    set_env_pair(
+        &mut env_pairs,
+        OsString::from("TERM"),
+        OsString::from("xterm-256color"),
+    )?;
+    set_env_pair(
+        &mut env_pairs,
+        OsString::from("COLORTERM"),
+        OsString::from("truecolor"),
+    )?;
     Ok(env_pairs)
 }
 
@@ -669,6 +778,10 @@ fn should_inherit_env(key: &OsStr) -> bool {
         || key == b"HOME"
         || key == b"USER"
         || key == b"PATH"
+        || key == b"SHELL"
+        || key == b"TMPDIR"
+        || key == b"SSH_AUTH_SOCK"
+        || key == b"LOGNAME"
         || key.starts_with(b"LC_")
 }
 
@@ -704,13 +817,22 @@ fn env_pairs_to_cstrings(env_pairs: &[(OsString, OsString)]) -> Result<Vec<CStri
         .collect()
 }
 
-fn resolve_command(command: &Path, env_pairs: &[(OsString, OsString)]) -> Result<PathBuf> {
+fn resolve_command(
+    command: &Path,
+    env_pairs: &[(OsString, OsString)],
+    cwd: Option<&Path>,
+) -> Result<PathBuf> {
     let command_bytes = command.as_os_str().as_bytes();
     if command_bytes.is_empty() {
         return Err(PtyError::BadCommand(command.to_path_buf()));
     }
     if command_bytes.contains(&b'/') {
-        return executable_path(command);
+        let candidate = if command.is_relative() {
+            cwd.map_or_else(|| command.to_path_buf(), |cwd| cwd.join(command))
+        } else {
+            command.to_path_buf()
+        };
+        return executable_path(&candidate);
     }
     let path_value = env_pairs
         .iter()
@@ -718,9 +840,14 @@ fn resolve_command(command: &Path, env_pairs: &[(OsString, OsString)]) -> Result
         .map(|(_, value)| value.clone())
         .unwrap_or_else(|| OsString::from(DEFAULT_PATH));
     for dir in env::split_paths(&path_value) {
+        let dir = if dir.is_relative() {
+            cwd.map_or(dir.clone(), |cwd| cwd.join(&dir))
+        } else {
+            dir
+        };
         let candidate = dir.join(command);
-        if candidate.is_file() {
-            return executable_path(&candidate);
+        if candidate.is_file() && executable_path(&candidate).is_ok() {
+            return Ok(candidate);
         }
     }
     Err(PtyError::BadCommand(command.to_path_buf()))
@@ -830,6 +957,22 @@ fn reap_child_nonblocking(pid: libc::pid_t, grace: Duration) -> Option<ExitStatu
     }
 }
 
+fn reap_child_blocking(pid: libc::pid_t) {
+    loop {
+        let mut status = 0;
+        // SAFETY: pid is the child that synchronously reported exec failure
+        // through the CLOEXEC pipe and is guaranteed to be exiting via _exit.
+        let result = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if result == pid {
+            return;
+        }
+        if result == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return;
+    }
+}
+
 fn is_would_block(error: &io::Error) -> bool {
     let raw = error.raw_os_error();
     raw == Some(libc::EAGAIN) || raw == Some(libc::EWOULDBLOCK)
@@ -838,9 +981,23 @@ fn is_would_block(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn temporary_directory(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            env::temp_dir().join(format!("locus-pty-{label}-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     fn spawn_command(command: &str, args: &[&str]) -> Pty {
         Pty::spawn(PtyOptions {
@@ -912,6 +1069,89 @@ mod tests {
             String::from_utf8_lossy(&output)
         );
         assert!(status.success());
+    }
+
+    #[test]
+    fn child_starts_with_default_sigpipe() {
+        let mut pty = spawn_command("/bin/sh", &["-c", "kill -13 $$; echo ALIVE"]);
+        let output = read_available(&mut pty, Duration::from_secs(2));
+        let status = pty.wait_blocking().unwrap().unwrap();
+
+        assert!(!String::from_utf8_lossy(&output).contains("ALIVE"));
+        assert_eq!(status.signal, Some(libc::SIGPIPE));
+    }
+
+    #[test]
+    fn path_search_skips_non_executable_match() {
+        let root = temporary_directory("path-search");
+        let first = root.join("a");
+        let second = root.join("b");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let first_probe = first.join("probe");
+        let second_probe = second.join("probe");
+        fs::write(&first_probe, "#!/bin/sh\necho WRONG\n").unwrap();
+        fs::write(&second_probe, "#!/bin/sh\necho RIGHT\n").unwrap();
+        fs::set_permissions(&first_probe, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&second_probe, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = env::join_paths([first, second]).unwrap();
+
+        let mut pty = Pty::spawn(PtyOptions {
+            command: Some(PathBuf::from("probe")),
+            env: vec![(OsString::from("PATH"), path)],
+            ..PtyOptions::default()
+        })
+        .unwrap();
+        let output = read_available(&mut pty, Duration::from_secs(2));
+        let status = pty.wait_blocking().unwrap().unwrap();
+        fs::remove_dir_all(root).unwrap();
+
+        assert!(status.success());
+        assert!(String::from_utf8_lossy(&output).contains("RIGHT"));
+    }
+
+    #[test]
+    fn relative_command_resolves_against_child_cwd() {
+        let root = temporary_directory("relative-command");
+        let probe = root.join("probe");
+        fs::write(&probe, "#!/bin/sh\necho CWD-RIGHT\n").unwrap();
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut pty = Pty::spawn(PtyOptions {
+            command: Some(PathBuf::from("./probe")),
+            cwd: Some(root.clone()),
+            ..PtyOptions::default()
+        })
+        .unwrap();
+        let output = read_available(&mut pty, Duration::from_secs(2));
+        let status = pty.wait_blocking().unwrap().unwrap();
+        fs::remove_dir_all(root).unwrap();
+
+        assert!(status.success());
+        assert!(String::from_utf8_lossy(&output).contains("CWD-RIGHT"));
+    }
+
+    #[test]
+    fn failed_spawn_leaves_no_zombie() {
+        let root = temporary_directory("failed-spawn");
+        let invalid = root.join("invalid-executable");
+        fs::write(&invalid, "this is not an executable image").unwrap();
+        fs::set_permissions(&invalid, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = Pty::spawn(PtyOptions {
+            command: Some(invalid),
+            ..PtyOptions::default()
+        })
+        .unwrap_err();
+        let pid = LAST_FAILED_SPAWN_PID.load(Ordering::SeqCst);
+        fs::remove_dir_all(root).unwrap();
+
+        assert!(matches!(error, PtyError::ChildExecFailed(_)));
+        assert!(pid > 0);
+        assert!(
+            process_is_gone(pid),
+            "failed child pid {pid} was not reaped"
+        );
     }
 
     #[test]
@@ -1036,6 +1276,25 @@ mod tests {
     }
 
     #[test]
+    fn term_pin_survives_overrides() {
+        let mut pty = Pty::spawn(PtyOptions {
+            command: Some(PathBuf::from("/usr/bin/env")),
+            env: vec![
+                (OsString::from("TERM"), OsString::from("xterm-ghostty")),
+                (OsString::from("COLORTERM"), OsString::from("host-value")),
+            ],
+            ..PtyOptions::default()
+        })
+        .unwrap();
+        let output =
+            String::from_utf8_lossy(&read_available(&mut pty, Duration::from_secs(2))).to_string();
+
+        assert!(output.contains("TERM=xterm-256color"));
+        assert!(output.contains("COLORTERM=truecolor"));
+        assert!(!output.contains("xterm-ghostty"));
+    }
+
+    #[test]
     fn idle_nonblocking_read_reports_would_block() {
         let mut pty = spawn_command("/bin/cat", &[]);
         let mut buf = [0_u8; 8];
@@ -1050,6 +1309,31 @@ mod tests {
         let _ = pty.shutdown().unwrap();
         let _ = pty.shutdown().unwrap();
         assert!(pty.master_fd() < 0);
+    }
+
+    #[test]
+    fn shutdown_returns_within_grace_for_live_child() {
+        let mut pty = spawn_command("/bin/sleep", &["30"]);
+        let started = Instant::now();
+
+        let status = pty.shutdown().unwrap();
+
+        assert!(status.is_some());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn echild_reports_exit() {
+        let disposition = classify_waitpid_error(io::Error::from_raw_os_error(libc::ECHILD));
+
+        assert!(matches!(disposition, WaitpidError::NoChild));
+        assert_eq!(
+            unknown_exit_status(),
+            ExitStatus {
+                code: None,
+                signal: None
+            }
+        );
     }
 
     #[test]

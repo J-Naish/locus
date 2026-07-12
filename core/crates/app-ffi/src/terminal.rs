@@ -16,7 +16,7 @@ use terminal::page_list::Scroll;
 use terminal::render::{DirtyState, RenderState};
 use terminal::screen::CursorStyle;
 use terminal::stream::Stream;
-use terminal::stream_terminal::{CapturedEffects, TerminalHandler};
+use terminal::stream_terminal::{Effects, TerminalHandler};
 use terminal::style::{FgOptions, Style};
 use terminal::terminal::{Options as TerminalOptions, Terminal};
 
@@ -270,8 +270,34 @@ pub struct LocusTermKeyEvent {
 }
 
 pub struct LocusTerm {
-    stream: Stream<TerminalHandler<CapturedEffects>>,
+    stream: Stream<TerminalHandler<FfiEffects>>,
     render_state: RenderState,
+}
+
+#[derive(Debug, Default)]
+struct FfiEffects {
+    pty: Vec<u8>,
+    latest_title: Option<String>,
+    latest_pwd: Option<String>,
+    latest_mouse_shape: Option<String>,
+}
+
+impl Effects for FfiEffects {
+    fn write_pty(&mut self, bytes: &[u8]) {
+        self.pty.extend_from_slice(bytes);
+    }
+
+    fn title_changed(&mut self, title: Option<&str>) {
+        self.latest_title = title.map(ToOwned::to_owned);
+    }
+
+    fn pwd_changed(&mut self, pwd: Option<&str>) {
+        self.latest_pwd = pwd.map(ToOwned::to_owned);
+    }
+
+    fn mouse_shape_changed(&mut self, shape: Option<&str>) {
+        self.latest_mouse_shape = shape.map(ToOwned::to_owned);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,7 +396,7 @@ pub extern "C" fn locus_term_new(cols: u16, rows: u16, max_scrollback: usize) ->
             width_px: 0,
             height_px: 0,
         });
-        let stream = Stream::new(TerminalHandler::new(terminal, CapturedEffects::default()));
+        let stream = Stream::new(TerminalHandler::new(terminal, FfiEffects::default()));
         let render_state = RenderState::new(rows, cols);
         Box::into_raw(Box::new(LocusTerm {
             stream,
@@ -1511,6 +1537,30 @@ mod tests {
             assert_eq!(
                 locus_term_feed(term, data.as_ptr(), data.len()),
                 LOCUS_STATUS_OK
+            );
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn ffi_effects_keep_latest_only() {
+        let term = new_term();
+        let mut input = Vec::new();
+        for index in 0..1_000 {
+            input.extend_from_slice(format!("\x1b]0;title-{index}\x07").as_bytes());
+        }
+
+        // SAFETY: `term` is live for this block, `input` remains readable for
+        // the feed call, and the handle is freed exactly once after inspection.
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            let term_ref = &*term;
+            assert_eq!(
+                term_ref.stream.handler.effects.latest_title.as_deref(),
+                Some("title-999")
             );
             locus_term_free(term);
         }
