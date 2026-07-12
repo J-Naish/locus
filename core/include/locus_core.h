@@ -657,7 +657,7 @@ LocusStatus locus_large_file_position_for_line_column(
  * handle state is undefined. Free the handle and create a new one.
  */
 
-#define LOCUS_TERM_ABI_VERSION ((uint32_t)2u)
+#define LOCUS_TERM_ABI_VERSION ((uint32_t)3u)
 
 #define LOCUS_TERM_STATUS_INVALID_ARGUMENT ((LocusStatus)300u)
 #define LOCUS_TERM_STATUS_PANIC ((LocusStatus)301u)
@@ -760,6 +760,10 @@ typedef struct LocusTermFrame {
     uint16_t cols;
     uint16_t rows;
     uint32_t dirty_state;
+    int32_t scroll_delta;
+    uint32_t viewport_offset_rows;
+    uint32_t total_rows;
+    bool at_bottom;
     size_t row_count;
     const LocusTermRow *rows_ptr;
     size_t cell_count;

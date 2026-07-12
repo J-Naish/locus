@@ -163,6 +163,29 @@ final class TerminalBridgeTests: XCTestCase {
     XCTAssertEqual(frame.cursor.y, 0)
   }
 
+  func testFrameExposesABIV3ScrollMetadata() throws {
+    let terminal = try TerminalCore(
+      columns: 20,
+      rows: 5,
+      maxScrollback: TerminalSession.defaultMaxScrollbackBytes
+    )
+    let frame = try TerminalFrame()
+    for line in 1...20 {
+      try terminal.feed(Data("L\(line)\r\n".utf8))
+    }
+
+    try terminal.render(into: frame, full: true)
+    XCTAssertEqual(frame.scrollDelta, 0)
+    XCTAssertEqual(frame.viewportOffsetRows, 0)
+    XCTAssertGreaterThanOrEqual(frame.totalRows, 20)
+    XCTAssertTrue(frame.atBottom)
+
+    try terminal.scroll(byRows: -4)
+    try terminal.render(into: frame, full: true)
+    XCTAssertEqual(frame.viewportOffsetRows, 4)
+    XCTAssertFalse(frame.atBottom)
+  }
+
   func testGraphemeExtrasSurviveToPlainText() throws {
     let terminal = try TerminalCore(columns: 80, rows: 24)
     let frame = try TerminalFrame()

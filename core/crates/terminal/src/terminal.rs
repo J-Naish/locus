@@ -162,7 +162,6 @@ pub struct Terminal {
     last_printed_class: Option<(u32, unicode::GraphemeBreak)>,
     sgr_style_changed: bool,
     pub modes: ModeState,
-    pub protected_mode: ProtectedMode,
     pub dirty: Dirty,
     pub colors: TerminalColors,
     pub flags: TerminalFlags,
@@ -191,7 +190,6 @@ impl Terminal {
             last_printed_class: None,
             sgr_style_changed: false,
             modes: ModeState::default(),
-            protected_mode: ProtectedMode::Off,
             dirty: Dirty::default(),
             colors: TerminalColors::default(),
             flags: TerminalFlags::default(),
@@ -975,7 +973,8 @@ impl Terminal {
                     .pages
                     .erase_row_bounded(Point::active(0, u32::from(top)), limit);
                 self.active_screen_mut().cursor_absolute(x, y);
-                self.dirty.screen = true;
+                // erase_row_bounded dirties its page, which RenderState expands
+                // to every affected row through Page::is_dirty.
             }
         } else {
             self.cursor_down(1);
@@ -1257,7 +1256,6 @@ impl Terminal {
         // Restore the cursor position and pending wrap.
         self.active_screen_mut().cursor_absolute(old_x, old_y);
         self.active_screen_mut().cursor.pending_wrap = old_wrap;
-        self.dirty.screen = true;
     }
 
     pub fn scroll_down(&mut self, count: usize) {
@@ -1275,7 +1273,6 @@ impl Terminal {
         // Restore the cursor position and pending wrap.
         self.active_screen_mut().cursor_absolute(old_x, old_y);
         self.active_screen_mut().cursor.pending_wrap = old_wrap;
-        self.dirty.screen = true;
     }
 
     pub fn insert_lines(&mut self, count: usize) {
@@ -1330,7 +1327,6 @@ impl Terminal {
         let left = self.scrolling_region.left;
         self.active_screen_mut().cursor_absolute(left, start_y);
         self.active_screen_mut().cursor.pending_wrap = false;
-        self.dirty.screen = true;
     }
 
     pub fn delete_lines(&mut self, count: usize) {
@@ -1385,7 +1381,6 @@ impl Terminal {
         let left = self.scrolling_region.left;
         self.active_screen_mut().cursor_absolute(left, start_y);
         self.active_screen_mut().cursor.pending_wrap = false;
-        self.dirty.screen = true;
     }
 
     /// ICH: insert `count` blank cells at the cursor, shifting existing content
@@ -1480,7 +1475,6 @@ impl Terminal {
 
         // Our row is always dirty.
         self.active_screen_mut().cursor_mark_dirty();
-        self.dirty.screen = true;
     }
 
     /// DCH: remove `count` characters at the cursor, shifting the remaining
@@ -1543,7 +1537,6 @@ impl Terminal {
 
         // Our row is always dirty.
         self.active_screen_mut().cursor_mark_dirty();
-        self.dirty.screen = true;
     }
 
     /// The wide-flag of the cell at active `(x, y)`, or `Narrow` if out of range.
@@ -1587,13 +1580,12 @@ impl Terminal {
 
         // Clear the cells [x, x + end). If we never had a protection mode, or
         // the last protection mode was not ISO, use the fast path.
-        let protected = self.protected_mode == ProtectedMode::Iso;
+        let protected = self.active_screen().protected_mode == ProtectedMode::Iso;
         self.active_screen_mut().clear_cells(
             Point::active(x, u32::from(y)),
             Point::active(x + end - 1, u32::from(y)),
             protected,
         );
-        self.dirty.screen = true;
     }
 
     /// Erase the line.
@@ -1654,7 +1646,7 @@ impl Terminal {
         // We respect protected attributes if explicitly requested (probably
         // a DECSEL sequence) or if our last protected mode was ISO even if it's
         // not currently set.
-        let protected = self.protected_mode == ProtectedMode::Iso || protected_req;
+        let protected = self.active_screen().protected_mode == ProtectedMode::Iso || protected_req;
 
         self.active_screen_mut().clear_cells(
             Point::active(start, y),
@@ -1668,7 +1660,7 @@ impl Terminal {
         // We respect protected attributes if explicitly requested (probably
         // a DECSEL sequence) or if our last protected mode was ISO even if it's
         // not currently set.
-        let protected = self.protected_mode == ProtectedMode::Iso || protected_req;
+        let protected = self.active_screen().protected_mode == ProtectedMode::Iso || protected_req;
 
         match mode {
             EraseDisplay::ScrollComplete => {
@@ -1895,15 +1887,16 @@ impl Terminal {
 
     pub fn set_protected_mode(&mut self, mode: ProtectedMode) {
         // ghostty: `Terminal.setProtectedMode` (Terminal.zig:1170)
+        let screen = self.active_screen_mut();
         match mode {
             ProtectedMode::Off => {
                 // screen.protected_mode is NEVER reset to `.off` because logic
                 // such as eraseChars depends on knowing the _most recent_ mode.
-                self.active_screen_mut().cursor.protected = false;
+                screen.cursor.protected = false;
             }
             ProtectedMode::Iso | ProtectedMode::Dec => {
-                self.active_screen_mut().cursor.protected = true;
-                self.protected_mode = mode;
+                screen.cursor.protected = true;
+                screen.protected_mode = mode;
             }
         }
     }
@@ -2147,7 +2140,6 @@ impl Terminal {
         self.pwd = None;
         self.title = None;
         self.status_display = StatusDisplay::Main;
-        self.protected_mode = ProtectedMode::Off;
         self.flags = TerminalFlags::default();
         self.mouse_shape = None;
         self.tabstops = Tabstops::new(usize::from(self.cols), TABSTOP_INTERVAL);
@@ -7906,7 +7898,7 @@ mod tests {
         assert_eq!(t.active_screen().cursor.y, 0);
         assert_eq!(t.active_screen().cursor.x, 0);
         assert!(t.active_screen().cursor.protected);
-        assert!(t.protected_mode == ProtectedMode::Iso);
+        assert!(t.active_screen().protected_mode == ProtectedMode::Iso);
         for y in 0..t.rows {
             assert!(t.is_dirty(Point::active(0, u32::from(y))));
         }
@@ -9043,6 +9035,24 @@ mod tests {
         assert!(t.active_screen().cursor.protected);
         t.set_protected_mode(ProtectedMode::Off);
         assert!(!t.active_screen().cursor.protected);
+    }
+
+    #[test]
+    fn protected_mode_is_scoped_to_each_screen() {
+        let mut t = terminal(5, 3);
+        t.set_protected_mode(ProtectedMode::Dec);
+        t.print('A');
+        t.set_protected_mode(ProtectedMode::Off);
+
+        t.switch_screen_mode(SwitchScreenMode::M1049, true);
+        t.set_protected_mode(ProtectedMode::Iso);
+        assert_eq!(t.active_screen().protected_mode, ProtectedMode::Iso);
+        t.switch_screen_mode(SwitchScreenMode::M1049, false);
+
+        assert_eq!(t.active_screen().protected_mode, ProtectedMode::Dec);
+        t.set_cursor_pos(1, 1);
+        t.erase_chars(1);
+        assert_eq!(t.plain_string(), "");
     }
 
     #[test]

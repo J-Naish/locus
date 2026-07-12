@@ -239,6 +239,22 @@ final class TerminalFrame {
     rawPointer.pointee.cursor
   }
 
+  var scrollDelta: Int32 {
+    rawPointer.pointee.scroll_delta
+  }
+
+  var viewportOffsetRows: UInt32 {
+    rawPointer.pointee.viewport_offset_rows
+  }
+
+  var totalRows: UInt32 {
+    rawPointer.pointee.total_rows
+  }
+
+  var atBottom: Bool {
+    rawPointer.pointee.at_bottom
+  }
+
   var columns: UInt16 {
     rawPointer.pointee.cols
   }

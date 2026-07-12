@@ -127,6 +127,7 @@ pub struct RenderState {
     pub cursor: RenderCursor,
     pub row_data: Vec<RenderRow>,
     pub dirty: DirtyState,
+    pub scroll_delta: i32,
     screen_key: crate::screen_set::ScreenKey,
     viewport_pin: Option<Pin>,
 }
@@ -140,26 +141,40 @@ impl RenderState {
             cursor: RenderCursor::default(),
             row_data: (0..rows).map(|_| RenderRow::blank(cols)).collect(),
             dirty: DirtyState::Full,
+            scroll_delta: 0,
             screen_key: crate::screen_set::ScreenKey::Primary,
             viewport_pin: None,
         }
     }
 
     pub fn update(&mut self, terminal: &mut Terminal) {
+        self.scroll_delta = 0;
         let screen_key = terminal.screens.active_key();
         let screen = terminal.active_screen();
         let dims_changed = self.rows != screen.rows() || self.cols != screen.cols();
         let viewport_pin = Some(screen.pages.get_top_left(Tag::Viewport));
-        let redraw = dims_changed
+        let viewport_changed = self.viewport_pin != viewport_pin;
+        let full_redraw = dims_changed
             || self.screen_key != screen_key
-            || self.viewport_pin != viewport_pin
             || terminal.dirty.any()
             || screen.dirty.any();
+        let scroll_delta = (!full_redraw && viewport_changed)
+            .then(|| {
+                viewport_row_delta(
+                    &screen.pages,
+                    self.viewport_pin?,
+                    viewport_pin?,
+                    screen.rows(),
+                )
+            })
+            .flatten();
+        let redraw = full_redraw || (viewport_changed && scroll_delta.is_none());
 
         self.rows = screen.rows();
         self.cols = screen.cols();
         self.screen_key = screen_key;
         self.viewport_pin = viewport_pin;
+        self.scroll_delta = scroll_delta.unwrap_or(0);
         self.colors = snapshot_colors(terminal);
         self.cursor = snapshot_cursor(terminal);
 
@@ -167,14 +182,28 @@ impl RenderState {
             self.row_data = (0..self.rows)
                 .map(|_| RenderRow::blank(self.cols))
                 .collect();
+        } else if let Some(delta) = scroll_delta {
+            if delta > 0 {
+                self.row_data.rotate_left(delta as usize);
+            } else {
+                self.row_data.rotate_right(delta.unsigned_abs() as usize);
+            }
         }
-        for row in &mut self.row_data {
+        let row_count = self.row_data.len();
+        for (index, row) in self.row_data.iter_mut().enumerate() {
             if row.cells.len() != self.cols as usize {
                 row.cells = vec![RenderCell::default(); self.cols as usize];
             }
             row.selection = None;
             row.highlights.clear();
-            row.dirty = redraw;
+            row.dirty = redraw
+                || scroll_delta.is_some_and(|delta| {
+                    if delta > 0 {
+                        index >= row_count.saturating_sub(delta as usize)
+                    } else {
+                        index < delta.unsigned_abs() as usize
+                    }
+                });
         }
 
         let screen = terminal.active_screen();
@@ -194,7 +223,13 @@ impl RenderState {
                 continue;
             };
             let row = &mut self.row_data[y as usize];
-            let was_dirty = row.dirty || screen.pages.pin_is_dirty(pin);
+            let pin_dirty = screen.pages.pin_is_dirty(pin);
+            let reusable_survivor = scroll_delta.is_some()
+                && !row.dirty
+                && row.pin == Some(pin)
+                && pin_dirty
+                && render_row_matches(row, &node.page, pin.y, self.cols);
+            let was_dirty = row.dirty || (pin_dirty && !reusable_survivor);
             row.pin = Some(pin);
             row.raw = node.page.row(pin.y);
             row.dirty = was_dirty;
@@ -233,9 +268,8 @@ impl RenderState {
                 }
             }
             if let Some((selection, top, bottom, top_coord, bottom_coord)) = selection_cache {
-                let point = Coordinate {
-                    x: pin.x,
-                    y: u32::from(y),
+                let Some(point) = screen.pages.point_from_pin(Tag::Screen, pin) else {
+                    continue;
                 };
                 if let Some(row_selection) = selection.contained_row_cached(
                     &screen.pages,
@@ -244,7 +278,7 @@ impl RenderState {
                     pin,
                     top_coord,
                     bottom_coord,
-                    point,
+                    point.coord(),
                 ) {
                     if let (Some(start), Some(end)) = (
                         row_selection.start(&screen.pages),
@@ -275,28 +309,47 @@ impl RenderState {
 
     pub fn update_highlights_flattened(&mut self, tag: u16, highlights: &[Flattened]) {
         for row in &mut self.row_data {
-            row.highlights.clear();
             let Some(pin) = row.pin else {
                 continue;
             };
+            let mut updated = Vec::new();
             for highlight in highlights {
                 if highlight.chunks.iter().any(|chunk| {
                     chunk.node == pin.node && pin.y >= chunk.start && pin.y < chunk.end
                 }) {
-                    row.highlights.push(RenderHighlight {
+                    // ghostty: render.zig:709-718 -- a node can contain many
+                    // viewport rows, so clipping applies only on the actual
+                    // first and last rows of the flattened highlight.
+                    updated.push(RenderHighlight {
                         tag,
-                        start: if highlight.chunks.first().map(|chunk| chunk.node) == Some(pin.node)
+                        start: if highlight
+                            .chunks
+                            .first()
+                            .is_some_and(|chunk| chunk.node == pin.node && chunk.start == pin.y)
                         {
                             highlight.top_x
                         } else {
                             0
                         },
-                        end: if highlight.chunks.last().map(|chunk| chunk.node) == Some(pin.node) {
+                        end: if highlight.chunks.last().is_some_and(|chunk| {
+                            chunk.node == pin.node && chunk.end.saturating_sub(1) == pin.y
+                        }) {
                             highlight.bot_x
                         } else {
                             self.cols.saturating_sub(1)
                         },
                     });
+                }
+            }
+            let highlights_changed = row.highlights != updated;
+            let has_match = !updated.is_empty();
+            if highlights_changed {
+                row.highlights = updated;
+            }
+            if has_match || highlights_changed {
+                row.dirty = true;
+                if self.dirty == DirtyState::False {
+                    self.dirty = DirtyState::Partial;
                 }
             }
         }
@@ -364,6 +417,57 @@ impl RenderState {
     }
 }
 
+fn viewport_row_delta(
+    pages: &crate::page_list::PageList,
+    previous: Pin,
+    current: Pin,
+    rows: CellCountInt,
+) -> Option<i32> {
+    for distance in 1..usize::from(rows) {
+        if pages
+            .pin_down(previous, distance)
+            .is_some_and(|pin| pin.eql(current))
+        {
+            return i32::try_from(distance).ok();
+        }
+        if pages
+            .pin_up(previous, distance)
+            .is_some_and(|pin| pin.eql(current))
+        {
+            return i32::try_from(distance).ok().map(i32::wrapping_neg);
+        }
+    }
+    None
+}
+
+fn render_row_matches(
+    cached: &RenderRow,
+    page: &crate::page::Page,
+    y: CellCountInt,
+    cols: CellCountInt,
+) -> bool {
+    let mut cached_raw = cached.raw;
+    cached_raw.set_dirty(false);
+    let mut current_raw = page.row(y);
+    current_raw.set_dirty(false);
+    if cached_raw != current_raw {
+        return false;
+    }
+
+    (0..cols).all(|x| {
+        cached.cells.get(x as usize).is_some_and(|cell| {
+            cell.raw == page.cell(y, x)
+                && cell.style
+                    == page
+                        .style_for_cell(y, x)
+                        .map(Style::from)
+                        .unwrap_or_default()
+                && cell.grapheme == page.grapheme(y, x).unwrap_or_default()
+                && cell.hyperlink == page.hyperlink_id(y, x)
+        })
+    })
+}
+
 type SelectionCache = (Selection, Pin, Pin, Coordinate, Coordinate);
 
 fn selection_cache(
@@ -373,8 +477,10 @@ fn selection_cache(
     let selection = selection?;
     let top = selection.top_left(&screen.pages)?;
     let bottom = selection.bottom_right(&screen.pages)?;
-    let top_coord = screen.pages.point_from_pin(Tag::Viewport, top)?.coord();
-    let bottom_coord = screen.pages.point_from_pin(Tag::Viewport, bottom)?.coord();
+    // ghostty: render.zig:601-602 -- selection endpoints remain resolvable
+    // after either endpoint leaves the viewport.
+    let top_coord = screen.pages.point_from_pin(Tag::Screen, top)?.coord();
+    let bottom_coord = screen.pages.point_from_pin(Tag::Screen, bottom)?.coord();
     Some((selection, top, bottom, top_coord, bottom_coord))
 }
 
@@ -642,6 +748,116 @@ mod tests {
     }
 
     #[test]
+    fn row_edits_do_not_force_full_redraw() {
+        let mut edited = terminal_with_text(10, 4, "abcdef");
+        let mut render = RenderState::new(0, 0);
+        render.update(&mut edited);
+
+        edited.set_cursor_pos(1, 3);
+        edited.delete_chars(1);
+        render.update(&mut edited);
+
+        assert_eq!(render.dirty, DirtyState::Partial);
+        assert_eq!(
+            render
+                .row_data
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| row.dirty.then_some(index))
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn region_scroll_does_not_force_full_redraw() {
+        let mut scrolled = terminal(10, 5);
+        scrolled.set_top_and_bottom_margin(2, 4);
+        scrolled.set_mode(Mode::EnableLeftAndRightMargin);
+        scrolled.set_left_and_right_margin(2, 9);
+        scrolled.set_cursor_pos(4, 2);
+        let mut render = RenderState::new(0, 0);
+        render.update(&mut scrolled);
+
+        scrolled.linefeed();
+        render.update(&mut scrolled);
+
+        assert_eq!(render.dirty, DirtyState::Partial);
+        assert_eq!(
+            render
+                .row_data
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| row.dirty.then_some(index))
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn viewport_scroll_reuses_rows() {
+        let mut terminal = terminal_with_text(8, 3, "one\r\ntwo\r\nthree");
+        let mut render = RenderState::new(0, 0);
+        render.update(&mut terminal);
+        let surviving_row = render.row_data[1].cells.clone();
+
+        terminal.linefeed();
+        render.update(&mut terminal);
+
+        assert_eq!(render.scroll_delta, 1);
+        assert_eq!(render.dirty, DirtyState::Partial);
+        assert_eq!(render.row_data[0].cells, surviving_row);
+        assert_eq!(
+            render
+                .row_data
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| row.dirty.then_some(index))
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn viewport_jump_falls_back_to_full_redraw() {
+        let mut terminal = terminal_with_text(8, 3, "one\r\ntwo\r\nthree");
+        let mut render = RenderState::new(0, 0);
+        render.update(&mut terminal);
+        terminal.print_string("\r\nfive\r\nsix\r\nseven");
+        render.update(&mut terminal);
+        terminal.scroll_viewport(crate::page_list::Scroll::DeltaRow(-3));
+        render.update(&mut terminal);
+
+        assert_eq!(render.scroll_delta, 0);
+        assert_eq!(render.dirty, DirtyState::Full);
+        assert!(render.row_data.iter().all(|row| row.dirty));
+    }
+
+    #[test]
+    fn viewport_scroll_up_reuses_rows() {
+        let mut terminal = terminal_with_text(8, 3, "one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        let mut render = RenderState::new(0, 0);
+        render.update(&mut terminal);
+        let surviving_row = render.row_data[0].cells.clone();
+
+        terminal.scroll_viewport(crate::page_list::Scroll::DeltaRow(-1));
+        render.update(&mut terminal);
+
+        assert_eq!(render.scroll_delta, -1);
+        assert_eq!(render.dirty, DirtyState::Partial);
+        assert_eq!(render.row_data[1].cells, surviving_row);
+        assert_eq!(
+            render
+                .row_data
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| row.dirty.then_some(index))
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+    }
+
+    #[test]
     fn colors() {
         // ghostty: "colors" (render.zig:1154)
         let mut terminal = terminal(10, 5);
@@ -709,6 +925,33 @@ mod tests {
         assert_eq!(
             render.row_data[2].selection,
             Some(RenderSelection { start: 0, end: 2 })
+        );
+    }
+
+    #[test]
+    fn selection_highlight_survives_offscreen_endpoints() {
+        let mut terminal = terminal_with_text(8, 3, "zero\r\none\r\ntwo\r\nthree\r\nfour\r\nfive");
+        terminal.scroll_viewport(crate::page_list::Scroll::Top);
+        let pages = &terminal.active_screen().pages;
+        let selection = Selection::new(
+            pages.pin(Point::screen(1, 0)).unwrap(),
+            pages.pin(Point::screen(3, 5)).unwrap(),
+            false,
+        );
+        terminal.active_screen_mut().select(Some(selection));
+        let mut render = RenderState::new(0, 0);
+        render.update(&mut terminal);
+
+        terminal.scroll_viewport(crate::page_list::Scroll::DeltaRow(2));
+        render.update(&mut terminal);
+
+        assert_eq!(
+            render.row_data[0].selection,
+            Some(RenderSelection { start: 0, end: 7 })
+        );
+        assert_eq!(
+            render.row_data[2].selection,
+            Some(RenderSelection { start: 0, end: 7 })
         );
     }
 
@@ -813,5 +1056,103 @@ mod tests {
         terminal.print_string("X");
         render.update(&mut terminal);
         assert!(render.row_data[0].highlights.is_empty());
+    }
+
+    #[test]
+    fn multi_row_highlight_clips_only_boundary_rows() {
+        let mut terminal = terminal(10, 3);
+        let mut render = RenderState::new(0, 0);
+        render.update(&mut terminal);
+        let pages = &terminal.active_screen().pages;
+        let highlight = Flattened::new(
+            pages,
+            Untracked::new(
+                pages.pin(Point::screen(3, 0)).unwrap(),
+                pages.pin(Point::screen(6, 2)).unwrap(),
+            ),
+        )
+        .unwrap();
+
+        render.update_highlights_flattened(7, &[highlight]);
+
+        assert_eq!(
+            render.row_data[0].highlights,
+            vec![RenderHighlight {
+                tag: 7,
+                start: 3,
+                end: 9,
+            }]
+        );
+        assert_eq!(
+            render.row_data[1].highlights,
+            vec![RenderHighlight {
+                tag: 7,
+                start: 0,
+                end: 9,
+            }]
+        );
+        assert_eq!(
+            render.row_data[2].highlights,
+            vec![RenderHighlight {
+                tag: 7,
+                start: 0,
+                end: 6,
+            }]
+        );
+    }
+
+    #[test]
+    fn wrapped_multi_row_highlight_never_inverts_ranges() {
+        let mut terminal = terminal(10, 3);
+        let mut render = RenderState::new(0, 0);
+        render.update(&mut terminal);
+        render.dirty = DirtyState::False;
+        for row in &mut render.row_data {
+            row.dirty = false;
+        }
+        let pages = &terminal.active_screen().pages;
+        let highlight = Flattened::new(
+            pages,
+            Untracked::new(
+                pages.pin(Point::screen(8, 0)).unwrap(),
+                pages.pin(Point::screen(2, 2)).unwrap(),
+            ),
+        )
+        .unwrap();
+
+        render.update_highlights_flattened(9, &[highlight]);
+
+        assert_eq!(render.dirty, DirtyState::Partial);
+        assert!(render.row_data.iter().all(|row| row.dirty));
+        assert!(render
+            .row_data
+            .iter()
+            .flat_map(|row| &row.highlights)
+            .all(|highlight| highlight.start <= highlight.end));
+    }
+
+    #[test]
+    fn multi_row_highlight_marks_changed_rows_dirty() {
+        let mut terminal = terminal(10, 3);
+        let mut render = RenderState::new(0, 0);
+        render.update(&mut terminal);
+        render.dirty = DirtyState::False;
+        for row in &mut render.row_data {
+            row.dirty = false;
+        }
+        let pages = &terminal.active_screen().pages;
+        let highlight = Flattened::new(
+            pages,
+            Untracked::new(
+                pages.pin(Point::screen(1, 0)).unwrap(),
+                pages.pin(Point::screen(4, 2)).unwrap(),
+            ),
+        )
+        .unwrap();
+
+        render.update_highlights_flattened(10, &[highlight]);
+
+        assert_eq!(render.dirty, DirtyState::Partial);
+        assert!(render.row_data.iter().all(|row| row.dirty));
     }
 }

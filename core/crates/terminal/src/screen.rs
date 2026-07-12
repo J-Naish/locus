@@ -18,6 +18,7 @@ use crate::selection::{Adjustment, Bounds, Selection};
 use crate::selection_codepoints::DEFAULT_LINE_WHITESPACE;
 use crate::sgr::Attribute;
 use crate::size::CellCountInt;
+use crate::stream::ProtectedMode;
 use crate::style::{PackedStyle, Style, StyleColor, StyleId, DEFAULT_STYLE_ID};
 use crate::unicode;
 
@@ -251,6 +252,7 @@ pub struct Screen {
     pub semantic_prompt: ScreenSemanticPrompt,
     pub selection: Option<Selection>,
     pub dirty: Dirty,
+    pub protected_mode: ProtectedMode,
 }
 
 impl Screen {
@@ -270,6 +272,7 @@ impl Screen {
             semantic_prompt: ScreenSemanticPrompt::default(),
             selection: None,
             dirty: Dirty::default(),
+            protected_mode: ProtectedMode::Off,
         };
         screen.assert_integrity();
         screen
@@ -291,13 +294,13 @@ impl Screen {
         let cursor_pin = self.cursor.pin;
         self.cursor = Cursor::new(cursor_pin);
 
-        // Reset our basic per-screen state. (Protected mode lives on the
-        // `Terminal` in this port, not the `Screen`, so it is reset there.)
+        // Reset our basic per-screen state.
         self.saved_cursor = None;
         self.charset = CharsetState::default();
         self.semantic_prompt = ScreenSemanticPrompt::default();
         self.clear_selection();
         self.dirty = Dirty::default();
+        self.protected_mode = ProtectedMode::Off;
 
         self.assert_integrity();
     }

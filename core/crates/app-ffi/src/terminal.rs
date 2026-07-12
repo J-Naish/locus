@@ -9,6 +9,7 @@ use std::ptr;
 use std::time::{Duration, Instant};
 
 use terminal::color::Rgb;
+use terminal::formatter::{Format, TerminalFormatter};
 use terminal::input::{self, Action, Key, KeyEvent, Mods, OptionAsAlt};
 use terminal::modes::Mode;
 use terminal::page::CellWide;
@@ -22,7 +23,8 @@ use terminal::terminal::{Options as TerminalOptions, Terminal};
 
 use crate::{clear_last_error_message, set_last_error_message, LOCUS_STATUS_OK};
 
-pub const LOCUS_TERM_ABI_VERSION: u32 = 2;
+pub const LOCUS_TERM_ABI_VERSION: u32 = 3;
+const SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
 
 pub const LOCUS_TERM_STATUS_INVALID_ARGUMENT: u32 = 300;
 pub const LOCUS_TERM_STATUS_PANIC: u32 = 301;
@@ -148,6 +150,10 @@ pub struct LocusTermFrame {
     pub cols: u16,
     pub rows: u16,
     pub dirty_state: u32,
+    pub scroll_delta: i32,
+    pub viewport_offset_rows: u32,
+    pub total_rows: u32,
+    pub at_bottom: bool,
     pub row_count: usize,
     pub rows_ptr: *const LocusTermRow,
     pub cell_count: usize,
@@ -176,6 +182,10 @@ impl LocusTermFrame {
             cols: 0,
             rows: 0,
             dirty_state: LOCUS_TERM_DIRTY_FULL,
+            scroll_delta: 0,
+            viewport_offset_rows: 0,
+            total_rows: 0,
+            at_bottom: true,
             row_count: 0,
             rows_ptr: ptr::null(),
             cell_count: 0,
@@ -272,6 +282,14 @@ pub struct LocusTermKeyEvent {
 pub struct LocusTerm {
     stream: Stream<TerminalHandler<FfiEffects>>,
     render_state: RenderState,
+    synchronized_output_started_at: Option<Instant>,
+}
+
+impl LocusTerm {
+    #[cfg(test)]
+    fn expire_synchronized_output_for_test(&mut self) {
+        self.synchronized_output_started_at = Some(Instant::now() - SYNCHRONIZED_OUTPUT_TIMEOUT);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -360,8 +378,8 @@ pub fn replay_bytes(
         return Err(render_status);
     }
 
-    // SAFETY: frame is live and immutable for this synchronous read.
-    let text = unsafe { dump_frame(frame, dump) };
+    // SAFETY: both handles are live and immutable for this synchronous read.
+    let text = unsafe { dump_frame(&*term, frame, dump) };
     // SAFETY: both handles are still live and have not been freed.
     unsafe {
         locus_term_frame_free(frame);
@@ -401,6 +419,7 @@ pub extern "C" fn locus_term_new(cols: u16, rows: u16, max_scrollback: usize) ->
         Box::into_raw(Box::new(LocusTerm {
             stream,
             render_state,
+            synchronized_output_started_at: None,
         }))
     })) {
         Ok(term) => term,
@@ -444,7 +463,24 @@ pub unsafe extern "C" fn locus_term_feed(
         let Some(bytes) = bytes_slice(bytes, len) else {
             return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
         };
+        let was_synchronized = term
+            .stream
+            .handler
+            .terminal
+            .modes
+            .get(Mode::SynchronizedOutput);
         term.stream.next_slice(bytes);
+        let is_synchronized = term
+            .stream
+            .handler
+            .terminal
+            .modes
+            .get(Mode::SynchronizedOutput);
+        if !was_synchronized && is_synchronized {
+            term.synchronized_output_started_at = Some(Instant::now());
+        } else if !is_synchronized {
+            term.synchronized_output_started_at = None;
+        }
         LOCUS_STATUS_OK
     })
 }
@@ -518,6 +554,13 @@ pub unsafe extern "C" fn locus_term_resize(term: *mut LocusTerm, cols: u16, rows
         let Some(term) = term_mut(term) else {
             return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
         };
+        // ghostty: termio/Termio.zig:490-492 -- resize must not leave a
+        // renderer blocked behind synchronized output.
+        term.stream
+            .handler
+            .terminal
+            .reset_mode(Mode::SynchronizedOutput);
+        term.synchronized_output_started_at = None;
         term.stream.handler.terminal.resize(cols, rows);
         LOCUS_STATUS_OK
     })
@@ -539,6 +582,15 @@ pub unsafe extern "C" fn locus_term_render(
         let Some(frame) = frame_mut(frame) else {
             return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
         };
+        if synchronized_output_blocks_render(term) {
+            frame.abi_version = LOCUS_TERM_ABI_VERSION;
+            frame.cols = term.stream.handler.terminal.cols;
+            frame.rows = term.stream.handler.terminal.rows;
+            frame.dirty_state = LOCUS_TERM_DIRTY_NONE;
+            frame.scroll_delta = 0;
+            update_viewport_metadata(term, frame);
+            return LOCUS_STATUS_OK;
+        }
         render_into_frame(term, frame, full);
         LOCUS_STATUS_OK
     })
@@ -770,7 +822,13 @@ fn render_into_frame(term: &mut LocusTerm, frame: &mut LocusTermFrame, full: boo
     frame.cols = term.render_state.cols;
     frame.rows = term.render_state.rows;
     frame.dirty_state = dirty_state_code(term.render_state.dirty);
+    frame.scroll_delta = if term.render_state.dirty == DirtyState::Full {
+        0
+    } else {
+        term.render_state.scroll_delta
+    };
     frame.cursor = cursor_from_render(&term.render_state);
+    update_viewport_metadata(term, frame);
     let storage = frame.storage_mut();
     storage.row_storage.clear();
     storage.cell_storage.clear();
@@ -819,12 +877,55 @@ fn render_into_frame(term: &mut LocusTerm, frame: &mut LocusTermFrame, full: boo
     frame.refresh_pointers();
 }
 
+fn synchronized_output_blocks_render(term: &mut LocusTerm) -> bool {
+    if !term
+        .stream
+        .handler
+        .terminal
+        .modes
+        .get(Mode::SynchronizedOutput)
+    {
+        term.synchronized_output_started_at = None;
+        return false;
+    }
+
+    if term
+        .synchronized_output_started_at
+        .is_some_and(|started| started.elapsed() < SYNCHRONIZED_OUTPUT_TIMEOUT)
+    {
+        return true;
+    }
+
+    // ghostty: termio/Thread.zig:35-37,364-374 -- upstream uses a timer;
+    // this serialized ABI checks the same deadline at presentation time.
+    term.stream
+        .handler
+        .terminal
+        .reset_mode(Mode::SynchronizedOutput);
+    term.synchronized_output_started_at = None;
+    false
+}
+
+fn update_viewport_metadata(term: &mut LocusTerm, frame: &mut LocusTermFrame) {
+    let screen = term.stream.handler.terminal.active_screen_mut();
+    let scrollbar = screen.pages.scrollbar();
+    let bottom_offset = scrollbar.total.saturating_sub(scrollbar.len);
+    let viewport_offset = bottom_offset.saturating_sub(scrollbar.offset);
+    frame.viewport_offset_rows = saturating_u32(viewport_offset);
+    frame.total_rows = saturating_u32(scrollbar.total);
+    frame.at_bottom = viewport_offset == 0;
+}
+
+fn saturating_u32(value: usize) -> u32 {
+    value.min(u32::MAX as usize) as u32
+}
+
 fn cursor_from_render(render: &RenderState) -> LocusTermCursor {
     let Some(viewport) = render.cursor.viewport else {
         return LocusTermCursor {
             x: render.cursor.active.x,
             y: render.cursor.active.y as u16,
-            visible: render.cursor.visible,
+            visible: false,
             blinking: render.cursor.blinking,
             wide_tail: false,
             style: cursor_style_code(render.cursor.visual_style),
@@ -902,7 +1003,16 @@ fn cell_wide_code(wide: CellWide) -> u8 {
 ///
 /// `frame` must be a live frame returned by this module and not mutated while
 /// this function reads its borrowed row/cell slices.
-unsafe fn dump_frame(frame: *const LocusTermFrame, dump: TermReplayDump) -> String {
+unsafe fn dump_frame(
+    term: &LocusTerm,
+    frame: *const LocusTermFrame,
+    dump: TermReplayDump,
+) -> String {
+    if dump == TermReplayDump::Vt {
+        let mut formatter = TerminalFormatter::new(&term.stream.handler.terminal);
+        formatter.opts.emit = Format::Vt;
+        return formatter.format().text;
+    }
     if frame.is_null() {
         return String::new();
     }
@@ -916,6 +1026,12 @@ unsafe fn dump_frame(frame: *const LocusTermFrame, dump: TermReplayDump) -> Stri
     let rows = unsafe { std::slice::from_raw_parts(frame.rows_ptr, frame.row_count) };
     // SAFETY: same ownership contract as rows above.
     let cells = unsafe { std::slice::from_raw_parts(frame.cells_ptr, frame.cell_count) };
+    let graphemes = if frame.grapheme_count == 0 || frame.graphemes_ptr.is_null() {
+        &[]
+    } else {
+        // SAFETY: same ownership contract as cells above.
+        unsafe { std::slice::from_raw_parts(frame.graphemes_ptr, frame.grapheme_count) }
+    };
     let mut out = String::new();
     for row in rows {
         if !out.is_empty() {
@@ -926,16 +1042,23 @@ unsafe fn dump_frame(frame: *const LocusTermFrame, dump: TermReplayDump) -> Stri
             .saturating_add(row.cell_count)
             .min(cells.len());
         for cell in &cells[row.cell_start..end] {
+            if matches!(cell.wide, 2 | 3) {
+                continue;
+            }
             let ch = char::from_u32(cell.codepoint).unwrap_or(' ');
             out.push(if ch == '\0' { ' ' } else { ch });
+            let grapheme_end = cell
+                .grapheme_start
+                .saturating_add(cell.grapheme_len)
+                .min(graphemes.len());
+            for codepoint in &graphemes[cell.grapheme_start.min(grapheme_end)..grapheme_end] {
+                if let Some(ch) = char::from_u32(*codepoint) {
+                    out.push(ch);
+                }
+            }
         }
     }
-    match dump {
-        TermReplayDump::Plain => trim_terminal_dump(out),
-        // The frame carries style metadata; a richer VT formatter can be
-        // layered here without changing CLI parsing or FFI ownership.
-        TermReplayDump::Vt => trim_terminal_dump(out),
-    }
+    trim_terminal_dump(out)
 }
 
 fn trim_terminal_dump(text: String) -> String {
@@ -1171,6 +1294,10 @@ mod tests {
     #[test]
     fn frame_prefix_layout_exposes_version_first() {
         assert_eq!(offset_of!(LocusTermFrame, abi_version), 0);
+        assert_eq!(offset_of!(LocusTermFrame, scroll_delta), 12);
+        assert_eq!(offset_of!(LocusTermFrame, viewport_offset_rows), 16);
+        assert_eq!(offset_of!(LocusTermFrame, total_rows), 20);
+        assert_eq!(offset_of!(LocusTermFrame, at_bottom), 24);
         assert!(offset_of!(LocusTermFrame, rows_ptr) > offset_of!(LocusTermFrame, row_count));
     }
 
@@ -1279,6 +1406,170 @@ mod tests {
             locus_term_frame_free(frame);
             locus_term_free(term);
         }
+    }
+
+    #[test]
+    fn frame_reports_scroll_delta() {
+        let term = locus_term_new(8, 3, 1024 * 1024);
+        let frame = locus_term_frame_new();
+        assert!(!term.is_null());
+        assert!(!frame.is_null());
+        unsafe {
+            let initial = b"one\r\ntwo\r\nthree";
+            assert_eq!(
+                locus_term_feed(term, initial.as_ptr(), initial.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            let next = b"\r\nfour";
+            assert_eq!(
+                locus_term_feed(term, next.as_ptr(), next.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, false), LOCUS_STATUS_OK);
+            assert_eq!((*frame).scroll_delta, 1);
+            assert_eq!((*frame).dirty_state, LOCUS_TERM_DIRTY_PARTIAL);
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn cursor_is_hidden_while_scrolled_back() {
+        let term = locus_term_new(8, 3, 1024 * 1024);
+        let frame = locus_term_frame_new();
+        let input = (0..10)
+            .map(|line| format!("{line}\r\n"))
+            .collect::<String>();
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            assert!((*frame).cursor.visible);
+            assert_eq!(locus_term_scroll(term, -2), LOCUS_STATUS_OK);
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            assert!(!(*frame).cursor.visible);
+            assert_eq!(locus_term_scroll(term, 100), LOCUS_STATUS_OK);
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            assert!((*frame).cursor.visible);
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn frame_reports_viewport_position() {
+        let term = locus_term_new(12, 10, 1024 * 1024);
+        let frame = locus_term_frame_new();
+        let input = (0..100)
+            .map(|line| format!("line-{line}\r\n"))
+            .collect::<String>();
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            assert!((*frame).total_rows >= 100);
+            assert_eq!((*frame).viewport_offset_rows, 0);
+            assert!((*frame).at_bottom);
+
+            assert_eq!(locus_term_scroll(term, -20), LOCUS_STATUS_OK);
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            assert_eq!((*frame).viewport_offset_rows, 20);
+            assert!(!(*frame).at_bottom);
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn synchronized_output_withholds_until_disabled() {
+        let term = new_term();
+        let frame = locus_term_frame_new();
+        unsafe {
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            let input = b"\x1b[?2026hwithheld";
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, false), LOCUS_STATUS_OK);
+            assert_eq!((*frame).dirty_state, LOCUS_TERM_DIRTY_NONE);
+            assert!(!dump_frame(&*term, frame, TermReplayDump::Plain).contains("withheld"));
+
+            let disable = b"\x1b[?2026l";
+            assert_eq!(
+                locus_term_feed(term, disable.as_ptr(), disable.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, false), LOCUS_STATUS_OK);
+            assert_ne!((*frame).dirty_state, LOCUS_TERM_DIRTY_NONE);
+            assert!(dump_frame(&*term, frame, TermReplayDump::Plain).contains("withheld"));
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn synchronized_output_timeout_forces_delivery() {
+        let term = new_term();
+        let frame = locus_term_frame_new();
+        unsafe {
+            let input = b"\x1b[?2026htimeout";
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            (*term).expire_synchronized_output_for_test();
+            assert_eq!(locus_term_render(term, frame, false), LOCUS_STATUS_OK);
+            assert_ne!((*frame).dirty_state, LOCUS_TERM_DIRTY_NONE);
+            assert!(dump_frame(&*term, frame, TermReplayDump::Plain).contains("timeout"));
+            assert!(!(*term)
+                .stream
+                .handler
+                .terminal
+                .modes
+                .get(Mode::SynchronizedOutput));
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn resize_releases_synchronized_output() {
+        let term = new_term();
+        unsafe {
+            let enable = b"\x1b[?2026h";
+            assert_eq!(
+                locus_term_feed(term, enable.as_ptr(), enable.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_resize(term, 20, 6), LOCUS_STATUS_OK);
+            assert!(!(*term)
+                .stream
+                .handler
+                .terminal
+                .modes
+                .get(Mode::SynchronizedOutput));
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn replay_plain_preserves_wide_graphemes_without_spacer_text() {
+        let text = "日本語 👨‍👩‍👧";
+        let output = replay_bytes(text.as_bytes(), 40, 4, TermReplayDump::Plain).unwrap();
+        assert!(output.text.contains(text), "dump was: {:?}", output.text);
+    }
+
+    #[test]
+    fn replay_vt_uses_terminal_formatter() {
+        let output = replay_bytes(b"\x1b[31mred", 20, 4, TermReplayDump::Vt).unwrap();
+        assert!(output.text.contains("\x1b["), "dump was: {:?}", output.text);
+        assert!(output.text.contains("red"), "dump was: {:?}", output.text);
     }
 
     #[test]
