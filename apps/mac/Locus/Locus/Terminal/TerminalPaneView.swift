@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Combine
 import CoreText
 import QuartzCore
@@ -544,6 +545,7 @@ extension TerminalKeyEvent {
   }
 }
 
+@MainActor
 enum TerminalKeyTranslator {
   // Device-dependent masks from IOKit/hidsystem/IOLLEvent.h. NSEvent always
   // supplies the device-independent modifier, but these low bits are present
@@ -559,7 +561,10 @@ enum TerminalKeyTranslator {
     static let rightControl: UInt = 0x0000_2000
   }
 
-  static func translate(_ input: TerminalKeyInput) -> TerminalKeyEvent? {
+  static func translate(
+    _ input: TerminalKeyInput,
+    action: UInt32 = LOCUS_TERM_ACTION_PRESS
+  ) -> TerminalKeyEvent? {
     let flags = NSEvent.ModifierFlags(rawValue: input.modifierFlagsRawValue)
     let modifiers = terminalModifiers(
       flags: flags,
@@ -570,7 +575,7 @@ enum TerminalKeyTranslator {
     // of passing it to the system, which has no binding for it.
     if modifiers.contains(.command), input.keyCode == 51 {
       return TerminalKeyEvent(
-        action: LOCUS_TERM_ACTION_PRESS,
+        action: action,
         key: LOCUS_TERM_KEY_UNIDENTIFIED,
         modifiers: .control,
         consumedModifiers: [],
@@ -587,14 +592,22 @@ enum TerminalKeyTranslator {
     let key = terminalKey(for: input.keyCode)
     let text = terminalText(for: input, modifiers: modifiers, key: key)
     return TerminalKeyEvent(
-      action: input.isARepeat ? LOCUS_TERM_ACTION_REPEAT : LOCUS_TERM_ACTION_PRESS,
+      action: input.isARepeat ? LOCUS_TERM_ACTION_REPEAT : action,
       key: key,
       modifiers: modifiers,
       consumedModifiers: [],
       composing: false,
       utf8: Data(text.utf8),
-      unshiftedCodepoint: input.charactersIgnoringModifiers?.unicodeScalars.first?.value ?? 0
+      unshiftedCodepoint: TerminalUnshiftedCodepointResolver.current(
+        keyCode: input.keyCode,
+        charactersIgnoringModifiers: input.charactersIgnoringModifiers
+      )
     )
+  }
+
+  static func suppressesTextInsertion(_ text: String) -> Bool {
+    !text.isEmpty
+      && text.unicodeScalars.allSatisfy({ (0xF710...0xF717).contains($0.value) })
   }
 
   private static func terminalText(
@@ -711,9 +724,132 @@ enum TerminalKeyTranslator {
       return LOCUS_TERM_KEY_F11
     case 111:
       return LOCUS_TERM_KEY_F12
+    case 105:
+      return LOCUS_TERM_KEY_F13
+    case 107:
+      return LOCUS_TERM_KEY_F14
+    case 113:
+      return LOCUS_TERM_KEY_F15
+    case 106:
+      return LOCUS_TERM_KEY_F16
+    case 64:
+      return LOCUS_TERM_KEY_F17
+    case 79:
+      return LOCUS_TERM_KEY_F18
+    case 80:
+      return LOCUS_TERM_KEY_F19
+    case 90:
+      return LOCUS_TERM_KEY_F20
     default:
       return LOCUS_TERM_KEY_UNIDENTIFIED
     }
+  }
+}
+
+@MainActor
+enum TerminalUnshiftedCodepointResolver {
+  private static var cache = TerminalUnshiftedCodepointCache()
+
+  nonisolated static func resolve(
+    charactersIgnoringModifiers: String?,
+    translate: () -> String?
+  ) -> UInt32 {
+    if let translated = translate(),
+      translated.unicodeScalars.count == 1,
+      let scalar = translated.unicodeScalars.first
+    {
+      return scalar.value
+    }
+    if let text = charactersIgnoringModifiers,
+      text.unicodeScalars.count == 1,
+      let scalar = text.unicodeScalars.first
+    {
+      if scalar.isASCII, let lowered = UnicodeScalar(String(scalar).lowercased()) {
+        return lowered.value
+      }
+      return scalar.value
+    }
+    return 0
+  }
+
+  static func current(keyCode: UInt16, charactersIgnoringModifiers: String?) -> UInt32 {
+    guard
+      let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+      let identifierPointer = TISGetInputSourceProperty(source, kTISPropertyInputSourceID),
+      let identifier = Unmanaged<CFString>.fromOpaque(identifierPointer).takeUnretainedValue()
+        as String?
+    else {
+      return resolve(charactersIgnoringModifiers: charactersIgnoringModifiers) { nil }
+    }
+    return cache.resolve(
+      layoutIdentifier: identifier,
+      keyCode: keyCode,
+      charactersIgnoringModifiers: charactersIgnoringModifiers
+    ) {
+      translatedCharacter(source: source, keyCode: keyCode)
+    }
+  }
+
+  private static func translatedCharacter(
+    source: TISInputSource,
+    keyCode: UInt16
+  ) -> String? {
+    guard
+      let layoutPointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData)
+    else {
+      return nil
+    }
+    let layoutData = Unmanaged<CFData>.fromOpaque(layoutPointer).takeUnretainedValue()
+    guard let bytes = CFDataGetBytePtr(layoutData) else {
+      return nil
+    }
+    let layout = bytes.withMemoryRebound(to: UCKeyboardLayout.self, capacity: 1) { $0 }
+    var deadKeyState: UInt32 = 0
+    var length = 0
+    var characters = [UniChar](repeating: 0, count: 4)
+    let status = UCKeyTranslate(
+      layout,
+      keyCode,
+      UInt16(kUCKeyActionDown),
+      0,
+      UInt32(LMGetKbdType()),
+      OptionBits(kUCKeyTranslateNoDeadKeysBit),
+      &deadKeyState,
+      characters.count,
+      &length,
+      &characters
+    )
+    guard status == noErr, length > 0 else {
+      return nil
+    }
+    return String(utf16CodeUnits: characters, count: length)
+  }
+}
+
+struct TerminalUnshiftedCodepointCache {
+  private struct Key: Hashable {
+    let layoutIdentifier: String
+    let keyCode: UInt16
+  }
+
+  private var values: [Key: UInt32] = [:]
+
+  mutating func resolve(
+    layoutIdentifier: String,
+    keyCode: UInt16,
+    charactersIgnoringModifiers: String?,
+    translate: () -> String?
+  ) -> UInt32 {
+    let key = Key(layoutIdentifier: layoutIdentifier, keyCode: keyCode)
+    if let cached = values[key] {
+      return cached
+    }
+    let value = TerminalUnshiftedCodepointResolver.resolve(
+      charactersIgnoringModifiers: charactersIgnoringModifiers,
+      translate: translate
+    )
+    values[key] = value
+    return value
   }
 }
 
@@ -938,6 +1074,22 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     }
   }
 
+  override func keyUp(with event: NSEvent) {
+    // Forwarding releases is safe: the core emits no bytes unless the active
+    // kitty keyboard protocol explicitly requests event types.
+    let input = TerminalKeyInput(event: event)
+    guard
+      let translated = TerminalKeyTranslator.translate(
+        input,
+        action: LOCUS_TERM_ACTION_RELEASE
+      )
+    else {
+      super.keyUp(with: event)
+      return
+    }
+    sendTerminalKey(translated)
+  }
+
   override func doCommand(by selector: Selector) {
     handledInputDuringKeyInterpretation = true
     guard let event = TerminalCommandKeyTranslator.terminalKey(for: selector) else {
@@ -967,6 +1119,11 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     clearMarkedText()
     let text = Self.string(fromTextInput: string)
     guard !text.isEmpty else {
+      return
+    }
+    // AppKit represents F13-F20 as private-use text on some paths. Those keys
+    // are handled by keyDown and must never leak literal PUA bytes to the PTY.
+    if TerminalKeyTranslator.suppressesTextInsertion(text) {
       return
     }
     resetCaretBlink()

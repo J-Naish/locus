@@ -6,6 +6,7 @@
 use crate::charsets::{ActiveSlot, Charset, Slots as CharsetSlots};
 use crate::device_attributes;
 use crate::device_status;
+use crate::input::kitty_flags::Flags as KittyFlags;
 use crate::modes::{mode_from_int, Mode, ModeTag};
 use crate::osc::{ColorOperationKind, ColorRequest, KittyColorRequest, Terminator};
 use crate::parser::{Action as ParserAction, Csi, Dcs, Esc, Parser};
@@ -98,7 +99,12 @@ pub trait Handler {
     fn cursor_style(&mut self, _style: CursorStyle) {}
     fn mouse_shift_capture(&mut self, _enabled: bool) {}
     fn modify_other_keys_2(&mut self, _enabled: bool) {}
+    fn kitty_keyboard_query(&mut self) {}
+    fn kitty_keyboard_push(&mut self, _flags: KittyFlags) {}
     fn kitty_keyboard_pop(&mut self, _count: u16) {}
+    fn kitty_keyboard_set(&mut self, _flags: KittyFlags) {}
+    fn kitty_keyboard_set_or(&mut self, _flags: KittyFlags) {}
+    fn kitty_keyboard_set_not(&mut self, _flags: KittyFlags) {}
     fn left_and_right_margin(&mut self, _left: u16, _right: u16) {}
     fn left_and_right_margin_ambiguous(&mut self) {}
     fn top_and_bottom_margin(&mut self, _top: u16, _bottom: u16) {}
@@ -839,8 +845,29 @@ impl<H: Handler> Stream<H> {
     fn dispatch_u(handler: &mut H, csi: Csi<'_>) {
         match csi.intermediates {
             b"" if csi.params.is_empty() => handler.restore_cursor(),
+            // ghostty: stream.zig:1832-1883
+            b"?" if csi.params.is_empty() => handler.kitty_keyboard_query(),
+            b">" if csi.params.len() <= 1 => {
+                let flags = csi.params.first().copied().unwrap_or(0);
+                if flags <= 0x1f {
+                    handler.kitty_keyboard_push(KittyFlags::from_bits(flags as u8));
+                }
+            }
             b"<" if csi.params.len() <= 1 => {
                 handler.kitty_keyboard_pop(count_param(csi.params.first().copied()));
+            }
+            b"=" if csi.params.len() <= 2 => {
+                let flags = csi.params.first().copied().unwrap_or(0);
+                if flags > 0x1f {
+                    return;
+                }
+                let flags = KittyFlags::from_bits(flags as u8);
+                match csi.params.get(1).copied().unwrap_or(1) {
+                    1 => handler.kitty_keyboard_set(flags),
+                    2 => handler.kitty_keyboard_set_or(flags),
+                    3 => handler.kitty_keyboard_set_not(flags),
+                    _ => {}
+                }
             }
             _ => {}
         }

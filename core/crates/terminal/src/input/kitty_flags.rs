@@ -34,7 +34,7 @@ impl Flags {
             | ((self.report_associated as u8) << 4)
     }
 
-    const fn from_bits(bits: u8) -> Self {
+    pub const fn from_bits(bits: u8) -> Self {
         Self {
             disambiguate: bits & (1 << 0) != 0,
             report_events: bits & (1 << 1) != 0,

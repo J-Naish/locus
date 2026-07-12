@@ -46,6 +46,125 @@ final class TerminalKeyTranslationTests: XCTestCase {
     }
   }
 
+  func testTranslatorMapsReleaseAndRepeatActions() throws {
+    let input = TerminalKeyInput(
+      keyCode: 123,
+      modifierFlagsRawValue: 0,
+      characters: nil,
+      charactersIgnoringModifiers: nil,
+      isARepeat: false
+    )
+    XCTAssertEqual(
+      try XCTUnwrap(
+        TerminalKeyTranslator.translate(input, action: LOCUS_TERM_ACTION_RELEASE)
+      ).action,
+      LOCUS_TERM_ACTION_RELEASE
+    )
+    let repeatInput = TerminalKeyInput(
+      keyCode: 123,
+      modifierFlagsRawValue: 0,
+      characters: nil,
+      charactersIgnoringModifiers: nil,
+      isARepeat: true
+    )
+    XCTAssertEqual(
+      try XCTUnwrap(TerminalKeyTranslator.translate(repeatInput)).action,
+      LOCUS_TERM_ACTION_REPEAT
+    )
+  }
+
+  func testF13ThroughF20MapToTerminalKeys() throws {
+    let expected: [(UInt16, UInt32)] = [
+      (105, LOCUS_TERM_KEY_F13), (107, LOCUS_TERM_KEY_F14),
+      (113, LOCUS_TERM_KEY_F15), (106, LOCUS_TERM_KEY_F16),
+      (64, LOCUS_TERM_KEY_F17), (79, LOCUS_TERM_KEY_F18),
+      (80, LOCUS_TERM_KEY_F19), (90, LOCUS_TERM_KEY_F20),
+    ]
+    for (keyCode, key) in expected {
+      let privateUseScalar = try XCTUnwrap(
+        UnicodeScalar(0xF710 + UInt32(key - LOCUS_TERM_KEY_F13))
+      )
+      let event = try XCTUnwrap(
+        TerminalKeyTranslator.translate(
+          TerminalKeyInput(
+            keyCode: keyCode,
+            modifierFlagsRawValue: 0,
+            characters: String(privateUseScalar),
+            charactersIgnoringModifiers: nil,
+            isARepeat: false
+          )
+        )
+      )
+      XCTAssertEqual(event.key, key)
+      XCTAssertTrue(event.utf8.isEmpty)
+    }
+  }
+
+  func testF13ThroughF20PrivateUseTextIsSuppressed() {
+    for value in 0xF710...0xF717 {
+      let scalar = UnicodeScalar(value)
+      XCTAssertNotNil(scalar)
+      if let scalar {
+        XCTAssertTrue(TerminalKeyTranslator.suppressesTextInsertion(String(scalar)))
+      }
+    }
+    XCTAssertFalse(TerminalKeyTranslator.suppressesTextInsertion("text"))
+  }
+
+  func testUnshiftedResolverUsesTranslationThenAsciiFallback() {
+    XCTAssertEqual(
+      TerminalUnshiftedCodepointResolver.resolve(
+        charactersIgnoringModifiers: "A",
+        translate: { "q" }
+      ),
+      UnicodeScalar("q").value
+    )
+    XCTAssertEqual(
+      TerminalUnshiftedCodepointResolver.resolve(
+        charactersIgnoringModifiers: "A",
+        translate: { nil }
+      ),
+      UnicodeScalar("a").value
+    )
+  }
+
+  func testUnshiftedResolverCachesByLayoutAndKeyCode() {
+    var cache = TerminalUnshiftedCodepointCache()
+    var translationCount = 0
+    let translate = {
+      translationCount += 1
+      return "a"
+    }
+
+    let first = cache.resolve(
+      layoutIdentifier: "test-layout",
+      keyCode: 0,
+      charactersIgnoringModifiers: "A",
+      translate: translate
+    )
+    let second = cache.resolve(
+      layoutIdentifier: "test-layout",
+      keyCode: 0,
+      charactersIgnoringModifiers: "Z",
+      translate: translate
+    )
+
+    XCTAssertEqual(first, UnicodeScalar("a").value)
+    XCTAssertEqual(second, first)
+    XCTAssertEqual(translationCount, 1)
+  }
+
+  func testCurrentLayoutProducesUnshiftedScalarForShiftAWhenAvailable() throws {
+    let value = TerminalUnshiftedCodepointResolver.current(
+      keyCode: 0,
+      charactersIgnoringModifiers: "A"
+    )
+    guard value == UnicodeScalar("a").value else {
+      throw XCTSkip("Current keyboard layout does not map keyCode 0 to unshifted a")
+    }
+    XCTAssertEqual(value, UnicodeScalar("a").value)
+  }
+
   func testControlCPassesCharacterAndMods() throws {
     let event = try XCTUnwrap(
       TerminalKeyTranslator.translate(
@@ -63,22 +182,6 @@ final class TerminalKeyTranslationTests: XCTestCase {
     XCTAssertTrue(event.modifiers.contains(.control))
     XCTAssertEqual(event.utf8, Data("c".utf8))
     XCTAssertEqual(event.unshiftedCodepoint, UnicodeScalar("c").value)
-  }
-
-  func testUnrepresentableModifiedKeyDetection() {
-    // CSI-u and modifyOtherKeys forms are protocol-only and must fall back.
-    XCTAssertTrue(
-      TerminalKeyEncodingFallback.isUnrepresentableModifiedKey(Data("\u{1B}[59;5u".utf8)))
-    XCTAssertTrue(
-      TerminalKeyEncodingFallback.isUnrepresentableModifiedKey(Data("\u{1B}[27;2;13~".utf8)))
-    // Navigation/function keys keep their modifiers, plain bytes pass through.
-    XCTAssertFalse(
-      TerminalKeyEncodingFallback.isUnrepresentableModifiedKey(Data("\u{1B}[15;2~".utf8)))
-    XCTAssertFalse(
-      TerminalKeyEncodingFallback.isUnrepresentableModifiedKey(Data("\u{1B}[5~".utf8)))
-    XCTAssertFalse(TerminalKeyEncodingFallback.isUnrepresentableModifiedKey(Data("\r".utf8)))
-    XCTAssertFalse(
-      TerminalKeyEncodingFallback.isUnrepresentableModifiedKey(Data("\u{1B}[A".utf8)))
   }
 
   func testCommandDeleteTranslatesToKillLine() throws {
@@ -289,6 +392,54 @@ final class TerminalKeyTranslationTests: XCTestCase {
       },
       "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
+  }
+
+  func testShiftEnterSendsPlainNewlineByDefault() throws {
+    let session = TerminalSession(columns: 40, rows: 10)
+    defer { session.terminate() }
+    session.start(command: "/bin/cat")
+    XCTAssertTrue(waitForTerminalInputCondition { session.snapshot != nil })
+    let event = try XCTUnwrap(
+      TerminalKeyTranslator.translate(
+        TerminalKeyInput(
+          keyCode: 36,
+          modifierFlagsRawValue: NSEvent.ModifierFlags.shift.rawValue,
+          characters: "\r",
+          charactersIgnoringModifiers: "\r",
+          isARepeat: false
+        )
+      )
+    )
+
+    session.sendKey(event)
+
+    XCTAssertTrue(waitForTerminalInputCondition { (session.snapshot?.cursorY ?? 0) > 0 })
+    XCTAssertFalse(session.plainTextForTesting()?.contains(";2;13~") == true)
+  }
+
+  func testKeyReleaseProducesNoOutputWithoutKittyProtocol() throws {
+    let session = TerminalSession(columns: 40, rows: 10)
+    defer { session.terminate() }
+    session.start(command: "/bin/cat")
+    XCTAssertTrue(waitForTerminalInputCondition { session.snapshot != nil })
+    let baseline = session.snapshot?.generation
+    let release = try XCTUnwrap(
+      TerminalKeyTranslator.translate(
+        TerminalKeyInput(
+          keyCode: 123,
+          modifierFlagsRawValue: 0,
+          characters: nil,
+          charactersIgnoringModifiers: nil,
+          isARepeat: false
+        ),
+        action: LOCUS_TERM_ACTION_RELEASE
+      )
+    )
+
+    session.sendKey(release)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+
+    XCTAssertEqual(session.snapshot?.generation, baseline)
   }
 }
 

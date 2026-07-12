@@ -230,7 +230,14 @@ pub fn legacy(event: KeyEvent<'_>, opts: Options) -> Vec<u8> {
         }
     }
 
-    if let Some(byte) = ctrl_seq(event.key, event.utf8, event.unshifted_codepoint, all_mods) {
+    let fixterm_control = matches!(event.key, Key::KeyI | Key::KeyM | Key::BracketLeft)
+        || (event.key == Key::Digit2 && all_mods.shift);
+    let control_byte = if !opts.modify_other_keys_state_2 || !fixterm_control {
+        ctrl_seq(event.key, event.utf8, event.unshifted_codepoint, all_mods)
+    } else {
+        None
+    };
+    if let Some(byte) = control_byte {
         if binding_mods.alt {
             output.push(0x1b);
         }
@@ -244,6 +251,13 @@ pub fn legacy(event: KeyEvent<'_>, opts: Options) -> Vec<u8> {
             output.push(byte);
         }
         return output;
+    }
+
+    if opts.modify_other_keys_state_2 && fixterm_control {
+        if let Some(sequence) = legacy_fixterms_sequence(event) {
+            output.extend_from_slice(sequence.as_bytes());
+            return output;
+        }
     }
 
     if opts.modify_other_keys_state_2 {
@@ -266,7 +280,10 @@ pub fn legacy(event: KeyEvent<'_>, opts: Options) -> Vec<u8> {
         }
     }
 
-    if event.mods.ctrl {
+    // Locus deliberately gates Ghostty's always-on fixterms CSI-u fallback.
+    // Plain shells receive conventional control bytes unless the application
+    // explicitly enables xterm modifyOtherKeys state 2.
+    if opts.modify_other_keys_state_2 && event.mods.ctrl {
         if let Some(mut codepoint) = single_codepoint(event.utf8) {
             let mut mods = CsiUMods::from_input(event.mods);
 
@@ -313,6 +330,21 @@ fn modify_other_mods(mut mods: Mods, opts: Options) -> Mods {
     mods
 }
 
+fn legacy_fixterms_sequence(event: KeyEvent<'_>) -> Option<String> {
+    if !event.mods.ctrl {
+        return None;
+    }
+    let mut codepoint = single_codepoint(event.utf8)?;
+    let mut mods = CsiUMods::from_input(event.mods);
+    if (b'A' as u32..=b'Z' as u32).contains(&codepoint) && mods.shift {
+        codepoint += (b'a' - b'A') as u32;
+    }
+    if event.unshifted_codepoint != codepoint {
+        mods.shift = false;
+    }
+    Some(format!("\x1b[{codepoint};{}u", mods.seq_int()))
+}
+
 fn legacy_alt_prefix(
     event: KeyEvent<'_>,
     binding_mods: Mods,
@@ -352,7 +384,7 @@ fn pc_style_function_key(key: Key, mods: Mods, opts: Options) -> Option<String> 
     if let Some(sequence) = enter_sequence(key, binding, opts.modify_other_keys_state_2) {
         return Some(sequence.to_owned());
     }
-    if let Some(sequence) = escape_sequence(key, binding) {
+    if let Some(sequence) = escape_sequence(key, binding, opts.modify_other_keys_state_2) {
         return Some(sequence.to_owned());
     }
 
@@ -415,6 +447,14 @@ fn pc_style_function_key(key: Key, mods: Mods, opts: Options) -> Option<String> 
         Key::F10 => Some("\x1b[21~".to_owned()),
         Key::F11 => Some("\x1b[23~".to_owned()),
         Key::F12 => Some("\x1b[24~".to_owned()),
+        Key::F13 => Some("\x1b[25~".to_owned()),
+        Key::F14 => Some("\x1b[26~".to_owned()),
+        Key::F15 => Some("\x1b[28~".to_owned()),
+        Key::F16 => Some("\x1b[29~".to_owned()),
+        Key::F17 => Some("\x1b[31~".to_owned()),
+        Key::F18 => Some("\x1b[32~".to_owned()),
+        Key::F19 => Some("\x1b[33~".to_owned()),
+        Key::F20 => Some("\x1b[34~".to_owned()),
         Key::NumpadEnter => Some(if keypad_application {
             "\x1bOM".to_owned()
         } else {
@@ -458,6 +498,14 @@ fn pc_style_pattern(key: Key) -> Option<&'static str> {
         Key::F10 => Some("\x1b[21;{}~"),
         Key::F11 => Some("\x1b[23;{}~"),
         Key::F12 => Some("\x1b[24;{}~"),
+        Key::F13 => Some("\x1b[25;{}~"),
+        Key::F14 => Some("\x1b[26;{}~"),
+        Key::F15 => Some("\x1b[28;{}~"),
+        Key::F16 => Some("\x1b[29;{}~"),
+        Key::F17 => Some("\x1b[31;{}~"),
+        Key::F18 => Some("\x1b[32;{}~"),
+        Key::F19 => Some("\x1b[33;{}~"),
+        Key::F20 => Some("\x1b[34;{}~"),
         _ => None,
     }
 }
@@ -551,24 +599,9 @@ fn tab_sequence(key: Key, mods: Mods, modify_other_keys: bool) -> Option<&'stati
         (true, false, false, false) => Some("\x1b[Z"),
         (false, true, false, false) => Some("\x1b\t"),
         (false, false, false, false) => Some("\t"),
-        _ => function_keys::modifier_code(mods)
-            .and_then(|code| match code {
-                4 => Some("\x1b[27;4;9~"),
-                5 => Some("\x1b[27;5;9~"),
-                6 => Some("\x1b[27;6;9~"),
-                7 => Some("\x1b[27;7;9~"),
-                8 => Some("\x1b[27;8;9~"),
-                9 => Some("\x1b[27;9;9~"),
-                10 => Some("\x1b[27;10;9~"),
-                11 => Some("\x1b[27;11;9~"),
-                12 => Some("\x1b[27;12;9~"),
-                13 => Some("\x1b[27;13;9~"),
-                14 => Some("\x1b[27;14;9~"),
-                15 => Some("\x1b[27;15;9~"),
-                16 => Some("\x1b[27;16;9~"),
-                _ => None,
-            })
-            .or(Some("\t")),
+        // Terminal.app-compatible fallback. Rich CSI-27 forms above are
+        // reserved for applications that opted into modifyOtherKeys state 2.
+        _ => Some("\t"),
     }
 }
 
@@ -598,32 +631,19 @@ fn enter_sequence(key: Key, mods: Mods, modify_other_keys: bool) -> Option<&'sta
             })
             .or(Some("\r"));
     }
-    match (mods.shift, mods.alt, mods.ctrl, mods.super_key) {
-        (false, false, false, false) => Some("\r"),
-        (true, false, false, false) => Some("\x1b[27;2;13~"),
-        (false, true, false, false) => Some("\x1b\r"),
-        _ => function_keys::modifier_code(mods).and_then(|code| match code {
-            4 => Some("\x1b[27;4;13~"),
-            5 => Some("\x1b[27;5;13~"),
-            6 => Some("\x1b[27;6;13~"),
-            7 => Some("\x1b[27;7;13~"),
-            8 => Some("\x1b[27;8;13~"),
-            9 => Some("\x1b[27;9;13~"),
-            10 => Some("\x1b[27;10;13~"),
-            11 => Some("\x1b[27;11;13~"),
-            12 => Some("\x1b[27;12;13~"),
-            13 => Some("\x1b[27;13;13~"),
-            14 => Some("\x1b[27;14;13~"),
-            15 => Some("\x1b[27;15;13~"),
-            16 => Some("\x1b[27;16;13~"),
-            _ => None,
-        }),
-    }
+    // Terminal.app-compatible fallback. Without an explicit protocol opt-in,
+    // every modified Return remains a plain carriage return.
+    Some("\r")
 }
 
-fn escape_sequence(key: Key, mods: Mods) -> Option<&'static str> {
+fn escape_sequence(key: Key, mods: Mods, modify_other_keys: bool) -> Option<&'static str> {
     if key != Key::Escape {
         return None;
+    }
+    if !modify_other_keys {
+        // Terminal.app-compatible fallback; protocol-only CSI-27 forms are
+        // emitted only after modifyOtherKeys state 2 is enabled.
+        return Some("\x1b");
     }
     match function_keys::modifier_code(mods) {
         Some(2) => Some("\x1b[27;2;27~"),
@@ -729,6 +749,7 @@ fn ctrl_seq(logical_key: Key, utf8: &[u8], unshifted_codepoint: u32, mods: Mods)
         b'9' => Some(57),
         b'?' => Some(127),
         b'@' => Some(0),
+        b'[' => Some(27),
         b'\\' => Some(28),
         b']' => Some(29),
         b'^' => Some(30),
@@ -741,9 +762,11 @@ fn ctrl_seq(logical_key: Key, utf8: &[u8], unshifted_codepoint: u32, mods: Mods)
         b'f' => Some(6),
         b'g' => Some(7),
         b'h' => Some(8),
+        b'i' => Some(9),
         b'j' => Some(10),
         b'k' => Some(11),
         b'l' => Some(12),
+        b'm' => Some(13),
         b'n' => Some(14),
         b'o' => Some(15),
         b'p' => Some(16),
@@ -2414,44 +2437,46 @@ mod tests {
     }
 
     #[test]
-    fn legacy_fixterm_awkward_letters() {
+    fn legacy_fixterm_awkward_letters_require_opt_in() {
         // ghostty: "legacy: fixterm awkward letters" (key_encode.zig:2205)
-        assert_eq!(
-            legacy(
-                KeyEvent {
-                    key: Key::KeyI,
-                    mods: m(false, true, false, false),
-                    utf8: b"i",
-                    ..KeyEvent::default()
-                },
-                Options::default()
+        for (key, text, fallback, rich) in [
+            (
+                Key::KeyI,
+                b"i".as_slice(),
+                b"\t".as_slice(),
+                b"\x1b[105;5u".as_slice(),
             ),
-            b"\x1b[105;5u"
-        );
-        assert_eq!(
-            legacy(
-                KeyEvent {
-                    key: Key::KeyM,
-                    mods: m(false, true, false, false),
-                    utf8: b"m",
-                    ..KeyEvent::default()
-                },
-                Options::default()
+            (
+                Key::KeyM,
+                b"m".as_slice(),
+                b"\r".as_slice(),
+                b"\x1b[109;5u".as_slice(),
             ),
-            b"\x1b[109;5u"
-        );
-        assert_eq!(
-            legacy(
-                KeyEvent {
-                    key: Key::BracketLeft,
-                    mods: m(false, true, false, false),
-                    utf8: b"[",
-                    ..KeyEvent::default()
-                },
-                Options::default()
+            (
+                Key::BracketLeft,
+                b"[".as_slice(),
+                b"\x1b".as_slice(),
+                b"\x1b[91;5u".as_slice(),
             ),
-            b"\x1b[91;5u"
-        );
+        ] {
+            let event = KeyEvent {
+                key,
+                mods: m(false, true, false, false),
+                utf8: text,
+                ..KeyEvent::default()
+            };
+            assert_eq!(legacy(event, Options::default()), fallback);
+            assert_eq!(
+                legacy(
+                    event,
+                    Options {
+                        modify_other_keys_state_2: true,
+                        ..Options::default()
+                    },
+                ),
+                rich
+            );
+        }
         assert_eq!(
             legacy(
                 KeyEvent {
@@ -2461,14 +2486,17 @@ mod tests {
                     unshifted_codepoint: '2' as u32,
                     ..KeyEvent::default()
                 },
-                Options::default()
+                Options {
+                    modify_other_keys_state_2: true,
+                    ..Options::default()
+                }
             ),
             b"\x1b[64;5u"
         );
     }
 
     #[test]
-    fn legacy_ctrl_shift_letter_ascii() {
+    fn legacy_ctrl_shift_letter_ascii_requires_opt_in_for_fixterms() {
         // ghostty: "legacy: ctrl+shift+letter ascii" (key_encode.zig:2248)
         let actual = legacy(
             KeyEvent {
@@ -2478,9 +2506,238 @@ mod tests {
                 unshifted_codepoint: 'm' as u32,
                 ..KeyEvent::default()
             },
-            Options::default(),
+            Options {
+                modify_other_keys_state_2: true,
+                ..Options::default()
+            },
         );
         assert_eq!(actual, b"\x1b[109;6u");
+        assert_eq!(
+            legacy(
+                KeyEvent {
+                    key: Key::KeyM,
+                    mods: m(true, true, false, false),
+                    utf8: b"M",
+                    unshifted_codepoint: 'm' as u32,
+                    ..KeyEvent::default()
+                },
+                Options::default(),
+            ),
+            b"M"
+        );
+    }
+
+    #[test]
+    fn legacy_modified_controls_use_plain_fallbacks_until_opted_in() {
+        let cases = [
+            (
+                Key::Enter,
+                m(true, false, false, false),
+                b"\r".as_slice(),
+                b"\x1b[27;2;13~".as_slice(),
+            ),
+            (
+                Key::Escape,
+                m(true, false, false, false),
+                b"\x1b".as_slice(),
+                b"\x1b[27;2;27~".as_slice(),
+            ),
+            (
+                Key::Tab,
+                m(false, true, false, false),
+                b"\t".as_slice(),
+                b"\x1b[27;5;9~".as_slice(),
+            ),
+        ];
+        for (key, mods, fallback, rich) in cases {
+            let event = KeyEvent {
+                key,
+                mods,
+                ..KeyEvent::default()
+            };
+            assert_eq!(legacy(event, Options::default()), fallback);
+            assert_eq!(
+                legacy(
+                    event,
+                    Options {
+                        modify_other_keys_state_2: true,
+                        ..Options::default()
+                    },
+                ),
+                rich
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_ctrl_i_defaults_to_tab() {
+        assert_eq!(
+            legacy(
+                KeyEvent {
+                    key: Key::KeyI,
+                    mods: m(false, true, false, false),
+                    utf8: b"i",
+                    ..KeyEvent::default()
+                },
+                Options::default(),
+            ),
+            b"\t"
+        );
+    }
+
+    #[test]
+    fn legacy_ctrl_i_opt_in_keeps_rich_encoding() {
+        assert_eq!(
+            legacy(
+                KeyEvent {
+                    key: Key::KeyI,
+                    mods: m(false, true, false, false),
+                    utf8: b"i",
+                    ..KeyEvent::default()
+                },
+                Options {
+                    modify_other_keys_state_2: true,
+                    ..Options::default()
+                },
+            ),
+            b"\x1b[105;5u"
+        );
+    }
+
+    #[test]
+    fn legacy_ctrl_m_defaults_to_carriage_return() {
+        assert_eq!(
+            legacy(
+                KeyEvent {
+                    key: Key::KeyM,
+                    mods: m(false, true, false, false),
+                    utf8: b"m",
+                    ..KeyEvent::default()
+                },
+                Options::default(),
+            ),
+            b"\r"
+        );
+    }
+
+    #[test]
+    fn legacy_ctrl_m_opt_in_keeps_rich_encoding() {
+        assert_eq!(
+            legacy(
+                KeyEvent {
+                    key: Key::KeyM,
+                    mods: m(false, true, false, false),
+                    utf8: b"m",
+                    ..KeyEvent::default()
+                },
+                Options {
+                    modify_other_keys_state_2: true,
+                    ..Options::default()
+                },
+            ),
+            b"\x1b[109;5u"
+        );
+    }
+
+    #[test]
+    fn legacy_ctrl_bracket_defaults_to_escape() {
+        assert_eq!(
+            legacy(
+                KeyEvent {
+                    key: Key::BracketLeft,
+                    mods: m(false, true, false, false),
+                    utf8: b"[",
+                    ..KeyEvent::default()
+                },
+                Options::default(),
+            ),
+            b"\x1b"
+        );
+    }
+
+    #[test]
+    fn legacy_ctrl_bracket_opt_in_keeps_rich_encoding() {
+        assert_eq!(
+            legacy(
+                KeyEvent {
+                    key: Key::BracketLeft,
+                    mods: m(false, true, false, false),
+                    utf8: b"[",
+                    ..KeyEvent::default()
+                },
+                Options {
+                    modify_other_keys_state_2: true,
+                    ..Options::default()
+                },
+            ),
+            b"\x1b[91;5u"
+        );
+    }
+
+    #[test]
+    fn legacy_shift_enter_defaults_to_carriage_return() {
+        assert_eq!(
+            legacy(
+                KeyEvent {
+                    key: Key::Enter,
+                    mods: m(true, false, false, false),
+                    ..KeyEvent::default()
+                },
+                Options::default(),
+            ),
+            b"\r"
+        );
+    }
+
+    #[test]
+    fn legacy_shift_enter_opt_in_keeps_rich_encoding() {
+        assert_eq!(
+            legacy(
+                KeyEvent {
+                    key: Key::Enter,
+                    mods: m(true, false, false, false),
+                    ..KeyEvent::default()
+                },
+                Options {
+                    modify_other_keys_state_2: true,
+                    ..Options::default()
+                },
+            ),
+            b"\x1b[27;2;13~"
+        );
+    }
+
+    #[test]
+    fn legacy_ctrl_tab_defaults_to_tab() {
+        assert_eq!(
+            legacy(
+                KeyEvent {
+                    key: Key::Tab,
+                    mods: m(false, true, false, false),
+                    ..KeyEvent::default()
+                },
+                Options::default(),
+            ),
+            b"\t"
+        );
+    }
+
+    #[test]
+    fn legacy_ctrl_tab_opt_in_keeps_rich_encoding() {
+        assert_eq!(
+            legacy(
+                KeyEvent {
+                    key: Key::Tab,
+                    mods: m(false, true, false, false),
+                    ..KeyEvent::default()
+                },
+                Options {
+                    modify_other_keys_state_2: true,
+                    ..Options::default()
+                },
+            ),
+            b"\x1b[27;5;9~"
+        );
     }
 
     #[test]
@@ -2587,6 +2844,25 @@ mod tests {
     }
 
     #[test]
+    fn legacy_f13_through_f20_sequences() {
+        // The vendored Ghostty table currently stops at F12
+        // (`input/function_keys.zig:92`). These are the standard xterm
+        // function-key sequences used by Ghostty's upstream key naming.
+        for (key, expected) in [
+            (Key::F13, b"\x1b[25~".as_slice()),
+            (Key::F14, b"\x1b[26~".as_slice()),
+            (Key::F15, b"\x1b[28~".as_slice()),
+            (Key::F16, b"\x1b[29~".as_slice()),
+            (Key::F17, b"\x1b[31~".as_slice()),
+            (Key::F18, b"\x1b[32~".as_slice()),
+            (Key::F19, b"\x1b[33~".as_slice()),
+            (Key::F20, b"\x1b[34~".as_slice()),
+        ] {
+            assert_eq!(legacy(event(key), Options::default()), expected);
+        }
+    }
+
+    #[test]
     fn legacy_left_shift_tab() {
         // ghostty: "legacy: left_shift+tab" (key_encode.zig:2398)
         let actual = legacy(
@@ -2629,7 +2905,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_hu_layout_ctrl_o_double_acute_sends_proper_codepoint() {
+    fn legacy_hu_layout_ctrl_o_double_acute_requires_opt_in() {
         // ghostty: "legacy: hu layout ctrl+ő sends proper codepoint" (key_encode.zig:2424)
         let actual = legacy(
             KeyEvent {
@@ -2639,7 +2915,10 @@ mod tests {
                 unshifted_codepoint: 337,
                 ..KeyEvent::default()
             },
-            Options::default(),
+            Options {
+                modify_other_keys_state_2: true,
+                ..Options::default()
+            },
         );
         assert_eq!(s(&actual), "\u{1b}[337;5u");
     }

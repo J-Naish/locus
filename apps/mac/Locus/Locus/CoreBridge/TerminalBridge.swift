@@ -60,6 +60,13 @@ struct TerminalModifiers: OptionSet, Equatable {
   static let rightCommand = Self(rawValue: 1 << 9)
 }
 
+struct TerminalKeyProtocol: OptionSet, Equatable {
+  let rawValue: UInt32
+
+  static let modifyOtherKeys = Self(rawValue: 1 << 0)
+  static let kittyKeyboard = Self(rawValue: 1 << 1)
+}
+
 enum TerminalCellWidth: UInt8, Equatable {
   case narrow = 0
   case wide = 1
@@ -132,6 +139,10 @@ final class TerminalCore {
     }
     try Self.checkStatus(status)
     return Self.copyAndFree(bytes: &bytes)
+  }
+
+  var keyProtocolActive: TerminalKeyProtocol {
+    TerminalKeyProtocol(rawValue: locus_term_key_protocol_active(handle))
   }
 
   func encodePaste(

@@ -1,10 +1,10 @@
 //! Terminal screen state.
 //!
-//! This ports the first structural slice of Ghostty's `terminal/Screen.zig`.
-//! Kitty-specific behavior is intentionally deferred to later terminal phases.
+//! This ports Ghostty's `terminal/Screen.zig` state used by the terminal core.
 
 use crate::color::Name;
 use crate::hyperlink::{Hyperlink, HyperlinkId, HyperlinkIdKind};
+use crate::input::kitty_flags::FlagStack;
 use crate::osc::parsers::semantic_prompt::{PromptClick, PromptClickEvents, PromptKind};
 use crate::page::{
     AsciiRunAttributes, CapacityFailure, Cell, CellWide, Page, SemanticContent, SemanticPrompt,
@@ -253,6 +253,9 @@ pub struct Screen {
     pub selection: Option<Selection>,
     pub dirty: Dirty,
     pub protected_mode: ProtectedMode,
+    /// Per-screen kitty keyboard protocol state.
+    /// ghostty: Screen.zig:70
+    pub kitty_keyboard: FlagStack,
 }
 
 impl Screen {
@@ -273,6 +276,7 @@ impl Screen {
             selection: None,
             dirty: Dirty::default(),
             protected_mode: ProtectedMode::Off,
+            kitty_keyboard: FlagStack::default(),
         };
         screen.assert_integrity();
         screen
@@ -301,6 +305,8 @@ impl Screen {
         self.clear_selection();
         self.dirty = Dirty::default();
         self.protected_mode = ProtectedMode::Off;
+        // ghostty: Screen.zig:405
+        self.kitty_keyboard = FlagStack::default();
 
         self.assert_integrity();
     }

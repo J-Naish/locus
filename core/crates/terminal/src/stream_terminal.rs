@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use crate::color::{Dynamic, DynamicRgb, Rgb};
 use crate::device_attributes::{self, Attributes};
 use crate::device_status::{self, ColorScheme};
+use crate::input::kitty_flags::{Flags as KittyFlags, SetMode as KittySetMode};
 use crate::modes::{Mode, ModeTag};
 use crate::osc::{
     ColorOperationKind, ColorRequest, ColorTarget, KittyColorKind, KittyColorRequest, KittySpecial,
@@ -513,8 +514,42 @@ impl<E: Effects> Handler for TerminalHandler<E> {
         self.terminal.flags.modify_other_keys_2 = enabled;
     }
 
-    fn kitty_keyboard_pop(&mut self, _count: u16) {
-        // Deferred: Phase map marks kitty keyboard stack as out of scope.
+    fn kitty_keyboard_query(&mut self) {
+        // ghostty: stream_terminal.zig kitty_keyboard_query
+        let flags = self.terminal.active_screen().kitty_keyboard.current().int();
+        self.write_response(&format!("\x1B[?{flags}u"));
+    }
+
+    fn kitty_keyboard_push(&mut self, flags: KittyFlags) {
+        self.terminal.active_screen_mut().kitty_keyboard.push(flags);
+    }
+
+    fn kitty_keyboard_pop(&mut self, count: u16) {
+        self.terminal
+            .active_screen_mut()
+            .kitty_keyboard
+            .pop(usize::from(count));
+    }
+
+    fn kitty_keyboard_set(&mut self, flags: KittyFlags) {
+        self.terminal
+            .active_screen_mut()
+            .kitty_keyboard
+            .set(KittySetMode::Set, flags);
+    }
+
+    fn kitty_keyboard_set_or(&mut self, flags: KittyFlags) {
+        self.terminal
+            .active_screen_mut()
+            .kitty_keyboard
+            .set(KittySetMode::Or, flags);
+    }
+
+    fn kitty_keyboard_set_not(&mut self, flags: KittyFlags) {
+        self.terminal
+            .active_screen_mut()
+            .kitty_keyboard
+            .set(KittySetMode::Not, flags);
     }
 
     fn left_and_right_margin(&mut self, left: u16, right: u16) {
@@ -1614,8 +1649,6 @@ mod tests {
         assert_eq!(stream.handler.effects.titles, vec![None]);
     }
 
-    // T-omitted (kitty keyboard stack is deferred): "kitty_keyboard_query" (stream_terminal.zig:1552)
-
     // ghostty: "xtversion default" (stream_terminal.zig:1581)
     #[test]
     fn xtversion_default() {
@@ -2174,6 +2207,61 @@ mod tests {
             stream.handler.effects.pty,
             b"\x1B[?64;22;52c\x1B[>41;100;0c"
         );
+    }
+
+    #[test]
+    fn kitty_keyboard_query_set_and_bit_operations() {
+        // ghostty: stream.zig:1832-1883
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.next_slice(b"\x1B[=1;1u\x1B[?u");
+        assert_eq!(stream.handler.effects.pty, b"\x1B[?1u");
+        stream.handler.effects.pty.clear();
+
+        stream.next_slice(b"\x1B[=2;2u\x1B[?u");
+        assert_eq!(stream.handler.effects.pty, b"\x1B[?3u");
+        stream.handler.effects.pty.clear();
+
+        stream.next_slice(b"\x1B[=1;3u\x1B[?u");
+        assert_eq!(stream.handler.effects.pty, b"\x1B[?2u");
+    }
+
+    #[test]
+    fn kitty_keyboard_push_pop_respects_stack_bound() {
+        // ghostty: "FlagStack: push pop" (key.zig:126)
+        let mut stream = stream(CapturedEffects::default());
+        for flag in 1..=8 {
+            stream.next_slice(format!("\x1B[>{flag}u").as_bytes());
+        }
+        stream.next_slice(b"\x1B[<1u\x1B[?u");
+        assert_eq!(stream.handler.effects.pty, b"\x1B[?7u");
+
+        stream.handler.effects.pty.clear();
+        stream.next_slice(b"\x1B[<99u\x1B[?u");
+        assert_eq!(stream.handler.effects.pty, b"\x1B[?0u");
+    }
+
+    #[test]
+    fn kitty_keyboard_state_is_isolated_per_screen_and_reset() {
+        // ghostty: "Terminal: fullReset clears alt screen kitty keyboard state"
+        // (Terminal.zig:12658)
+        let mut stream = stream(CapturedEffects::default());
+        stream.next_slice(b"\x1B[=1;1u\x1B[?1049h\x1B[=2;1u\x1B[?u");
+        assert_eq!(stream.handler.effects.pty, b"\x1B[?2u");
+
+        stream.handler.effects.pty.clear();
+        stream.next_slice(b"\x1B[?1049l\x1B[?u");
+        assert_eq!(stream.handler.effects.pty, b"\x1B[?1u");
+
+        stream.handler.effects.pty.clear();
+        stream.next_slice(b"\x1Bc\x1B[?u");
+        assert_eq!(stream.handler.effects.pty, b"\x1B[?0u");
+        assert!(stream
+            .handler
+            .terminal
+            .screens
+            .get(ScreenKey::Alternate)
+            .is_none());
     }
 
     // T-omitted (kitty graphics feature is deferred): "kitty graphics APC response" (stream_terminal.zig:2200)

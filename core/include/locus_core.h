@@ -710,6 +710,14 @@ LocusStatus locus_large_file_position_for_line_column(
 #define LOCUS_TERM_KEY_F10 ((uint32_t)110u)
 #define LOCUS_TERM_KEY_F11 ((uint32_t)111u)
 #define LOCUS_TERM_KEY_F12 ((uint32_t)112u)
+#define LOCUS_TERM_KEY_F13 ((uint32_t)113u)
+#define LOCUS_TERM_KEY_F14 ((uint32_t)114u)
+#define LOCUS_TERM_KEY_F15 ((uint32_t)115u)
+#define LOCUS_TERM_KEY_F16 ((uint32_t)116u)
+#define LOCUS_TERM_KEY_F17 ((uint32_t)117u)
+#define LOCUS_TERM_KEY_F18 ((uint32_t)118u)
+#define LOCUS_TERM_KEY_F19 ((uint32_t)119u)
+#define LOCUS_TERM_KEY_F20 ((uint32_t)120u)
 
 typedef struct LocusTerm LocusTerm;
 typedef struct LocusTermFrameStorage LocusTermFrameStorage;
@@ -800,6 +808,8 @@ LocusTermFrame *locus_term_frame_new(void);
 void locus_term_frame_free(LocusTermFrame *frame);
 LocusStatus locus_term_key(
     LocusTerm *term, const LocusTermKeyEvent *event, LocusTermBytes *out);
+/* Bit 0 = modifyOtherKeys state 2; bit 1 = active kitty keyboard flags. */
+uint32_t locus_term_key_protocol_active(const LocusTerm *term);
 /*
  * Returns LOCUS_TERM_STATUS_UNSAFE_PASTE only when bracketed paste is off,
  * the input contains unsafe newline or control data, and allow_unsafe is

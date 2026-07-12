@@ -80,6 +80,14 @@ pub const LOCUS_TERM_KEY_F9: u32 = 109;
 pub const LOCUS_TERM_KEY_F10: u32 = 110;
 pub const LOCUS_TERM_KEY_F11: u32 = 111;
 pub const LOCUS_TERM_KEY_F12: u32 = 112;
+pub const LOCUS_TERM_KEY_F13: u32 = 113;
+pub const LOCUS_TERM_KEY_F14: u32 = 114;
+pub const LOCUS_TERM_KEY_F15: u32 = 115;
+pub const LOCUS_TERM_KEY_F16: u32 = 116;
+pub const LOCUS_TERM_KEY_F17: u32 = 117;
+pub const LOCUS_TERM_KEY_F18: u32 = 118;
+pub const LOCUS_TERM_KEY_F19: u32 = 119;
+pub const LOCUS_TERM_KEY_F20: u32 = 120;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -396,6 +404,30 @@ pub fn replay_bytes(
 #[no_mangle]
 pub extern "C" fn locus_term_abi_version() -> u32 {
     LOCUS_TERM_ABI_VERSION
+}
+
+/// Reports the active keyboard protocol without changing the frame ABI.
+/// Bit 0 is xterm modifyOtherKeys state 2; bit 1 is any active kitty flag.
+///
+/// # Safety
+///
+/// `term` must be NULL or a live terminal handle.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_key_protocol_active(term: *const LocusTerm) -> u32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        if term.is_null() {
+            return 0;
+        }
+        // SAFETY: the caller guarantees a live handle for this synchronous read.
+        let term = unsafe { &*term };
+        let terminal = &term.stream.handler.terminal;
+        let mut result = u32::from(terminal.flags.modify_other_keys_2);
+        if terminal.active_screen().kitty_keyboard.current().int() != 0 {
+            result |= 1 << 1;
+        }
+        result
+    }))
+    .unwrap_or(0)
 }
 
 #[no_mangle]
@@ -1081,7 +1113,7 @@ fn key_options(terminal: &Terminal) -> input::Options {
         alt_esc_prefix: terminal.modes.get(Mode::AltEscPrefix)
             || terminal.modes.get(Mode::AltSendsEscape),
         modify_other_keys_state_2: terminal.flags.modify_other_keys_2,
-        kitty_flags: terminal::input::KittyFlags::DISABLED,
+        kitty_flags: terminal.active_screen().kitty_keyboard.current(),
         macos_option_as_alt: OptionAsAlt::False,
         is_macos: cfg!(target_os = "macos"),
     }
@@ -1123,6 +1155,14 @@ fn key_from_u32(key: u32) -> Key {
         LOCUS_TERM_KEY_F10 => Key::F10,
         LOCUS_TERM_KEY_F11 => Key::F11,
         LOCUS_TERM_KEY_F12 => Key::F12,
+        LOCUS_TERM_KEY_F13 => Key::F13,
+        LOCUS_TERM_KEY_F14 => Key::F14,
+        LOCUS_TERM_KEY_F15 => Key::F15,
+        LOCUS_TERM_KEY_F16 => Key::F16,
+        LOCUS_TERM_KEY_F17 => Key::F17,
+        LOCUS_TERM_KEY_F18 => Key::F18,
+        LOCUS_TERM_KEY_F19 => Key::F19,
+        LOCUS_TERM_KEY_F20 => Key::F20,
         _ => Key::Unidentified,
     }
 }
@@ -1179,6 +1219,41 @@ mod tests {
     #[test]
     fn abi_version_is_nonzero() {
         assert_eq!(locus_term_abi_version(), LOCUS_TERM_ABI_VERSION);
+    }
+
+    #[test]
+    fn key_protocol_query_reports_xterm_and_kitty_modes() {
+        let term = new_term();
+        unsafe {
+            assert_eq!(locus_term_key_protocol_active(term), 0);
+
+            let xterm = b"\x1B[>4;2m";
+            assert_eq!(
+                locus_term_feed(term, xterm.as_ptr(), xterm.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_key_protocol_active(term), 1);
+
+            let kitty = b"\x1B[=1;1u";
+            assert_eq!(
+                locus_term_feed(term, kitty.as_ptr(), kitty.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_key_protocol_active(term), 3);
+
+            let reset = b"\x1Bc";
+            assert_eq!(
+                locus_term_feed(term, reset.as_ptr(), reset.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_key_protocol_active(term), 0);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn key_protocol_query_accepts_null() {
+        assert_eq!(unsafe { locus_term_key_protocol_active(ptr::null()) }, 0);
     }
 
     #[test]

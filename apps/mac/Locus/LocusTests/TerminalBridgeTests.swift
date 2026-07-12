@@ -25,6 +25,20 @@ final class TerminalBridgeTests: XCTestCase {
     XCTAssertEqual(TerminalCore.abiVersion, TerminalCore.expectedABIVersion)
   }
 
+  func testKeyProtocolActiveTracksXtermKittyAndReset() throws {
+    let terminal = try TerminalCore(columns: 80, rows: 24)
+    XCTAssertEqual(terminal.keyProtocolActive, [])
+
+    try terminal.feed(Data("\u{1B}[>4;2m".utf8))
+    XCTAssertEqual(terminal.keyProtocolActive, [.modifyOtherKeys])
+
+    try terminal.feed(Data("\u{1B}[=1;1u".utf8))
+    XCTAssertEqual(terminal.keyProtocolActive, [.modifyOtherKeys, .kittyKeyboard])
+
+    try terminal.feed(Data("\u{1B}c".utf8))
+    XCTAssertEqual(terminal.keyProtocolActive, [])
+  }
+
   func testFeedAndRenderPlainText() throws {
     let terminal = try TerminalCore(columns: 80, rows: 24)
     let frame = try TerminalFrame()
