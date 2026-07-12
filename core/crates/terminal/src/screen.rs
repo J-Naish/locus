@@ -1675,15 +1675,18 @@ impl Screen {
             return String::new();
         };
 
-        let mut out = String::new();
+        let selected_rows = bottom_right_point
+            .y
+            .saturating_sub(top_left_point.y)
+            .saturating_add(1) as usize;
+        let mut out = String::with_capacity(
+            selected_rows.saturating_mul(usize::from(self.pages.cols).saturating_add(1)),
+        );
         let mut current = top_left;
+        let mut current_point = top_left_point;
         let mut seen_row = false;
-        while let Some(point) = self
-            .pages
-            .point_from_pin(Tag::Screen, current)
-            .map(Point::coord)
-        {
-            if point.y > bottom_right_point.y {
+        loop {
+            if current_point.y > bottom_right_point.y {
                 break;
             }
             if let Some(row_selection) = options.selection.contained_row_cached(
@@ -1693,12 +1696,12 @@ impl Screen {
                 current,
                 top_left_point,
                 bottom_right_point,
-                point,
+                current_point,
             ) {
                 if seen_row && !previous_row_wraps(&self.pages, current) {
                     out.push('\n');
                 }
-                out.push_str(&self.selection_row_string(row_selection, options.trim));
+                self.append_selection_row(&mut out, row_selection, options.trim);
                 seen_row = true;
             }
             if current.node == bottom_right.node && current.y == bottom_right.y {
@@ -1708,6 +1711,7 @@ impl Screen {
                 break;
             };
             current = next.left(next.x as usize);
+            current_point.y = current_point.y.saturating_add(1);
         }
         if options.trim {
             trim_trailing_newlines_and_spaces(&mut out);
@@ -1715,22 +1719,22 @@ impl Screen {
         out
     }
 
-    fn selection_row_string(&self, selection: Selection, trim: bool) -> String {
+    fn append_selection_row(&self, out: &mut String, selection: Selection, trim: bool) {
         let Some(start) = selection.start(&self.pages) else {
-            return String::new();
+            return;
         };
         let Some(end) = selection.end(&self.pages) else {
-            return String::new();
+            return;
         };
         if start.node != end.node || start.y != end.y {
-            return String::new();
+            return;
         }
         let min_x = start.x.min(end.x);
         let max_x = start.x.max(end.x);
         let Some(node) = self.pages.node(start.node) else {
-            return String::new();
+            return;
         };
-        let mut out = String::new();
+        let row_start = out.len();
         for x in min_x..=max_x {
             let cell = node.page.cell(start.y, x);
             match cell.wide() {
@@ -1757,9 +1761,10 @@ impl Screen {
             }
         }
         if trim {
-            trim_trailing_spaces(&mut out);
+            while out.len() > row_start && out.ends_with(' ') {
+                let _ = out.pop();
+            }
         }
-        out
     }
 
     pub fn select_all(&self) -> Option<Selection> {
@@ -1825,14 +1830,11 @@ impl Screen {
         };
         let mut current = start;
         loop {
-            if direction == Direction::RightDown && self.pages.pin_before(end, current) {
-                return None;
-            }
-            if direction == Direction::LeftUp && self.pages.pin_before(current, end) {
-                return None;
-            }
             if let Some(selection) = self.select_word(current, boundaries) {
                 return Some(selection);
+            }
+            if current.eql(end) {
+                return None;
             }
             current = match direction {
                 Direction::RightDown => step_right(&self.pages, current)?,
@@ -2716,12 +2718,6 @@ fn previous_row_wraps(pages: &PageList, row: Pin) -> bool {
         .row_and_cell(previous)
         .map(|(row, _)| row.wrap())
         .unwrap_or(false)
-}
-
-fn trim_trailing_spaces(value: &mut String) {
-    while value.ends_with(' ') {
-        let _ = value.pop();
-    }
 }
 
 fn trim_trailing_newlines_and_spaces(value: &mut String) {
@@ -6130,6 +6126,40 @@ mod tests {
                 trim: true
             }),
             "abcdef"
+        );
+    }
+
+    #[test]
+    fn selection_string_linear_in_selection() {
+        // port-added: regression coverage for the row/page walk removed from
+        // selection_string; the selected bytes must remain identical.
+        const LINE_COUNT: usize = 2_000;
+        let mut screen = Screen::new(Options {
+            // Wide rows intentionally reduce each page's row capacity so this
+            // fixture spans several page nodes without private test hooks.
+            cols: 512,
+            rows: 4,
+            max_scrollback: PageList::standard_size() * 64,
+        });
+        let mut expected = String::with_capacity(LINE_COUNT * 6);
+        for index in 0..LINE_COUNT {
+            let line = format!("r{index:04}");
+            screen.test_write_string(&line);
+            expected.push_str(&line);
+            if index + 1 < LINE_COUNT {
+                screen.test_write_string("\r\n");
+                expected.push('\n');
+            }
+        }
+        assert!(screen.pages.total_pages() >= 4);
+        let selection = screen.select_all().expect("non-empty selection");
+
+        assert_eq!(
+            screen.selection_string(SelectionStringOptions {
+                selection,
+                trim: true,
+            }),
+            expected
         );
     }
 

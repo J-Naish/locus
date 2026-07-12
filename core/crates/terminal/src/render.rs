@@ -360,32 +360,36 @@ impl RenderState {
         let mut map = include_map.then(Vec::new);
         for (row_index, row) in self.row_data.iter().enumerate() {
             for x in 0..self.cols {
-                let cell = row
-                    .cells
-                    .get(x as usize)
-                    .map(|cell| cell.raw)
-                    .unwrap_or_default();
-                let ch = if cell.has_text() {
-                    char::from_u32(cell.codepoint()).unwrap_or('\0')
+                let coordinate = Coordinate {
+                    x,
+                    y: row_index as u32,
+                };
+                let Some(cell) = row.cells.get(x as usize) else {
+                    push_mapped_char(&mut out, map.as_mut(), '\0', coordinate);
+                    continue;
+                };
+                let ch = if cell.raw.has_text() {
+                    char::from_u32(cell.raw.codepoint()).unwrap_or('\0')
                 } else {
                     '\0'
                 };
-                out.push(ch);
-                if let Some(map) = &mut map {
-                    map.push(Coordinate {
-                        x,
-                        y: row_index as u32,
-                    });
+                push_mapped_char(&mut out, map.as_mut(), ch, coordinate);
+                for codepoint in &cell.grapheme {
+                    if let Some(ch) = char::from_u32(*codepoint) {
+                        push_mapped_char(&mut out, map.as_mut(), ch, coordinate);
+                    }
                 }
             }
             if !row.raw.wrap() {
-                out.push('\n');
-                if let Some(map) = &mut map {
-                    map.push(Coordinate {
+                push_mapped_char(
+                    &mut out,
+                    map.as_mut(),
+                    '\n',
+                    Coordinate {
                         x: self.cols.saturating_sub(1),
                         y: row_index as u32,
-                    });
-                }
+                    },
+                );
             }
         }
         (out, map)
@@ -414,6 +418,18 @@ impl RenderState {
             }
         }
         coords
+    }
+}
+
+fn push_mapped_char(
+    out: &mut String,
+    map: Option<&mut Vec<Coordinate>>,
+    ch: char,
+    coordinate: Coordinate,
+) {
+    out.push(ch);
+    if let Some(map) = map {
+        map.extend(std::iter::repeat_n(coordinate, ch.len_utf8()));
     }
 }
 
@@ -987,6 +1003,27 @@ mod tests {
         render.update(&mut terminal);
         let (string, _) = render.string(false);
         assert_eq!(string, "AB\0\0\0\n\0\0\0\0\0\n");
+    }
+
+    #[test]
+    fn string_map_tracks_utf8_bytes_after_wide_graphemes() {
+        // ghostty: render.zig:746-793 -- each emitted UTF-8 byte maps back to
+        // the source cell, including grapheme continuations.
+        let mut terminal = terminal_with_text(20, 1, "日本語👨\u{200d}💻ASCII");
+        let mut render = RenderState::new(0, 0);
+        render.update(&mut terminal);
+
+        let (string, map) = render.string(true);
+        let map = map.expect("requested byte map");
+        let ascii = string.find("ASCII").expect("ASCII suffix");
+        assert_eq!(map.len(), string.len());
+        assert_eq!(map[ascii], Coordinate { x: 8, y: 0 });
+        assert_eq!(map[ascii + 4], Coordinate { x: 12, y: 0 });
+
+        let emoji = string.find('👨').expect("emoji base");
+        let laptop = string.find('💻').expect("emoji continuation");
+        assert_eq!(map[emoji], Coordinate { x: 6, y: 0 });
+        assert_eq!(map[laptop], Coordinate { x: 6, y: 0 });
     }
 
     #[test]

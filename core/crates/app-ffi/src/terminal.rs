@@ -10,12 +10,23 @@ use std::time::{Duration, Instant};
 
 use terminal::color::Rgb;
 use terminal::formatter::{Format, TerminalFormatter};
+use terminal::input::mouse_encode::{
+    self, Action as MouseAction, Button as MouseButton, Event as MouseInputEvent,
+};
 use terminal::input::{self, Action, Key, KeyEvent, Mods, OptionAsAlt};
 use terminal::modes::Mode;
 use terminal::page::CellWide;
 use terminal::page_list::Scroll;
+use terminal::point::{Coordinate, Point};
 use terminal::render::{DirtyState, RenderState};
-use terminal::screen::CursorStyle;
+use terminal::screen::{CursorStyle, SelectionStringOptions};
+use terminal::screen_set::ScreenKey;
+use terminal::selection_codepoints::DEFAULT_WORD_BOUNDARIES;
+use terminal::selection_gesture::{
+    Autoscroll, AutoscrollTick, Behavior as SelectionBehavior, Drag as SelectionDrag,
+    Geometry as SelectionGeometry, Press as SelectionPress, Release as SelectionRelease,
+    SelectionGesture, Time as SelectionTime,
+};
 use terminal::stream::Stream;
 use terminal::stream_terminal::{Effects, TerminalHandler};
 use terminal::style::{FgOptions, Style};
@@ -23,8 +34,14 @@ use terminal::terminal::{Options as TerminalOptions, Terminal};
 
 use crate::{clear_last_error_message, set_last_error_message, LOCUS_STATUS_OK};
 
-pub const LOCUS_TERM_ABI_VERSION: u32 = 3;
+pub const LOCUS_TERM_ABI_VERSION: u32 = 4;
 const SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
+const MAX_WHEEL_ROWS_PER_EVENT: u32 = 4_096;
+const SELECTION_BEHAVIORS: [SelectionBehavior; 3] = [
+    SelectionBehavior::Cell,
+    SelectionBehavior::Word,
+    SelectionBehavior::Line,
+];
 
 pub const LOCUS_TERM_STATUS_INVALID_ARGUMENT: u32 = 300;
 pub const LOCUS_TERM_STATUS_PANIC: u32 = 301;
@@ -45,6 +62,23 @@ pub const LOCUS_TERM_DIRTY_FULL: u32 = 2;
 pub const LOCUS_TERM_ACTION_RELEASE: u32 = 0;
 pub const LOCUS_TERM_ACTION_PRESS: u32 = 1;
 pub const LOCUS_TERM_ACTION_REPEAT: u32 = 2;
+
+pub const LOCUS_TERM_SELECTION_PRESS: u32 = 0;
+pub const LOCUS_TERM_SELECTION_DRAG: u32 = 1;
+pub const LOCUS_TERM_SELECTION_RELEASE: u32 = 2;
+pub const LOCUS_TERM_SELECTION_PRESS_REPEAT: u32 = 3;
+
+pub const LOCUS_TERM_MOUSE_PRESS: u32 = 0;
+pub const LOCUS_TERM_MOUSE_RELEASE: u32 = 1;
+pub const LOCUS_TERM_MOUSE_MOTION: u32 = 2;
+pub const LOCUS_TERM_MOUSE_BUTTON_LEFT: u32 = 0;
+pub const LOCUS_TERM_MOUSE_BUTTON_MIDDLE: u32 = 1;
+pub const LOCUS_TERM_MOUSE_BUTTON_RIGHT: u32 = 2;
+pub const LOCUS_TERM_MOUSE_BUTTON_WHEEL_UP: u32 = 3;
+pub const LOCUS_TERM_MOUSE_BUTTON_WHEEL_DOWN: u32 = 4;
+pub const LOCUS_TERM_MOUSE_BUTTON_WHEEL_LEFT: u32 = 5;
+pub const LOCUS_TERM_MOUSE_BUTTON_WHEEL_RIGHT: u32 = 6;
+pub const LOCUS_TERM_MOUSE_BUTTON_NONE: u32 = u32::MAX;
 
 pub const LOCUS_TERM_MOD_SHIFT: u16 = 1 << 0;
 pub const LOCUS_TERM_MOD_CTRL: u16 = 1 << 1;
@@ -148,6 +182,8 @@ pub struct LocusTermRow {
     pub cell_count: usize,
     pub dirty: bool,
     pub wrapped: bool,
+    pub sel_start: u16,
+    pub sel_end: u16,
 }
 
 /// Reusable Rust-owned render frame. Public fields form the C-readable prefix;
@@ -290,6 +326,9 @@ pub struct LocusTermKeyEvent {
 pub struct LocusTerm {
     stream: Stream<TerminalHandler<FfiEffects>>,
     render_state: RenderState,
+    selection_gesture: SelectionGesture,
+    selection_clock: u64,
+    last_mouse_cell: Option<Coordinate>,
     synchronized_output_started_at: Option<Instant>,
 }
 
@@ -451,6 +490,9 @@ pub extern "C" fn locus_term_new(cols: u16, rows: u16, max_scrollback: usize) ->
         Box::into_raw(Box::new(LocusTerm {
             stream,
             render_state,
+            selection_gesture: SelectionGesture::new(),
+            selection_clock: 0,
+            last_mouse_cell: None,
             synchronized_output_started_at: None,
         }))
     })) {
@@ -768,6 +810,356 @@ pub unsafe extern "C" fn locus_term_scroll(term: *mut LocusTerm, delta: isize) -
     })
 }
 
+/// Applies a local text-selection gesture using viewport cell coordinates.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_selection_gesture(
+    term: *mut LocusTerm,
+    kind: u32,
+    x: u16,
+    y: u16,
+    cell_fraction_x: f32,
+    rectangle: bool,
+) -> u32 {
+    term_status(|| {
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        if !valid_cell_fraction(cell_fraction_x) {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        let LocusTerm {
+            stream,
+            selection_gesture,
+            selection_clock,
+            ..
+        } = term;
+        let terminal = &mut stream.handler.terminal;
+        let Some(pin) = viewport_pin(terminal, x, y) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        let xpos = f64::from(x) + f64::from(cell_fraction_x);
+        let ypos = f64::from(y) + 0.5;
+        let geometry = selection_geometry(terminal);
+        match kind {
+            LOCUS_TERM_SELECTION_PRESS => {
+                selection_gesture.reset(terminal);
+                *selection_clock = selection_clock.wrapping_add(2);
+                selection_gesture.press(
+                    terminal,
+                    SelectionPress {
+                        time: Some(SelectionTime(*selection_clock)),
+                        pin,
+                        xpos,
+                        ypos,
+                        max_distance: f64::MAX,
+                        repeat_interval: 1,
+                        word_boundary_codepoints: &DEFAULT_WORD_BOUNDARIES,
+                        behaviors: &SELECTION_BEHAVIORS,
+                    },
+                );
+            }
+            LOCUS_TERM_SELECTION_DRAG => {
+                selection_gesture.drag(
+                    terminal,
+                    SelectionDrag {
+                        pin: Some(pin),
+                        xpos,
+                        ypos,
+                        rectangle,
+                        word_boundary_codepoints: &DEFAULT_WORD_BOUNDARIES,
+                        geometry,
+                    },
+                );
+            }
+            LOCUS_TERM_SELECTION_RELEASE => {
+                selection_gesture.release(terminal, SelectionRelease { pin: Some(pin) });
+            }
+            LOCUS_TERM_SELECTION_PRESS_REPEAT => {
+                *selection_clock = selection_clock.wrapping_add(1);
+                selection_gesture.press(
+                    terminal,
+                    SelectionPress {
+                        time: Some(SelectionTime(*selection_clock)),
+                        pin,
+                        xpos,
+                        ypos,
+                        max_distance: f64::MAX,
+                        repeat_interval: 1,
+                        word_boundary_codepoints: &DEFAULT_WORD_BOUNDARIES,
+                        behaviors: &SELECTION_BEHAVIORS,
+                    },
+                );
+            }
+            _ => return LOCUS_TERM_STATUS_INVALID_ARGUMENT,
+        }
+        LOCUS_STATUS_OK
+    })
+}
+
+/// Clears both the active selection and any in-progress gesture.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_selection_clear(term: *mut LocusTerm) -> u32 {
+    term_status(|| {
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        let LocusTerm {
+            stream,
+            selection_gesture,
+            ..
+        } = term;
+        let terminal = &mut stream.handler.terminal;
+        selection_gesture.reset(terminal);
+        terminal.active_screen_mut().clear_selection();
+        LOCUS_STATUS_OK
+    })
+}
+
+/// Copies the active selection as UTF-8 text.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle. `out` must point to writable storage
+/// for a `LocusTermBytes`, later freed with `locus_term_bytes_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_selection_string(
+    term: *mut LocusTerm,
+    out: *mut LocusTermBytes,
+) -> u32 {
+    term_status(|| {
+        if out.is_null() {
+            set_last_error_message("out must not be NULL");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is non-null and caller-provided writable storage.
+        unsafe { *out = LocusTermBytes::default() };
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        let screen = term.stream.handler.terminal.active_screen();
+        let text = screen.selection.map_or_else(String::new, |selection| {
+            screen.selection_string(SelectionStringOptions {
+                selection,
+                trim: true,
+            })
+        });
+        // SAFETY: `out` remains valid for this synchronous call.
+        unsafe { *out = bytes_from_vec(text.into_bytes()) };
+        LOCUS_STATUS_OK
+    })
+}
+
+/// Advances a selection gesture while the pointer remains beyond a viewport edge.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_autoscroll_tick(
+    term: *mut LocusTerm,
+    direction: i32,
+    x: u16,
+    cell_fraction_x: f32,
+    rectangle: bool,
+) -> u32 {
+    term_status(|| {
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        if direction == 0 || !valid_cell_fraction(cell_fraction_x) {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        let LocusTerm {
+            stream,
+            selection_gesture,
+            ..
+        } = term;
+        let terminal = &mut stream.handler.terminal;
+        if x >= terminal.cols {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        let down = direction > 0;
+        selection_gesture.set_autoscroll(if down {
+            Autoscroll::Down
+        } else {
+            Autoscroll::Up
+        });
+        let viewport = Coordinate {
+            x,
+            y: if down {
+                u32::from(terminal.rows.saturating_sub(1))
+            } else {
+                0
+            },
+        };
+        let geometry = selection_geometry(terminal);
+        selection_gesture.autoscroll_tick(
+            terminal,
+            AutoscrollTick {
+                viewport,
+                xpos: f64::from(x) + f64::from(cell_fraction_x),
+                ypos: if down { geometry.screen_height } else { 0.0 },
+                rectangle,
+                word_boundary_codepoints: &DEFAULT_WORD_BOUNDARIES,
+                geometry,
+            },
+        );
+        LOCUS_STATUS_OK
+    })
+}
+
+/// Encodes a mouse event according to the terminal's active reporting modes.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle. `out` must point to writable storage
+/// for a `LocusTermBytes`, later freed with `locus_term_bytes_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_mouse(
+    term: *mut LocusTerm,
+    kind: u32,
+    button: u32,
+    x: u16,
+    y: u16,
+    mods: u16,
+    out: *mut LocusTermBytes,
+) -> u32 {
+    term_status(|| {
+        if out.is_null() {
+            set_last_error_message("out must not be NULL");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is non-null and caller-provided writable storage.
+        unsafe { *out = LocusTermBytes::default() };
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        let Some(action) = mouse_action(kind) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        let Some(button) = mouse_button(button) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        let terminal = &mut term.stream.handler.terminal;
+        if x >= terminal.cols || y >= terminal.rows {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        let mode = terminal.flags.mouse_event;
+        let format = terminal.flags.mouse_format;
+        if action == MouseAction::Motion
+            && format != terminal::terminal::MouseFormat::SgrPixels
+            && term.last_mouse_cell == Some(Coordinate { x, y: u32::from(y) })
+        {
+            return LOCUS_STATUS_OK;
+        }
+        let bytes = mouse_encode::encode(
+            MouseInputEvent {
+                action,
+                button,
+                mods: mods_from_bits(mods),
+                x,
+                y,
+            },
+            mode,
+            format,
+        );
+        if !bytes.is_empty() {
+            terminal.active_screen_mut().clear_selection();
+            term.selection_gesture.reset(terminal);
+            term.last_mouse_cell = Some(Coordinate { x, y: u32::from(y) });
+        }
+        // SAFETY: `out` remains valid for this synchronous call.
+        unsafe { *out = bytes_from_vec(bytes) };
+        LOCUS_STATUS_OK
+    })
+}
+
+/// Applies wheel policy: mouse reports, alternate-scroll arrows, or local scrollback.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle. `out` must point to writable storage
+/// for a `LocusTermBytes`, later freed with `locus_term_bytes_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_scroll_wheel(
+    term: *mut LocusTerm,
+    delta_rows: i32,
+    x: u16,
+    y: u16,
+    mods: u16,
+    out: *mut LocusTermBytes,
+) -> u32 {
+    term_status(|| {
+        if out.is_null() {
+            set_last_error_message("out must not be NULL");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is non-null and caller-provided writable storage.
+        unsafe { *out = LocusTermBytes::default() };
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        if delta_rows.unsigned_abs() > MAX_WHEEL_ROWS_PER_EVENT {
+            set_last_error_message("wheel delta is too large");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        let terminal = &mut term.stream.handler.terminal;
+        if x >= terminal.cols || y >= terminal.rows {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        let mut bytes = Vec::new();
+        if terminal.flags.mouse_event != terminal::terminal::MouseEvent::None {
+            let button = if delta_rows < 0 {
+                MouseButton::Four
+            } else {
+                MouseButton::Five
+            };
+            for _ in 0..delta_rows.unsigned_abs() {
+                bytes.extend(mouse_encode::encode(
+                    MouseInputEvent {
+                        action: MouseAction::Press,
+                        button: Some(button),
+                        mods: mods_from_bits(mods),
+                        x,
+                        y,
+                    },
+                    terminal.flags.mouse_event,
+                    terminal.flags.mouse_format,
+                ));
+            }
+        } else if terminal.screens.active_key() == ScreenKey::Alternate
+            && terminal.modes.get(Mode::MouseAlternateScroll)
+        {
+            let sequence: &[u8] = match (delta_rows < 0, terminal.modes.get(Mode::CursorKeys)) {
+                (true, true) => b"\x1bOA",
+                (true, false) => b"\x1b[A",
+                (false, true) => b"\x1bOB",
+                (false, false) => b"\x1b[B",
+            };
+            for _ in 0..delta_rows.unsigned_abs() {
+                bytes.extend_from_slice(sequence);
+            }
+        } else if terminal.screens.active_key() == ScreenKey::Primary {
+            terminal.scroll_viewport(Scroll::DeltaRow(delta_rows as isize));
+        }
+        if !bytes.is_empty() {
+            terminal.active_screen_mut().clear_selection();
+            term.selection_gesture.reset(terminal);
+        }
+        // SAFETY: `out` remains valid for this synchronous call.
+        unsafe { *out = bytes_from_vec(bytes) };
+        LOCUS_STATUS_OK
+    })
+}
+
 fn term_status(action: impl FnOnce() -> u32) -> u32 {
     clear_last_error_message();
     match catch_unwind(AssertUnwindSafe(action)) {
@@ -803,6 +1195,64 @@ fn validate_terminal_scrollback(max_scrollback: usize) -> bool {
         return false;
     }
     true
+}
+
+fn valid_cell_fraction(value: f32) -> bool {
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        return true;
+    }
+    set_last_error_message("cell_fraction_x must be finite and between zero and one");
+    false
+}
+
+fn selection_geometry(terminal: &Terminal) -> SelectionGeometry {
+    SelectionGeometry {
+        columns: terminal.cols,
+        cell_width: 1.0,
+        padding_left: 0.0,
+        screen_height: f64::from(terminal.rows),
+    }
+}
+
+fn viewport_pin(terminal: &Terminal, x: u16, y: u16) -> Option<terminal::page_list::Pin> {
+    if x >= terminal.cols || y >= terminal.rows {
+        set_last_error_message("selection coordinate is outside the viewport");
+        return None;
+    }
+    terminal
+        .active_screen()
+        .pages
+        .pin(Point::viewport(x, u32::from(y)))
+}
+
+fn mouse_action(kind: u32) -> Option<MouseAction> {
+    match kind {
+        LOCUS_TERM_MOUSE_PRESS => Some(MouseAction::Press),
+        LOCUS_TERM_MOUSE_RELEASE => Some(MouseAction::Release),
+        LOCUS_TERM_MOUSE_MOTION => Some(MouseAction::Motion),
+        _ => {
+            set_last_error_message("unknown mouse event kind");
+            None
+        }
+    }
+}
+
+fn mouse_button(button: u32) -> Option<Option<MouseButton>> {
+    let value = match button {
+        LOCUS_TERM_MOUSE_BUTTON_LEFT => Some(MouseButton::Left),
+        LOCUS_TERM_MOUSE_BUTTON_MIDDLE => Some(MouseButton::Middle),
+        LOCUS_TERM_MOUSE_BUTTON_RIGHT => Some(MouseButton::Right),
+        LOCUS_TERM_MOUSE_BUTTON_WHEEL_UP => Some(MouseButton::Four),
+        LOCUS_TERM_MOUSE_BUTTON_WHEEL_DOWN => Some(MouseButton::Five),
+        LOCUS_TERM_MOUSE_BUTTON_WHEEL_LEFT => Some(MouseButton::Six),
+        LOCUS_TERM_MOUSE_BUTTON_WHEEL_RIGHT => Some(MouseButton::Seven),
+        LOCUS_TERM_MOUSE_BUTTON_NONE => None,
+        _ => {
+            set_last_error_message("unknown mouse button");
+            return None;
+        }
+    };
+    Some(value)
 }
 
 fn bytes_slice<'a>(bytes: *const u8, len: usize) -> Option<&'a [u8]> {
@@ -904,6 +1354,8 @@ fn render_into_frame(term: &mut LocusTerm, frame: &mut LocusTermFrame, full: boo
             cell_count: row.cells.len(),
             dirty: row.dirty,
             wrapped: row.raw.wrap(),
+            sel_start: row.selection.map(|value| value.start).unwrap_or(u16::MAX),
+            sel_end: row.selection.map(|value| value.end).unwrap_or(u16::MAX),
         });
     }
     frame.refresh_pointers();
@@ -1216,6 +1668,19 @@ mod tests {
         term
     }
 
+    unsafe fn owned_bytes(bytes: &mut LocusTermBytes) -> Vec<u8> {
+        let result = if bytes.len == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: test callers pass bytes returned by this ABI, which owns
+            // a readable allocation until locus_term_bytes_free below.
+            unsafe { std::slice::from_raw_parts(bytes.ptr, bytes.len) }.to_vec()
+        };
+        // SAFETY: the allocation belongs to this byte handle and is freed once.
+        unsafe { locus_term_bytes_free(bytes) };
+        result
+    }
+
     #[test]
     fn abi_version_is_nonzero() {
         assert_eq!(locus_term_abi_version(), LOCUS_TERM_ABI_VERSION);
@@ -1289,6 +1754,11 @@ mod tests {
     #[test]
     fn row_layout_starts_with_y() {
         assert_eq!(offset_of!(LocusTermRow, y), 0);
+        assert!(offset_of!(LocusTermRow, sel_start) > offset_of!(LocusTermRow, wrapped));
+        assert_eq!(
+            offset_of!(LocusTermRow, sel_end),
+            offset_of!(LocusTermRow, sel_start) + size_of::<u16>()
+        );
         assert!(size_of::<LocusTermRow>() >= 32);
     }
 
@@ -1968,6 +2438,203 @@ mod tests {
                 locus_term_key(term, &event, ptr::null_mut()),
                 LOCUS_TERM_STATUS_INVALID_ARGUMENT
             );
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn selection_gesture_populates_frame_and_release_keeps_selection() {
+        let term = new_term();
+        let frame = locus_term_frame_new();
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, b"abcdef".as_ptr(), 6),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 0, 1, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 1, 4, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 2, 4, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            let rows = std::slice::from_raw_parts((*frame).rows_ptr, (*frame).row_count);
+            assert_eq!((rows[0].sel_start, rows[0].sel_end), (1, 3));
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn selection_clear_removes_frame_range() {
+        let term = new_term();
+        let frame = locus_term_frame_new();
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, b"abcdef".as_ptr(), 6),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 0, 1, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 1, 4, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_selection_clear(term), LOCUS_STATUS_OK);
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            let rows = std::slice::from_raw_parts((*frame).rows_ptr, (*frame).row_count);
+            assert_eq!((rows[0].sel_start, rows[0].sel_end), (u16::MAX, u16::MAX));
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn selection_string_round_trips_visible_text() {
+        let term = new_term();
+        let mut out = LocusTermBytes::default();
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, b"abcdef".as_ptr(), 6),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 0, 1, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 1, 4, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_selection_string(term, &mut out), LOCUS_STATUS_OK);
+            assert_eq!(owned_bytes(&mut out), b"bcd");
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn selection_rejects_nonfinite_fraction() {
+        let term = new_term();
+        unsafe {
+            assert_eq!(
+                locus_term_selection_gesture(term, 0, 0, 0, f32::NAN, false),
+                LOCUS_TERM_STATUS_INVALID_ARGUMENT
+            );
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn mouse_without_reporting_mode_returns_empty() {
+        let term = new_term();
+        let mut out = LocusTermBytes::default();
+        unsafe {
+            assert_eq!(
+                locus_term_mouse(term, 0, 0, 1, 1, 0, &mut out),
+                LOCUS_STATUS_OK
+            );
+            assert!(owned_bytes(&mut out).is_empty());
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn sgr_mouse_press_encodes_one_based_coordinates() {
+        let term = new_term();
+        let mut out = LocusTermBytes::default();
+        unsafe {
+            let enable = b"\x1b[?1000h\x1b[?1006h";
+            assert_eq!(
+                locus_term_feed(term, enable.as_ptr(), enable.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_mouse(term, 0, 0, 2, 1, 0, &mut out),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(owned_bytes(&mut out), b"\x1b[<0;3;2M");
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn alternate_scroll_mode_emits_cursor_keys() {
+        let term = new_term();
+        let mut out = LocusTermBytes::default();
+        unsafe {
+            let enable = b"\x1b[?1049h\x1b[?1007h";
+            assert_eq!(
+                locus_term_feed(term, enable.as_ptr(), enable.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_scroll_wheel(term, -2, 1, 1, 0, &mut out),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(owned_bytes(&mut out), b"\x1b[A\x1b[A");
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn primary_wheel_without_mouse_mode_scrolls_viewport() {
+        let term = locus_term_new(12, 4, 1024 * 1024);
+        let frame = locus_term_frame_new();
+        let input = (0..20)
+            .map(|line| format!("{line}\r\n"))
+            .collect::<String>();
+        let mut out = LocusTermBytes::default();
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_scroll_wheel(term, -2, 1, 1, 0, &mut out),
+                LOCUS_STATUS_OK
+            );
+            assert!(owned_bytes(&mut out).is_empty());
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            assert_eq!((*frame).viewport_offset_rows, 2);
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn button_motion_filters_hover_but_any_motion_reports_it() {
+        let term = new_term();
+        let mut out = LocusTermBytes::default();
+        unsafe {
+            let button_mode = b"\x1b[?1002h\x1b[?1006h";
+            assert_eq!(
+                locus_term_feed(term, button_mode.as_ptr(), button_mode.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_mouse(term, 2, u32::MAX, 1, 1, 0, &mut out),
+                LOCUS_STATUS_OK
+            );
+            assert!(owned_bytes(&mut out).is_empty());
+
+            let any_mode = b"\x1b[?1003h";
+            assert_eq!(
+                locus_term_feed(term, any_mode.as_ptr(), any_mode.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_mouse(term, 2, u32::MAX, 2, 1, 0, &mut out),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(owned_bytes(&mut out), b"\x1b[<35;3;2M");
             locus_term_free(term);
         }
     }

@@ -6,6 +6,7 @@ pub mod key_encode;
 pub mod key_mods;
 pub mod kitty_entries;
 pub mod kitty_flags;
+pub mod mouse_encode;
 pub mod paste;
 
 pub use key::{Action, Key, KeyEvent};

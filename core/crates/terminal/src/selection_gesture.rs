@@ -4,6 +4,7 @@
 //! tracked-pin slab instead of mutable `*Pin` pointers.
 
 use crate::page_list::{Pin, PinId, Scroll};
+use crate::point::{Coordinate, Point};
 use crate::screen::SelectLineOptions;
 use crate::screen_set::{ScreenKey, ScreenSet};
 use crate::selection::Selection;
@@ -68,6 +69,10 @@ pub struct Drag<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AutoscrollTick<'a> {
+    pub viewport: Coordinate,
+    pub xpos: f64,
+    pub ypos: f64,
+    pub rectangle: bool,
     pub word_boundary_codepoints: &'a [char],
     pub geometry: Geometry,
 }
@@ -123,7 +128,7 @@ impl SelectionGesture {
         if !self.press_repeat(terminal, &press) {
             self.press_initial(terminal, &press);
         }
-        self.press_selection(terminal, press.word_boundary_codepoints)
+        self.press_selection(terminal, press.pin, press.word_boundary_codepoints)
     }
 
     pub fn drag(&mut self, terminal: &mut Terminal, drag: Drag<'_>) -> Option<Selection> {
@@ -159,27 +164,33 @@ impl SelectionGesture {
         terminal: &mut Terminal,
         tick: AutoscrollTick<'_>,
     ) -> Option<Selection> {
+        if self.count == 0 {
+            debug_assert_eq!(self.autoscroll, Autoscroll::None);
+            return None;
+        }
         let delta = match self.autoscroll {
             Autoscroll::None => return None,
             Autoscroll::Up => -1,
             Autoscroll::Down => 1,
         };
+        // ghostty: SelectionGesture.zig:478-484. A stale anchor cancels the
+        // timer-driven gesture instead of continuing to scroll forever.
+        if self.validated_left_click_pin(&terminal.screens).is_none() {
+            self.reset(terminal);
+            return None;
+        }
         terminal.scroll_viewport(Scroll::DeltaRow(delta));
         let pin = terminal
             .active_screen()
             .pages
-            .get_top_left(crate::point::Tag::Viewport);
+            .pin(Point::viewport(tick.viewport.x, tick.viewport.y))?;
         self.drag(
             terminal,
             Drag {
                 pin: Some(pin),
-                xpos: self.xpos,
-                ypos: if delta < 0 {
-                    0.0
-                } else {
-                    tick.geometry.screen_height
-                },
-                rectangle: false,
+                xpos: tick.xpos,
+                ypos: tick.ypos,
+                rectangle: tick.rectangle,
                 word_boundary_codepoints: tick.word_boundary_codepoints,
                 geometry: tick.geometry,
             },
@@ -201,6 +212,11 @@ impl SelectionGesture {
     }
 
     pub fn release(&mut self, terminal: &mut Terminal, release: Release) {
+        // ghostty: SelectionGesture.zig:564-572
+        if self.count == 0 {
+            debug_assert_eq!(self.autoscroll, Autoscroll::None);
+            return;
+        }
         self.autoscroll = Autoscroll::None;
         if let Some(click) = self.validated_left_click_pin(&terminal.screens) {
             if release.pin.map(|pin| !pin.eql(click)).unwrap_or(true) {
@@ -217,6 +233,10 @@ impl SelectionGesture {
 
     pub fn count(&self) -> u8 {
         self.count
+    }
+
+    pub fn set_autoscroll(&mut self, autoscroll: Autoscroll) {
+        self.autoscroll = autoscroll;
     }
 
     fn press_initial(&mut self, terminal: &mut Terminal, press: &Press<'_>) {
@@ -257,32 +277,25 @@ impl SelectionGesture {
         {
             return false;
         }
-        let Some(screen) = terminal.screens.get_mut(key) else {
-            return false;
-        };
-        let Some(id) = self.left_click_pin else {
-            return false;
-        };
-        // Ghostty mutates a stored `*Pin` in place. Rust stores tracked pins in
-        // PageList's slab, so a repeat updates the existing PinId entry.
-        if !screen.pages.set_tracked_pin(id, press.pin) {
+        if self.left_click_pin.is_none() {
             return false;
         }
+        // ghostty: SelectionGesture.zig:657-664. Repeated clicks update the
+        // click sequence while preserving its original tracked anchor.
         self.count = self.count.saturating_add(1).min(3);
         self.time = press.time;
         self.behavior = behavior_for_count(self.count, press.behaviors);
-        self.xpos = press.xpos;
-        self.ypos = press.ypos;
         self.dragged = false;
+        self.autoscroll = Autoscroll::None;
         true
     }
 
     fn press_selection(
         &mut self,
         terminal: &mut Terminal,
+        pin: Pin,
         word_boundary_codepoints: &[char],
     ) -> Option<Selection> {
-        let pin = self.validated_left_click_pin(&terminal.screens)?;
         let selection = match self.behavior {
             Behavior::Cell => None,
             Behavior::Word => terminal
@@ -316,16 +329,25 @@ impl SelectionGesture {
 
     fn validated_left_click_pin(&self, screens: &ScreenSet) -> Option<Pin> {
         let key = self.left_click_screen?;
+        // ghostty: SelectionGesture.zig:219-227. A tracked pin is meaningful
+        // only while its originating screen is the active screen instance.
+        if screens.active_key() != key {
+            return None;
+        }
         if screens.generation(key) != self.generation {
             return None;
         }
         screens.get(key)?.pages.tracked_pin(self.left_click_pin?)
     }
 
-    fn reset(&mut self, terminal: &mut Terminal) {
+    pub fn reset(&mut self, terminal: &mut Terminal) {
         if let (Some(key), Some(id)) = (self.left_click_screen, self.left_click_pin) {
-            if let Some(screen) = terminal.screens.get_mut(key) {
-                let _ = screen.pages.untrack_pin(id);
+            // ghostty: SelectionGesture.zig:179-185. Use the originating
+            // screen, but never untrack through a recycled screen generation.
+            if terminal.screens.generation(key) == self.generation {
+                if let Some(screen) = terminal.screens.get_mut(key) {
+                    let _ = screen.pages.untrack_pin(id);
+                }
             }
         }
         *self = Self::default();
@@ -347,9 +369,12 @@ fn distance(x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
 }
 
 fn autoscroll_from_y(y: f64, height: f64) -> Autoscroll {
-    if y < 0.0 {
+    // ghostty: SelectionGesture.zig:161-164,378-384. Keep a one-pixel
+    // activation buffer so fullscreen-edge drags still autoscroll.
+    const AUTOSCROLL_BUFFER: f64 = 1.0;
+    if y <= AUTOSCROLL_BUFFER {
         Autoscroll::Up
-    } else if y >= height {
+    } else if y > height - AUTOSCROLL_BUFFER {
         Autoscroll::Down
     } else {
         Autoscroll::None
@@ -960,48 +985,82 @@ mod tests {
     #[test]
     fn selection_gesture_drag_autoscroll_edge_boundaries() {
         // ghostty: "SelectionGesture drag autoscroll edge boundaries" (SelectionGesture.zig:1609)
-        assert_eq!(autoscroll_from_y(-0.1, 80.0), Autoscroll::Up);
-        assert_eq!(autoscroll_from_y(0.0, 80.0), Autoscroll::None);
-        assert_eq!(autoscroll_from_y(79.9, 80.0), Autoscroll::None);
-        assert_eq!(autoscroll_from_y(80.0, 80.0), Autoscroll::Down);
+        assert_eq!(autoscroll_from_y(1.0, 80.0), Autoscroll::Up);
+        assert_eq!(autoscroll_from_y(1.1, 80.0), Autoscroll::None);
+        assert_eq!(autoscroll_from_y(79.0, 80.0), Autoscroll::None);
+        assert_eq!(autoscroll_from_y(79.1, 80.0), Autoscroll::Down);
     }
 
     #[test]
     fn selection_gesture_autoscroll_tick_scrolls_and_continues_drag() {
         // ghostty: "SelectionGesture autoscroll tick scrolls and continues drag" (SelectionGesture.zig:1633)
-        let mut terminal = terminal_with_text(10, 4, "one\ntwo\nthree\nfour\nfive\nsix");
+        let mut terminal = terminal_with_text(5, 5, "");
         let mut gesture = SelectionGesture::new();
-        let _ = press_gesture(&mut gesture, &mut terminal, 1, 2, 1);
+        let _ = press_gesture(&mut gesture, &mut terminal, 1, 1, 1);
         gesture.autoscroll = Autoscroll::Down;
         let result = gesture
             .autoscroll_tick(
                 &mut terminal,
                 AutoscrollTick {
+                    viewport: Coordinate { x: 3, y: 2 },
+                    xpos: 39.0,
+                    ypos: 100.0,
+                    rectangle: false,
                     word_boundary_codepoints: &DEFAULT_WORD_BOUNDARIES,
-                    geometry: test_geometry(),
+                    geometry: Geometry {
+                        columns: 5,
+                        padding_left: 0.0,
+                        screen_height: 100.0,
+                        ..test_geometry()
+                    },
                 },
             )
             .map(|selection| selection_points(&terminal, selection));
-        assert_eq!(result, Some((0, 2, 0, 2)));
+        assert_eq!(result, Some((1, 1, 3, 2)));
     }
 
     #[test]
     fn selection_gesture_autoscroll_tick_resolves_drag_pin_after_scrolling() {
         // ghostty: "SelectionGesture autoscroll tick resolves drag pin after scrolling" (SelectionGesture.zig:1657)
-        let mut terminal = terminal_with_text(10, 4, "one\ntwo\nthree\nfour\nfive\nsix");
+        let mut terminal = terminal_with_text(5, 3, "1111\n2222\n3333\n4444\n5555");
+        terminal.scroll_viewport(Scroll::DeltaRow(-2));
         let mut gesture = SelectionGesture::new();
-        let _ = press_gesture(&mut gesture, &mut terminal, 1, 2, 1);
-        gesture.autoscroll = Autoscroll::Up;
-        let result = gesture
+        let _ = press_gesture(&mut gesture, &mut terminal, 1, 1, 1);
+        gesture.autoscroll = Autoscroll::Down;
+        let viewport = Coordinate { x: 3, y: 2 };
+        let pre_scroll_pin = terminal
+            .active_screen()
+            .pages
+            .pin(Point::viewport(viewport.x, viewport.y))
+            .expect("pre-scroll viewport pin");
+        let selection = gesture
             .autoscroll_tick(
                 &mut terminal,
                 AutoscrollTick {
+                    viewport,
+                    xpos: 39.0,
+                    ypos: 100.0,
+                    rectangle: false,
                     word_boundary_codepoints: &DEFAULT_WORD_BOUNDARIES,
-                    geometry: test_geometry(),
+                    geometry: Geometry {
+                        columns: 5,
+                        padding_left: 0.0,
+                        screen_height: 100.0,
+                        ..test_geometry()
+                    },
                 },
             )
-            .map(|selection| selection_points(&terminal, selection));
-        assert_eq!(result, Some((0, 2, 0, 1)));
+            .expect("autoscroll selection");
+        let post_scroll_pin = terminal
+            .active_screen()
+            .pages
+            .pin(Point::viewport(viewport.x, viewport.y))
+            .expect("post-scroll viewport pin");
+        assert!(!pre_scroll_pin.eql(post_scroll_pin));
+        assert_eq!(
+            selection.end(&terminal.active_screen().pages),
+            Some(post_scroll_pin)
+        );
     }
 
     #[test]
@@ -1009,17 +1068,51 @@ mod tests {
         // ghostty: "SelectionGesture autoscroll tick stops with invalidated click" (SelectionGesture.zig:1686)
         let mut terminal = terminal_with_text(20, 5, "hello world");
         let mut gesture = SelectionGesture::new();
+        let _ = press_gesture(&mut gesture, &mut terminal, 1, 1, 1);
         gesture.autoscroll = Autoscroll::Down;
+        let _ = terminal.screens.get_init(ScreenKey::Alternate);
+        terminal.screens.switch_to(ScreenKey::Alternate);
         let result = gesture
             .autoscroll_tick(
                 &mut terminal,
                 AutoscrollTick {
+                    viewport: Coordinate { x: 2, y: 1 },
+                    xpos: 20.0,
+                    ypos: 80.0,
+                    rectangle: false,
                     word_boundary_codepoints: &DEFAULT_WORD_BOUNDARIES,
                     geometry: test_geometry(),
                 },
             )
             .map(|selection| selection_points(&terminal, selection));
         assert_eq!(result, None);
+        assert_eq!(gesture.count(), 0);
+        assert_eq!(gesture.autoscroll, Autoscroll::None);
+    }
+
+    #[test]
+    fn selection_gesture_autoscroll_tick_preserves_rectangle_mode() {
+        // ghostty: SelectionGesture.zig:426-496
+        let mut terminal = terminal_with_text(10, 4, "one\ntwo\nthree\nfour\nfive\nsix");
+        let mut gesture = SelectionGesture::new();
+        let _ = press_gesture(&mut gesture, &mut terminal, 1, 2, 1);
+        gesture.autoscroll = Autoscroll::Down;
+
+        let selection = gesture
+            .autoscroll_tick(
+                &mut terminal,
+                AutoscrollTick {
+                    viewport: Coordinate { x: 3, y: 3 },
+                    xpos: 39.0,
+                    ypos: 100.0,
+                    rectangle: true,
+                    word_boundary_codepoints: &DEFAULT_WORD_BOUNDARIES,
+                    geometry: test_geometry(),
+                },
+            )
+            .expect("rectangle autoscroll selection");
+
+        assert!(selection.rectangle);
     }
 
     #[test]
@@ -1213,6 +1306,42 @@ mod tests {
     }
 
     #[test]
+    fn selection_gesture_repeat_keeps_original_anchor_and_stops_autoscroll() {
+        // ghostty: "SelectionGesture repeat increments click count" (SelectionGesture.zig:1880)
+        let mut terminal = terminal_with_text(20, 5, "hello world");
+        let mut gesture = SelectionGesture::new();
+        let mut first = press_at(&terminal, 0, 0, 10);
+        first.max_distance = 100.0;
+        let _ = gesture.press(&mut terminal, first);
+        gesture.autoscroll = Autoscroll::Down;
+
+        let mut repeated = press_at(&terminal, 5, 0, 20);
+        repeated.max_distance = 100.0;
+        let _ = gesture.press(&mut terminal, repeated);
+
+        assert_eq!(gesture.count(), 2);
+        assert_eq!(gesture.autoscroll, Autoscroll::None);
+        assert_eq!(
+            gesture
+                .validated_left_click_pin(&terminal.screens)
+                .map(|pin| pin.x),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn selection_gesture_release_without_press_is_noop() {
+        // ghostty: SelectionGesture.zig:564-572
+        let mut terminal = terminal_with_text(20, 5, "hello world");
+        let mut gesture = SelectionGesture::new();
+
+        gesture.release(&mut terminal, Release { pin: None });
+
+        assert!(!gesture.dragged());
+        assert_eq!(gesture.autoscroll, Autoscroll::None);
+    }
+
+    #[test]
     fn selection_gesture_repeat_clamps_at_triple_click() {
         // ghostty: "SelectionGesture repeat clamps at triple click" (SelectionGesture.zig:1894)
         let mut terminal = terminal_with_text(20, 5, "hello world");
@@ -1296,6 +1425,37 @@ mod tests {
     }
 
     #[test]
+    fn selection_gesture_drag_rejects_anchor_from_inactive_screen() {
+        // ghostty: "SelectionGesture screen switch resets click count" (SelectionGesture.zig:1968)
+        let mut terminal = terminal_with_text(20, 5, "hello world");
+        let mut gesture = SelectionGesture::new();
+        let _ = press_gesture(&mut gesture, &mut terminal, 0, 0, 10);
+
+        let _ = terminal.screens.get_init(ScreenKey::Alternate);
+        terminal.screens.switch_to(ScreenKey::Alternate);
+        let alternate_pin = screen_pin(&terminal, 3, 0);
+        let tracked_before = terminal.active_screen().pages.count_tracked_pins();
+
+        let selection = gesture.drag(
+            &mut terminal,
+            Drag {
+                pin: Some(alternate_pin),
+                xpos: 30.0,
+                ypos: 10.0,
+                rectangle: false,
+                word_boundary_codepoints: &DEFAULT_WORD_BOUNDARIES,
+                geometry: test_geometry(),
+            },
+        );
+
+        assert_eq!(selection, None);
+        assert_eq!(
+            terminal.active_screen().pages.count_tracked_pins(),
+            tracked_before
+        );
+    }
+
+    #[test]
     fn selection_gesture_removed_screen_resets_without_untracking_stale_pin() {
         // ghostty: "SelectionGesture removed screen resets without untracking stale pin" (SelectionGesture.zig:1991)
         let mut terminal = terminal_with_text(20, 5, "hello world");
@@ -1315,6 +1475,26 @@ mod tests {
         press.time = Some(Time(20));
         let _ = gesture.press(&mut terminal, press);
         assert_eq!(gesture.count(), 1);
+    }
+
+    #[test]
+    fn selection_gesture_reset_does_not_untrack_recycled_screen_pin() {
+        // ghostty: "SelectionGesture removed screen resets without untracking stale pin" (SelectionGesture.zig:1991)
+        let mut terminal = terminal_with_text(20, 5, "hello world");
+        let _ = terminal.screens.get_init(ScreenKey::Alternate);
+        terminal.screens.switch_to(ScreenKey::Alternate);
+        let mut gesture = SelectionGesture::new();
+        let _ = press_gesture(&mut gesture, &mut terminal, 0, 0, 10);
+
+        terminal.screens.remove(ScreenKey::Alternate);
+        let _ = terminal.screens.get_init(ScreenKey::Alternate);
+        terminal.screens.switch_to(ScreenKey::Alternate);
+        let pin = screen_pin(&terminal, 1, 0);
+        let id = terminal.active_screen_mut().pages.track_pin(pin);
+
+        gesture.reset(&mut terminal);
+
+        assert_eq!(terminal.active_screen().pages.tracked_pin(id), Some(pin));
     }
 
     #[test]

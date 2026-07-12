@@ -657,7 +657,7 @@ LocusStatus locus_large_file_position_for_line_column(
  * handle state is undefined. Free the handle and create a new one.
  */
 
-#define LOCUS_TERM_ABI_VERSION ((uint32_t)3u)
+#define LOCUS_TERM_ABI_VERSION ((uint32_t)4u)
 
 #define LOCUS_TERM_STATUS_INVALID_ARGUMENT ((LocusStatus)300u)
 #define LOCUS_TERM_STATUS_PANIC ((LocusStatus)301u)
@@ -675,6 +675,23 @@ LocusStatus locus_large_file_position_for_line_column(
 #define LOCUS_TERM_ACTION_RELEASE ((uint32_t)0u)
 #define LOCUS_TERM_ACTION_PRESS ((uint32_t)1u)
 #define LOCUS_TERM_ACTION_REPEAT ((uint32_t)2u)
+
+#define LOCUS_TERM_SELECTION_PRESS ((uint32_t)0u)
+#define LOCUS_TERM_SELECTION_DRAG ((uint32_t)1u)
+#define LOCUS_TERM_SELECTION_RELEASE ((uint32_t)2u)
+#define LOCUS_TERM_SELECTION_PRESS_REPEAT ((uint32_t)3u)
+
+#define LOCUS_TERM_MOUSE_PRESS ((uint32_t)0u)
+#define LOCUS_TERM_MOUSE_RELEASE ((uint32_t)1u)
+#define LOCUS_TERM_MOUSE_MOTION ((uint32_t)2u)
+#define LOCUS_TERM_MOUSE_BUTTON_LEFT ((uint32_t)0u)
+#define LOCUS_TERM_MOUSE_BUTTON_MIDDLE ((uint32_t)1u)
+#define LOCUS_TERM_MOUSE_BUTTON_RIGHT ((uint32_t)2u)
+#define LOCUS_TERM_MOUSE_BUTTON_WHEEL_UP ((uint32_t)3u)
+#define LOCUS_TERM_MOUSE_BUTTON_WHEEL_DOWN ((uint32_t)4u)
+#define LOCUS_TERM_MOUSE_BUTTON_WHEEL_LEFT ((uint32_t)5u)
+#define LOCUS_TERM_MOUSE_BUTTON_WHEEL_RIGHT ((uint32_t)6u)
+#define LOCUS_TERM_MOUSE_BUTTON_NONE UINT32_MAX
 
 #define LOCUS_TERM_MOD_SHIFT ((uint16_t)(1u << 0))
 #define LOCUS_TERM_MOD_CTRL ((uint16_t)(1u << 1))
@@ -761,6 +778,9 @@ typedef struct LocusTermRow {
     size_t cell_count;
     bool dirty;
     bool wrapped;
+    /* Inclusive selected columns; UINT16_MAX in both fields means none. */
+    uint16_t sel_start;
+    uint16_t sel_end;
 } LocusTermRow;
 
 typedef struct LocusTermFrame {
@@ -820,6 +840,24 @@ LocusStatus locus_term_paste(
     LocusTerm *term, const uint8_t *bytes, size_t len, bool allow_unsafe,
     LocusTermBytes *out);
 LocusStatus locus_term_scroll(LocusTerm *term, intptr_t delta);
+/* Coordinates are viewport cells; cell_fraction_x refines the horizontal edge. */
+LocusStatus locus_term_selection_gesture(
+    LocusTerm *term, uint32_t kind, uint16_t x, uint16_t y,
+    float cell_fraction_x, bool rectangle);
+LocusStatus locus_term_selection_clear(LocusTerm *term);
+LocusStatus locus_term_selection_string(
+    LocusTerm *term, LocusTermBytes *out);
+LocusStatus locus_term_autoscroll_tick(
+    LocusTerm *term, int32_t direction, uint16_t x, float cell_fraction_x,
+    bool rectangle);
+/* Empty output means the caller should handle the mouse event locally. */
+LocusStatus locus_term_mouse(
+    LocusTerm *term, uint32_t kind, uint32_t button, uint16_t x, uint16_t y,
+    uint16_t mods, LocusTermBytes *out);
+/* Routes wheel input to mouse reports, alternate-scroll keys, or scrollback. */
+LocusStatus locus_term_scroll_wheel(
+    LocusTerm *term, int32_t delta_rows, uint16_t x, uint16_t y,
+    uint16_t mods, LocusTermBytes *out);
 
 /*
  * PTY process management ABI (added under ABI version 6).

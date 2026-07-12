@@ -177,7 +177,7 @@ final class TerminalBridgeTests: XCTestCase {
     XCTAssertEqual(frame.cursor.y, 0)
   }
 
-  func testFrameExposesABIV3ScrollMetadata() throws {
+  func testFrameExposesABIV4ScrollMetadata() throws {
     let terminal = try TerminalCore(
       columns: 20,
       rows: 5,
@@ -198,6 +198,24 @@ final class TerminalBridgeTests: XCTestCase {
     try terminal.render(into: frame, full: true)
     XCTAssertEqual(frame.viewportOffsetRows, 4)
     XCTAssertFalse(frame.atBottom)
+  }
+
+  func testSelectionGestureAndStringRoundTripThroughBridge() throws {
+    let terminal = try TerminalCore(columns: 12, rows: 4)
+    let frame = try TerminalFrame()
+    try terminal.feed(Data("abcdef".utf8))
+
+    try terminal.selectionGesture(.press, column: 1, row: 0)
+    try terminal.selectionGesture(.drag, column: 4, row: 0)
+    try terminal.selectionGesture(.release, column: 4, row: 0)
+    try terminal.render(into: frame, full: true)
+
+    XCTAssertEqual(try terminal.selectionString(), "bcd")
+    XCTAssertEqual(frame.selectionRange(forRow: 0), 1...3)
+
+    try terminal.clearSelection()
+    try terminal.render(into: frame, full: true)
+    XCTAssertNil(frame.selectionRange(forRow: 0))
   }
 
   func testGraphemeExtrasSurviveToPlainText() throws {

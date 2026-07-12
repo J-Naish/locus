@@ -59,7 +59,6 @@ impl Tracked {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlattenedChunk {
     pub node: crate::page_list::NodeId,
-    pub serial: u64,
     pub start: CellCountInt,
     pub end: CellCountInt,
 }
@@ -81,12 +80,8 @@ impl Flattened {
         let mut iterator = pages.page_iterator(Direction::RightDown, top_point, Some(bottom_point));
         let mut chunks = Vec::new();
         while let Some(chunk) = iterator.next(pages) {
-            let Some(serial) = pages.node_serial(chunk.node) else {
-                continue;
-            };
             chunks.push(FlattenedChunk {
                 node: chunk.node,
-                serial,
                 start: chunk.start,
                 end: chunk.end,
             });
@@ -97,17 +92,6 @@ impl Flattened {
             // Upstream highlight.zig historically called this `end_x`; T8b
             // ports the corrected behavior by carrying the bottom pin's x.
             bot_x: bottom_right.x,
-        })
-    }
-
-    pub fn contains_row(
-        &self,
-        node: crate::page_list::NodeId,
-        serial: u64,
-        y: CellCountInt,
-    ) -> bool {
-        self.chunks.iter().any(|chunk| {
-            chunk.node == node && chunk.serial == serial && y >= chunk.start && y < chunk.end
         })
     }
 }

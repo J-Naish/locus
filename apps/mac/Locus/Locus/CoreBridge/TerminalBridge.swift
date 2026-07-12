@@ -74,6 +74,30 @@ enum TerminalCellWidth: UInt8, Equatable {
   case spacerTail = 3
 }
 
+enum TerminalSelectionGestureKind: UInt32 {
+  case press = 0
+  case drag = 1
+  case release = 2
+  case pressRepeat = 3
+}
+
+enum TerminalMouseEventKind: UInt32 {
+  case press = 0
+  case release = 1
+  case motion = 2
+}
+
+enum TerminalMouseButton: UInt32 {
+  case left = 0
+  case middle = 1
+  case right = 2
+  case wheelUp = 3
+  case wheelDown = 4
+  case wheelLeft = 5
+  case wheelRight = 6
+  case none = 0xFFFF_FFFF
+}
+
 /// Wraps one `locus_term` handle. This class is not thread-safe: use one
 /// instance from a single serial execution context. If a call throws
 /// `.corePanic`, discard this instance and create a new one.
@@ -174,6 +198,94 @@ final class TerminalCore {
     try Self.checkStatus(locus_term_scroll(handle, delta))
   }
 
+  func selectionGesture(
+    _ kind: TerminalSelectionGestureKind,
+    column: UInt16,
+    row: UInt16,
+    cellFractionX: Float = 0.5,
+    rectangle: Bool = false
+  ) throws {
+    try Self.checkStatus(
+      locus_term_selection_gesture(
+        handle,
+        kind.rawValue,
+        column,
+        row,
+        cellFractionX,
+        rectangle
+      )
+    )
+  }
+
+  func clearSelection() throws {
+    try Self.checkStatus(locus_term_selection_clear(handle))
+  }
+
+  func selectionString() throws -> String {
+    var bytes = LocusTermBytes(ptr: nil, len: 0, cap: 0)
+    try Self.checkStatus(locus_term_selection_string(handle, &bytes))
+    return String(decoding: Self.copyAndFree(bytes: &bytes), as: UTF8.self)
+  }
+
+  func autoscrollSelection(
+    direction: Int32,
+    column: UInt16,
+    cellFractionX: Float = 0.5,
+    rectangle: Bool = false
+  ) throws {
+    try Self.checkStatus(
+      locus_term_autoscroll_tick(
+        handle,
+        direction,
+        column,
+        cellFractionX,
+        rectangle
+      )
+    )
+  }
+
+  func encodeMouse(
+    kind: TerminalMouseEventKind,
+    button: TerminalMouseButton,
+    column: UInt16,
+    row: UInt16,
+    modifiers: TerminalModifiers = []
+  ) throws -> Data {
+    var bytes = LocusTermBytes(ptr: nil, len: 0, cap: 0)
+    try Self.checkStatus(
+      locus_term_mouse(
+        handle,
+        kind.rawValue,
+        button.rawValue,
+        column,
+        row,
+        modifiers.rawValue,
+        &bytes
+      )
+    )
+    return Self.copyAndFree(bytes: &bytes)
+  }
+
+  func scrollWheel(
+    deltaRows: Int32,
+    column: UInt16,
+    row: UInt16,
+    modifiers: TerminalModifiers = []
+  ) throws -> Data {
+    var bytes = LocusTermBytes(ptr: nil, len: 0, cap: 0)
+    try Self.checkStatus(
+      locus_term_scroll_wheel(
+        handle,
+        deltaRows,
+        column,
+        row,
+        modifiers.rawValue,
+        &bytes
+      )
+    )
+    return Self.copyAndFree(bytes: &bytes)
+  }
+
   func render(into frame: TerminalFrame, full: Bool = false) throws {
     try Self.checkStatus(locus_term_render(handle, frame.rawPointer, full))
   }
@@ -272,6 +384,22 @@ final class TerminalFrame {
 
   var rows: UInt16 {
     rawPointer.pointee.rows
+  }
+
+  func selectionRange(forRow index: Int) -> ClosedRange<UInt16>? {
+    guard index >= 0, index < rawPointer.pointee.row_count,
+      let rows = rawPointer.pointee.rows_ptr
+    else {
+      return nil
+    }
+    let row = rows[index]
+    guard row.sel_start != UInt16.max,
+      row.sel_end != UInt16.max,
+      row.sel_start <= row.sel_end
+    else {
+      return nil
+    }
+    return row.sel_start...row.sel_end
   }
 
   func withRows<R>(_ body: (UnsafeBufferPointer<LocusTermRow>) throws -> R) rethrows -> R {
