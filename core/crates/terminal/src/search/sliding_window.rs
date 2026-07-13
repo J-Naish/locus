@@ -94,6 +94,10 @@ impl SlidingWindow {
         self.data_offset = 0;
     }
 
+    pub(crate) fn needle_len(&self) -> usize {
+        self.needle.len()
+    }
+
     // ghostty: terminal/search/sliding_window.zig:159
     pub fn next(&mut self, pages: &PageList) -> Option<Flattened> {
         if self.needle.is_empty() || self.data.len() < self.needle.len() {
