@@ -6,6 +6,35 @@ import XCTest
 
 @MainActor
 final class TerminalPaneViewTests: XCTestCase {
+  func testPaintSchedulingIgnoresFrameDirtyStateByDesign() {
+    // The signature intentionally has no dirty/frame parameter so a clean
+    // follow-up render cannot suppress an earlier generation's repaint.
+    XCTAssertFalse(
+      TerminalPaneView.shouldSchedulePaint(
+        generation: nil,
+        lastScheduledGeneration: nil
+      )
+    )
+    XCTAssertFalse(
+      TerminalPaneView.shouldSchedulePaint(
+        generation: 5,
+        lastScheduledGeneration: 5
+      )
+    )
+    XCTAssertTrue(
+      TerminalPaneView.shouldSchedulePaint(
+        generation: 5,
+        lastScheduledGeneration: nil
+      )
+    )
+    XCTAssertTrue(
+      TerminalPaneView.shouldSchedulePaint(
+        generation: 6,
+        lastScheduledGeneration: 5
+      )
+    )
+  }
+
   func testCellMetricsAreConsistent() {
     let metrics = TerminalCellMetrics()
 

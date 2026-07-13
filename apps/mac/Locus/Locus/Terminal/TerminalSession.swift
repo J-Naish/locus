@@ -257,6 +257,11 @@ private final class TerminalSessionPublisher {
 private final class TerminalSessionWorker {
   /// Stall-detection threshold for buffered output while the child is not reading.
   private static let maxPendingOutputBytes = 4 * 1024 * 1024
+  /// Cap on bytes consumed per read-source event. The kqueue-backed read
+  /// source re-fires while the descriptor stays readable, so throughput is
+  /// unchanged; the cap bounds how long a flood can monopolize the serial
+  /// queue before queued input and rendering get a turn.
+  private static let maxBytesPerReadEvent = 256 * 1024
   private static let teardownQueue = DispatchQueue(
     label: "locus.terminal.session.teardown",
     qos: .utility
@@ -852,9 +857,10 @@ private final class TerminalSessionWorker {
 
     do {
       var didRead = false
+      var bytesReadThisEvent = 0
       var buffer = [UInt8](repeating: 0, count: 4096)
 
-      while true {
+      while bytesReadThisEvent < Self.maxBytesPerReadEvent {
         let count = try buffer.withUnsafeMutableBytes { rawBuffer in
           try pty.read(into: rawBuffer)
         }
@@ -863,6 +869,7 @@ private final class TerminalSessionWorker {
         }
 
         didRead = true
+        bytesReadThisEvent += count
         try terminal.feed(Data(buffer.prefix(count)))
         let responses = try terminal.takeResponses()
         if !responses.isEmpty {

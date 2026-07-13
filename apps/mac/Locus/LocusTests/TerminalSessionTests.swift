@@ -63,6 +63,64 @@ final class TerminalSessionTests: XCTestCase {
     )
   }
 
+  func testFloodedOutputKeepsPublishingWithoutInput() {
+    let session = TerminalSession(columns: 40, rows: 10)
+    defer {
+      session.send(Data([0x03]))
+      session.terminate()
+    }
+
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    let initialGeneration = session.snapshot?.generation ?? 0
+
+    session.send(Data("yes\n".utf8))
+
+    XCTAssertTrue(
+      waitUntil(timeout: 5) {
+        guard let snapshot = session.snapshot,
+          snapshot.generation >= initialGeneration + 3,
+          let text = session.plainTextForTesting()
+        else {
+          return false
+        }
+        return text.contains("y\ny\ny")
+      },
+      "Generation was \(session.snapshot?.generation ?? 0), snapshot was: "
+        + "\(session.plainTextForTesting() ?? "<nil>")"
+    )
+  }
+
+  func testInterruptTakesEffectDuringFlood() {
+    let session = TerminalSession(columns: 40, rows: 10)
+    defer {
+      session.send(Data([0x03]))
+      session.terminate()
+    }
+
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    let interruptStartedAt = Date()
+    session.send(Data("yes\n".utf8))
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    session.send(Data([0x03]))
+    session.send(Data("echo flood-done\n".utf8))
+
+    let didFinish = waitUntil(timeout: 5) {
+      session.plainTextForTesting()?.contains("flood-done") == true
+    }
+    let elapsed = Date().timeIntervalSince(interruptStartedAt)
+    XCTAssertTrue(
+      didFinish,
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
+    )
+    XCTAssertLessThan(
+      elapsed,
+      6,
+      "Interrupt and queued input took \(elapsed) seconds during a PTY flood"
+    )
+  }
+
   func testShellEchoRoundTrip() {
     let session = TerminalSession(columns: 40, rows: 10)
     defer {

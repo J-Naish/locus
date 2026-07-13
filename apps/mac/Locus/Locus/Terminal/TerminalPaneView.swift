@@ -1063,7 +1063,6 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   private var cancellable: AnyCancellable?
   private var hasPendingFrameChange = true
   private var lastScheduledGeneration: UInt64?
-  private var lastDrawnGeneration: UInt64?
   private var lastGridSize: TerminalGridSize?
   private var frameDisplayLink: CADisplayLink?
   private var markedTextStorage: NSAttributedString?
@@ -1083,6 +1082,19 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
 
   override var acceptsFirstResponder: Bool { true }
   override var isOpaque: Bool { true }
+
+  /// A new snapshot generation always schedules a paint. Frame dirty state
+  /// must not gate this: query-only feeds can consume earlier dirty flags,
+  /// while each frame still contains the complete terminal contents.
+  static func shouldSchedulePaint(
+    generation: UInt64?,
+    lastScheduledGeneration: UInt64?
+  ) -> Bool {
+    guard let generation else {
+      return false
+    }
+    return generation != lastScheduledGeneration
+  }
 
   init(
     session: TerminalSession? = nil,
@@ -1579,7 +1591,6 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
         ? caretRect(for: frame.cursor)
         : nil
     }
-    lastDrawnGeneration = session.snapshot?.generation
   }
 
   override func cacheDisplay(in rect: NSRect, to bitmapImageRep: NSBitmapImageRep) {
@@ -1617,21 +1628,22 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   @objc private func displayLinkDidTick(_ link: CADisplayLink) {
     invalidateCaretForBlinkIfNeeded(at: CACurrentMediaTime())
 
-    guard hasPendingFrameChange, let generation = session?.snapshot?.generation else {
+    guard hasPendingFrameChange else {
       return
     }
-    guard generation != lastScheduledGeneration else {
-      hasPendingFrameChange = false
+    let generation = session?.snapshot?.generation
+    guard
+      Self.shouldSchedulePaint(
+        generation: generation,
+        lastScheduledGeneration: lastScheduledGeneration
+      )
+    else {
+      if generation == lastScheduledGeneration {
+        hasPendingFrameChange = false
+      }
       return
     }
-
-    var hasRenderableChange = true
-    session?.withFrame { frame in
-      hasRenderableChange = frame.dirtyKind != .none || lastDrawnGeneration == nil
-    }
-    guard hasRenderableChange else {
-      hasPendingFrameChange = false
-      lastScheduledGeneration = generation
+    guard let generation else {
       return
     }
 
