@@ -18,6 +18,63 @@ final class TerminalPanelTests: XCTestCase {
     )
   }
 
+  func testDisplayTitlePrefersTitleThenAbbreviatedPwd() {
+    let homeDirectory = URL(filePath: "/Users/nash", directoryHint: .isDirectory)
+
+    XCTAssertNil(
+      TerminalPanelPresentation.displayTitle(
+        snapshot: nil,
+        homeDirectory: homeDirectory
+      )
+    )
+    XCTAssertEqual(
+      TerminalPanelPresentation.displayTitle(
+        snapshot: terminalPanelSnapshot(
+          atBottom: true,
+          title: "vim README.md",
+          workingDirectory: URL(
+            filePath: "/Users/nash/dev",
+            directoryHint: .isDirectory
+          )
+        ),
+        homeDirectory: homeDirectory
+      ),
+      "vim README.md"
+    )
+    XCTAssertEqual(
+      TerminalPanelPresentation.displayTitle(
+        snapshot: terminalPanelSnapshot(
+          atBottom: true,
+          workingDirectory: URL(
+            filePath: "/Users/nash/dev",
+            directoryHint: .isDirectory
+          )
+        ),
+        homeDirectory: homeDirectory
+      ),
+      "~/dev"
+    )
+    XCTAssertEqual(
+      TerminalPanelPresentation.displayTitle(
+        snapshot: terminalPanelSnapshot(
+          atBottom: true,
+          workingDirectory: URL(
+            filePath: "/tmp/locus",
+            directoryHint: .isDirectory
+          )
+        ),
+        homeDirectory: homeDirectory
+      ),
+      "/tmp/locus"
+    )
+    XCTAssertNil(
+      TerminalPanelPresentation.displayTitle(
+        snapshot: terminalPanelSnapshot(atBottom: true),
+        homeDirectory: homeDirectory
+      )
+    )
+  }
+
   func testPanelHeightClampsToBounds() {
     let minimumHeight = TerminalPanelMetrics.minimumHeight
 
@@ -247,7 +304,11 @@ final class TerminalPanelTests: XCTestCase {
   }
 }
 
-private func terminalPanelSnapshot(atBottom: Bool) -> TerminalSession.Snapshot {
+private func terminalPanelSnapshot(
+  atBottom: Bool,
+  title: String? = nil,
+  workingDirectory: URL? = nil
+) -> TerminalSession.Snapshot {
   TerminalSession.Snapshot(
     generation: 1,
     columns: 80,
@@ -256,7 +317,9 @@ private func terminalPanelSnapshot(atBottom: Bool) -> TerminalSession.Snapshot {
     cursorY: 0,
     cursorVisible: true,
     cursorBlinking: true,
-    atBottom: atBottom
+    atBottom: atBottom,
+    title: title,
+    workingDirectory: workingDirectory
   )
 }
 

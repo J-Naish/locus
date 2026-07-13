@@ -70,6 +70,8 @@ final class TerminalSession: ObservableObject {
     let cursorVisible: Bool
     let cursorBlinking: Bool
     let atBottom: Bool
+    let title: String?
+    let workingDirectory: URL?
   }
 
   enum State: Equatable, Sendable {
@@ -352,6 +354,10 @@ private final class TerminalSessionWorker {
   private var lastDrainProgressAt = DispatchTime.now()
   private var writeSourceIsActive = false
   private var generation: UInt64 = 0
+  private var lastTitleReport = ""
+  private var lastWorkingDirectoryReport = ""
+  private var cachedTitle: String?
+  private var cachedWorkingDirectory: URL?
   private var columns: UInt16
   private var rows: UInt16
   private let maxScrollback: Int
@@ -1016,6 +1022,7 @@ private final class TerminalSessionWorker {
     }
 
     try terminal.render(into: frame, full: true)
+    refreshReportedMetadata(from: terminal)
     generation &+= 1
     let cursor = frame.cursor
     let snapshot = TerminalSession.Snapshot(
@@ -1026,9 +1033,45 @@ private final class TerminalSessionWorker {
       cursorY: cursor.y,
       cursorVisible: cursor.visible,
       cursorBlinking: cursor.blinking,
-      atBottom: frame.atBottom
+      atBottom: frame.atBottom,
+      title: cachedTitle,
+      workingDirectory: cachedWorkingDirectory
     )
     publish(snapshot: snapshot)
+  }
+
+  private func refreshReportedMetadata(from terminal: TerminalCore) {
+    do {
+      let report = try terminal.latestTitle()
+      if report != lastTitleReport {
+        lastTitleReport = report
+        let title = report.trimmingCharacters(in: .whitespacesAndNewlines)
+        cachedTitle = title.isEmpty ? nil : title
+      }
+    } catch {
+      handleMouseInteractionError(error)
+    }
+
+    do {
+      let report = try terminal.latestWorkingDirectoryReport()
+      if report != lastWorkingDirectoryReport {
+        lastWorkingDirectoryReport = report
+        cachedWorkingDirectory = Self.workingDirectory(from: report)
+      }
+    } catch {
+      handleMouseInteractionError(error)
+    }
+  }
+
+  private static func workingDirectory(from report: String) -> URL? {
+    guard
+      let url = URL(string: report),
+      url.scheme == "file",
+      !url.path.isEmpty
+    else {
+      return nil
+    }
+    return url
   }
 
   private func enqueueWrite(_ data: Data) throws {

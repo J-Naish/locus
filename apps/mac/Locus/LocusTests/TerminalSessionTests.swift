@@ -636,6 +636,55 @@ final class TerminalSessionTests: XCTestCase {
     XCTAssertEqual(session.selectionText(), "")
   }
 
+  func testTitleReportReachesSnapshot() {
+    let session = TerminalSession(columns: 80, rows: 12)
+    defer {
+      session.terminate()
+    }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+
+    session.send(
+      Data("printf '\\033]2;locus-p3-title\\007'; echo title-sent\n".utf8)
+    )
+
+    XCTAssertTrue(
+      waitUntil {
+        session.plainTextForTesting()?.contains("title-sent") == true
+          && session.snapshot?.title == "locus-p3-title"
+      }
+    )
+  }
+
+  func testWorkingDirectoryReportReachesSnapshot() {
+    let session = TerminalSession(columns: 80, rows: 12)
+    defer {
+      session.terminate()
+    }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+
+    session.send(
+      Data(
+        "printf '\\033]7;file:///tmp/locus%%20p3\\007'; echo pwd-sent\n".utf8
+      )
+    )
+    XCTAssertTrue(
+      waitUntil {
+        session.plainTextForTesting()?.contains("pwd-sent") == true
+          && session.snapshot?.workingDirectory?.path == "/tmp/locus p3"
+      }
+    )
+
+    session.send(Data("printf '\\033]7;\\007'; echo pwd-cleared\n".utf8))
+    XCTAssertTrue(
+      waitUntil {
+        session.plainTextForTesting()?.contains("pwd-cleared") == true
+          && session.snapshot?.workingDirectory == nil
+      }
+    )
+  }
+
   func testScrollWheelScrollsPrimaryScrollback() {
     let session = TerminalSession(columns: 80, rows: 12)
     defer {

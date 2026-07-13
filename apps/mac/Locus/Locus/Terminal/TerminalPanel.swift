@@ -229,6 +229,35 @@ enum TerminalPanelPresentation {
   ) -> Bool {
     snapshot?.atBottom == false
   }
+
+  /// Label text for the panel: the reported title, else the reported
+  /// working directory abbreviated with "~". nil hides the label.
+  static func displayTitle(
+    snapshot: TerminalSession.Snapshot?,
+    homeDirectory: URL
+  ) -> String? {
+    guard let snapshot else {
+      return nil
+    }
+    if let title = snapshot.title, !title.isEmpty {
+      return title
+    }
+    guard let workingDirectory = snapshot.workingDirectory else {
+      return nil
+    }
+
+    let path = workingDirectory.standardizedFileURL.path
+    let homePath = homeDirectory.standardizedFileURL.path
+    guard path != homePath else {
+      return "~"
+    }
+    let homePrefix = homePath.hasSuffix("/") ? homePath : "\(homePath)/"
+    guard path.hasPrefix(homePrefix) else {
+      return path
+    }
+    let suffix = path.dropFirst(homePrefix.count)
+    return suffix.isEmpty ? "~" : "~/\(suffix)"
+  }
 }
 
 private struct TerminalPanelContent: View {
@@ -265,6 +294,23 @@ private struct TerminalPanelContent: View {
           .padding(12)
           .accessibilityLabel("Scroll to Bottom")
           .accessibilityIdentifier("terminal-jump-to-bottom")
+        }
+      }
+      .overlay(alignment: .topTrailing) {
+        if let displayTitle = TerminalPanelPresentation.displayTitle(
+          snapshot: session.snapshot,
+          homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+        ) {
+          Text(displayTitle)
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .frame(maxWidth: 320, alignment: .trailing)
+            .padding(.top, 10)
+            .padding(.trailing, 12)
+            .allowsHitTesting(false)
+            .accessibilityIdentifier("terminal-title")
         }
       }
     case .exited, .failed:

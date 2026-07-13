@@ -956,6 +956,72 @@ pub unsafe extern "C" fn locus_term_selection_string(
     })
 }
 
+/// Copies the most recent window title into `out`; empty when unset.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle. `out` must point to writable storage
+/// for a `LocusTermBytes`, later freed with `locus_term_bytes_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_latest_title(
+    term: *mut LocusTerm,
+    out: *mut LocusTermBytes,
+) -> u32 {
+    term_status(|| {
+        if out.is_null() {
+            set_last_error_message("out must not be NULL");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is non-null and caller-provided writable storage.
+        unsafe { *out = LocusTermBytes::default() };
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        let bytes = term
+            .stream
+            .handler
+            .terminal
+            .title()
+            .map_or_else(Vec::new, |title| title.to_owned().into_bytes());
+        // SAFETY: `out` remains valid for this synchronous call.
+        unsafe { *out = bytes_from_vec(bytes) };
+        LOCUS_STATUS_OK
+    })
+}
+
+/// Copies the most recent OSC 7 working-directory report verbatim into `out`.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle. `out` must point to writable storage
+/// for a `LocusTermBytes`, later freed with `locus_term_bytes_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_latest_pwd(
+    term: *mut LocusTerm,
+    out: *mut LocusTermBytes,
+) -> u32 {
+    term_status(|| {
+        if out.is_null() {
+            set_last_error_message("out must not be NULL");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is non-null and caller-provided writable storage.
+        unsafe { *out = LocusTermBytes::default() };
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        let bytes = term
+            .stream
+            .handler
+            .terminal
+            .pwd()
+            .map_or_else(Vec::new, |pwd| pwd.to_owned().into_bytes());
+        // SAFETY: `out` remains valid for this synchronous call.
+        unsafe { *out = bytes_from_vec(bytes) };
+        LOCUS_STATUS_OK
+    })
+}
+
 /// Advances a selection gesture while the pointer remains beyond a viewport edge.
 ///
 /// # Safety
@@ -2552,6 +2618,67 @@ mod tests {
             );
             assert_eq!(locus_term_selection_string(term, &mut out), LOCUS_STATUS_OK);
             assert_eq!(owned_bytes(&mut out), b"bcd");
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn latest_title_and_pwd_round_trip_through_feed() {
+        let term = new_term();
+        let mut out = LocusTermBytes::default();
+        unsafe {
+            let title = b"\x1b]2;hello-title\x07";
+            assert_eq!(
+                locus_term_feed(term, title.as_ptr(), title.len()),
+                LOCUS_STATUS_OK
+            );
+            let pwd = b"\x1b]7;file:///tmp/locus%20p3\x07";
+            assert_eq!(
+                locus_term_feed(term, pwd.as_ptr(), pwd.len()),
+                LOCUS_STATUS_OK
+            );
+
+            assert_eq!(locus_term_latest_title(term, &mut out), LOCUS_STATUS_OK);
+            assert_eq!(owned_bytes(&mut out), b"hello-title");
+            assert_eq!(locus_term_latest_pwd(term, &mut out), LOCUS_STATUS_OK);
+            assert_eq!(owned_bytes(&mut out), b"file:///tmp/locus%20p3");
+
+            let clear_title = b"\x1b]2;\x07";
+            assert_eq!(
+                locus_term_feed(term, clear_title.as_ptr(), clear_title.len()),
+                LOCUS_STATUS_OK
+            );
+            let clear_pwd = b"\x1b]7;\x07";
+            assert_eq!(
+                locus_term_feed(term, clear_pwd.as_ptr(), clear_pwd.len()),
+                LOCUS_STATUS_OK
+            );
+
+            assert_eq!(locus_term_latest_title(term, &mut out), LOCUS_STATUS_OK);
+            assert!(owned_bytes(&mut out).is_empty());
+            assert_eq!(locus_term_latest_pwd(term, &mut out), LOCUS_STATUS_OK);
+            assert!(owned_bytes(&mut out).is_empty());
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn latest_title_rejects_null_out() {
+        let term = new_term();
+        let mut out = LocusTermBytes::default();
+        unsafe {
+            assert_eq!(
+                locus_term_latest_title(term, ptr::null_mut()),
+                LOCUS_TERM_STATUS_INVALID_ARGUMENT
+            );
+            assert_eq!(
+                locus_term_latest_pwd(term, ptr::null_mut()),
+                LOCUS_TERM_STATUS_INVALID_ARGUMENT
+            );
+            assert_eq!(locus_term_latest_title(term, &mut out), LOCUS_STATUS_OK);
+            assert!(owned_bytes(&mut out).is_empty());
+            assert_eq!(locus_term_latest_pwd(term, &mut out), LOCUS_STATUS_OK);
+            assert!(owned_bytes(&mut out).is_empty());
             locus_term_free(term);
         }
     }

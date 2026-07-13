@@ -847,6 +847,12 @@ LocusStatus locus_term_selection_gesture(
 LocusStatus locus_term_selection_clear(LocusTerm *term);
 LocusStatus locus_term_selection_string(
     LocusTerm *term, LocusTermBytes *out);
+/* Copies the most recent window title; empty when unset. */
+LocusStatus locus_term_latest_title(
+    LocusTerm *term, LocusTermBytes *out);
+/* Copies the most recent OSC 7 working-directory report verbatim. */
+LocusStatus locus_term_latest_pwd(
+    LocusTerm *term, LocusTermBytes *out);
 LocusStatus locus_term_autoscroll_tick(
     LocusTerm *term, int32_t direction, uint16_t x, float cell_fraction_x,
     bool rectangle);

@@ -218,6 +218,23 @@ final class TerminalBridgeTests: XCTestCase {
     XCTAssertNil(frame.selectionRange(forRow: 0))
   }
 
+  func testLatestTitleAndPwdReportRoundTrip() throws {
+    let terminal = try TerminalCore(columns: 80, rows: 24)
+
+    try terminal.feed(Data("\u{1B}]2;bridge-title\u{07}".utf8))
+    try terminal.feed(Data("\u{1B}]7;file:///tmp/locus%20p3\u{07}".utf8))
+    XCTAssertEqual(try terminal.latestTitle(), "bridge-title")
+    XCTAssertEqual(
+      try terminal.latestWorkingDirectoryReport(),
+      "file:///tmp/locus%20p3"
+    )
+
+    try terminal.feed(Data("\u{1B}]2;\u{07}".utf8))
+    try terminal.feed(Data("\u{1B}]7;\u{07}".utf8))
+    XCTAssertEqual(try terminal.latestTitle(), "")
+    XCTAssertEqual(try terminal.latestWorkingDirectoryReport(), "")
+  }
+
   func testGraphemeExtrasSurviveToPlainText() throws {
     let terminal = try TerminalCore(columns: 80, rows: 24)
     let frame = try TerminalFrame()

@@ -227,6 +227,18 @@ final class TerminalCore {
     return String(decoding: Self.copyAndFree(bytes: &bytes), as: UTF8.self)
   }
 
+  func latestTitle() throws -> String {
+    var bytes = LocusTermBytes(ptr: nil, len: 0, cap: 0)
+    try Self.checkStatus(locus_term_latest_title(handle, &bytes))
+    return String(decoding: Self.copyAndFree(bytes: &bytes), as: UTF8.self)
+  }
+
+  func latestWorkingDirectoryReport() throws -> String {
+    var bytes = LocusTermBytes(ptr: nil, len: 0, cap: 0)
+    try Self.checkStatus(locus_term_latest_pwd(handle, &bytes))
+    return String(decoding: Self.copyAndFree(bytes: &bytes), as: UTF8.self)
+  }
+
   func autoscrollSelection(
     direction: Int32,
     column: UInt16,
