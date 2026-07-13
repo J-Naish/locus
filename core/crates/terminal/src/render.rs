@@ -1273,5 +1273,4 @@ mod tests {
         assert_eq!(render.dirty, DirtyState::Partial);
         assert!(render.row_data.iter().all(|row| row.dirty));
     }
-
 }
