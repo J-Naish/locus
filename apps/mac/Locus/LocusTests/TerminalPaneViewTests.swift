@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import XCTest
 
 @testable import Locus
@@ -121,6 +122,184 @@ final class TerminalPaneViewTests: XCTestCase {
         TerminalPaneLayoutMetrics.contentInsets.left + metrics.cellWidth * 2,
       ]
     )
+  }
+
+  func testGlyphGridCellsPreserveCellCounts() throws {
+    let style = TerminalTextStyle(
+      foreground: .defaultForeground,
+      background: .defaultBackground,
+      flags: []
+    )
+    let run = try XCTUnwrap(
+      TerminalLineRunBuilder.runs(
+        for: [
+          TerminalRenderableCell(text: "A", cellCount: 1, style: style),
+          TerminalRenderableCell(text: "界", cellCount: 2, style: style),
+          TerminalRenderableCell(text: "→", cellCount: 1, style: style),
+          TerminalRenderableCell(text: "e\u{301}", cellCount: 1, style: style),
+        ]
+      ).first
+    )
+
+    let cells = TerminalGlyphGridLayout.cells(for: run)
+
+    XCTAssertEqual(cells.map(\.startColumn), [0, 1, 3, 4])
+    XCTAssertEqual(cells.map(\.cellCount), [1, 2, 1, 1])
+    XCTAssertEqual(cells.map(\.utf16Range), [0..<1, 1..<2, 2..<3, 3..<5])
+  }
+
+  func testGlyphOverflowScaleUsesCellBudget() throws {
+    let cellWidth: CGFloat = 9
+    let slack = TerminalGlyphOverflow.advanceSlack
+
+    XCTAssertNil(
+      TerminalGlyphOverflow.overflowScale(
+        clusterAdvance: cellWidth,
+        cellCount: 1,
+        cellWidth: cellWidth
+      )
+    )
+    XCTAssertNil(
+      TerminalGlyphOverflow.overflowScale(
+        clusterAdvance: cellWidth + slack,
+        cellCount: 1,
+        cellWidth: cellWidth
+      )
+    )
+    XCTAssertEqual(
+      try XCTUnwrap(
+        TerminalGlyphOverflow.overflowScale(
+          clusterAdvance: cellWidth + slack + 0.1,
+          cellCount: 1,
+          cellWidth: cellWidth
+        )
+      ),
+      cellWidth / (cellWidth + slack + 0.1),
+      accuracy: 0.0001
+    )
+    XCTAssertNil(
+      TerminalGlyphOverflow.overflowScale(
+        clusterAdvance: cellWidth * 2 + slack,
+        cellCount: 2,
+        cellWidth: cellWidth
+      )
+    )
+    let doubleCellScale = try XCTUnwrap(
+      TerminalGlyphOverflow.overflowScale(
+        clusterAdvance: cellWidth * 2 + slack + 0.1,
+        cellCount: 2,
+        cellWidth: cellWidth
+      )
+    )
+    XCTAssertEqual(doubleCellScale, cellWidth * 2 / (cellWidth * 2 + slack + 0.1), accuracy: 0.0001)
+    XCTAssertLessThanOrEqual(doubleCellScale, 1)
+    XCTAssertNil(
+      TerminalGlyphOverflow.overflowScale(
+        clusterAdvance: 0,
+        cellCount: 1,
+        cellWidth: cellWidth
+      )
+    )
+    XCTAssertNil(
+      TerminalGlyphOverflow.overflowScale(
+        clusterAdvance: cellWidth,
+        cellCount: 0,
+        cellWidth: cellWidth
+      )
+    )
+  }
+
+  func testGlyphClustersGroupByGridCellIdentity() throws {
+    let first = TerminalGlyphGridCell(utf16Range: 0..<2, startColumn: 0, cellCount: 1)
+    let second = TerminalGlyphGridCell(utf16Range: 2..<3, startColumn: 1, cellCount: 1)
+
+    let groups = TerminalGlyphClusterLayout.groups(
+      stringIndices: [2, 0, 1, kCFNotFound, 99],
+      advances: [
+        CGSize(width: 4, height: 0),
+        CGSize(width: 3, height: 0),
+        CGSize(width: 2, height: 0),
+        CGSize(width: 7, height: 0),
+        CGSize(width: 8, height: 0),
+      ],
+      cellsByUTF16Index: [first, first, second]
+    )
+
+    XCTAssertEqual(groups.mainGlyphIndices, [3, 4])
+    let firstCluster = try XCTUnwrap(groups.clusters.first { $0.cell.startColumn == 0 })
+    XCTAssertEqual(firstCluster.glyphIndices, [1, 2])
+    XCTAssertEqual(firstCluster.advance, 5)
+    let secondCluster = try XCTUnwrap(groups.clusters.first { $0.cell.startColumn == 1 })
+    XCTAssertEqual(secondCluster.glyphIndices, [0])
+    XCTAssertEqual(secondCluster.advance, 4)
+  }
+
+  func testCoreTextGlyphOverflowMeasurementStaysWithinFitRange() throws {
+    let metrics = TerminalCellMetrics()
+    let style = TerminalTextStyle(
+      foreground: .defaultForeground,
+      background: .defaultBackground,
+      flags: []
+    )
+    let run = try XCTUnwrap(
+      TerminalLineRunBuilder.runs(
+        for: [
+          TerminalRenderableCell(text: "結", cellCount: 2, style: style),
+          TerminalRenderableCell(text: "果", cellCount: 2, style: style),
+          TerminalRenderableCell(text: "→", cellCount: 1, style: style),
+          TerminalRenderableCell(text: "次", cellCount: 2, style: style),
+        ]
+      ).first
+    )
+    let attributed = NSAttributedString(
+      string: run.text,
+      attributes: [.font: metrics.font, .ligature: 0]
+    )
+    let line = CTLineCreateWithAttributedString(attributed)
+    let cellsByUTF16Index = TerminalGlyphGridLayout.cellsByUTF16Index(for: run)
+    var measuredScales: [CGFloat] = []
+    var arrowScale: CGFloat?
+
+    for case let glyphRun as CTRun in CTLineGetGlyphRuns(line) as NSArray {
+      let count = CTRunGetGlyphCount(glyphRun)
+      var stringIndices = [CFIndex](repeating: 0, count: count)
+      var advances = [CGSize](repeating: .zero, count: count)
+      CTRunGetStringIndices(glyphRun, CFRange(location: 0, length: 0), &stringIndices)
+      CTRunGetAdvances(glyphRun, CFRange(location: 0, length: 0), &advances)
+      let groups = TerminalGlyphClusterLayout.groups(
+        stringIndices: stringIndices,
+        advances: advances,
+        cellsByUTF16Index: cellsByUTF16Index
+      )
+      for cluster in groups.clusters {
+        let gridOrigin =
+          TerminalPaneLayoutMetrics.contentInsets.left
+          + CGFloat(cluster.cell.startColumn) * metrics.cellWidth
+        XCTAssertEqual(
+          (gridOrigin - TerminalPaneLayoutMetrics.contentInsets.left) / metrics.cellWidth,
+          CGFloat(cluster.cell.startColumn),
+          accuracy: 0.0001
+        )
+        guard
+          let scale = TerminalGlyphOverflow.overflowScale(
+            clusterAdvance: cluster.advance,
+            cellCount: cluster.cell.cellCount,
+            cellWidth: metrics.cellWidth
+          )
+        else {
+          continue
+        }
+        measuredScales.append(scale)
+        if cluster.cell.startColumn == 4 {
+          arrowScale = scale
+        }
+      }
+    }
+
+    XCTAssertTrue(measuredScales.allSatisfy { (0.5...1).contains($0) })
+    if let arrowScale {
+      XCTAssertTrue((0.5...1).contains(arrowScale))
+    }
   }
 
   func testCursorRectMatchesColumnPosition() {

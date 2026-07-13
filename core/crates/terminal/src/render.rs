@@ -234,18 +234,23 @@ impl RenderState {
             row.raw = node.page.row(pin.y);
             row.dirty = was_dirty;
             if was_dirty {
-                for x in 0..self.cols {
-                    let cell = node.page.cell(pin.y, x);
-                    row.cells[x as usize] = RenderCell {
-                        raw: cell,
-                        style: node
-                            .page
-                            .style_for_cell(pin.y, x)
-                            .map(Style::from)
-                            .unwrap_or_default(),
-                        grapheme: node.page.grapheme(pin.y, x).unwrap_or_default(),
-                        hyperlink: node.page.hyperlink_id(pin.y, x),
-                    };
+                if row.raw.managed_memory() {
+                    for x in 0..self.cols {
+                        row.cells[x as usize] = snapshot_cell(&node.page, pin.y, x);
+                    }
+                } else {
+                    // ghostty: render.zig:494-506 -- plain rows avoid managed
+                    // lookups, but every field must still replace prior-frame data.
+                    debug_assert!((0..self.cols).all(|x| {
+                        let cell = node.page.cell(pin.y, x);
+                        !cell.has_styling() && !cell.has_grapheme() && !cell.hyperlink()
+                    }));
+                    for x in 0..self.cols {
+                        row.cells[x as usize] = RenderCell {
+                            raw: node.page.cell(pin.y, x),
+                            ..RenderCell::default()
+                        };
+                    }
                 }
             }
             if let Some(cursor_pin) = cursor_pin {
@@ -456,6 +461,30 @@ fn viewport_row_delta(
     None
 }
 
+fn snapshot_cell(page: &crate::page::Page, y: CellCountInt, x: CellCountInt) -> RenderCell {
+    let cell = page.cell(y, x);
+    RenderCell {
+        raw: cell,
+        style: if cell.has_styling() {
+            page.style_for_cell(y, x)
+                .map(Style::from)
+                .unwrap_or_default()
+        } else {
+            Style::default()
+        },
+        grapheme: if cell.has_grapheme() {
+            page.grapheme(y, x).unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        hyperlink: if cell.hyperlink() {
+            page.hyperlink_id(y, x)
+        } else {
+            None
+        },
+    }
+}
+
 fn render_row_matches(
     cached: &RenderRow,
     page: &crate::page::Page,
@@ -471,16 +500,10 @@ fn render_row_matches(
     }
 
     (0..cols).all(|x| {
-        cached.cells.get(x as usize).is_some_and(|cell| {
-            cell.raw == page.cell(y, x)
-                && cell.style
-                    == page
-                        .style_for_cell(y, x)
-                        .map(Style::from)
-                        .unwrap_or_default()
-                && cell.grapheme == page.grapheme(y, x).unwrap_or_default()
-                && cell.hyperlink == page.hyperlink_id(y, x)
-        })
+        cached
+            .cells
+            .get(x as usize)
+            .is_some_and(|cell| *cell == snapshot_cell(page, y, x))
     })
 }
 
@@ -567,6 +590,7 @@ mod tests {
     use crate::point::Point;
     use crate::selection::Selection;
     use crate::sgr::Underline;
+    use crate::stream::EraseLine;
     use crate::terminal::{Options, Terminal};
 
     fn terminal(cols: CellCountInt, rows: CellCountInt) -> Terminal {
@@ -642,6 +666,63 @@ mod tests {
             render.row_data[0].cells[2].style.flags.underline,
             Underline::Single
         );
+    }
+
+    #[test]
+    fn plain_row_snapshot_resets_stale_managed_fields() {
+        let mut terminal = terminal(12, 2);
+        terminal.active_screen_mut().cursor.style.flags.bold = true;
+        terminal.active_screen_mut().manual_style_update();
+        terminal.print_string("S");
+        terminal.active_screen_mut().cursor.style = Style::default();
+        terminal.active_screen_mut().manual_style_update();
+        terminal.print_string("👨\u{200D}");
+        terminal
+            .active_screen_mut()
+            .start_hyperlink(Some(b"id"), b"https://example.test");
+        terminal.print_string("H");
+        terminal.active_screen_mut().end_hyperlink();
+
+        let mut render = RenderState::new(0, 0);
+        render.update(&mut terminal);
+        assert!(render.row_data[0].cells[0].style.flags.bold);
+        assert!(!render.row_data[0].cells[1].grapheme.is_empty());
+        assert!(render.row_data[0].cells[3].hyperlink.is_some());
+
+        terminal.set_cursor_pos(1, 1);
+        terminal.erase_line(EraseLine::Complete, false);
+        terminal.print_string("plain");
+        render.update(&mut terminal);
+
+        for cell in &render.row_data[0].cells {
+            assert_eq!(cell.style, Style::default());
+            assert!(cell.grapheme.is_empty());
+            assert!(cell.hyperlink.is_none());
+        }
+        let codepoints: Vec<u32> = render.row_data[0]
+            .cells
+            .iter()
+            .map(|cell| cell.raw.codepoint())
+            .collect();
+        assert_eq!(
+            &codepoints[..5],
+            &['p' as u32, 'l' as u32, 'a' as u32, 'i' as u32, 'n' as u32]
+        );
+
+        terminal.set_cursor_pos(1, 1);
+        terminal.erase_line(EraseLine::Complete, false);
+        terminal.print_string("a");
+        terminal.active_screen_mut().cursor.style.flags.bold = true;
+        terminal.active_screen_mut().manual_style_update();
+        terminal.print_string("b");
+        terminal.active_screen_mut().cursor.style = Style::default();
+        terminal.active_screen_mut().manual_style_update();
+        terminal.print_string("c");
+        render.update(&mut terminal);
+
+        assert_eq!(render.row_data[0].cells[0].style, Style::default());
+        assert!(render.row_data[0].cells[1].style.flags.bold);
+        assert_eq!(render.row_data[0].cells[2].style, Style::default());
     }
 
     #[test]
@@ -1192,4 +1273,5 @@ mod tests {
         assert_eq!(render.dirty, DirtyState::Partial);
         assert!(render.row_data.iter().all(|row| row.dirty));
     }
+
 }

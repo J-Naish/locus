@@ -276,9 +276,88 @@ enum TerminalLineRunBuilder {
   }
 }
 
-struct TerminalGlyphGridCell: Equatable {
+struct TerminalGlyphGridCell: Equatable, Hashable {
   let utf16Range: Range<Int>
   let startColumn: Int
+  let cellCount: Int
+}
+
+struct TerminalGlyphCluster: Equatable {
+  let cell: TerminalGlyphGridCell
+  var glyphIndices: [Int]
+  var advance: CGFloat
+}
+
+struct TerminalGlyphClusterGroups: Equatable {
+  var mainGlyphIndices: [Int]
+  var clusters: [TerminalGlyphCluster]
+}
+
+enum TerminalGlyphOverflow {
+  static let advanceSlack: CGFloat = 0.5
+
+  static func overflowScale(
+    clusterAdvance: CGFloat,
+    cellCount: Int,
+    cellWidth: CGFloat
+  ) -> CGFloat? {
+    guard
+      clusterAdvance.isFinite,
+      cellWidth.isFinite,
+      clusterAdvance > 0,
+      cellCount > 0,
+      cellWidth > 0
+    else {
+      return nil
+    }
+    let budget = CGFloat(cellCount) * cellWidth
+    guard clusterAdvance > budget + advanceSlack else {
+      return nil
+    }
+    return min(1, budget / clusterAdvance)
+  }
+}
+
+enum TerminalGlyphClusterLayout {
+  static func groups(
+    stringIndices: [CFIndex],
+    advances: [CGSize],
+    cellsByUTF16Index: [TerminalGlyphGridCell]
+  ) -> TerminalGlyphClusterGroups {
+    var mainGlyphIndices: [Int] = []
+    var clusters: [TerminalGlyphCluster] = []
+    var clusterIndices: [TerminalGlyphGridCell: Int] = [:]
+
+    for (glyphIndex, stringIndex) in stringIndices.enumerated() {
+      guard
+        glyphIndex < advances.count,
+        stringIndex != kCFNotFound,
+        stringIndex >= 0,
+        stringIndex < cellsByUTF16Index.count
+      else {
+        mainGlyphIndices.append(glyphIndex)
+        continue
+      }
+      let cell = cellsByUTF16Index[stringIndex]
+      if let clusterIndex = clusterIndices[cell] {
+        clusters[clusterIndex].glyphIndices.append(glyphIndex)
+        clusters[clusterIndex].advance += advances[glyphIndex].width
+      } else {
+        clusterIndices[cell] = clusters.count
+        clusters.append(
+          TerminalGlyphCluster(
+            cell: cell,
+            glyphIndices: [glyphIndex],
+            advance: advances[glyphIndex].width
+          )
+        )
+      }
+    }
+    return TerminalGlyphClusterGroups(
+      mainGlyphIndices: mainGlyphIndices,
+      clusters: clusters
+    )
+  }
 }
 
 enum TerminalGlyphGridLayout {
@@ -293,7 +372,8 @@ enum TerminalGlyphGridLayout {
       }
       return TerminalGlyphGridCell(
         utf16Range: utf16Offset..<(utf16Offset + length),
-        startColumn: column
+        startColumn: column,
+        cellCount: cell.cellCount
       )
     }
   }
@@ -1535,6 +1615,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     let line = CTLineCreateWithAttributedString(attributedString(for: run))
     let gridCellsByUTF16Index = TerminalGlyphGridLayout.cellsByUTF16Index(for: run)
     let foreground = resolvedForegroundColor(for: run.style)
+    let isPureASCII = run.text.utf8.allSatisfy { $0 < 0x80 }
 
     context.saveGState()
     context.textMatrix = .identity
@@ -1546,6 +1627,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
         line: line,
         terminalRun: run,
         gridCellsByUTF16Index: gridCellsByUTF16Index,
+        measureOverflow: !isPureASCII,
         baselineY: baselineY,
         in: context
       )
@@ -1559,6 +1641,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     line: CTLine,
     terminalRun: TerminalTextRun,
     gridCellsByUTF16Index: [TerminalGlyphGridCell],
+    measureOverflow: Bool,
     baselineY: CGFloat,
     in context: CGContext
   ) {
@@ -1610,8 +1693,87 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     let attributes = CTRunGetAttributes(glyphRun) as NSDictionary
     let runFont = attributes[kCTFontAttributeName as String] as? NSFont
     let font = (runFont ?? metrics.font(for: terminalRun.style.flags)) as CTFont
+    guard measureOverflow else {
+      drawGlyphs(glyphs, at: gridPositions, font: font, in: context)
+      return
+    }
+
+    var advances = [CGSize](repeating: .zero, count: count)
+    CTRunGetAdvances(glyphRun, CFRange(location: 0, length: 0), &advances)
+    let groups = TerminalGlyphClusterLayout.groups(
+      stringIndices: stringIndices,
+      advances: advances,
+      cellsByUTF16Index: gridCellsByUTF16Index
+    )
+    var mainGlyphIndices = groups.mainGlyphIndices
+    var overflowClusters: [(TerminalGlyphCluster, CGFloat)] = []
+    for cluster in groups.clusters {
+      if let scale = TerminalGlyphOverflow.overflowScale(
+        clusterAdvance: cluster.advance,
+        cellCount: cluster.cell.cellCount,
+        cellWidth: metrics.cellWidth
+      ) {
+        overflowClusters.append((cluster, scale))
+      } else {
+        mainGlyphIndices.append(contentsOf: cluster.glyphIndices)
+      }
+    }
+    mainGlyphIndices.sort()
+    drawGlyphs(
+      at: mainGlyphIndices,
+      from: glyphs,
+      positions: gridPositions,
+      font: font,
+      in: context
+    )
+
+    for (cluster, scale) in overflowClusters {
+      let gridOriginX =
+        TerminalPaneLayoutMetrics.contentInsets.left
+        + CGFloat(terminalRun.startColumn + cluster.cell.startColumn) * metrics.cellWidth
+      context.saveGState()
+      context.translateBy(x: gridOriginX, y: 0)
+      context.scaleBy(x: scale, y: 1)
+      context.translateBy(x: -gridOriginX, y: 0)
+      // Clipping amputates arrowheads and circles. Condensing preserves the
+      // complete fallback glyph while keeping its ink inside the wcwidth grid.
+      drawGlyphs(
+        at: cluster.glyphIndices,
+        from: glyphs,
+        positions: gridPositions,
+        font: font,
+        in: context
+      )
+      context.restoreGState()
+    }
+  }
+
+  private func drawGlyphs(
+    at indices: [Int],
+    from glyphs: [CGGlyph],
+    positions: [CGPoint],
+    font: CTFont,
+    in context: CGContext
+  ) {
+    guard !indices.isEmpty else {
+      return
+    }
+    let selectedGlyphs = indices.map { glyphs[$0] }
+    let selectedPositions = indices.map { positions[$0] }
+    drawGlyphs(selectedGlyphs, at: selectedPositions, font: font, in: context)
+  }
+
+  private func drawGlyphs(
+    _ glyphs: [CGGlyph],
+    at positions: [CGPoint],
+    font: CTFont,
+    in context: CGContext
+  ) {
+    guard !glyphs.isEmpty, glyphs.count == positions.count else {
+      return
+    }
     glyphs.withUnsafeBufferPointer { glyphBuffer in
-      gridPositions.withUnsafeBufferPointer { positionBuffer in
+      positions.withUnsafeBufferPointer { positionBuffer in
         guard
           let glyphBaseAddress = glyphBuffer.baseAddress,
           let positionBaseAddress = positionBuffer.baseAddress
@@ -1622,7 +1784,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
           font,
           glyphBaseAddress,
           positionBaseAddress,
-          count,
+          glyphs.count,
           context
         )
       }
