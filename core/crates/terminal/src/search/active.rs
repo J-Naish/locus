@@ -19,6 +19,10 @@ impl ActiveSearch {
         }
     }
 
+    pub(crate) fn needle(&self) -> &[u8] {
+        self.window.needle()
+    }
+
     // ghostty: terminal/search/active.zig:52
     /// Rebuilds the search window and returns the earliest active-area node.
     ///
