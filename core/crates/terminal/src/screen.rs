@@ -984,6 +984,7 @@ impl Screen {
                     node.page.release_style(old);
                 }
             }
+            self.cursor.style_id = DEFAULT_STYLE_ID;
         }
 
         if packed == PackedStyle::default() {
@@ -1014,6 +1015,10 @@ impl Screen {
                             return false;
                         }
                     };
+                    if self.cursor.hyperlink_id != 0 {
+                        node.page.release_hyperlink_id(self.cursor.hyperlink_id);
+                        self.cursor.hyperlink_id = 0;
+                    }
                     let rebuild_failed =
                         self.pages.increase_capacity(pin.node, adjustment).is_err();
                     if rebuild_failed
@@ -1022,9 +1027,13 @@ impl Screen {
                                 .split_for_capacity(pin, IncreaseCapacity::Styles)
                                 .is_err())
                     {
+                        let mut hyperlink_attempts = 0usize;
+                        self.cursor_register_hyperlink(&mut hyperlink_attempts);
                         self.cursor.style_id = DEFAULT_STYLE_ID;
                         return false;
                     }
+                    let mut hyperlink_attempts = 0usize;
+                    self.cursor_register_hyperlink(&mut hyperlink_attempts);
                 }
             }
         }
@@ -1275,10 +1284,6 @@ impl Screen {
         if attempt >= 16 {
             return false;
         }
-        let Some(pin) = self.cursor_pin() else {
-            return false;
-        };
-        self.release_cursor_refs();
         let dimension = match failure {
             CapacityFailure::StringBytes => IncreaseCapacity::StringBytes,
             CapacityFailure::HyperlinkMap | CapacityFailure::HyperlinkSet => {
@@ -1286,11 +1291,31 @@ impl Screen {
             }
             _ => return false,
         };
-        if self
-            .pages
-            .increase_capacity(pin.node, Some(dimension))
-            .is_err()
-        {
+        let Some(pin) = self.cursor_pin() else {
+            return false;
+        };
+        self.rebuild_cursor_page_for_hyperlink(pin, dimension, |pages, node, dimension| {
+            pages.increase_capacity(node, Some(dimension)).map(|_| ())
+        })
+    }
+
+    fn rebuild_cursor_page_for_hyperlink<F>(
+        &mut self,
+        pin: Pin,
+        dimension: IncreaseCapacity,
+        rebuild: F,
+    ) -> bool
+    where
+        F: FnOnce(
+            &mut PageList,
+            crate::page_list::NodeId,
+            IncreaseCapacity,
+        ) -> Result<(), IncreaseCapacityError>,
+    {
+        self.release_cursor_refs();
+        if rebuild(&mut self.pages, pin.node, dimension).is_err() {
+            self.manual_style_update();
+            self.cursor_reload();
             return false;
         }
         self.manual_style_update();
@@ -5694,6 +5719,31 @@ mod tests {
     }
 
     #[test]
+    fn hyperlink_survives_style_capacity_rebuild() {
+        let mut screen = Screen::new(Options {
+            cols: 10,
+            rows: 5,
+            max_scrollback: PageList::standard_size() * 4,
+        });
+        let uri = b"https://example.com/style-rebuild";
+        screen.start_hyperlink(Some(b"active"), uri);
+        fill_cursor_page_styles(&mut screen);
+        screen.cursor.style.flags.bold = true;
+
+        assert!(screen.try_manual_style_update());
+        screen.test_write_string("x");
+
+        let pin = screen.pages.pin(Point::active(0, 0)).unwrap();
+        assert_eq!(
+            screen
+                .pages
+                .node(pin.node)
+                .and_then(|node| node.page.hyperlink_uri(pin.y, pin.x)),
+            Some(uri.as_slice())
+        );
+    }
+
+    #[test]
     fn screen_cursor_down_scroll_bold_only_style_leaves_row_unstyled() {
         // port-added: pin the two independent background-clear conditions.
         let mut screen = Screen::new(Options {
@@ -5923,6 +5973,24 @@ mod tests {
         let after_set = screen.pages.node_capacity(cursor_node(&screen)).unwrap();
         assert_eq!(after_set.string_bytes, before.string_bytes);
         assert!(after_set.hyperlink_bytes > before.hyperlink_bytes);
+    }
+
+    #[test]
+    fn hyperlink_capacity_retry_failure_preserves_cursor_style() {
+        let mut screen = Screen::new(Options::default());
+        screen.set_attribute(Attribute::Bold);
+        let pin = screen.cursor_pin().unwrap();
+
+        assert!(!screen.rebuild_cursor_page_for_hyperlink(
+            pin,
+            IncreaseCapacity::HyperlinkBytes,
+            |_, _, _| Err(IncreaseCapacityError::OutOfSpace),
+        ));
+
+        assert!(screen.cursor.style.flags.bold);
+        assert_ne!(screen.cursor.style_id, DEFAULT_STYLE_ID);
+        screen.test_write_string("x");
+        assert_ne!(active_cell(&screen, 0, 0).style_id(), DEFAULT_STYLE_ID);
     }
 
     #[test]

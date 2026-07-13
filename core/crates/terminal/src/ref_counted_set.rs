@@ -1,7 +1,5 @@
 //! Offset-addressed ref-counted set for page-local style/hyperlink storage.
 
-#![expect(dead_code, reason = "Phase T4b consumes the page substrate")]
-
 use crate::size::{align_forward, BufValue, Offset, OffsetBuf};
 
 pub(crate) type Id = u16;
@@ -94,8 +92,6 @@ pub(crate) struct RefCountedSet<T, Ctx> {
 }
 
 impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
-    pub(crate) const LOAD_FACTOR: f64 = 0.8125;
-
     pub(crate) fn capacity_for_count(n: usize) -> usize {
         if n == 0 {
             0
@@ -142,6 +138,10 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
             return Ok(id);
         }
 
+        if self.psl_stats[MAX_PSL] > 0 {
+            return Err(AddError::OutOfMemory);
+        }
+
         if self.next_id as usize >= self.layout.cap {
             let rehash_threshold = self.layout.cap * 9 / 10;
             if self.living < rehash_threshold {
@@ -174,6 +174,7 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
         write_ref::<T>(backing, self.items, id, refs + n);
     }
 
+    #[cfg(test)]
     pub(crate) fn add_with_id(
         &mut self,
         backing: &mut [u8],
@@ -185,6 +186,9 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
         if id < self.next_id {
             let refs = self.ref_count(backing, id);
             if refs == 0 {
+                if self.psl_stats[MAX_PSL] > 0 {
+                    return Err(AddError::OutOfMemory);
+                }
                 self.delete_item(backing, id);
                 let added = self.insert(backing, value, id)?;
                 let refs = self.ref_count(backing, added);
@@ -221,6 +225,7 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn release_multiple(&mut self, backing: &mut [u8], id: Id, n: RefCountInt) {
         let refs = self.ref_count(backing, id);
         debug_assert!(refs >= n);
@@ -241,14 +246,17 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
     /// The number of item slots this set can hold before it must be rehashed or
     /// grown. Mirrors reading `styles.layout.cap` in Ghostty (used by tests that
     /// need to fill the set to its true capacity).
+    #[cfg(test)]
     pub(crate) const fn layout_cap(self) -> usize {
         self.layout.cap
     }
 
+    #[cfg(test)]
     pub(crate) fn lookup(self, backing: &[u8], value: T) -> Option<Id> {
         self.lookup_with_probe(backing, backing, value)
     }
 
+    #[cfg(test)]
     pub(crate) fn lookup_with_probe(
         self,
         backing: &[u8],
@@ -309,6 +317,7 @@ impl<T: BufValue, Ctx: RefCountedSetContext<T> + Copy> RefCountedSet<T, Ctx> {
     /// probe, and its value/psl/ref are written to `items[chosen_id]` at the
     /// end (chosen_id may differ from new_id if a smaller dead id is reused).
     /// Displaced existing items are re-homed in place as we pass them.
+    #[cfg(test)]
     fn insert(&mut self, backing: &mut [u8], value: T, new_id: Id) -> Result<Id, AddError> {
         let hash = self.context.hash(backing, &value);
         self.insert_with_hash(backing, value, new_id, hash)
@@ -567,6 +576,34 @@ mod tests {
     }
 
     #[derive(Clone, Copy)]
+    struct IdentityContext;
+
+    impl RefCountedSetContext<u64> for IdentityContext {
+        fn hash(&self, _buf: &[u8], value: &u64) -> u64 {
+            *value
+        }
+
+        fn eql(&self, _buf: &[u8], a: &u64, b: &u64) -> bool {
+            a == b
+        }
+    }
+
+    type PressureSet = (Vec<u8>, RefCountedSet<u64, IdentityContext>, Vec<(u64, Id)>);
+
+    fn max_psl_pressure_set() -> PressureSet {
+        let layout = Layout::init::<u64>(128);
+        let mut buf = vec![0; layout.total_size];
+        let mut set = RefCountedSet::init(OffsetBuf::init(), layout, &mut buf, IdentityContext);
+        let mut live = Vec::new();
+        for index in 0..=MAX_PSL {
+            let value = (index * layout.table_cap) as u64;
+            live.push((value, set.add(&mut buf, value).unwrap()));
+        }
+        assert!(set.psl_stats[MAX_PSL] > 0);
+        (buf, set, live)
+    }
+
+    #[derive(Clone, Copy)]
     struct CountingContext<'a> {
         deleted: &'a Cell<usize>,
     }
@@ -727,6 +764,37 @@ mod tests {
                     "live probe value {value}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn max_psl_pressure_reports_out_of_memory_without_corrupting_table() {
+        let (mut buf, mut set, live) = max_psl_pressure_set();
+        let before = buf.clone();
+        let value = (live.len() * set.layout.table_cap) as u64;
+
+        assert_eq!(set.add(&mut buf, value), Err(AddError::OutOfMemory));
+        assert_eq!(buf, before);
+        for (value, id) in live {
+            assert_eq!(set.lookup(&buf, value), Some(id));
+        }
+    }
+
+    #[test]
+    fn max_psl_pressure_add_with_dead_id_fails_without_deleting_item() {
+        let (mut buf, mut set, live) = max_psl_pressure_set();
+        let dead_id = live[0].1;
+        set.release(&mut buf, dead_id);
+        let before = buf.clone();
+        let value = (live.len() * set.layout.table_cap) as u64;
+
+        assert_eq!(
+            set.add_with_id(&mut buf, value, dead_id),
+            Err(AddError::OutOfMemory)
+        );
+        assert_eq!(buf, before);
+        for (value, id) in live.into_iter().skip(1) {
+            assert_eq!(set.lookup(&buf, value), Some(id));
         }
     }
 }

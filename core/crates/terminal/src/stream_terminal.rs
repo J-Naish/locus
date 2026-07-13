@@ -310,6 +310,10 @@ impl<E: Effects> TerminalHandler<E> {
 }
 
 impl<E: Effects> Handler for TerminalHandler<E> {
+    fn interrupt_grapheme_run(&mut self) {
+        self.terminal.interrupt_grapheme_run();
+    }
+
     fn print(&mut self, cp: char) {
         self.terminal.print(cp);
     }

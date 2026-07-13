@@ -13,6 +13,7 @@ use crate::size::CellCountInt;
 
 pub const PAGE_PREHEAT: usize = 4;
 const PAGE_POOL_MAX: usize = 8;
+const INHERITED_LAYOUT_MAX_MULTIPLE: usize = 4;
 pub const STD_SIZE: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1234,7 +1235,8 @@ impl PageList {
             return None;
         }
 
-        let mut cap = Self::initial_capacity(self.cols);
+        let initial_cap = Self::initial_capacity(self.cols);
+        let mut cap = initial_cap;
         if let Some(last_capacity) = self.node(last).map(|node| node.page.capacity()) {
             // Deliberate Ghostty deviation: managed-data capacity is a
             // session-level high-water mark. New pages inherit it so output
@@ -1244,12 +1246,17 @@ impl PageList {
             cap.grapheme_bytes = last_capacity.grapheme_bytes;
             cap.hyperlink_bytes = last_capacity.hyperlink_bytes;
             cap.string_bytes = last_capacity.string_bytes;
+            if Page::layout(cap).total_size
+                > Self::standard_size().saturating_mul(INHERITED_LAYOUT_MAX_MULTIPLE)
+            {
+                cap = initial_cap;
+            }
         }
         let cap_layout_size = Page::layout(cap).total_size;
-        let mut retired_non_standard_buffer = None;
-        if self.first.is_some()
+        let mut retired_non_standard_buffers = Vec::new();
+        while self.first.is_some()
             && self.first != self.last
-            && self.page_size + Self::standard_size() > self.max_size()
+            && self.page_size.saturating_add(cap_layout_size) > self.max_size()
         {
             let first = self.pop_first()?;
             let first_rows = self.node_rows(first).unwrap_or(0) as usize;
@@ -1257,6 +1264,7 @@ impl PageList {
             if self.total_rows + 1 < self.rows as usize {
                 self.prepend_node(first);
                 self.total_rows += first_rows;
+                break;
             } else {
                 if self.viewport == Viewport::Pin {
                     if let Some(offset) = &mut self.viewport_pin_row_offset {
@@ -1302,6 +1310,7 @@ impl PageList {
                     self.insert_after(last, first);
                     self.total_rows += 1;
                     self.page_serial_min = old_serial.saturating_add(1);
+                    drop(retired_non_standard_buffers);
                     return Some(first);
                 }
                 if let Some(node) = self.take_node(first) {
@@ -1313,14 +1322,14 @@ impl PageList {
                         // Keep modest resize headroom while returning cleared history to the allocator.
                         self.page_buffers.push(memory);
                     } else {
-                        retired_non_standard_buffer = Some(memory);
+                        retired_non_standard_buffers.push(memory);
                     }
                 }
             }
         }
 
         let next = self.create_page(cap);
-        drop(retired_non_standard_buffer);
+        drop(retired_non_standard_buffers);
         if let Some(node) = self.node_mut(next) {
             node.page.set_size_rows(1);
         }
@@ -4091,6 +4100,27 @@ mod tests {
             list.node_capacity(new_last).unwrap().grapheme_bytes,
             expanded_capacity.grapheme_bytes
         );
+    }
+
+    #[test]
+    fn grow_respects_max_size_after_capacity_inflation() {
+        let budget = 8 * PageList::standard_size();
+        let mut list = PageList::new(80, 24, Some(budget));
+        let mut last = list.last_node().unwrap();
+        while list.node(last).unwrap().page.memory_len() <= 5 * PageList::standard_size() {
+            last = list
+                .increase_capacity(last, Some(IncreaseCapacity::GraphemeBytes))
+                .unwrap();
+        }
+        let inflated_page_size = list.node(last).unwrap().page.memory_len();
+        assert!(inflated_page_size > 5 * PageList::standard_size());
+
+        let rows_per_page = usize::from(list.node_capacity(last).unwrap().rows);
+        list.grow_rows(rows_per_page * 12);
+
+        let one_page_slack = Page::layout(PageList::initial_capacity(80)).total_size;
+        assert!(list.page_size() <= list.max_size() + one_page_slack);
+        assert!(list.total_pages() <= budget / PageList::standard_size() + 1);
     }
 
     #[test]

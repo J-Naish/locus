@@ -57,6 +57,7 @@ pub enum SizeReportStyle {
 }
 
 pub trait Handler {
+    fn interrupt_grapheme_run(&mut self) {}
     fn print(&mut self, _cp: char) {}
     /// A maximal run of printable ASCII observed while the parser is in the
     /// ground state. Implementations may batch this operation.
@@ -200,10 +201,7 @@ fn parse_sgr_decimal(bytes: &[u8]) -> Option<u16> {
 
 fn fast_sgr_prefix(bytes: &[u8]) -> Option<(usize, sgr::Attribute<'static>)> {
     let body = bytes.strip_prefix(b"\x1B[")?;
-    let end = body.iter().position(|&byte| byte == b'm')?;
-    if end > 11 {
-        return None;
-    }
+    let end = body.iter().take(12).position(|&byte| byte == b'm')?;
     let params = &body[..end];
     let attribute = if params.contains(&b';') {
         let mut parts = params.split(|&byte| byte == b';');
@@ -246,6 +244,7 @@ impl<H: Handler> Stream<H> {
         while index < bytes.len() {
             if self.parser.state() == crate::parser::State::Ground && !self.utf8.is_pending() {
                 if let Some((consumed, attribute)) = fast_sgr_prefix(&bytes[index..]) {
+                    self.handler.interrupt_grapheme_run();
                     self.handler.set_attribute(attribute);
                     self.handler.sgr_sequence_end();
                     index += consumed;
@@ -273,13 +272,43 @@ impl<H: Handler> Stream<H> {
                 while index < bytes.len() && bytes[index] >= 0x80 {
                     index += 1;
                 }
-                if let Ok(text) = std::str::from_utf8(&bytes[utf8_start..index]) {
-                    for cp in text.chars() {
-                        self.handle_codepoint(cp);
+                let span_end = index;
+                let mut cursor = utf8_start;
+                while cursor < span_end {
+                    if self.utf8.is_pending() {
+                        self.next(bytes[cursor]);
+                        cursor += 1;
+                        continue;
                     }
-                    continue;
+                    match std::str::from_utf8(&bytes[cursor..span_end]) {
+                        Ok(text) => {
+                            for cp in text.chars() {
+                                self.handle_codepoint(cp);
+                            }
+                            cursor = span_end;
+                        }
+                        Err(error) => {
+                            let valid_end = cursor + error.valid_up_to();
+                            if valid_end > cursor {
+                                if let Ok(valid) = std::str::from_utf8(&bytes[cursor..valid_end]) {
+                                    for cp in valid.chars() {
+                                        self.handle_codepoint(cp);
+                                    }
+                                }
+                            }
+                            cursor = valid_end;
+                            let invalid_len = error
+                                .error_len()
+                                .unwrap_or_else(|| span_end.saturating_sub(cursor));
+                            let invalid_end = cursor.saturating_add(invalid_len).min(span_end);
+                            while cursor < invalid_end {
+                                self.next(bytes[cursor]);
+                                cursor += 1;
+                            }
+                        }
+                    }
                 }
-                index = utf8_start;
+                continue;
             }
 
             self.next(bytes[index]);
@@ -335,6 +364,9 @@ impl<H: Handler> Stream<H> {
     }
 
     fn dispatch_action(handler: &mut H, action: ParserAction<'_>) {
+        if !matches!(action, ParserAction::Print(_)) {
+            handler.interrupt_grapheme_run();
+        }
         match action {
             ParserAction::Print(cp) => handler.print(cp),
             ParserAction::Execute(byte) => handler.execute(byte),
@@ -933,6 +965,24 @@ impl<H: Handler + Default> Default for Stream<H> {
 mod tests {
     use super::*;
     use crate::modes::Mode;
+    use std::time::{Duration, Instant};
+
+    fn chunked_printed(bytes: &[u8], chunk_size: usize) -> (Vec<char>, Duration) {
+        let started = Instant::now();
+        let mut stream = Stream::new(RecordingHandler::default());
+        for chunk in bytes.chunks(chunk_size) {
+            stream.next_slice(chunk);
+        }
+        (stream.handler.printed, started.elapsed())
+    }
+
+    fn bytewise_printed(bytes: &[u8]) -> Vec<char> {
+        let mut stream = Stream::new(RecordingHandler::default());
+        for byte in bytes {
+            stream.next(*byte);
+        }
+        stream.handler.printed
+    }
 
     #[test]
     fn fast_sgr_prefix_accepts_only_complete_unambiguous_sequences() {
@@ -953,6 +1003,7 @@ mod tests {
     struct RecordingHandler {
         printed: Vec<char>,
         cursor_right: u16,
+        cursor_down_calls: usize,
         mode: Option<Mode>,
         reset_mode_seen: bool,
         restore_mode_seen: bool,
@@ -990,6 +1041,10 @@ mod tests {
 
         fn cursor_right(&mut self, value: u16) {
             self.cursor_right = value;
+        }
+
+        fn cursor_down(&mut self, _value: u16) {
+            self.cursor_down_calls += 1;
         }
 
         fn set_mode(&mut self, mode: Mode) {
@@ -1154,6 +1209,54 @@ mod tests {
         assert!(stream.handler.printed.is_empty());
         stream.next_slice(&[0x80]);
         assert_eq!(stream.handler.printed, ['\u{800}']);
+    }
+
+    #[test]
+    fn utf8_span_split_across_chunks_is_linear() {
+        fn japanese_bytes(size: usize) -> Vec<u8> {
+            "日".as_bytes().iter().copied().cycle().take(size).collect()
+        }
+
+        let small = japanese_bytes(64 * 1024);
+        let large = japanese_bytes(256 * 1024);
+        let (small_printed, small_elapsed) = chunked_printed(&small, 4096);
+        let (large_printed, large_elapsed) = chunked_printed(&large, 4096);
+
+        assert_eq!(small_printed, bytewise_printed(&small));
+        assert_eq!(large_printed, bytewise_printed(&large));
+        assert!(
+            large_elapsed < small_elapsed.saturating_mul(6),
+            "4x input took {large_elapsed:?} after {small_elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn utf8_invalid_run_matches_bytewise() {
+        let bytes = vec![0xAA; 64 * 1024];
+        let (chunked, _) = chunked_printed(&bytes, 4096);
+        assert_eq!(chunked, bytewise_printed(&bytes));
+    }
+
+    #[test]
+    fn mless_csi_stream_is_linear() {
+        fn run(sequence_count: usize) -> (usize, Duration) {
+            let bytes = b"\x1B[B".repeat(sequence_count);
+            let started = Instant::now();
+            let mut stream = Stream::new(RecordingHandler::default());
+            for chunk in bytes.chunks(4096) {
+                stream.next_slice(chunk);
+            }
+            (stream.handler.cursor_down_calls, started.elapsed())
+        }
+
+        let (small_calls, small_elapsed) = run(64 * 1024);
+        let (large_calls, large_elapsed) = run(256 * 1024);
+        assert!(small_calls > 0);
+        assert_eq!(large_calls, small_calls * 4);
+        assert!(
+            large_elapsed < small_elapsed.saturating_mul(6),
+            "4x input took {large_elapsed:?} after {small_elapsed:?}"
+        );
     }
 
     // ghostty: "stream: cursor right (CUF)" (stream.zig:2453)

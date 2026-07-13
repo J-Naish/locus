@@ -4,11 +4,9 @@
 //! Row/Cell bit layouts are pinned because these values are copied in flat page
 //! buffers and later phases depend on their exact representation.
 
-#![allow(dead_code, unused_imports)]
-
 use crate::bitmap_allocator::{BitmapAllocator, OutOfMemory};
 use crate::color::Rgb;
-use crate::hash_map::{AutoOffsetHashMap, OffsetHashMap};
+use crate::hash_map::AutoOffsetHashMap;
 use crate::hyperlink::{HyperlinkId, HyperlinkMap, HyperlinkSet, PageEntry, PageEntryId};
 use crate::ref_counted_set::{self, AddError, Layout as SetLayout};
 use crate::size::{
@@ -17,9 +15,7 @@ use crate::size::{
 };
 use crate::style::{PackedStyle, StyleContext, StyleSet, DEFAULT_STYLE_ID};
 
-#[allow(dead_code)]
 pub(crate) const STRING_CHUNK: usize = 32;
-#[allow(dead_code)]
 pub(crate) type StringAlloc = BitmapAllocator<STRING_CHUNK>;
 
 pub(crate) const GRAPHEME_CHUNK_LEN: usize = 4;
@@ -61,7 +57,6 @@ impl SemanticPrompt {
 pub struct Row(u64);
 
 impl Row {
-    #[allow(dead_code)]
     const CELLS_MASK: u64 = 0xFFFF_FFFF;
     const WRAP_BIT: u64 = 1 << 32;
     const WRAP_CONTINUATION_BIT: u64 = 1 << 33;
@@ -77,12 +72,10 @@ impl Row {
         self.0
     }
 
-    #[allow(dead_code)]
     pub(crate) const fn cells(self) -> Offset<Cell> {
         Offset::new((self.0 & Self::CELLS_MASK) as u32)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn set_cells(&mut self, cells: Offset<Cell>) {
         self.0 = (self.0 & !Self::CELLS_MASK) | u64::from(cells.offset);
     }
@@ -475,7 +468,9 @@ pub struct Layout {
 pub struct Page {
     memory: Vec<u8>,
     rows: Offset<Row>,
-    cells: Offset<Cell>,
+    // ghostty stores a page-level `cells` pointer. Logical rows already own
+    // their physical cell offsets in this safe port, so retaining it here is
+    // redundant after initialization.
     dirty: bool,
     string_alloc: StringAlloc,
     grapheme_alloc: GraphemeAlloc,
@@ -485,7 +480,6 @@ pub struct Page {
     hyperlink_set: HyperlinkSet,
     size: PageSize,
     capacity: Capacity,
-    pause_integrity_checks: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -599,7 +593,6 @@ impl Page {
     pub fn init_buf(mut memory: Vec<u8>, layout: Layout) -> Self {
         debug_assert_eq!(memory.len(), layout.total_size);
         let rows = OffsetBuf::init_offset(layout.rows_start).member::<Row>(0);
-        let cells = OffsetBuf::init_offset(layout.cells_start).member::<Cell>(0);
         for y in 0..layout.capacity.rows as usize {
             let mut row = Row::default();
             row.set_cells(Offset::new(
@@ -644,7 +637,6 @@ impl Page {
         Self {
             memory,
             rows,
-            cells,
             dirty: false,
             string_alloc,
             grapheme_alloc,
@@ -657,7 +649,6 @@ impl Page {
                 rows: layout.capacity.rows,
             },
             capacity: layout.capacity,
-            pause_integrity_checks: 0,
         }
     }
 
@@ -1643,30 +1634,6 @@ impl Page {
         }
     }
 
-    fn clear_cell(&mut self, y: CellCountInt, x: CellCountInt) {
-        self.clear_cell_with(y, x, Cell::default());
-    }
-
-    /// Clear a cell, releasing any managed data (grapheme/hyperlink/style)
-    /// and overwriting it with `fill`. Mirrors Ghostty's `clearCells` writing
-    /// `blankCell()`, which carries the current background color.
-    fn clear_cell_with(&mut self, y: CellCountInt, x: CellCountInt, fill: Cell) {
-        let cell = self.cell(y, x);
-        if cell.has_grapheme() {
-            self.clear_grapheme(y, x);
-        }
-        if cell.hyperlink() {
-            self.clear_hyperlink(y, x);
-        }
-        if cell.has_styling() && self.styles.get(&self.memory, cell.style_id()).is_some() {
-            self.styles.release(&mut self.memory, cell.style_id());
-        }
-        self.write_cell_raw(y, x, fill);
-        let mut row = self.row(y);
-        row.set_dirty(true);
-        self.set_row(y, row);
-    }
-
     /// Clear a range of cells, filling them with `fill` (the current blank
     /// cell). Mirrors Ghostty's `clearCells` memset with `blankCell()`.
     pub fn fill_cells(
@@ -1903,6 +1870,7 @@ impl Page {
         self.styles.release(&mut self.memory, id);
     }
 
+    #[cfg(test)]
     pub(crate) fn set_style_id_raw(&mut self, y: CellCountInt, x: CellCountInt, id: StyleCountInt) {
         let mut cell = self.cell(y, x);
         cell.set_style_id(id);
@@ -1915,6 +1883,7 @@ impl Page {
     }
 
     /// The style set's slot capacity (`styles.layout.cap` in Ghostty).
+    #[cfg(test)]
     pub(crate) fn style_layout_cap(&self) -> usize {
         self.styles.layout_cap()
     }
@@ -1976,17 +1945,19 @@ impl Page {
         x: CellCountInt,
         id: HyperlinkId,
     ) -> Result<(), CapacityFailure> {
-        self.hyperlink_set.use_ref(&mut self.memory, id);
         let key = self.cell_offset(y, x);
         let previous = self.hyperlink_map.get(&self.memory, key);
-        if let Err(err) = self.hyperlink_map.put(&mut self.memory, key, id) {
-            self.hyperlink_set.release(&mut self.memory, id);
-            let _ = err;
-            return Err(CapacityFailure::HyperlinkMap);
-        }
-        if let Some(previous) = previous.filter(|&previous| previous != id) {
-            // ghostty: page.zig:1423-1430
-            self.hyperlink_set.release(&mut self.memory, previous);
+        if previous != Some(id) {
+            self.hyperlink_set.use_ref(&mut self.memory, id);
+            if self.hyperlink_map.put(&mut self.memory, key, id).is_err() {
+                self.hyperlink_set.release(&mut self.memory, id);
+                return Err(CapacityFailure::HyperlinkMap);
+            }
+            if let Some(previous) = previous {
+                // ghostty: page.zig:1423-1430. This port owns the new ref,
+                // so a same-ID rewrite must skip both acquire and release.
+                self.hyperlink_set.release(&mut self.memory, previous);
+            }
         }
         let mut cell = self.cell(y, x);
         cell.set_hyperlink(true);
@@ -1999,6 +1970,7 @@ impl Page {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn hyperlink_capacity(&self) -> usize {
         self.hyperlink_map.capacity() as usize
     }
@@ -2151,13 +2123,14 @@ impl Page {
         if entries.is_empty() {
             return;
         }
+        let row_offsets = RowOffsetIndex::new(source, start_y, end_y);
 
         let mut copied = Vec::<(HyperlinkId, HyperlinkId, StyleCountInt)>::new();
         for (source_key, source_id) in entries {
-            let Some((source_y, x)) = source.cell_coordinates_for_offset(source_key) else {
+            let Some((source_y, x)) = row_offsets.coordinates(source_key) else {
                 continue;
             };
-            if source_y < start_y || source_y >= end_y || x >= self.size.cols {
+            if x >= self.size.cols {
                 continue;
             }
             let destination_y = source_y - start_y;
@@ -2202,11 +2175,12 @@ impl Page {
         start_y: CellCountInt,
         end_y: CellCountInt,
     ) {
+        let row_offsets = RowOffsetIndex::new(source, start_y, end_y);
         for (source_key, source_slice) in source.grapheme_map.entries(&source.memory) {
-            let Some((source_y, x)) = source.cell_coordinates_for_offset(source_key) else {
+            let Some((source_y, x)) = row_offsets.coordinates(source_key) else {
                 continue;
             };
-            if source_y < start_y || source_y >= end_y || x >= self.size.cols {
+            if x >= self.size.cols {
                 continue;
             }
             let Ok(destination_slice) = self
@@ -2227,26 +2201,6 @@ impl Page {
                 destination_slice,
             );
         }
-    }
-
-    fn cell_coordinates_for_offset(
-        &self,
-        offset: Offset<Cell>,
-    ) -> Option<(CellCountInt, CellCountInt)> {
-        let first = self.row(0).cells().offset as usize;
-        let offset = offset.offset as usize;
-        let byte_offset = offset.checked_sub(first)?;
-        if !byte_offset.is_multiple_of(Cell::SIZE) {
-            return None;
-        }
-        let index = byte_offset / Cell::SIZE;
-        let capacity_cols = usize::from(self.capacity.cols);
-        let y = index / capacity_cols;
-        let x = index % capacity_cols;
-        if y >= usize::from(self.capacity.rows) {
-            return None;
-        }
-        Some((y as CellCountInt, x as CellCountInt))
     }
 
     pub(crate) fn style_for_cell(&self, y: CellCountInt, x: CellCountInt) -> Option<PackedStyle> {
@@ -2320,6 +2274,35 @@ struct CloneCaches {
     hyperlinks: Vec<(HyperlinkId, HyperlinkId)>,
     bulk_hyperlinks: bool,
     bulk_graphemes: bool,
+}
+
+struct RowOffsetIndex {
+    rows: Vec<(usize, CellCountInt)>,
+    row_bytes: usize,
+}
+
+impl RowOffsetIndex {
+    fn new(page: &Page, start_y: CellCountInt, end_y: CellCountInt) -> Self {
+        let mut rows = (start_y..end_y)
+            .map(|y| (page.row(y).cells().offset as usize, y))
+            .collect::<Vec<_>>();
+        rows.sort_unstable_by_key(|(offset, _)| *offset);
+        Self {
+            rows,
+            row_bytes: usize::from(page.capacity.cols) * Cell::SIZE,
+        }
+    }
+
+    fn coordinates(&self, offset: Offset<Cell>) -> Option<(CellCountInt, CellCountInt)> {
+        let offset = offset.offset as usize;
+        let index = self.rows.partition_point(|(base, _)| *base <= offset);
+        let (base, y) = *self.rows.get(index.checked_sub(1)?)?;
+        let delta = offset.checked_sub(base)?;
+        if delta >= self.row_bytes || !delta.is_multiple_of(Cell::SIZE) {
+            return None;
+        }
+        Some((y, (delta / Cell::SIZE) as CellCountInt))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3445,6 +3428,52 @@ mod tests {
     }
 
     #[test]
+    fn clone_rows_from_after_swap_rows_keeps_managed_data() {
+        let mut source = Page::init(Capacity::new(4, 4));
+        source.set_cell(0, 0, Cell::new('h'));
+        let hyperlink = source
+            .insert_hyperlink_implicit(1, b"https://example.test/swap")
+            .unwrap();
+        source.set_hyperlink_id(0, 0, hyperlink).unwrap();
+        source.set_cell(1, 0, Cell::new('g'));
+        source.append_grapheme(1, 0, 0x0301).unwrap();
+        source.swap_rows(0, 1);
+
+        let mut destination = Page::init(source.capacity());
+        destination.clone_rows_from(&source, 0, source.size().rows);
+
+        assert_eq!(destination.grapheme(0, 0), Some(vec![0x0301]));
+        assert_eq!(
+            destination.hyperlink_uri(1, 0),
+            Some(b"https://example.test/swap".as_slice())
+        );
+        assert!(destination.verify_integrity().is_ok());
+    }
+
+    #[test]
+    fn clone_rows_subrange_after_rotation_keeps_managed_data() {
+        let mut source = Page::init(Capacity::new(4, 4));
+        source.set_cell(0, 0, Cell::new('g'));
+        source.append_grapheme(0, 0, 0x0301).unwrap();
+        source.set_cell(2, 0, Cell::new('h'));
+        let hyperlink = source
+            .insert_hyperlink_implicit(1, b"https://example.test/rotate")
+            .unwrap();
+        source.set_hyperlink_id(2, 0, hyperlink).unwrap();
+        source.rotate_rows_left_once(0, 3);
+
+        let mut destination = Page::init(source.capacity());
+        destination.clone_rows_from(&source, 1, 3);
+
+        assert_eq!(
+            destination.hyperlink_uri(0, 0),
+            Some(b"https://example.test/rotate".as_slice())
+        );
+        assert_eq!(destination.grapheme(1, 0), Some(vec![0x0301]));
+        assert!(destination.verify_integrity().is_ok());
+    }
+
+    #[test]
     fn ghostty_clone_from_frees_dst_graphemes() {
         // ghostty: "Page cloneFrom frees dst graphemes" (page.zig:2820)
         let mut src = Page::init(Capacity {
@@ -4021,6 +4050,20 @@ mod tests {
             page.hyperlink_set.ref_count(&page.memory, second),
             second_base_refs + 1
         );
+    }
+
+    #[test]
+    fn set_hyperlink_id_same_id_reset_keeps_refcount() {
+        let mut page = Page::init(Capacity::new(2, 1));
+        let hyperlink = page
+            .insert_hyperlink_implicit(1, b"https://example.test")
+            .unwrap();
+        page.set_hyperlink_id(0, 0, hyperlink).unwrap();
+        let refs = page.hyperlink_set.ref_count(&page.memory, hyperlink);
+
+        page.set_hyperlink_id(0, 0, hyperlink).unwrap();
+
+        assert_eq!(page.hyperlink_set.ref_count(&page.memory, hyperlink), refs);
     }
 
     #[test]

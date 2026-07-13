@@ -579,6 +579,12 @@ impl Terminal {
                 offset += 1;
             }
         }
+        // Printable ASCII never continues a non-ASCII grapheme cluster, so
+        // this batching path does not participate in last_printed_class.
+    }
+
+    pub(crate) fn interrupt_grapheme_run(&mut self) {
+        self.last_printed_class = None;
     }
 
     /// Grapheme-clustering branch of [`print`]. Returns `true` if the code point
@@ -670,7 +676,7 @@ impl Terminal {
             } else {
                 DesiredWide::Narrow
             };
-        } else if unicode::width(c) != 0 {
+        } else if !unicode::props(c).width_zero_in_grapheme {
             // A code point that contributes width means we're at least width 2,
             // since the first code point must be at least width 1.
             desired_wide = DesiredWide::Wide;
@@ -962,17 +968,23 @@ impl Terminal {
                 self.scroll_up(1);
             } else {
                 // ghostty: Terminal.zig:1430-1545 -- this is the hot path for
-                // an unstyled interior scroll region. Erasing shifts the
-                // tracked cursor pin, so re-resolve its original active point.
-                let x = self.active_screen().cursor.x;
-                let y = self.active_screen().cursor.y;
+                // an unstyled interior scroll region. Preserve the exact pin:
+                // erase fixups may move it across a page boundary, where
+                // cursor_absolute would release refs from the wrong page.
+                let saved_pin = self.active_screen().cursor_pin();
                 let top = self.scrolling_region.top;
                 let limit = usize::from(self.scrolling_region.bottom - top);
                 let _ = self
                     .active_screen_mut()
                     .pages
                     .erase_row_bounded(Point::active(0, u32::from(top)), limit);
-                self.active_screen_mut().cursor_absolute(x, y);
+                if let Some(saved_pin) = saved_pin {
+                    let cursor_pin_id = self.active_screen().cursor.pin;
+                    let _ = self
+                        .active_screen_mut()
+                        .pages
+                        .set_tracked_pin(cursor_pin_id, saved_pin);
+                }
                 // erase_row_bounded dirties its page, which RenderState expands
                 // to every affected row through Page::is_dirty.
             }
@@ -2137,6 +2149,7 @@ impl Terminal {
         // Reset our basic state.
         self.modes.reset();
         self.previous_char = None;
+        self.last_printed_class = None;
         self.pwd = None;
         self.title = None;
         self.status_display = StatusDisplay::Main;
@@ -2158,6 +2171,7 @@ impl Terminal {
         if self.screens.active_key() == key {
             return false;
         }
+        self.last_printed_class = None;
 
         // We always end hyperlink state on the OLD screen before switching.
         self.active_screen_mut().end_hyperlink();
@@ -2651,6 +2665,10 @@ impl Default for Terminal {
 }
 
 impl Handler for Terminal {
+    fn interrupt_grapheme_run(&mut self) {
+        self.interrupt_grapheme_run();
+    }
+
     fn print(&mut self, cp: char) {
         Terminal::print(self, cp);
     }
@@ -3595,6 +3613,62 @@ mod tests {
         assert_eq!(c.codepoint(), 0x1F44B);
         assert!(c.has_grapheme());
         assert_eq!(c.wide(), CellWide::Wide);
+    }
+
+    #[test]
+    fn narrow_emoji_base_with_skin_tone_stays_narrow() {
+        let mut t = terminal(8, 2);
+        t.modes.set(Mode::GraphemeCluster, true);
+
+        print_cp(&mut t, 0x270C);
+        print_cp(&mut t, 0x1F3FB);
+
+        let cell = cell(&t, 0, 0);
+        assert_eq!(cell.wide(), CellWide::Narrow);
+        assert_eq!(t.grapheme_at(screen_point(0, 0)), Some(vec![0x1F3FB]));
+        assert_eq!(t.active_screen().cursor.x, 1);
+    }
+
+    #[test]
+    fn grapheme_cluster_joins_after_cursor_roundtrip_zwj() {
+        let handler = TerminalHandler::new(terminal(12, 3), NoopEffects);
+        let mut stream = Stream::new(handler);
+        stream
+            .handler
+            .terminal
+            .modes
+            .set(Mode::GraphemeCluster, true);
+        stream.next_slice("👨\u{200D}".as_bytes());
+        stream.next_slice(b"\x1B[2;1H");
+        stream.next_slice("😀".as_bytes());
+        stream.next_slice(b"\x1B[1;3H");
+        stream.next_slice("👩".as_bytes());
+
+        assert_eq!(
+            stream.handler.terminal.grapheme_at(screen_point(0, 0)),
+            Some(vec![0x200D, 0x1F469])
+        );
+    }
+
+    #[test]
+    fn prepend_cluster_joins_after_interleaved_print() {
+        let handler = TerminalHandler::new(terminal(12, 3), NoopEffects);
+        let mut stream = Stream::new(handler);
+        stream
+            .handler
+            .terminal
+            .modes
+            .set(Mode::GraphemeCluster, true);
+        stream.next_slice("\u{0600}".as_bytes());
+        stream.next_slice(b"\x1B[2;1H");
+        stream.next_slice("一".as_bytes());
+        stream.next_slice(b"\x1B[1;2H");
+        stream.next_slice("丁".as_bytes());
+
+        assert_eq!(
+            stream.handler.terminal.grapheme_at(screen_point(0, 0)),
+            Some(vec![u32::from('丁')])
+        );
     }
 
     #[test]
@@ -6787,6 +6861,49 @@ mod tests {
         assert_eq!(t.active_screen().cursor.y, 9);
         assert_eq!(t.active_screen().cursor.x, 0);
         assert_eq!(t.active_screen().pages.total_rows(), total_rows);
+    }
+
+    #[test]
+    fn region_scroll_at_page_boundary_keeps_style_refs() {
+        let mut t = terminal_opts(6, 3, 8 * crate::page_list::PageList::standard_size());
+        let cap_rows = usize::from(t.first_page_capacity_rows());
+        for _ in 0..(cap_rows * 2) {
+            t.set_cursor_pos(3, 1);
+            t.index();
+            let pin = t.active_screen().cursor_pin().unwrap();
+            if t.active_screen().pages.first_node() != t.active_screen().pages.last_node()
+                && pin.y == 0
+            {
+                break;
+            }
+        }
+        let boundary_pin = t.active_screen().cursor_pin().unwrap();
+        assert_eq!(boundary_pin.y, 0);
+        t.scrolling_region.top = 1;
+        t.scrolling_region.bottom = 2;
+        t.set_attribute(Attribute::Bold);
+        let style_id = t.active_screen().cursor.style_id;
+        assert_ne!(style_id, 0);
+        let saved_pin = t.active_screen().cursor_pin().unwrap();
+
+        t.index();
+
+        assert!(t.active_screen().cursor_pin().unwrap().eql(saved_pin));
+        assert!(
+            t.active_screen()
+                .pages
+                .node(saved_pin.node)
+                .unwrap()
+                .page
+                .style_ref_count(style_id)
+                > 0
+        );
+        let mut current = t.active_screen().pages.first_node();
+        while let Some(id) = current {
+            let node = t.active_screen().pages.node(id).unwrap();
+            assert!(node.page.verify_integrity().is_ok());
+            current = node.next;
+        }
     }
 
     #[test]

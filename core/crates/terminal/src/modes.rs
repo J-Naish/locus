@@ -48,8 +48,6 @@ pub enum Mode {
     BracketedPaste = 2004,
     SynchronizedOutput = 2026,
     GraphemeCluster = 2027,
-    ReportColorScheme = 2031,
-    InBandSizeReports = 2048,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,7 +235,9 @@ struct ModeEntry {
     default: bool,
 }
 
-const ENTRIES: [ModeEntry; 41] = [
+// Ghostty also recognizes 2031/2048, but this port does not emit their
+// reports yet. Keep DECRQM honest until the behavior exists end to end.
+const ENTRIES: [ModeEntry; 39] = [
     ModeEntry {
         mode: Mode::DisableKeyboard,
         value: 2,
@@ -475,18 +475,6 @@ const ENTRIES: [ModeEntry; 41] = [
         // behavior directly from the mode table.
         default: true,
     },
-    ModeEntry {
-        mode: Mode::ReportColorScheme,
-        value: 2031,
-        ansi: false,
-        default: false,
-    },
-    ModeEntry {
-        mode: Mode::InBandSizeReports,
-        value: 2048,
-        ansi: false,
-        default: false,
-    },
 ];
 
 pub fn mode_from_int(value: u16, ansi: bool) -> Option<Mode> {
@@ -597,6 +585,20 @@ mod tests {
     fn get_report_unknown_mode() {
         let report = ModeState::default().get_report(ModeTag::new(9999, false));
         assert_eq!(report.state, ReportState::NotRecognized);
+    }
+
+    #[test]
+    fn report_color_scheme_mode_is_not_recognized_until_implemented() {
+        let report = ModeState::default().get_report(ModeTag::new(2031, false));
+        assert_eq!(report.state, ReportState::NotRecognized);
+        assert_eq!(encoded(report), "\x1B[?2031;0$y");
+    }
+
+    #[test]
+    fn in_band_size_report_mode_is_not_recognized_until_implemented() {
+        let report = ModeState::default().get_report(ModeTag::new(2048, false));
+        assert_eq!(report.state, ReportState::NotRecognized);
+        assert_eq!(encoded(report), "\x1B[?2048;0$y");
     }
 
     // ghostty: "Report.encode DEC mode set" (modes.zig:356)
