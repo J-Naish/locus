@@ -69,6 +69,7 @@ final class TerminalSession: ObservableObject {
     let cursorY: UInt16
     let cursorVisible: Bool
     let cursorBlinking: Bool
+    let atBottom: Bool
   }
 
   enum State: Equatable, Sendable {
@@ -150,6 +151,27 @@ final class TerminalSession: ObservableObject {
 
   func resize(columns: UInt16, rows: UInt16) {
     worker.resize(columns: columns, rows: rows)
+  }
+
+  /// Routes wheel input through the terminal's wheel policy. Negative
+  /// deltas scroll toward older history rows.
+  func scrollWheel(
+    deltaRows: Int32,
+    column: UInt16,
+    row: UInt16,
+    modifiers: TerminalModifiers
+  ) {
+    worker.scrollWheel(
+      deltaRows: deltaRows,
+      column: column,
+      row: row,
+      modifiers: modifiers
+    )
+  }
+
+  /// Returns the viewport to the live bottom of the terminal.
+  func scrollToBottom() {
+    worker.scrollToBottom()
   }
 
   func terminate() {
@@ -262,6 +284,11 @@ private final class TerminalSessionWorker {
   /// unchanged; the cap bounds how long a flood can monopolize the serial
   /// queue before queued input and rendering get a turn.
   private static let maxBytesPerReadEvent = 256 * 1024
+  private static let maxWheelRowsPerEvent: Int32 = 4096
+  /// PageList's down-overflow path clamps at the active viewport while
+  /// walking pages, so a large positive delta is a safe jump to bottom.
+  /// See core/crates/terminal/src/page_list.rs:746.
+  private static let scrollToBottomRowDelta = Int(Int32.max)
   private static let teardownQueue = DispatchQueue(
     label: "locus.terminal.session.teardown",
     qos: .utility
@@ -278,6 +305,13 @@ private final class TerminalSessionWorker {
       completion: @MainActor @Sendable (TerminalSession.PasteOutcome) -> Void
     )
     case resize(columns: UInt16, rows: UInt16)
+    case scrollWheel(
+      deltaRows: Int32,
+      column: UInt16,
+      row: UInt16,
+      modifiers: TerminalModifiers
+    )
+    case scrollToBottom
     case sendMouse(
       kind: TerminalMouseEventKind,
       button: TerminalMouseButton,
@@ -383,6 +417,26 @@ private final class TerminalSessionWorker {
 
   func resize(columns: UInt16, rows: UInt16) {
     enqueue(.resize(columns: columns, rows: rows))
+  }
+
+  func scrollWheel(
+    deltaRows: Int32,
+    column: UInt16,
+    row: UInt16,
+    modifiers: TerminalModifiers
+  ) {
+    enqueue(
+      .scrollWheel(
+        deltaRows: deltaRows,
+        column: column,
+        row: row,
+        modifiers: modifiers
+      )
+    )
+  }
+
+  func scrollToBottom() {
+    enqueue(.scrollToBottom)
   }
 
   func terminate() {
@@ -526,6 +580,15 @@ private final class TerminalSessionWorker {
       pasteOnQueue(text, allowUnsafe: allowUnsafe, completion: completion)
     case .resize(let columns, let rows):
       resizeOnQueue(columns: columns, rows: rows)
+    case .scrollWheel(let deltaRows, let column, let row, let modifiers):
+      scrollWheelOnQueue(
+        deltaRows: deltaRows,
+        column: column,
+        row: row,
+        modifiers: modifiers
+      )
+    case .scrollToBottom:
+      scrollToBottomOnQueue()
     case .sendMouse(let kind, let button, let column, let row, let modifiers):
       sendMouseOnQueue(
         kind: kind,
@@ -630,6 +693,7 @@ private final class TerminalSessionWorker {
     }
 
     do {
+      returnToBottomForUserInputIfNeeded()
       try enqueueWrite(data)
     } catch {
       fail(error)
@@ -646,6 +710,7 @@ private final class TerminalSessionWorker {
     }
 
     do {
+      returnToBottomForUserInputIfNeeded()
       var encoded = Data()
       for event in events {
         encoded.append(
@@ -675,6 +740,7 @@ private final class TerminalSessionWorker {
     do {
       switch try terminal.encodePaste(text, allowUnsafe: allowUnsafe) {
       case .safe(let data):
+        returnToBottomForUserInputIfNeeded()
         try enqueueWrite(data)
         completePaste(.sent, completion: completion)
       case .unsafe:
@@ -700,6 +766,61 @@ private final class TerminalSessionWorker {
       try renderAndPublish()
     } catch {
       fail(error)
+    }
+  }
+
+  private func scrollWheelOnQueue(
+    deltaRows: Int32,
+    column: UInt16,
+    row: UInt16,
+    modifiers: TerminalModifiers
+  ) {
+    guard
+      let terminal,
+      deltaRows != 0,
+      deltaRows >= -Self.maxWheelRowsPerEvent,
+      deltaRows <= Self.maxWheelRowsPerEvent
+    else {
+      return
+    }
+    let coordinate = clampedCoordinate(column: column, row: row)
+    do {
+      let bytes = try terminal.scrollWheel(
+        deltaRows: deltaRows,
+        column: coordinate.column,
+        row: coordinate.row,
+        modifiers: modifiers
+      )
+      if !bytes.isEmpty {
+        try enqueueWrite(bytes)
+      }
+      try renderAndPublish()
+    } catch {
+      handleMouseInteractionError(error)
+    }
+  }
+
+  private func scrollToBottomOnQueue() {
+    guard let terminal else {
+      return
+    }
+    do {
+      try terminal.scroll(byRows: Self.scrollToBottomRowDelta)
+      try renderAndPublish()
+    } catch {
+      handleMouseInteractionError(error)
+    }
+  }
+
+  private func returnToBottomForUserInputIfNeeded() {
+    guard frame?.atBottom == false, let terminal else {
+      return
+    }
+    do {
+      try terminal.scroll(byRows: Self.scrollToBottomRowDelta)
+      try renderAndPublish()
+    } catch {
+      handleMouseInteractionError(error)
     }
   }
 
@@ -904,7 +1025,8 @@ private final class TerminalSessionWorker {
       cursorX: cursor.x,
       cursorY: cursor.y,
       cursorVisible: cursor.visible,
-      cursorBlinking: cursor.blinking
+      cursorBlinking: cursor.blinking,
+      atBottom: frame.atBottom
     )
     publish(snapshot: snapshot)
   }

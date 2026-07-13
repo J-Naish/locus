@@ -223,6 +223,14 @@ private struct TerminalPanelResizeHandle: View {
   }
 }
 
+enum TerminalPanelPresentation {
+  static func shouldShowJumpToBottom(
+    snapshot: TerminalSession.Snapshot?
+  ) -> Bool {
+    snapshot?.atBottom == false
+  }
+}
+
 private struct TerminalPanelContent: View {
   @ObservedObject var session: TerminalSession
   let onViewReady: (TerminalPaneView) -> Void
@@ -230,8 +238,35 @@ private struct TerminalPanelContent: View {
   var body: some View {
     switch session.state {
     case .idle, .running:
-      TerminalPane(session: session, onViewReady: onViewReady)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      ZStack(alignment: .bottomTrailing) {
+        TerminalPane(session: session, onViewReady: onViewReady)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+        if TerminalPanelPresentation.shouldShowJumpToBottom(
+          snapshot: session.snapshot
+        ) {
+          Button {
+            session.scrollToBottom()
+          } label: {
+            Image(systemName: "arrow.down.to.line")
+              .imageScale(.small)
+              .foregroundStyle(.secondary)
+              .padding(6)
+              .background(.ultraThinMaterial, in: Capsule())
+              .overlay {
+                Capsule()
+                  .strokeBorder(
+                    Color(nsColor: .separatorColor).opacity(0.5),
+                    lineWidth: 0.5
+                  )
+              }
+          }
+          .buttonStyle(.plain)
+          .padding(12)
+          .accessibilityLabel("Scroll to Bottom")
+          .accessibilityIdentifier("terminal-jump-to-bottom")
+        }
+      }
     case .exited, .failed:
       Text("The process has ended.")
         .font(.callout)

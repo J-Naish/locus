@@ -635,6 +635,68 @@ final class TerminalSessionTests: XCTestCase {
     XCTAssertTrue(waitUntil { selectionRange(in: session, row: row) == nil })
     XCTAssertEqual(session.selectionText(), "")
   }
+
+  func testScrollWheelScrollsPrimaryScrollback() {
+    let session = TerminalSession(columns: 80, rows: 12)
+    defer {
+      session.terminate()
+    }
+    XCTAssertTrue(prepareScrollableTerminal(session))
+
+    session.scrollWheel(deltaRows: -10, column: 0, row: 0, modifiers: [])
+    XCTAssertTrue(waitUntil { session.snapshot?.atBottom == false })
+
+    session.scrollWheel(deltaRows: 10_000, column: 0, row: 0, modifiers: [])
+    RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    XCTAssertEqual(session.snapshot?.atBottom, false)
+
+    session.scrollWheel(deltaRows: 4096, column: 0, row: 0, modifiers: [])
+    XCTAssertTrue(waitUntil { session.snapshot?.atBottom == true })
+  }
+
+  func testScrollWheelUnderMouseCaptureDoesNotMoveViewport() {
+    let session = TerminalSession(columns: 80, rows: 12)
+    defer {
+      session.terminate()
+    }
+    XCTAssertTrue(prepareScrollableTerminal(session))
+    session.send(Data("printf '\\033[?1002h'; echo ready\n".utf8))
+    XCTAssertTrue(waitUntil { session.plainTextForTesting()?.contains("ready") == true })
+    let generation = session.snapshot?.generation ?? 0
+
+    session.scrollWheel(deltaRows: -10, column: 0, row: 0, modifiers: [])
+
+    XCTAssertTrue(waitUntil { (session.snapshot?.generation ?? 0) > generation })
+    XCTAssertEqual(session.snapshot?.atBottom, true)
+  }
+
+  func testScrollToBottomReturnsViewport() {
+    let session = TerminalSession(columns: 80, rows: 12)
+    defer {
+      session.terminate()
+    }
+    XCTAssertTrue(prepareScrollableTerminal(session))
+    session.scrollWheel(deltaRows: -10, column: 0, row: 0, modifiers: [])
+    XCTAssertTrue(waitUntil { session.snapshot?.atBottom == false })
+
+    session.scrollToBottom()
+
+    XCTAssertTrue(waitUntil { session.snapshot?.atBottom == true })
+  }
+
+  func testTypingReturnsViewportToBottom() {
+    let session = TerminalSession(columns: 80, rows: 12)
+    defer {
+      session.terminate()
+    }
+    XCTAssertTrue(prepareScrollableTerminal(session))
+    session.scrollWheel(deltaRows: -10, column: 0, row: 0, modifiers: [])
+    XCTAssertTrue(waitUntil { session.snapshot?.atBottom == false })
+
+    session.send(Data("x".utf8))
+
+    XCTAssertTrue(waitUntil { session.snapshot?.atBottom == true })
+  }
 }
 
 @MainActor
@@ -671,6 +733,22 @@ private func waitForInitialShellFrame(_ session: TerminalSession) -> Bool {
       return false
     }
     return !plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+}
+
+@MainActor
+private func prepareScrollableTerminal(_ session: TerminalSession) -> Bool {
+  session.start(command: "/bin/sh")
+  guard waitForInitialShellFrame(session) else {
+    return false
+  }
+  session.send(
+    Data(
+      "i=0; while [ $i -lt 200 ]; do echo line-$i; i=$((i+1)); done\n".utf8
+    )
+  )
+  return waitUntil(timeout: 5) {
+    session.plainTextForTesting()?.contains("line-199") == true
   }
 }
 

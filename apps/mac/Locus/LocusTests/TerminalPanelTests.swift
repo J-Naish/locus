@@ -4,6 +4,20 @@ import XCTest
 
 @MainActor
 final class TerminalPanelTests: XCTestCase {
+  func testJumpPillVisibilityFollowsSnapshotBottomState() {
+    XCTAssertFalse(TerminalPanelPresentation.shouldShowJumpToBottom(snapshot: nil))
+    XCTAssertFalse(
+      TerminalPanelPresentation.shouldShowJumpToBottom(
+        snapshot: terminalPanelSnapshot(atBottom: true)
+      )
+    )
+    XCTAssertTrue(
+      TerminalPanelPresentation.shouldShowJumpToBottom(
+        snapshot: terminalPanelSnapshot(atBottom: false)
+      )
+    )
+  }
+
   func testPanelHeightClampsToBounds() {
     let minimumHeight = TerminalPanelMetrics.minimumHeight
 
@@ -156,7 +170,8 @@ final class TerminalPanelTests: XCTestCase {
 
     XCTAssertTrue(browserReference?.session === session)
     XCTAssertTrue(
-      browserReference?.session?.plainTextForTesting()?.contains("browser-replacement-marker") == true)
+      browserReference?.session?.plainTextForTesting()?.contains("browser-replacement-marker")
+        == true)
   }
 
   func testTerminateOnTeardown() throws {
@@ -230,6 +245,19 @@ final class TerminalPanelTests: XCTestCase {
       "Snapshot was: \(restartedSession.plainTextForTesting() ?? "<nil>")"
     )
   }
+}
+
+private func terminalPanelSnapshot(atBottom: Bool) -> TerminalSession.Snapshot {
+  TerminalSession.Snapshot(
+    generation: 1,
+    columns: 80,
+    rows: 24,
+    cursorX: 0,
+    cursorY: 0,
+    cursorVisible: true,
+    cursorBlinking: true,
+    atBottom: atBottom
+  )
 }
 
 @MainActor

@@ -6,6 +6,56 @@ import XCTest
 
 @MainActor
 final class TerminalPaneViewTests: XCTestCase {
+  func testWheelAccumulatorEmitsWholeRowsWithCarry() {
+    var accumulator = TerminalWheelAccumulator()
+
+    XCTAssertEqual(
+      accumulator.ffiDeltaRows(
+        scrollingDeltaY: 40,
+        hasPreciseDeltas: true,
+        cellHeight: 16
+      ),
+      -2
+    )
+    XCTAssertEqual(
+      accumulator.ffiDeltaRows(
+        scrollingDeltaY: 8,
+        hasPreciseDeltas: true,
+        cellHeight: 16
+      ),
+      -1
+    )
+    XCTAssertEqual(
+      accumulator.ffiDeltaRows(
+        scrollingDeltaY: -16,
+        hasPreciseDeltas: true,
+        cellHeight: 16
+      ),
+      1
+    )
+    XCTAssertEqual(
+      accumulator.ffiDeltaRows(
+        scrollingDeltaY: 3,
+        hasPreciseDeltas: false,
+        cellHeight: 16
+      ),
+      -3
+    )
+  }
+
+  func testWheelAccumulatorClampsToFFILimit() {
+    var accumulator = TerminalWheelAccumulator()
+
+    XCTAssertEqual(
+      accumulator.ffiDeltaRows(
+        scrollingDeltaY: 16 * 10_000,
+        hasPreciseDeltas: true,
+        cellHeight: 16
+      ),
+      -4096
+    )
+  }
+
   func testPaintSchedulingIgnoresFrameDirtyStateByDesign() {
     // The signature intentionally has no dirty/frame parameter so a clean
     // follow-up render cannot suppress an earlier generation's repaint.

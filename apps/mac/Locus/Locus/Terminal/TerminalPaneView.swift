@@ -515,6 +515,34 @@ enum TerminalPaneGeometry {
   }
 }
 
+/// Accumulates AppKit scrolling deltas into whole terminal rows. AppKit's
+/// positive Y direction points toward older content, while the terminal FFI
+/// uses negative row deltas for that direction.
+struct TerminalWheelAccumulator {
+  static let maxWheelRowsPerEvent: CGFloat = 4096
+
+  private var pendingRows: CGFloat = 0
+
+  mutating func ffiDeltaRows(
+    scrollingDeltaY: CGFloat,
+    hasPreciseDeltas: Bool,
+    cellHeight: CGFloat
+  ) -> Int32 {
+    guard scrollingDeltaY.isFinite, cellHeight.isFinite, cellHeight > 0 else {
+      return 0
+    }
+
+    pendingRows += hasPreciseDeltas ? scrollingDeltaY / cellHeight : scrollingDeltaY
+    let wholeRows = pendingRows.rounded(.towardZero)
+    pendingRows -= wholeRows
+    let clampedRows = min(
+      max(wholeRows, -Self.maxWheelRowsPerEvent),
+      Self.maxWheelRowsPerEvent
+    )
+    return -Int32(clampedRows)
+  }
+}
+
 struct TerminalKeyInput: Equatable, Sendable {
   let keyCode: UInt16
   let modifierFlagsRawValue: UInt
@@ -1079,6 +1107,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   private var lastCaretInputTime = CACurrentMediaTime()
   private var lastDrawnCaretVisibility: Bool?
   private var lastDrawnCaretRect: NSRect?
+  private var wheelAccumulator = TerminalWheelAccumulator()
 
   override var acceptsFirstResponder: Bool { true }
   override var isOpaque: Bool { true }
@@ -1151,6 +1180,28 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   override func layout() {
     super.layout()
     scheduleTerminalResizeIfNeeded()
+  }
+
+  override func scrollWheel(with event: NSEvent) {
+    guard let session, let gridSize = currentGridSize() else {
+      super.scrollWheel(with: event)
+      return
+    }
+    let deltaRows = wheelAccumulator.ffiDeltaRows(
+      scrollingDeltaY: event.scrollingDeltaY,
+      hasPreciseDeltas: event.hasPreciseScrollingDeltas,
+      cellHeight: metrics.cellHeight
+    )
+    guard deltaRows != 0 else {
+      return
+    }
+    let hit = cellHit(for: event, gridSize: gridSize)
+    session.scrollWheel(
+      deltaRows: deltaRows,
+      column: hit.coordinate.column,
+      row: hit.coordinate.row,
+      modifiers: TerminalKeyTranslator.modifiers(for: event)
+    )
   }
 
   override func mouseDown(with event: NSEvent) {
