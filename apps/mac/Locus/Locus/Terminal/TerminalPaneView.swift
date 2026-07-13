@@ -563,7 +563,8 @@ enum TerminalKeyTranslator {
 
   static func translate(
     _ input: TerminalKeyInput,
-    action: UInt32 = LOCUS_TERM_ACTION_PRESS
+    action: UInt32 = LOCUS_TERM_ACTION_PRESS,
+    composing: Bool = false
   ) -> TerminalKeyEvent? {
     let flags = NSEvent.ModifierFlags(rawValue: input.modifierFlagsRawValue)
     let modifiers = terminalModifiers(
@@ -579,7 +580,7 @@ enum TerminalKeyTranslator {
         key: LOCUS_TERM_KEY_UNIDENTIFIED,
         modifiers: .control,
         consumedModifiers: [],
-        composing: false,
+        composing: composing,
         utf8: Data("u".utf8),
         unshiftedCodepoint: UnicodeScalar("u").value
       )
@@ -596,7 +597,7 @@ enum TerminalKeyTranslator {
       key: key,
       modifiers: modifiers,
       consumedModifiers: [],
-      composing: false,
+      composing: composing,
       utf8: Data(text.utf8),
       unshiftedCodepoint: TerminalUnshiftedCodepointResolver.current(
         keyCode: input.keyCode,
@@ -781,18 +782,25 @@ enum TerminalUnshiftedCodepointResolver {
     else {
       return resolve(charactersIgnoringModifiers: charactersIgnoringModifiers) { nil }
     }
+    let keyboardType = UInt32(LMGetKbdType())
     return cache.resolve(
       layoutIdentifier: identifier,
       keyCode: keyCode,
+      keyboardType: keyboardType,
       charactersIgnoringModifiers: charactersIgnoringModifiers
     ) {
-      translatedCharacter(source: source, keyCode: keyCode)
+      translatedCharacter(
+        source: source,
+        keyCode: keyCode,
+        keyboardType: keyboardType
+      )
     }
   }
 
   private static func translatedCharacter(
     source: TISInputSource,
-    keyCode: UInt16
+    keyCode: UInt16,
+    keyboardType: UInt32
   ) -> String? {
     guard
       let layoutPointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData)
@@ -812,7 +820,7 @@ enum TerminalUnshiftedCodepointResolver {
       keyCode,
       UInt16(kUCKeyActionDown),
       0,
-      UInt32(LMGetKbdType()),
+      keyboardType,
       OptionBits(kUCKeyTranslateNoDeadKeysBit),
       &deadKeyState,
       characters.count,
@@ -830,6 +838,7 @@ struct TerminalUnshiftedCodepointCache {
   private struct Key: Hashable {
     let layoutIdentifier: String
     let keyCode: UInt16
+    let keyboardType: UInt32
   }
 
   private var values: [Key: UInt32] = [:]
@@ -837,10 +846,15 @@ struct TerminalUnshiftedCodepointCache {
   mutating func resolve(
     layoutIdentifier: String,
     keyCode: UInt16,
+    keyboardType: UInt32,
     charactersIgnoringModifiers: String?,
     translate: () -> String?
   ) -> UInt32 {
-    let key = Key(layoutIdentifier: layoutIdentifier, keyCode: keyCode)
+    let key = Key(
+      layoutIdentifier: layoutIdentifier,
+      keyCode: keyCode,
+      keyboardType: keyboardType
+    )
     if let cached = values[key] {
       return cached
     }
@@ -1081,7 +1095,8 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     guard
       let translated = TerminalKeyTranslator.translate(
         input,
-        action: LOCUS_TERM_ACTION_RELEASE
+        action: LOCUS_TERM_ACTION_RELEASE,
+        composing: hasMarkedText()
       )
     else {
       super.keyUp(with: event)
@@ -1127,7 +1142,23 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
       return
     }
     resetCaretBlink()
-    session?.send(Data(text.utf8))
+    if text.unicodeScalars.count == 1, let scalar = text.unicodeScalars.first {
+      sendTerminalKey(
+        TerminalKeyEvent(
+          action: LOCUS_TERM_ACTION_PRESS,
+          key: LOCUS_TERM_KEY_UNIDENTIFIED,
+          modifiers: [],
+          consumedModifiers: [],
+          composing: false,
+          utf8: Data(text.utf8),
+          unshiftedCodepoint: scalar.value
+        )
+      )
+    } else {
+      // An IME commit can contain multiple scalars without corresponding
+      // physical key events, so it must remain a raw UTF-8 write.
+      session?.send(Data(text.utf8))
+    }
   }
 
   func setMarkedText(

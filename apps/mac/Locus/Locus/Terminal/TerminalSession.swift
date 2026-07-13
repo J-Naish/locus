@@ -93,7 +93,8 @@ final class TerminalSession: ObservableObject {
   init(
     columns: UInt16 = 80,
     rows: UInt16 = 24,
-    maxScrollback: Int = TerminalSession.defaultMaxScrollbackBytes
+    maxScrollback: Int = TerminalSession.defaultMaxScrollbackBytes,
+    pendingOutputStallGrace: TimeInterval = 5
   ) {
     let publisher = TerminalSessionPublisher()
     self.publisher = publisher
@@ -101,6 +102,7 @@ final class TerminalSession: ObservableObject {
       columns: columns,
       rows: rows,
       maxScrollback: maxScrollback,
+      pendingOutputStallGrace: pendingOutputStallGrace,
       publishState: { [weak publisher] state in
         publisher?.publish(state: state)
       },
@@ -181,10 +183,12 @@ private final class TerminalSessionPublisher {
 }
 
 private final class TerminalSessionWorker {
-  /// Upper bound on buffered outgoing bytes while the child is not reading
-  /// (for example, while stopped with Ctrl+S). Beyond this the sink is treated
-  /// as dead so one terminal cannot grow memory without bound.
+  /// Stall-detection threshold for buffered output while the child is not reading.
   private static let maxPendingOutputBytes = 4 * 1024 * 1024
+  private static let teardownQueue = DispatchQueue(
+    label: "locus.terminal.session.teardown",
+    qos: .utility
+  )
 
   private enum Command: Sendable {
     case start(command: String, arguments: [String], currentDirectory: String?)
@@ -210,23 +214,31 @@ private final class TerminalSessionWorker {
   private var frame: TerminalFrame?
   private var readSource: DispatchSourceRead?
   private var writeSource: DispatchSourceWrite?
+  private var sourceCancellationGroup: DispatchGroup?
+  private var pendingOutputStallTimer: DispatchSourceTimer?
   private var pendingOutput = Data()
+  private var lastDrainProgressAt = DispatchTime.now()
   private var writeSourceIsActive = false
   private var generation: UInt64 = 0
   private var columns: UInt16
   private var rows: UInt16
   private let maxScrollback: Int
+  private let pendingOutputStallGraceNanoseconds: UInt64
 
   init(
     columns: UInt16,
     rows: UInt16,
     maxScrollback: Int,
+    pendingOutputStallGrace: TimeInterval,
     publishState: @escaping @MainActor (TerminalSession.State) -> Void,
     publishSnapshot: @escaping @MainActor (TerminalSession.Snapshot) -> Void
   ) {
     self.columns = columns
     self.rows = rows
     self.maxScrollback = maxScrollback
+    pendingOutputStallGraceNanoseconds = UInt64(
+      max(0.001, pendingOutputStallGrace) * 1_000_000_000
+    )
     self.publishState = publishState
     self.publishSnapshot = publishSnapshot
     queue.setSpecific(key: queueKey, value: ())
@@ -365,23 +377,33 @@ private final class TerminalSessionWorker {
         fileDescriptor: pty.masterFileDescriptor,
         queue: queue
       )
+      let sourceCancellationGroup = DispatchGroup()
+      sourceCancellationGroup.enter()
+      sourceCancellationGroup.enter()
 
       self.pty = pty
       self.terminal = terminal
       self.frame = frame
       readSource = source
       self.writeSource = writeSource
+      self.sourceCancellationGroup = sourceCancellationGroup
 
       source.setEventHandler { [weak self] in
         self?.readAvailableData()
       }
       // A dispatch source's monitored descriptor must remain open until its
       // cancellation handler runs. Retain the PTY through cancellation delivery.
-      source.setCancelHandler { _ = pty }
+      source.setCancelHandler {
+        _ = pty
+        sourceCancellationGroup.leave()
+      }
       writeSource.setEventHandler { [weak self] in
         self?.flushPendingOutput()
       }
-      writeSource.setCancelHandler { _ = pty }
+      writeSource.setCancelHandler {
+        _ = pty
+        sourceCancellationGroup.leave()
+      }
       source.resume()
 
       try renderAndPublish()
@@ -531,13 +553,13 @@ private final class TerminalSessionWorker {
       return
     }
     if !pendingOutput.isEmpty {
-      try appendPendingOutput(data)
+      appendPendingOutput(data)
       return
     }
 
     let leftover = try writeAvailable(data)
     if !leftover.isEmpty {
-      try appendPendingOutput(leftover)
+      appendPendingOutput(leftover)
     }
   }
 
@@ -554,6 +576,7 @@ private final class TerminalSessionWorker {
           break
         }
         offset += written
+        lastDrainProgressAt = .now()
       } catch let error as PtyError {
         if case .wouldBlock = error {
           break
@@ -564,14 +587,10 @@ private final class TerminalSessionWorker {
     return Data(data.dropFirst(offset))
   }
 
-  private func appendPendingOutput(_ data: Data) throws {
-    guard data.count <= Self.maxPendingOutputBytes - pendingOutput.count else {
-      throw PtyError.io(
-        "Terminal pending output exceeded \(Self.maxPendingOutputBytes) bytes."
-      )
-    }
+  private func appendPendingOutput(_ data: Data) {
     pendingOutput.append(data)
     activateWriteSource()
+    updatePendingOutputStallTimer()
   }
 
   private func flushPendingOutput() {
@@ -587,6 +606,7 @@ private final class TerminalSessionWorker {
       if pendingOutput.isEmpty {
         suspendWriteSource()
       }
+      updatePendingOutputStallTimer()
     } catch {
       fail(error)
     }
@@ -608,8 +628,67 @@ private final class TerminalSessionWorker {
     writeSource.suspend()
   }
 
+  private func updatePendingOutputStallTimer() {
+    guard pendingOutput.count > Self.maxPendingOutputBytes else {
+      cancelPendingOutputStallTimer()
+      return
+    }
+
+    guard pendingOutputStallTimer == nil else {
+      return
+    }
+    let timer = DispatchSource.makeTimerSource(queue: queue)
+    timer.setEventHandler { [weak self] in
+      self?.checkPendingOutputStall()
+    }
+    pendingOutputStallTimer = timer
+    timer.resume()
+    schedulePendingOutputStallCheck(on: timer, after: pendingOutputStallGraceNanoseconds)
+  }
+
+  private func checkPendingOutputStall() {
+    guard pendingOutput.count > Self.maxPendingOutputBytes else {
+      cancelPendingOutputStallTimer()
+      return
+    }
+
+    let now = DispatchTime.now().uptimeNanoseconds
+    let lastProgress = lastDrainProgressAt.uptimeNanoseconds
+    let elapsed = now >= lastProgress ? now - lastProgress : 0
+    guard elapsed >= pendingOutputStallGraceNanoseconds else {
+      if let pendingOutputStallTimer {
+        schedulePendingOutputStallCheck(
+          on: pendingOutputStallTimer,
+          after: pendingOutputStallGraceNanoseconds - elapsed
+        )
+      }
+      return
+    }
+
+    fail(
+      PtyError.io(
+        "Terminal output stalled with more than \(Self.maxPendingOutputBytes) buffered bytes."
+      )
+    )
+  }
+
+  private func schedulePendingOutputStallCheck(
+    on timer: DispatchSourceTimer,
+    after nanoseconds: UInt64
+  ) {
+    timer.schedule(
+      deadline: .now() + .nanoseconds(Int(min(nanoseconds, UInt64(Int.max)))),
+      leeway: .milliseconds(10)
+    )
+  }
+
+  private func cancelPendingOutputStallTimer() {
+    pendingOutputStallTimer?.cancel()
+    pendingOutputStallTimer = nil
+  }
+
   private func finishExited(code: Int32) {
-    cancelSource()
+    _ = cancelSource()
     pty = nil
     terminal = nil
     frame = nil
@@ -617,37 +696,32 @@ private final class TerminalSessionWorker {
   }
 
   private func terminate(publishExit: Bool) {
-    cancelSource()
-    do {
-      try pty?.shutdown()
-    } catch {
-      if publishExit {
-        publish(state: .failed(error.localizedDescription))
-      }
-      pty = nil
-      terminal = nil
-      frame = nil
-      return
-    }
-
+    let ptyForTeardown = pty
+    let cancellationGroup = cancelSource()
     pty = nil
     terminal = nil
     frame = nil
     if publishExit {
       publish(state: .exited(code: -1))
     }
+    Self.scheduleShutdown(of: ptyForTeardown, after: cancellationGroup)
   }
 
   private func fail(_ error: Error) {
-    cancelSource()
-    try? pty?.shutdown()
+    let ptyForTeardown = pty
+    let cancellationGroup = cancelSource()
     pty = nil
     terminal = nil
     frame = nil
     publish(state: .failed(error.localizedDescription))
+    Self.scheduleShutdown(of: ptyForTeardown, after: cancellationGroup)
   }
 
-  private func cancelSource() {
+  @discardableResult
+  private func cancelSource() -> DispatchGroup? {
+    let cancellationGroup = sourceCancellationGroup
+    sourceCancellationGroup = nil
+    cancelPendingOutputStallTimer()
     readSource?.cancel()
     readSource = nil
     if let writeSource {
@@ -659,6 +733,35 @@ private final class TerminalSessionWorker {
     writeSource = nil
     writeSourceIsActive = false
     pendingOutput.removeAll()
+    return cancellationGroup
+  }
+
+  private static func scheduleShutdown(
+    of pty: PtySession?,
+    after cancellationGroup: DispatchGroup?
+  ) {
+    guard let pty else {
+      return
+    }
+    let retained = Unmanaged.passRetained(pty)
+    let opaqueAddress = UInt(bitPattern: retained.toOpaque())
+    let shutdown: @Sendable () -> Void = {
+      shutdownRetainedPty(at: opaqueAddress)
+    }
+    if let cancellationGroup {
+      cancellationGroup.notify(queue: teardownQueue, execute: shutdown)
+    } else {
+      teardownQueue.async(execute: shutdown)
+    }
+  }
+
+  private static func shutdownRetainedPty(at opaqueAddress: UInt) {
+    guard let opaque = UnsafeMutableRawPointer(bitPattern: opaqueAddress) else {
+      preconditionFailure("Retained PTY pointer was unexpectedly nil.")
+    }
+    let retained = Unmanaged<PtySession>.fromOpaque(opaque)
+    let pty = retained.takeRetainedValue()
+    try? pty.shutdown()
   }
 
   private func publish(state: TerminalSession.State) {

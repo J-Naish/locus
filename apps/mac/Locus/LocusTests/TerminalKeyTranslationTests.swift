@@ -73,6 +73,38 @@ final class TerminalKeyTranslationTests: XCTestCase {
     )
   }
 
+  func testKeyUpDuringCompositionIsSuppressed() throws {
+    let input = TerminalKeyInput(
+      keyCode: 0,
+      modifierFlagsRawValue: 0,
+      characters: "a",
+      charactersIgnoringModifiers: "a",
+      isARepeat: false
+    )
+    let composingRelease = try XCTUnwrap(
+      TerminalKeyTranslator.translate(
+        input,
+        action: LOCUS_TERM_ACTION_RELEASE,
+        composing: true
+      )
+    )
+    let ordinaryRelease = try XCTUnwrap(
+      TerminalKeyTranslator.translate(
+        input,
+        action: LOCUS_TERM_ACTION_RELEASE,
+        composing: false
+      )
+    )
+    let terminal = try TerminalCore(columns: 40, rows: 10)
+    try terminal.feed(Data("\u{1B}[=10;1u".utf8))
+
+    let composingBytes = try composingRelease.withLocusEvent { try terminal.encodeKey($0) }
+    let ordinaryBytes = try ordinaryRelease.withLocusEvent { try terminal.encodeKey($0) }
+
+    XCTAssertTrue(composingBytes.isEmpty)
+    XCTAssertFalse(ordinaryBytes.isEmpty)
+  }
+
   func testF13ThroughF20MapToTerminalKeys() throws {
     let expected: [(UInt16, UInt32)] = [
       (105, LOCUS_TERM_KEY_F13), (107, LOCUS_TERM_KEY_F14),
@@ -139,12 +171,14 @@ final class TerminalKeyTranslationTests: XCTestCase {
     let first = cache.resolve(
       layoutIdentifier: "test-layout",
       keyCode: 0,
+      keyboardType: 40,
       charactersIgnoringModifiers: "A",
       translate: translate
     )
     let second = cache.resolve(
       layoutIdentifier: "test-layout",
       keyCode: 0,
+      keyboardType: 40,
       charactersIgnoringModifiers: "Z",
       translate: translate
     )
@@ -152,6 +186,34 @@ final class TerminalKeyTranslationTests: XCTestCase {
     XCTAssertEqual(first, UnicodeScalar("a").value)
     XCTAssertEqual(second, first)
     XCTAssertEqual(translationCount, 1)
+  }
+
+  func testUnshiftedResolverCacheSeparatesKeyboardTypes() {
+    var cache = TerminalUnshiftedCodepointCache()
+    var translationCount = 0
+
+    let ansi = cache.resolve(
+      layoutIdentifier: "test-layout",
+      keyCode: 50,
+      keyboardType: 40,
+      charactersIgnoringModifiers: nil
+    ) {
+      translationCount += 1
+      return "`"
+    }
+    let jis = cache.resolve(
+      layoutIdentifier: "test-layout",
+      keyCode: 50,
+      keyboardType: 41,
+      charactersIgnoringModifiers: nil
+    ) {
+      translationCount += 1
+      return "_"
+    }
+
+    XCTAssertEqual(ansi, UnicodeScalar("`").value)
+    XCTAssertEqual(jis, UnicodeScalar("_").value)
+    XCTAssertEqual(translationCount, 2)
   }
 
   func testCurrentLayoutProducesUnshiftedScalarForShiftAWhenAvailable() throws {
@@ -341,6 +403,60 @@ final class TerminalKeyTranslationTests: XCTestCase {
     )
   }
 
+  func testTypedKeyEncodesUnderKittyReportAll() throws {
+    let scriptURL = try makeTerminalKeyCaptureScript(
+      activation: "printf '\\033[=8;1u'",
+      byteCount: 5
+    )
+    defer { try? FileManager.default.removeItem(at: scriptURL) }
+    let session = TerminalSession(columns: 80, rows: 10)
+    defer { session.terminate() }
+    let view = TerminalPaneView(session: session)
+
+    session.start(command: scriptURL.path)
+    XCTAssertTrue(
+      waitForTerminalInputCondition {
+        session.plainTextForTesting()?.contains("READY") == true
+      }
+    )
+    view.insertText("a", replacementRange: NSRange(location: NSNotFound, length: 0))
+
+    XCTAssertTrue(
+      waitForTerminalInputCondition(timeout: 5) {
+        guard let text = session.plainTextForTesting() else {
+          return false
+        }
+        return text.split(whereSeparator: { $0.isWhitespace })
+          .joined(separator: " ")
+          .contains("1b 5b 39 37 75")
+      },
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
+    )
+  }
+
+  func testTypedKeyRemainsRawWithoutKeyProtocol() throws {
+    let scriptURL = try makeTerminalKeyCaptureScript(activation: ":", byteCount: 1)
+    defer { try? FileManager.default.removeItem(at: scriptURL) }
+    let session = TerminalSession(columns: 80, rows: 10)
+    defer { session.terminate() }
+    let view = TerminalPaneView(session: session)
+
+    session.start(command: scriptURL.path)
+    XCTAssertTrue(
+      waitForTerminalInputCondition {
+        session.plainTextForTesting()?.contains("READY") == true
+      }
+    )
+    view.insertText("a", replacementRange: NSRange(location: NSNotFound, length: 0))
+
+    XCTAssertTrue(
+      waitForTerminalInputCondition(timeout: 5) {
+        session.plainTextForTesting()?.contains("61") == true
+      },
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
+    )
+  }
+
   func testPasteSendsPasteboardTextThroughPty() {
     let session = TerminalSession(columns: 40, rows: 10)
     defer {
@@ -457,4 +573,27 @@ private func waitForTerminalInputCondition(
     RunLoop.current.run(until: Date().addingTimeInterval(interval))
   }
   return condition()
+}
+
+private func makeTerminalKeyCaptureScript(
+  activation: String,
+  byteCount: Int
+) throws -> URL {
+  let scriptURL = FileManager.default.temporaryDirectory
+    .appendingPathComponent("locus-terminal-key-\(UUID().uuidString).sh")
+  let contents = """
+    #!/bin/sh
+    /bin/stty raw -echo
+    \(activation)
+    printf READY
+    /bin/dd bs=1 count=\(byteCount) 2>/dev/null | /usr/bin/od -An -tx1
+    printf '\r\nCAPTURED\r\n'
+    sleep 5
+    """
+  try contents.write(to: scriptURL, atomically: true, encoding: .utf8)
+  try FileManager.default.setAttributes(
+    [.posixPermissions: 0o755],
+    ofItemAtPath: scriptURL.path
+  )
+  return scriptURL
 }

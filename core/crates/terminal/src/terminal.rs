@@ -161,6 +161,7 @@ pub struct Terminal {
     pub previous_char: Option<char>,
     last_printed_class: Option<(u32, unicode::GraphemeBreak)>,
     sgr_style_changed: bool,
+    synchronized_output_epoch: u64,
     pub modes: ModeState,
     pub dirty: Dirty,
     pub colors: TerminalColors,
@@ -189,6 +190,7 @@ impl Terminal {
             previous_char: None,
             last_printed_class: None,
             sgr_style_changed: false,
+            synchronized_output_epoch: 0,
             modes: ModeState::default(),
             dirty: Dirty::default(),
             colors: TerminalColors::default(),
@@ -2386,7 +2388,14 @@ impl Terminal {
     }
 
     pub fn set_mode(&mut self, mode: Mode) {
+        if mode == Mode::SynchronizedOutput && !self.modes.get(mode) {
+            self.synchronized_output_epoch = self.synchronized_output_epoch.saturating_add(1);
+        }
         self.modes.set(mode, true);
+    }
+
+    pub fn synchronized_output_epoch(&self) -> u64 {
+        self.synchronized_output_epoch
     }
 
     pub fn reset_mode(&mut self, mode: Mode) {
@@ -2966,6 +2975,21 @@ mod tests {
             width_px: 0,
             height_px: 0,
         })
+    }
+
+    #[test]
+    fn synchronized_output_epoch_advances_only_when_enabled() {
+        let mut terminal = terminal(80, 24);
+
+        assert_eq!(terminal.synchronized_output_epoch(), 0);
+        terminal.set_mode(Mode::SynchronizedOutput);
+        assert_eq!(terminal.synchronized_output_epoch(), 1);
+        terminal.set_mode(Mode::SynchronizedOutput);
+        assert_eq!(terminal.synchronized_output_epoch(), 1);
+        terminal.reset_mode(Mode::SynchronizedOutput);
+        assert_eq!(terminal.synchronized_output_epoch(), 1);
+        terminal.set_mode(Mode::SynchronizedOutput);
+        assert_eq!(terminal.synchronized_output_epoch(), 2);
     }
 
     fn assert_print_run_equivalent(cols: CellCountInt, rows: CellCountInt, payload: &[u8]) {

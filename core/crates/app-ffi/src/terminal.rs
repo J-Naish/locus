@@ -37,6 +37,7 @@ use crate::{clear_last_error_message, set_last_error_message, LOCUS_STATUS_OK};
 pub const LOCUS_TERM_ABI_VERSION: u32 = 4;
 const SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
 const MAX_WHEEL_ROWS_PER_EVENT: u32 = 4_096;
+const SELECTION_CELL_WIDTH: f64 = 10.0;
 const SELECTION_BEHAVIORS: [SelectionBehavior; 3] = [
     SelectionBehavior::Cell,
     SelectionBehavior::Word,
@@ -337,6 +338,13 @@ impl LocusTerm {
     fn expire_synchronized_output_for_test(&mut self) {
         self.synchronized_output_started_at = Some(Instant::now() - SYNCHRONIZED_OUTPUT_TIMEOUT);
     }
+
+    #[cfg(test)]
+    fn age_synchronized_output_for_test(&mut self, duration: Duration) {
+        self.synchronized_output_started_at = self
+            .synchronized_output_started_at
+            .and_then(|started| started.checked_sub(duration));
+    }
 }
 
 #[derive(Debug, Default)]
@@ -537,23 +545,14 @@ pub unsafe extern "C" fn locus_term_feed(
         let Some(bytes) = bytes_slice(bytes, len) else {
             return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
         };
-        let was_synchronized = term
-            .stream
-            .handler
-            .terminal
-            .modes
-            .get(Mode::SynchronizedOutput);
+        let synchronized_output_epoch = term.stream.handler.terminal.synchronized_output_epoch();
         term.stream.next_slice(bytes);
-        let is_synchronized = term
-            .stream
-            .handler
-            .terminal
-            .modes
-            .get(Mode::SynchronizedOutput);
-        if !was_synchronized && is_synchronized {
-            term.synchronized_output_started_at = Some(Instant::now());
-        } else if !is_synchronized {
+        let terminal = &term.stream.handler.terminal;
+        let is_synchronized = terminal.modes.get(Mode::SynchronizedOutput);
+        if !is_synchronized {
             term.synchronized_output_started_at = None;
+        } else if terminal.synchronized_output_epoch() != synchronized_output_epoch {
+            term.synchronized_output_started_at = Some(Instant::now());
         }
         LOCUS_STATUS_OK
     })
@@ -841,7 +840,7 @@ pub unsafe extern "C" fn locus_term_selection_gesture(
         let Some(pin) = viewport_pin(terminal, x, y) else {
             return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
         };
-        let xpos = f64::from(x) + f64::from(cell_fraction_x);
+        let xpos = (f64::from(x) + f64::from(cell_fraction_x)) * SELECTION_CELL_WIDTH;
         let ypos = f64::from(y) + 0.5;
         let geometry = selection_geometry(terminal);
         match kind {
@@ -982,6 +981,9 @@ pub unsafe extern "C" fn locus_term_autoscroll_tick(
             selection_gesture,
             ..
         } = term;
+        if selection_gesture.count() == 0 {
+            return LOCUS_STATUS_OK;
+        }
         let terminal = &mut stream.handler.terminal;
         if x >= terminal.cols {
             return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
@@ -1005,7 +1007,7 @@ pub unsafe extern "C" fn locus_term_autoscroll_tick(
             terminal,
             AutoscrollTick {
                 viewport,
-                xpos: f64::from(x) + f64::from(cell_fraction_x),
+                xpos: (f64::from(x) + f64::from(cell_fraction_x)) * SELECTION_CELL_WIDTH,
                 ypos: if down { geometry.screen_height } else { 0.0 },
                 rectangle,
                 word_boundary_codepoints: &DEFAULT_WORD_BOUNDARIES,
@@ -1051,6 +1053,9 @@ pub unsafe extern "C" fn locus_term_mouse(
         let terminal = &mut term.stream.handler.terminal;
         if x >= terminal.cols || y >= terminal.rows {
             return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        if mods & LOCUS_TERM_MOD_SHIFT != 0 && !terminal.flags.mouse_shift_capture {
+            return LOCUS_STATUS_OK;
         }
         let mode = terminal.flags.mouse_event;
         let format = terminal.flags.mouse_format;
@@ -1114,6 +1119,9 @@ pub unsafe extern "C" fn locus_term_scroll_wheel(
         let terminal = &mut term.stream.handler.terminal;
         if x >= terminal.cols || y >= terminal.rows {
             return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        if mods & LOCUS_TERM_MOD_SHIFT != 0 && !terminal.flags.mouse_shift_capture {
+            return LOCUS_STATUS_OK;
         }
         let mut bytes = Vec::new();
         if terminal.flags.mouse_event != terminal::terminal::MouseEvent::None {
@@ -1208,7 +1216,7 @@ fn valid_cell_fraction(value: f32) -> bool {
 fn selection_geometry(terminal: &Terminal) -> SelectionGeometry {
     SelectionGeometry {
         columns: terminal.cols,
-        cell_width: 1.0,
+        cell_width: SELECTION_CELL_WIDTH,
         padding_left: 0.0,
         screen_height: f64::from(terminal.rows),
     }
@@ -2084,6 +2092,34 @@ mod tests {
     }
 
     #[test]
+    fn synchronized_output_reopen_in_one_chunk_gets_fresh_budget() {
+        let term = new_term();
+        let frame = locus_term_frame_new();
+        unsafe {
+            let first = b"\x1b[?2026hfirst";
+            assert_eq!(
+                locus_term_feed(term, first.as_ptr(), first.len()),
+                LOCUS_STATUS_OK
+            );
+            (*term).age_synchronized_output_for_test(Duration::from_millis(100));
+            assert_eq!(locus_term_render(term, frame, false), LOCUS_STATUS_OK);
+            assert_eq!((*frame).dirty_state, LOCUS_TERM_DIRTY_NONE);
+
+            let reopen = b"\x1b[?2026l\x1b[?2026hsecond";
+            assert_eq!(
+                locus_term_feed(term, reopen.as_ptr(), reopen.len()),
+                LOCUS_STATUS_OK
+            );
+            (*term).age_synchronized_output_for_test(Duration::from_millis(60));
+            assert_eq!(locus_term_render(term, frame, false), LOCUS_STATUS_OK);
+            assert_eq!((*frame).dirty_state, LOCUS_TERM_DIRTY_NONE);
+
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
     fn resize_releases_synchronized_output() {
         let term = new_term();
         unsafe {
@@ -2521,6 +2557,53 @@ mod tests {
     }
 
     #[test]
+    fn selection_fraction_includes_pointer_cell() {
+        let term = new_term();
+        let mut out = LocusTermBytes::default();
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, b"hello world".as_ptr(), 11),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 0, 0, 0, 0.1, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 1, 4, 0, 0.9, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_selection_string(term, &mut out), LOCUS_STATUS_OK);
+            assert_eq!(owned_bytes(&mut out), b"hello");
+
+            assert_eq!(locus_term_selection_clear(term), LOCUS_STATUS_OK);
+            assert_eq!(
+                locus_term_selection_gesture(term, 0, 0, 0, 0.05, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 1, 0, 0, 0.95, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_selection_string(term, &mut out), LOCUS_STATUS_OK);
+            assert_eq!(owned_bytes(&mut out), b"h");
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn autoscroll_without_active_gesture_is_a_no_op() {
+        let term = new_term();
+        unsafe {
+            assert_eq!(
+                locus_term_autoscroll_tick(term, 1, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
     fn selection_rejects_nonfinite_fraction() {
         let term = new_term();
         unsafe {
@@ -2561,6 +2644,58 @@ mod tests {
                 LOCUS_STATUS_OK
             );
             assert_eq!(owned_bytes(&mut out), b"\x1b[<0;3;2M");
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn shifted_mouse_bypasses_reporting_and_preserves_selection() {
+        let term = new_term();
+        let mut out = LocusTermBytes::default();
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, b"abcdef".as_ptr(), 6),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 0, 1, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 1, 4, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            let enable = b"\x1b[?1000h\x1b[?1006h";
+            assert_eq!(
+                locus_term_feed(term, enable.as_ptr(), enable.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_mouse(term, 0, 0, 2, 0, LOCUS_TERM_MOD_SHIFT, &mut out),
+                LOCUS_STATUS_OK
+            );
+            assert!(owned_bytes(&mut out).is_empty());
+            assert_eq!(locus_term_selection_string(term, &mut out), LOCUS_STATUS_OK);
+            assert_eq!(owned_bytes(&mut out), b"bcd");
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn shifted_mouse_reports_when_application_captures_shift() {
+        let term = new_term();
+        let mut out = LocusTermBytes::default();
+        unsafe {
+            let enable = b"\x1b[?1000h\x1b[?1006h\x1b[>1s";
+            assert_eq!(
+                locus_term_feed(term, enable.as_ptr(), enable.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_mouse(term, 0, 0, 2, 1, LOCUS_TERM_MOD_SHIFT, &mut out),
+                LOCUS_STATUS_OK
+            );
+            assert!(!owned_bytes(&mut out).is_empty());
             locus_term_free(term);
         }
     }

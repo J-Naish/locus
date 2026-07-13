@@ -161,6 +161,42 @@ final class TerminalSessionTests: XCTestCase {
     session.send(Data("echo after-terminate\n".utf8))
   }
 
+  func testShutdownDoesNotBlockWithFrame() throws {
+    let scriptURL = try makeExecutableShellScript(
+      """
+      #!/bin/sh
+      trap '' HUP
+      printf READY
+      while :; do
+        sleep 1
+      done
+      """
+    )
+    defer {
+      try? FileManager.default.removeItem(at: scriptURL)
+    }
+    let session = TerminalSession(columns: 40, rows: 10)
+
+    session.start(command: scriptURL.path)
+    XCTAssertTrue(waitUntil { session.plainTextForTesting()?.contains("READY") == true })
+
+    let startedAt = ProcessInfo.processInfo.systemUptime
+    session.terminate()
+    session.withFrame { _ in }
+    let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+
+    XCTAssertLessThan(elapsed, 0.15)
+    XCTAssertTrue(
+      waitUntil {
+        if case .exited = session.state {
+          return true
+        }
+        return false
+      },
+      "State was: \(session.state)"
+    )
+  }
+
   func testRepeatedStartStopCyclesDoNotCrash() {
     for _ in 0..<10 {
       let session = TerminalSession(columns: 40, rows: 10)
@@ -292,6 +328,73 @@ final class TerminalSessionTests: XCTestCase {
     XCTAssertEqual(session.state, .running)
   }
 
+  func testLargePasteIntoDrainingShellSurvives() throws {
+    let scriptURL = try makeExecutableShellScript(
+      """
+      #!/bin/sh
+      /bin/stty raw -echo
+      printf READY
+      exec /bin/cat
+      """
+    )
+    defer {
+      try? FileManager.default.removeItem(at: scriptURL)
+    }
+    let session = TerminalSession(columns: 120, rows: 10)
+    defer {
+      session.terminate()
+    }
+
+    session.start(command: scriptURL.path)
+    XCTAssertTrue(waitUntil { session.plainTextForTesting()?.contains("READY") == true })
+    let payload = Data((String(repeating: "A", count: 8 * 1024 * 1024) + "@END@").utf8)
+    session.send(payload)
+
+    XCTAssertTrue(
+      waitUntil(timeout: 30) { session.plainTextForTesting()?.contains("@END@") == true },
+      "State was: \(session.state), snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
+    )
+    XCTAssertEqual(session.state, .running)
+  }
+
+  func testStuckSinkStillFailsAfterStall() throws {
+    let scriptURL = try makeExecutableShellScript(
+      """
+      #!/bin/sh
+      /bin/stty raw -echo
+      printf READY
+      sleep 30
+      """
+    )
+    defer {
+      try? FileManager.default.removeItem(at: scriptURL)
+    }
+    let session = TerminalSession(
+      columns: 120,
+      rows: 10,
+      pendingOutputStallGrace: 0.25
+    )
+    defer {
+      session.terminate()
+    }
+
+    session.start(command: scriptURL.path)
+    XCTAssertTrue(waitUntil { session.plainTextForTesting()?.contains("READY") == true })
+    session.send(Data(repeating: 0x41, count: 5 * 1024 * 1024))
+
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    XCTAssertEqual(session.state, .running)
+    XCTAssertTrue(
+      waitUntil(timeout: 3) {
+        if case .failed(let message) = session.state {
+          return message.contains("stalled")
+        }
+        return false
+      },
+      "State was: \(session.state)"
+    )
+  }
+
   func testWriteOrderingPreservedAcrossBackpressure() throws {
     let scriptURL = try makeExecutableShellScript(
       """
@@ -328,38 +431,6 @@ final class TerminalSessionTests: XCTestCase {
       "State was: \(session.state), snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
     XCTAssertEqual(session.state, .running)
-  }
-
-  func testPendingOutputCapFailsSession() throws {
-    let scriptURL = try makeExecutableShellScript(
-      """
-      #!/bin/sh
-      /bin/stty raw -echo
-      printf READY
-      exec /bin/sleep 30
-      """
-    )
-    defer {
-      try? FileManager.default.removeItem(at: scriptURL)
-    }
-    let session = TerminalSession(columns: 120, rows: 10)
-    defer {
-      session.terminate()
-    }
-
-    session.start(command: scriptURL.path)
-    XCTAssertTrue(waitUntil { session.plainTextForTesting()?.contains("READY") == true })
-    session.send(Data(repeating: UInt8(ascii: "X"), count: 5 * 1024 * 1024))
-
-    XCTAssertTrue(
-      waitUntil(timeout: 5) {
-        if case .failed = session.state {
-          return true
-        }
-        return false
-      },
-      "State was: \(session.state)"
-    )
   }
 
   func testMultilinePasteRequiresConfirmationThenSends() {
