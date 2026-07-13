@@ -467,6 +467,52 @@ enum TerminalPaneGeometry {
       row: UInt16(clamping: row)
     )
   }
+
+  static func cellHit(
+    for point: NSPoint,
+    metrics: TerminalCellMetrics,
+    insets: TerminalContentInsets,
+    grid: TerminalGridSize
+  ) -> (coordinate: TerminalCellCoordinate, fractionX: Float) {
+    let coordinate = cellCoordinate(
+      for: point,
+      metrics: metrics,
+      insets: insets,
+      grid: grid
+    )
+    let cellMinX = insets.left + CGFloat(coordinate.column) * metrics.cellWidth
+    let rawFraction = (point.x - cellMinX) / metrics.cellWidth
+    return (
+      coordinate,
+      Float(min(max(rawFraction, 0), 1))
+    )
+  }
+
+  static func autoscrollDirection(forY y: CGFloat, height: CGFloat) -> Int32? {
+    if y < 0 {
+      return -1
+    }
+    if y > height {
+      return 1
+    }
+    return nil
+  }
+
+  static func selectionRect(
+    columns: ClosedRange<UInt16>,
+    row: UInt16,
+    bounds: NSRect,
+    metrics: TerminalCellMetrics,
+    insets: TerminalContentInsets
+  ) -> NSRect {
+    NSRect(
+      x: insets.left + CGFloat(columns.lowerBound) * metrics.cellWidth,
+      y: rowRectY(row, bounds: bounds, metrics: metrics, insets: insets),
+      width: CGFloat(Int(columns.upperBound) - Int(columns.lowerBound) + 1)
+        * metrics.cellWidth,
+      height: metrics.cellHeight
+    )
+  }
 }
 
 struct TerminalKeyInput: Equatable, Sendable {
@@ -689,6 +735,10 @@ enum TerminalKeyTranslator {
   static func suppressesTextInsertion(_ text: String) -> Bool {
     !text.isEmpty
       && text.unicodeScalars.allSatisfy({ (0xF710...0xF717).contains($0.value) })
+  }
+
+  static func modifiers(for event: NSEvent) -> TerminalModifiers {
+    terminalModifiers(flags: event.modifierFlags, rawValue: event.modifierFlags.rawValue)
   }
 
   private static func terminalText(
@@ -976,10 +1026,19 @@ struct TerminalPane: NSViewRepresentable {
   }
 }
 
-final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
+final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuItemValidation {
+  private enum MouseRouting {
+    case none
+    case localSelection
+    case application
+  }
+
   private struct PendingClick {
     let location: NSPoint
+    let cell: TerminalCellCoordinate
   }
+
+  private static let selectionAutoscrollInterval: TimeInterval = 0.05
 
   var onWindowChange: ((TerminalPaneView) -> Void)?
   var session: TerminalSession? {
@@ -1013,6 +1072,11 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   private var pendingGridSize: TerminalGridSize?
   private var resizeTask: Task<Void, Never>?
   private var pendingClick: PendingClick?
+  private var mouseRouting: MouseRouting = .none
+  private var lastDragRectangle = false
+  private var selectionAutoscrollTimer: Timer?
+  private var lastAutoscrollContext: (direction: Int32, column: UInt16, fractionX: Float)?
+  private var hasRenderedSelection = false
   private var lastCaretInputTime = CACurrentMediaTime()
   private var lastDrawnCaretVisibility: Bool?
   private var lastDrawnCaretRect: NSRect?
@@ -1047,6 +1111,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
 
   deinit {
     MainActor.assumeIsolated {
+      stopSelectionAutoscroll()
       resizeTask?.cancel()
       stopDisplayLink()
       NotificationCenter.default.removeObserver(self)
@@ -1056,6 +1121,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
     if window == nil {
+      stopSelectionAutoscroll()
       cancelPendingTerminalResize()
       stopDisplayLink()
     } else {
@@ -1077,11 +1143,46 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
 
   override func mouseDown(with event: NSEvent) {
     window?.makeFirstResponder(self)
+    guard let session, let gridSize = currentGridSize() else {
+      mouseRouting = .none
+      pendingClick = nil
+      super.mouseDown(with: event)
+      return
+    }
+    let point = topLeftPoint(for: event)
+    let hit = TerminalPaneGeometry.cellHit(
+      for: point,
+      metrics: metrics,
+      insets: TerminalPaneLayoutMetrics.contentInsets,
+      grid: gridSize
+    )
+    let modifiers = TerminalKeyTranslator.modifiers(for: event)
+    if session.routeMousePress(
+      button: .left,
+      column: hit.coordinate.column,
+      row: hit.coordinate.row,
+      modifiers: modifiers
+    ) {
+      mouseRouting = .application
+      pendingClick = nil
+      super.mouseDown(with: event)
+      return
+    }
+
+    mouseRouting = .localSelection
+    lastDragRectangle = event.modifierFlags.contains(.option)
+    session.selectionGesture(
+      event.clickCount == 1 ? .press : .pressRepeat,
+      column: hit.coordinate.column,
+      row: hit.coordinate.row,
+      cellFractionX: hit.fractionX,
+      rectangle: lastDragRectangle
+    )
     let significantModifiers = event.modifierFlags.intersection([
       .command, .control, .option, .shift,
     ])
     if event.clickCount == 1, significantModifiers.isEmpty {
-      pendingClick = PendingClick(location: topLeftPoint(for: event))
+      pendingClick = PendingClick(location: point, cell: hit.coordinate)
     } else {
       pendingClick = nil
     }
@@ -1089,38 +1190,161 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   }
 
   override func mouseDragged(with event: NSEvent) {
+    guard let session, let gridSize = currentGridSize() else {
+      pendingClick = nil
+      super.mouseDragged(with: event)
+      return
+    }
+    let point = topLeftPoint(for: event)
+    let hit = TerminalPaneGeometry.cellHit(
+      for: point,
+      metrics: metrics,
+      insets: TerminalPaneLayoutMetrics.contentInsets,
+      grid: gridSize
+    )
     if let pendingClick,
-      distance(from: pendingClick.location, to: topLeftPoint(for: event))
-        > metrics.cellWidth
+      distance(from: pendingClick.location, to: point) > metrics.cellWidth
+        || pendingClick.cell != hit.coordinate
     {
       self.pendingClick = nil
+    }
+
+    switch mouseRouting {
+    case .application:
+      session.sendMouse(
+        kind: .motion,
+        button: .left,
+        column: hit.coordinate.column,
+        row: hit.coordinate.row,
+        modifiers: TerminalKeyTranslator.modifiers(for: event)
+      )
+    case .localSelection:
+      lastDragRectangle = event.modifierFlags.contains(.option)
+      if let direction = TerminalPaneGeometry.autoscrollDirection(
+        forY: point.y,
+        height: bounds.height
+      ) {
+        lastAutoscrollContext = (
+          direction,
+          hit.coordinate.column,
+          hit.fractionX
+        )
+        startSelectionAutoscrollIfNeeded()
+      } else {
+        stopSelectionAutoscroll()
+        session.selectionGesture(
+          .drag,
+          column: hit.coordinate.column,
+          row: hit.coordinate.row,
+          cellFractionX: hit.fractionX,
+          rectangle: lastDragRectangle
+        )
+      }
+    case .none:
+      break
     }
     super.mouseDragged(with: event)
   }
 
   override func mouseUp(with event: NSEvent) {
     defer {
+      stopSelectionAutoscroll()
+      mouseRouting = .none
       pendingClick = nil
       super.mouseUp(with: event)
     }
-    guard let pendingClick else {
+    guard let session, let gridSize = currentGridSize() else {
       return
     }
     let releasePoint = topLeftPoint(for: event)
-    guard
-      distance(from: pendingClick.location, to: releasePoint)
-        <= metrics.cellWidth,
-      let gridSize = currentGridSize()
-    else {
-      return
-    }
-    let destination = TerminalPaneGeometry.cellCoordinate(
+    let hit = TerminalPaneGeometry.cellHit(
       for: releasePoint,
       metrics: metrics,
       insets: TerminalPaneLayoutMetrics.contentInsets,
       grid: gridSize
     )
-    moveCaret(to: destination)
+    switch mouseRouting {
+    case .application:
+      session.sendMouse(
+        kind: .release,
+        button: .left,
+        column: hit.coordinate.column,
+        row: hit.coordinate.row,
+        modifiers: TerminalKeyTranslator.modifiers(for: event)
+      )
+    case .localSelection:
+      session.selectionGesture(
+        .release,
+        column: hit.coordinate.column,
+        row: hit.coordinate.row,
+        cellFractionX: hit.fractionX,
+        rectangle: lastDragRectangle
+      )
+    case .none:
+      break
+    }
+
+    guard let pendingClick,
+      distance(from: pendingClick.location, to: releasePoint) <= metrics.cellWidth
+    else {
+      return
+    }
+    moveCaret(to: hit.coordinate)
+  }
+
+  override func otherMouseDown(with event: NSEvent) {
+    guard event.buttonNumber == 2, let session, let gridSize = currentGridSize() else {
+      super.otherMouseDown(with: event)
+      return
+    }
+    let hit = cellHit(for: event, gridSize: gridSize)
+    session.sendMouse(
+      kind: .press,
+      button: .middle,
+      column: hit.coordinate.column,
+      row: hit.coordinate.row,
+      modifiers: TerminalKeyTranslator.modifiers(for: event)
+    )
+  }
+
+  override func otherMouseUp(with event: NSEvent) {
+    guard event.buttonNumber == 2, let session, let gridSize = currentGridSize() else {
+      super.otherMouseUp(with: event)
+      return
+    }
+    let hit = cellHit(for: event, gridSize: gridSize)
+    session.sendMouse(
+      kind: .release,
+      button: .middle,
+      column: hit.coordinate.column,
+      row: hit.coordinate.row,
+      modifiers: TerminalKeyTranslator.modifiers(for: event)
+    )
+  }
+
+  override func menu(for event: NSEvent) -> NSMenu? {
+    // Right-click stays local in P1 so copy and paste remain available even
+    // when the child application has enabled mouse reporting.
+    let menu = NSMenu()
+    menu.addItem(NSMenuItem(title: "Copy", action: #selector(copy(_:)), keyEquivalent: ""))
+    menu.addItem(NSMenuItem(title: "Paste", action: #selector(paste(_:)), keyEquivalent: ""))
+    return menu
+  }
+
+  func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+    switch menuItem.action {
+    case #selector(copy(_:)):
+      return hasRenderedSelection
+    case #selector(paste(_:)):
+      return pasteboard.string(forType: .string)?.isEmpty == false
+    default:
+      return true
+    }
+  }
+
+  override func resetCursorRects() {
+    super.resetCursorRects()
+    addCursorRect(bounds, cursor: .iBeam)
   }
 
   override func becomeFirstResponder() -> Bool {
@@ -1207,6 +1431,14 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
       }
       self?.confirmUnsafePaste(text)
     }
+  }
+
+  @objc func copy(_ sender: Any?) {
+    guard let text = session?.selectionText(), !text.isEmpty else {
+      return
+    }
+    pasteboard.clearContents()
+    pasteboard.setString(text, forType: .string)
   }
 
   func insertText(_ string: Any, replacementRange: NSRange) {
@@ -1332,6 +1564,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     backgroundColor.setFill()
     dirtyRect.fill()
 
+    hasRenderedSelection = false
     guard let session else {
       return
     }
@@ -1513,6 +1746,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
           for row in rows {
             drawBackgrounds(row: row, cells: cells, in: context)
           }
+          drawSelection(frame: frame, rows: rows)
           for row in rows {
             drawText(row: row, cells: cells, graphemes: graphemes, in: context)
           }
@@ -1524,6 +1758,32 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
     } else {
       drawCursor(frame.cursor, visible: caretVisible, in: context)
     }
+  }
+
+  private func drawSelection(
+    frame: TerminalFrame,
+    rows: UnsafeBufferPointer<LocusTermRow>
+  ) {
+    let color: NSColor =
+      hasActiveKeyboardFocus
+      ? .selectedTextBackgroundColor
+      : .unemphasizedSelectedTextBackgroundColor
+    var drewSelection = false
+    color.setFill()
+    for (index, row) in rows.enumerated() {
+      guard let columns = frame.selectionRange(forRow: index) else {
+        continue
+      }
+      TerminalPaneGeometry.selectionRect(
+        columns: columns,
+        row: row.y,
+        bounds: bounds,
+        metrics: metrics,
+        insets: TerminalPaneLayoutMetrics.contentInsets
+      ).fill()
+      drewSelection = true
+    }
+    hasRenderedSelection = drewSelection
   }
 
   private func drawBackgrounds(
@@ -1919,6 +2179,53 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient {
   private func topLeftPoint(for event: NSEvent) -> NSPoint {
     let localPoint = convert(event.locationInWindow, from: nil)
     return NSPoint(x: localPoint.x, y: bounds.height - localPoint.y)
+  }
+
+  private func cellHit(
+    for event: NSEvent,
+    gridSize: TerminalGridSize
+  ) -> (coordinate: TerminalCellCoordinate, fractionX: Float) {
+    TerminalPaneGeometry.cellHit(
+      for: topLeftPoint(for: event),
+      metrics: metrics,
+      insets: TerminalPaneLayoutMetrics.contentInsets,
+      grid: gridSize
+    )
+  }
+
+  private func startSelectionAutoscrollIfNeeded() {
+    guard selectionAutoscrollTimer == nil else {
+      return
+    }
+    let timer = Timer(
+      timeInterval: Self.selectionAutoscrollInterval,
+      target: self,
+      selector: #selector(selectionAutoscrollTimerDidFire(_:)),
+      userInfo: nil,
+      repeats: true
+    )
+    timer.tolerance = 0.01
+    RunLoop.main.add(timer, forMode: .common)
+    selectionAutoscrollTimer = timer
+  }
+
+  private func stopSelectionAutoscroll() {
+    selectionAutoscrollTimer?.invalidate()
+    selectionAutoscrollTimer = nil
+    lastAutoscrollContext = nil
+  }
+
+  @objc private func selectionAutoscrollTimerDidFire(_ timer: Timer) {
+    guard mouseRouting == .localSelection, let context = lastAutoscrollContext else {
+      stopSelectionAutoscroll()
+      return
+    }
+    session?.selectionAutoscrollTick(
+      direction: context.direction,
+      column: context.column,
+      cellFractionX: context.fractionX,
+      rectangle: lastDragRectangle
+    )
   }
 
   private func distance(from start: NSPoint, to end: NSPoint) -> CGFloat {

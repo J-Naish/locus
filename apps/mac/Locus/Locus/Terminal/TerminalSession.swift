@@ -160,6 +160,78 @@ final class TerminalSession: ObservableObject {
     worker.withFrame(body)
   }
 
+  /// Synchronously routes a mouse press through the running application's
+  /// mouse-reporting mode. Do not call this from inside `withFrame`.
+  func routeMousePress(
+    button: TerminalMouseButton,
+    column: UInt16,
+    row: UInt16,
+    modifiers: TerminalModifiers
+  ) -> Bool {
+    worker.routeMousePress(
+      button: button,
+      column: column,
+      row: row,
+      modifiers: modifiers
+    )
+  }
+
+  func sendMouse(
+    kind: TerminalMouseEventKind,
+    button: TerminalMouseButton,
+    column: UInt16,
+    row: UInt16,
+    modifiers: TerminalModifiers
+  ) {
+    worker.sendMouse(
+      kind: kind,
+      button: button,
+      column: column,
+      row: row,
+      modifiers: modifiers
+    )
+  }
+
+  func selectionGesture(
+    _ kind: TerminalSelectionGestureKind,
+    column: UInt16,
+    row: UInt16,
+    cellFractionX: Float,
+    rectangle: Bool
+  ) {
+    worker.selectionGesture(
+      kind,
+      column: column,
+      row: row,
+      cellFractionX: cellFractionX,
+      rectangle: rectangle
+    )
+  }
+
+  func selectionAutoscrollTick(
+    direction: Int32,
+    column: UInt16,
+    cellFractionX: Float,
+    rectangle: Bool
+  ) {
+    worker.selectionAutoscrollTick(
+      direction: direction,
+      column: column,
+      cellFractionX: cellFractionX,
+      rectangle: rectangle
+    )
+  }
+
+  func clearSelection() {
+    worker.clearSelection()
+  }
+
+  /// Synchronously returns the current selection. Do not call this from
+  /// inside `withFrame`.
+  func selectionText() -> String {
+    worker.selectionText()
+  }
+
   fileprivate func publish(state: State) {
     self.state = state
   }
@@ -201,6 +273,27 @@ private final class TerminalSessionWorker {
       completion: @MainActor @Sendable (TerminalSession.PasteOutcome) -> Void
     )
     case resize(columns: UInt16, rows: UInt16)
+    case sendMouse(
+      kind: TerminalMouseEventKind,
+      button: TerminalMouseButton,
+      column: UInt16,
+      row: UInt16,
+      modifiers: TerminalModifiers
+    )
+    case selectionGesture(
+      TerminalSelectionGestureKind,
+      column: UInt16,
+      row: UInt16,
+      cellFractionX: Float,
+      rectangle: Bool
+    )
+    case selectionAutoscrollTick(
+      direction: Int32,
+      column: UInt16,
+      cellFractionX: Float,
+      rectangle: Bool
+    )
+    case clearSelection
     case terminate
   }
 
@@ -306,6 +399,95 @@ private final class TerminalSessionWorker {
     }
   }
 
+  func routeMousePress(
+    button: TerminalMouseButton,
+    column: UInt16,
+    row: UInt16,
+    modifiers: TerminalModifiers
+  ) -> Bool {
+    if DispatchQueue.getSpecific(key: queueKey) != nil {
+      return routeMousePressOnQueue(
+        button: button,
+        column: column,
+        row: row,
+        modifiers: modifiers
+      )
+    }
+    return queue.sync {
+      routeMousePressOnQueue(
+        button: button,
+        column: column,
+        row: row,
+        modifiers: modifiers
+      )
+    }
+  }
+
+  func sendMouse(
+    kind: TerminalMouseEventKind,
+    button: TerminalMouseButton,
+    column: UInt16,
+    row: UInt16,
+    modifiers: TerminalModifiers
+  ) {
+    enqueue(
+      .sendMouse(
+        kind: kind,
+        button: button,
+        column: column,
+        row: row,
+        modifiers: modifiers
+      )
+    )
+  }
+
+  func selectionGesture(
+    _ kind: TerminalSelectionGestureKind,
+    column: UInt16,
+    row: UInt16,
+    cellFractionX: Float,
+    rectangle: Bool
+  ) {
+    enqueue(
+      .selectionGesture(
+        kind,
+        column: column,
+        row: row,
+        cellFractionX: cellFractionX,
+        rectangle: rectangle
+      )
+    )
+  }
+
+  func selectionAutoscrollTick(
+    direction: Int32,
+    column: UInt16,
+    cellFractionX: Float,
+    rectangle: Bool
+  ) {
+    enqueue(
+      .selectionAutoscrollTick(
+        direction: direction,
+        column: column,
+        cellFractionX: cellFractionX,
+        rectangle: rectangle
+      )
+    )
+  }
+
+  func clearSelection() {
+    enqueue(.clearSelection)
+  }
+
+  func selectionText() -> String {
+    if DispatchQueue.getSpecific(key: queueKey) != nil {
+      return selectionTextOnQueue()
+    }
+    return queue.sync {
+      selectionTextOnQueue()
+    }
+  }
+
   private func enqueue(_ command: Command) {
     let retained = Unmanaged.passRetained(self)
     let opaqueAddress = UInt(bitPattern: retained.toOpaque())
@@ -339,6 +521,31 @@ private final class TerminalSessionWorker {
       pasteOnQueue(text, allowUnsafe: allowUnsafe, completion: completion)
     case .resize(let columns, let rows):
       resizeOnQueue(columns: columns, rows: rows)
+    case .sendMouse(let kind, let button, let column, let row, let modifiers):
+      sendMouseOnQueue(
+        kind: kind,
+        button: button,
+        column: column,
+        row: row,
+        modifiers: modifiers
+      )
+    case .selectionGesture(let kind, let column, let row, let cellFractionX, let rectangle):
+      selectionGestureOnQueue(
+        kind,
+        column: column,
+        row: row,
+        cellFractionX: cellFractionX,
+        rectangle: rectangle
+      )
+    case .selectionAutoscrollTick(let direction, let column, let cellFractionX, let rectangle):
+      selectionAutoscrollTickOnQueue(
+        direction: direction,
+        column: column,
+        cellFractionX: cellFractionX,
+        rectangle: rectangle
+      )
+    case .clearSelection:
+      clearSelectionOnQueue()
     case .terminate:
       terminate(publishExit: true)
     }
@@ -487,6 +694,153 @@ private final class TerminalSessionWorker {
       try pty.resize(columns: columns, rows: rows)
       try renderAndPublish()
     } catch {
+      fail(error)
+    }
+  }
+
+  private func routeMousePressOnQueue(
+    button: TerminalMouseButton,
+    column: UInt16,
+    row: UInt16,
+    modifiers: TerminalModifiers
+  ) -> Bool {
+    guard let terminal else {
+      return false
+    }
+    let coordinate = clampedCoordinate(column: column, row: row)
+    do {
+      let bytes = try terminal.encodeMouse(
+        kind: .press,
+        button: button,
+        column: coordinate.column,
+        row: coordinate.row,
+        modifiers: modifiers
+      )
+      guard !bytes.isEmpty else {
+        return false
+      }
+      try enqueueWrite(bytes)
+      try renderAndPublish()
+      return true
+    } catch {
+      handleMouseInteractionError(error)
+      return false
+    }
+  }
+
+  private func sendMouseOnQueue(
+    kind: TerminalMouseEventKind,
+    button: TerminalMouseButton,
+    column: UInt16,
+    row: UInt16,
+    modifiers: TerminalModifiers
+  ) {
+    guard let terminal else {
+      return
+    }
+    let coordinate = clampedCoordinate(column: column, row: row)
+    do {
+      let bytes = try terminal.encodeMouse(
+        kind: kind,
+        button: button,
+        column: coordinate.column,
+        row: coordinate.row,
+        modifiers: modifiers
+      )
+      guard !bytes.isEmpty else {
+        return
+      }
+      try enqueueWrite(bytes)
+      try renderAndPublish()
+    } catch {
+      handleMouseInteractionError(error)
+    }
+  }
+
+  private func selectionGestureOnQueue(
+    _ kind: TerminalSelectionGestureKind,
+    column: UInt16,
+    row: UInt16,
+    cellFractionX: Float,
+    rectangle: Bool
+  ) {
+    guard let terminal else {
+      return
+    }
+    let coordinate = clampedCoordinate(column: column, row: row)
+    do {
+      try terminal.selectionGesture(
+        kind,
+        column: coordinate.column,
+        row: coordinate.row,
+        cellFractionX: cellFractionX,
+        rectangle: rectangle
+      )
+      try renderAndPublish()
+    } catch {
+      handleMouseInteractionError(error)
+    }
+  }
+
+  private func selectionAutoscrollTickOnQueue(
+    direction: Int32,
+    column: UInt16,
+    cellFractionX: Float,
+    rectangle: Bool
+  ) {
+    guard let terminal else {
+      return
+    }
+    let clampedColumn = min(column, columns > 0 ? columns - 1 : 0)
+    do {
+      try terminal.autoscrollSelection(
+        direction: direction,
+        column: clampedColumn,
+        cellFractionX: cellFractionX,
+        rectangle: rectangle
+      )
+      try renderAndPublish()
+    } catch {
+      handleMouseInteractionError(error)
+    }
+  }
+
+  private func clearSelectionOnQueue() {
+    guard let terminal else {
+      return
+    }
+    do {
+      try terminal.clearSelection()
+      try renderAndPublish()
+    } catch {
+      handleMouseInteractionError(error)
+    }
+  }
+
+  private func selectionTextOnQueue() -> String {
+    guard let terminal else {
+      return ""
+    }
+    do {
+      return try terminal.selectionString()
+    } catch {
+      handleMouseInteractionError(error)
+      return ""
+    }
+  }
+
+  private func clampedCoordinate(
+    column: UInt16,
+    row: UInt16
+  ) -> (column: UInt16, row: UInt16) {
+    (
+      min(column, columns > 0 ? columns - 1 : 0),
+      min(row, rows > 0 ? rows - 1 : 0)
+    )
+  }
+
+  private func handleMouseInteractionError(_ error: Error) {
+    if case TerminalBridgeError.corePanic = error {
       fail(error)
     }
   }

@@ -460,6 +460,123 @@ final class TerminalSessionTests: XCTestCase {
       "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
     )
   }
+
+  func testSelectionGestureSelectsEchoedText() {
+    let session = TerminalSession(columns: 80, rows: 12)
+    defer {
+      session.terminate()
+    }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    session.send(Data("echo abcdef\n".utf8))
+
+    guard let row = waitForTerminalRow(startingWith: "abcdef", in: session) else {
+      XCTFail("Snapshot was: \(session.plainTextForTesting() ?? "<nil>")")
+      return
+    }
+    // The drag endpoint cell only joins the selection once the pointer passes
+    // its midpoint, so fraction 0.9 selects through column 3 inclusive.
+    session.selectionGesture(.press, column: 0, row: row, cellFractionX: 0.5, rectangle: false)
+    session.selectionGesture(.drag, column: 3, row: row, cellFractionX: 0.9, rectangle: false)
+    session.selectionGesture(.release, column: 3, row: row, cellFractionX: 0.9, rectangle: false)
+
+    XCTAssertTrue(
+      waitUntil {
+        var range: ClosedRange<UInt16>?
+        session.withFrame { frame in
+          range = frame.selectionRange(forRow: Int(row))
+        }
+        return range == 0...3 && session.selectionText() == "abcd"
+      },
+      "Selection was range=\(String(describing: selectionRange(in: session, row: row))) text=\(session.selectionText())"
+    )
+  }
+
+  func testMousePressRoutesToApplicationWhenCaptureEnabled() {
+    let session = TerminalSession(columns: 80, rows: 12)
+    defer {
+      session.terminate()
+    }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    // A raw ESC byte would be eaten by the shell's line editor; send the
+    // literal \033 for printf to expand on output instead.
+    session.send(Data("echo selected; printf '\\033[?1002h'; echo ready\n".utf8))
+
+    guard let row = waitForTerminalRow(startingWith: "selected", in: session) else {
+      XCTFail("Snapshot was: \(session.plainTextForTesting() ?? "<nil>")")
+      return
+    }
+    XCTAssertTrue(waitUntil { session.plainTextForTesting()?.contains("ready") == true })
+    selectColumns(0...3, row: row, in: session)
+    XCTAssertTrue(waitUntil { selectionRange(in: session, row: row) == 0...3 })
+
+    XCTAssertTrue(
+      session.routeMousePress(button: .left, column: 0, row: 0, modifiers: [])
+    )
+    XCTAssertTrue(waitUntil { selectionRange(in: session, row: row) == nil })
+  }
+
+  func testMousePressStaysLocalWithoutCapture() {
+    let session = TerminalSession(columns: 80, rows: 12)
+    defer {
+      session.terminate()
+    }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    session.send(Data("echo local-selection\n".utf8))
+
+    guard let row = waitForTerminalRow(startingWith: "local-selection", in: session) else {
+      XCTFail("Snapshot was: \(session.plainTextForTesting() ?? "<nil>")")
+      return
+    }
+    XCTAssertFalse(
+      session.routeMousePress(button: .left, column: 0, row: row, modifiers: [])
+    )
+    selectColumns(0...3, row: row, in: session)
+
+    XCTAssertTrue(waitUntil { selectionRange(in: session, row: row) == 0...3 })
+    XCTAssertEqual(session.selectionText(), "loca")
+  }
+
+  func testShiftedMousePressStaysLocalUnderCapture() {
+    let session = TerminalSession(columns: 80, rows: 12)
+    defer {
+      session.terminate()
+    }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    // Literal \033 for printf to expand; a raw ESC byte would be eaten by
+    // the shell's line editor before reaching printf.
+    session.send(Data("printf '\\033[?1002h'; echo ready\n".utf8))
+    XCTAssertTrue(waitUntil { session.plainTextForTesting()?.contains("ready") == true })
+
+    XCTAssertFalse(
+      session.routeMousePress(button: .left, column: 0, row: 0, modifiers: [.shift])
+    )
+  }
+
+  func testSelectionTextIsEmptyWithoutSelection() {
+    let session = TerminalSession(columns: 80, rows: 12)
+    defer {
+      session.terminate()
+    }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    XCTAssertEqual(session.selectionText(), "")
+    session.send(Data("echo clear-me\n".utf8))
+
+    guard let row = waitForTerminalRow(startingWith: "clear-me", in: session) else {
+      XCTFail("Snapshot was: \(session.plainTextForTesting() ?? "<nil>")")
+      return
+    }
+    selectColumns(0...3, row: row, in: session)
+    XCTAssertTrue(waitUntil { selectionRange(in: session, row: row) == 0...3 })
+    session.clearSelection()
+
+    XCTAssertTrue(waitUntil { selectionRange(in: session, row: row) == nil })
+    XCTAssertEqual(session.selectionText(), "")
+  }
 }
 
 @MainActor
@@ -497,6 +614,68 @@ private func waitForInitialShellFrame(_ session: TerminalSession) -> Bool {
     }
     return !plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
+}
+
+@MainActor
+private func waitForTerminalRow(
+  startingWith prefix: String,
+  in session: TerminalSession
+) -> UInt16? {
+  var resolvedRow: UInt16?
+  _ = waitUntil {
+    session.withFrame { frame in
+      let lines = frame.plainText().split(separator: "\n", omittingEmptySubsequences: false)
+      if let index = lines.firstIndex(where: { $0.hasPrefix(prefix) }) {
+        resolvedRow = UInt16(clamping: index)
+      }
+    }
+    return resolvedRow != nil
+  }
+  return resolvedRow
+}
+
+/// Selects the inclusive column range. The drag endpoint cell only joins the
+/// selection once the pointer passes its midpoint, so the drag/release
+/// fraction sits at 0.9 to select through `columns.upperBound`.
+@MainActor
+private func selectColumns(
+  _ columns: ClosedRange<UInt16>,
+  row: UInt16,
+  in session: TerminalSession
+) {
+  session.selectionGesture(
+    .press,
+    column: columns.lowerBound,
+    row: row,
+    cellFractionX: 0.5,
+    rectangle: false
+  )
+  session.selectionGesture(
+    .drag,
+    column: columns.upperBound,
+    row: row,
+    cellFractionX: 0.9,
+    rectangle: false
+  )
+  session.selectionGesture(
+    .release,
+    column: columns.upperBound,
+    row: row,
+    cellFractionX: 0.9,
+    rectangle: false
+  )
+}
+
+@MainActor
+private func selectionRange(
+  in session: TerminalSession,
+  row: UInt16
+) -> ClosedRange<UInt16>? {
+  var range: ClosedRange<UInt16>?
+  session.withFrame { frame in
+    range = frame.selectionRange(forRow: Int(row))
+  }
+  return range
 }
 
 private func makeExecutableShellScript(_ contents: String) throws -> URL {

@@ -385,6 +385,79 @@ final class TerminalPaneViewTests: XCTestCase {
     )
   }
 
+  func testCellHitFractionAtCellCentersAndEdges() {
+    let metrics = TerminalCellMetrics()
+    let insets = TerminalPaneLayoutMetrics.contentInsets
+    let grid = TerminalGridSize(columns: 4, rows: 3)
+
+    let center = TerminalPaneGeometry.cellHit(
+      for: NSPoint(
+        x: insets.left + metrics.cellWidth * 1.5,
+        y: insets.top + metrics.cellHeight * 0.5
+      ),
+      metrics: metrics,
+      insets: insets,
+      grid: grid
+    )
+    XCTAssertEqual(center.coordinate, TerminalCellCoordinate(column: 1, row: 0))
+    XCTAssertEqual(center.fractionX, 0.5, accuracy: 0.001)
+
+    let leftEdge = TerminalPaneGeometry.cellHit(
+      for: NSPoint(x: insets.left + metrics.cellWidth, y: insets.top),
+      metrics: metrics,
+      insets: insets,
+      grid: grid
+    )
+    XCTAssertEqual(leftEdge.coordinate.column, 1)
+    XCTAssertEqual(leftEdge.fractionX, 0, accuracy: 0.001)
+
+    let beyondRight = TerminalPaneGeometry.cellHit(
+      for: NSPoint(x: insets.left + metrics.cellWidth * 8, y: insets.top),
+      metrics: metrics,
+      insets: insets,
+      grid: grid
+    )
+    XCTAssertEqual(beyondRight.coordinate.column, 3)
+    XCTAssertEqual(beyondRight.fractionX, 1, accuracy: 0.001)
+
+    let beforeLeft = TerminalPaneGeometry.cellHit(
+      for: NSPoint(x: 0, y: insets.top),
+      metrics: metrics,
+      insets: insets,
+      grid: grid
+    )
+    XCTAssertEqual(beforeLeft.coordinate.column, 0)
+    XCTAssertEqual(beforeLeft.fractionX, 0, accuracy: 0.001)
+  }
+
+  func testAutoscrollDirectionAtVerticalEdges() {
+    XCTAssertEqual(TerminalPaneGeometry.autoscrollDirection(forY: -5, height: 200), -1)
+    XCTAssertEqual(TerminalPaneGeometry.autoscrollDirection(forY: 205, height: 200), 1)
+    XCTAssertNil(TerminalPaneGeometry.autoscrollDirection(forY: 100, height: 200))
+  }
+
+  func testSelectionRectSpansInclusiveColumns() {
+    let metrics = TerminalCellMetrics()
+    let insets = TerminalPaneLayoutMetrics.contentInsets
+    let bounds = NSRect(x: 0, y: 0, width: 400, height: 300)
+
+    let rect = TerminalPaneGeometry.selectionRect(
+      columns: 3...5,
+      row: 2,
+      bounds: bounds,
+      metrics: metrics,
+      insets: insets
+    )
+
+    XCTAssertEqual(rect.minX, insets.left + 3 * metrics.cellWidth, accuracy: 0.001)
+    XCTAssertEqual(rect.width, 3 * metrics.cellWidth, accuracy: 0.001)
+    XCTAssertEqual(
+      rect.minY,
+      TerminalPaneGeometry.rowRectY(2, bounds: bounds, metrics: metrics, insets: insets),
+      accuracy: 0.001
+    )
+  }
+
   func testCaretMoveEventsRightAndLeft() {
     let rightEvents = TerminalCaretMovement.events(
       from: TerminalCellCoordinate(column: 5, row: 2),
@@ -588,6 +661,45 @@ final class TerminalPaneViewTests: XCTestCase {
     view.cacheDisplay(in: view.bounds, to: bitmap)
 
     XCTAssertTrue(bitmapHasMultipleColors(bitmap))
+  }
+
+  func testCopyWritesSelectionToInjectedPasteboard() {
+    let pasteboard = NSPasteboard(name: .init("locus-terminal-copy-\(UUID().uuidString)"))
+    pasteboard.clearContents()
+    let session = TerminalSession(columns: 80, rows: 12)
+    defer {
+      session.terminate()
+      pasteboard.clearContents()
+    }
+    let view = TerminalPaneView(session: session, pasteboard: pasteboard)
+    session.start(command: "/bin/sh")
+    session.send(Data("echo copy-me\n".utf8))
+
+    var row: UInt16?
+    XCTAssertTrue(
+      waitForPaneCondition {
+        session.withFrame { frame in
+          let lines = frame.plainText().split(separator: "\n", omittingEmptySubsequences: false)
+          if let index = lines.firstIndex(where: { $0.hasPrefix("copy-me") }) {
+            row = UInt16(clamping: index)
+          }
+        }
+        return row != nil
+      }
+    )
+    guard let row else {
+      return
+    }
+    // Drag fraction 0.9 selects through column 3 (the endpoint cell only
+    // joins the selection once the pointer passes its midpoint).
+    session.selectionGesture(.press, column: 0, row: row, cellFractionX: 0.5, rectangle: false)
+    session.selectionGesture(.drag, column: 3, row: row, cellFractionX: 0.9, rectangle: false)
+    session.selectionGesture(.release, column: 3, row: row, cellFractionX: 0.9, rectangle: false)
+    XCTAssertTrue(waitForPaneCondition { session.selectionText() == "copy" })
+
+    view.copy(nil)
+
+    XCTAssertEqual(pasteboard.string(forType: .string), "copy")
   }
 
   func testViewResizeDrivesSessionResize() {
