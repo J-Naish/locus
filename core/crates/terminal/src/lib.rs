@@ -8,6 +8,7 @@
 pub mod apc;
 pub(crate) mod bitmap_allocator;
 pub mod charsets;
+pub(crate) mod circ_buf;
 pub mod color;
 pub mod dcs;
 pub mod device_attributes;
@@ -28,6 +29,7 @@ pub(crate) mod ref_counted_set;
 pub mod render;
 pub mod screen;
 pub mod screen_set;
+pub mod search;
 pub mod selection;
 pub mod selection_codepoints;
 pub mod selection_gesture;
