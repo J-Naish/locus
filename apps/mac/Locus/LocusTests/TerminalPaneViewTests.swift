@@ -537,6 +537,31 @@ final class TerminalPaneViewTests: XCTestCase {
     )
   }
 
+  func testSearchMatchRectsUseInclusiveCells() {
+    let metrics = TerminalCellMetrics()
+    let insets = TerminalPaneLayoutMetrics.contentInsets
+    let bounds = NSRect(x: 0, y: 0, width: 400, height: 300)
+    let match = TerminalSearchMatch(y: 2, xStart: 3, xEnd: 5, isSelected: false)
+
+    let rect = TerminalPaneGeometry.searchMatchRect(
+      match,
+      bounds: bounds,
+      metrics: metrics,
+      insets: insets
+    )
+
+    XCTAssertEqual(
+      rect,
+      TerminalPaneGeometry.selectionRect(
+        columns: 3...5,
+        row: 2,
+        bounds: bounds,
+        metrics: metrics,
+        insets: insets
+      )
+    )
+  }
+
   func testCaretMoveEventsRightAndLeft() {
     let rightEvents = TerminalCaretMovement.events(
       from: TerminalCellCoordinate(column: 5, row: 2),

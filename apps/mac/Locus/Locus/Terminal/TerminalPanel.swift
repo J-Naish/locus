@@ -5,6 +5,8 @@ enum TerminalPanelMetrics {
   static let defaultHeight: CGFloat = 240
   static let resizeHandleHeight: CGFloat = 8
   static let maximumParentHeightFraction: CGFloat = 0.8
+  static let findDebounce: Duration = .milliseconds(250)
+  static let findFieldWidth: CGFloat = 180
 
   static var minimumHeight: CGFloat {
     let metrics = TerminalCellMetrics()
@@ -22,6 +24,8 @@ enum TerminalPanelMetrics {
 @MainActor
 final class TerminalPanelState: ObservableObject {
   @Published private(set) var isVisible = false
+  @Published private(set) var isFindBarVisible = false
+  @Published private(set) var findQuery = ""
   @Published private(set) var session: TerminalSession?
   @Published private(set) var panelHeight: CGFloat
   var currentWorkspaceFolder: URL?
@@ -34,6 +38,7 @@ final class TerminalPanelState: ObservableObject {
   private weak var terminalView: TerminalPaneView?
   private weak var previousFirstResponder: NSResponder?
   private var didRequestShutdown = false
+  private var findTask: Task<Void, Never>?
 
   init(
     startCommand: String? = nil,
@@ -61,6 +66,7 @@ final class TerminalPanelState: ObservableObject {
 
   deinit {
     MainActor.assumeIsolated {
+      findTask?.cancel()
       shutdown()
     }
   }
@@ -96,6 +102,31 @@ final class TerminalPanelState: ObservableObject {
     window.makeFirstResponder(view)
   }
 
+  func showFindBar() {
+    guard isVisible else {
+      return
+    }
+    isFindBarVisible = true
+    scheduleSearch(for: findQuery)
+  }
+
+  func updateFindQuery(_ query: String) {
+    guard findQuery != query else {
+      return
+    }
+    findQuery = query
+    scheduleSearch(for: query)
+  }
+
+  func selectSearch(_ direction: TerminalSearchDirection) {
+    session?.searchSelect(direction)
+  }
+
+  func closeFindBar() {
+    endFind()
+    focusTerminal()
+  }
+
   func shutdown() {
     guard !didRequestShutdown else {
       return
@@ -121,11 +152,45 @@ final class TerminalPanelState: ObservableObject {
   }
 
   private func hide(in window: NSWindow?) {
+    endFind()
     isVisible = false
     if let window, window.firstResponder === terminalView {
       window.makeFirstResponder(previousFirstResponder)
     }
     previousFirstResponder = nil
+  }
+
+  private func scheduleSearch(for query: String) {
+    findTask?.cancel()
+    if query.isEmpty {
+      session?.searchEnd()
+      return
+    }
+    findTask = Task { @MainActor [weak self] in
+      do {
+        try await Task.sleep(for: TerminalPanelMetrics.findDebounce)
+      } catch {
+        return
+      }
+      guard let self, self.isFindBarVisible, self.findQuery == query else {
+        return
+      }
+      self.session?.searchStart(query)
+    }
+  }
+
+  private func endFind() {
+    findTask?.cancel()
+    findTask = nil
+    session?.searchEnd()
+    isFindBarVisible = false
+  }
+
+  private func focusTerminal() {
+    guard let terminalView, let window = terminalView.window else {
+      return
+    }
+    window.makeFirstResponder(terminalView)
   }
 
   private func activeSession() -> TerminalSession {
@@ -155,9 +220,7 @@ struct TerminalPanelView: View {
   var body: some View {
     Group {
       if let session = state.session {
-        TerminalPanelContent(session: session) { view in
-          state.registerTerminalView(view)
-        }
+        TerminalPanelContent(state: state, session: session)
       } else {
         Color(nsColor: LocusChromeColors.documentCard)
       }
@@ -258,18 +321,40 @@ enum TerminalPanelPresentation {
     let suffix = path.dropFirst(homePrefix.count)
     return suffix.isEmpty ? "~" : "~/\(suffix)"
   }
+
+  static func shouldShowTitleLabel(isFindBarVisible: Bool) -> Bool {
+    !isFindBarVisible
+  }
+
+  static func findCountLabel(search: TerminalSession.SearchState?) -> String {
+    guard let status = search?.status, status.active else {
+      return "—"
+    }
+    guard status.total > 0 else {
+      return "0"
+    }
+    guard let selectedIndex = status.selectedIndex else {
+      return "\(status.total)"
+    }
+    return "\(selectedIndex + 1)/\(status.total)"
+  }
 }
 
 private struct TerminalPanelContent: View {
+  @ObservedObject var state: TerminalPanelState
   @ObservedObject var session: TerminalSession
-  let onViewReady: (TerminalPaneView) -> Void
+  @FocusState private var isFindFieldFocused: Bool
 
   var body: some View {
     switch session.state {
     case .idle, .running:
       ZStack(alignment: .bottomTrailing) {
-        TerminalPane(session: session, onViewReady: onViewReady)
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+        TerminalPane(
+          session: session,
+          onViewReady: state.registerTerminalView,
+          onFindRequested: state.showFindBar
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
 
         if TerminalPanelPresentation.shouldShowJumpToBottom(
           snapshot: session.snapshot
@@ -297,10 +382,18 @@ private struct TerminalPanelContent: View {
         }
       }
       .overlay(alignment: .topTrailing) {
-        if let displayTitle = TerminalPanelPresentation.displayTitle(
-          snapshot: session.snapshot,
-          homeDirectory: FileManager.default.homeDirectoryForCurrentUser
-        ) {
+        if state.isFindBarVisible {
+          findBar
+            .padding(.top, 8)
+            .padding(.trailing, 12)
+        } else if TerminalPanelPresentation.shouldShowTitleLabel(
+          isFindBarVisible: state.isFindBarVisible
+        ),
+          let displayTitle = TerminalPanelPresentation.displayTitle(
+            snapshot: session.snapshot,
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+          )
+        {
           Text(displayTitle)
             .font(.caption)
             .foregroundStyle(.tertiary)
@@ -313,12 +406,93 @@ private struct TerminalPanelContent: View {
             .accessibilityIdentifier("terminal-title")
         }
       }
+      .onChange(of: state.isFindBarVisible) { _, isVisible in
+        isFindFieldFocused = isVisible
+      }
     case .exited, .failed:
       Text("The process has ended.")
         .font(.callout)
         .foregroundStyle(.secondary)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+  }
+
+  private var findBar: some View {
+    HStack(spacing: 4) {
+      TextField(
+        "Find",
+        text: Binding(
+          get: { state.findQuery },
+          set: { query in
+            state.updateFindQuery(query)
+          }
+        )
+      )
+      .textFieldStyle(.plain)
+      .frame(width: TerminalPanelMetrics.findFieldWidth)
+      .focused($isFindFieldFocused)
+      .onKeyPress(phases: .down) { press in
+        guard press.key == .return else {
+          return .ignored
+        }
+        state.selectSearch(press.modifiers.contains(.shift) ? .previous : .next)
+        return .handled
+      }
+      .onExitCommand(perform: state.closeFindBar)
+      .accessibilityIdentifier("terminal-find-field")
+
+      Text(TerminalPanelPresentation.findCountLabel(search: session.snapshot?.search))
+        .font(.caption.monospacedDigit())
+        .foregroundStyle(.secondary)
+        .frame(minWidth: 34, alignment: .trailing)
+        .accessibilityIdentifier("terminal-find-count")
+
+      findButton(
+        systemName: "chevron.up",
+        label: "Previous Match",
+        identifier: "terminal-find-previous"
+      ) {
+        state.selectSearch(.previous)
+      }
+      findButton(
+        systemName: "chevron.down",
+        label: "Next Match",
+        identifier: "terminal-find-next"
+      ) {
+        state.selectSearch(.next)
+      }
+      findButton(
+        systemName: "xmark",
+        label: "Close Find",
+        identifier: "terminal-find-close",
+        action: state.closeFindBar
+      )
+    }
+    .font(.caption)
+    .padding(.horizontal, 8)
+    .padding(.vertical, 6)
+    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 7))
+    .overlay {
+      RoundedRectangle(cornerRadius: 7)
+        .strokeBorder(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 0.5)
+    }
+  }
+
+  private func findButton(
+    systemName: String,
+    label: String,
+    identifier: String,
+    action: @escaping () -> Void
+  ) -> some View {
+    Button(action: action) {
+      Image(systemName: systemName)
+        .frame(width: 18, height: 18)
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .help(label)
+    .accessibilityLabel(label)
+    .accessibilityIdentifier(identifier)
   }
 }
 

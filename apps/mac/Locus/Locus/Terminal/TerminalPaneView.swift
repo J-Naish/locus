@@ -513,6 +513,21 @@ enum TerminalPaneGeometry {
       height: metrics.cellHeight
     )
   }
+
+  static func searchMatchRect(
+    _ match: TerminalSearchMatch,
+    bounds: NSRect,
+    metrics: TerminalCellMetrics,
+    insets: TerminalContentInsets
+  ) -> NSRect {
+    selectionRect(
+      columns: match.xStart...match.xEnd,
+      row: match.y,
+      bounds: bounds,
+      metrics: metrics,
+      insets: insets
+    )
+  }
 }
 
 /// Accumulates AppKit scrolling deltas into whole terminal rows. AppKit's
@@ -1028,18 +1043,22 @@ struct TerminalUnshiftedCodepointCache {
 struct TerminalPane: NSViewRepresentable {
   let session: TerminalSession
   var onViewReady: ((TerminalPaneView) -> Void)?
+  var onFindRequested: (() -> Void)?
 
   init(
     session: TerminalSession,
-    onViewReady: ((TerminalPaneView) -> Void)? = nil
+    onViewReady: ((TerminalPaneView) -> Void)? = nil,
+    onFindRequested: (() -> Void)? = nil
   ) {
     self.session = session
     self.onViewReady = onViewReady
+    self.onFindRequested = onFindRequested
   }
 
   func makeNSView(context: Context) -> TerminalPaneView {
     let view = TerminalPaneView(session: session)
     view.onWindowChange = onViewReady
+    view.onFindRequested = onFindRequested
     onViewReady?(view)
     return view
   }
@@ -1047,10 +1066,12 @@ struct TerminalPane: NSViewRepresentable {
   func updateNSView(_ nsView: TerminalPaneView, context: Context) {
     nsView.session = session
     nsView.onWindowChange = onViewReady
+    nsView.onFindRequested = onFindRequested
   }
 
   static func dismantleNSView(_ nsView: TerminalPaneView, coordinator: Void) {
     nsView.onWindowChange = nil
+    nsView.onFindRequested = nil
   }
 }
 
@@ -1069,6 +1090,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   private static let selectionAutoscrollInterval: TimeInterval = 0.05
 
   var onWindowChange: ((TerminalPaneView) -> Void)?
+  var onFindRequested: (() -> Void)?
   var session: TerminalSession? {
     didSet {
       guard oldValue !== session else {
@@ -1123,6 +1145,14 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       return false
     }
     return generation != lastScheduledGeneration
+  }
+
+  private static func isFindShortcut(_ event: NSEvent) -> Bool {
+    let significant = event.modifierFlags.intersection([
+      .command, .control, .option, .shift,
+    ])
+    return significant == .command
+      && event.charactersIgnoringModifiers?.lowercased() == "f"
   }
 
   init(
@@ -1428,6 +1458,10 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   }
 
   override func keyDown(with event: NSEvent) {
+    if Self.isFindShortcut(event) {
+      onFindRequested?()
+      return
+    }
     let input = TerminalKeyInput(event: event)
     guard let translated = TerminalKeyTranslator.translate(input) else {
       super.keyDown(with: event)
@@ -1633,9 +1667,15 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
     }
 
     let drawTime = CACurrentMediaTime()
+    let searchMatches = session.snapshot?.search?.viewportMatches ?? []
     session.withFrame { frame in
       let caretVisible = caretIsVisible(cursor: frame.cursor, at: drawTime)
-      draw(frame: frame, caretVisible: caretVisible, in: context)
+      draw(
+        frame: frame,
+        searchMatches: searchMatches,
+        caretVisible: caretVisible,
+        in: context
+      )
       lastDrawnCaretVisibility = caretVisible
       lastDrawnCaretRect =
         caretVisible && !hasMarkedText()
@@ -1800,6 +1840,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
 
   private func draw(
     frame: TerminalFrame,
+    searchMatches: [TerminalSearchMatch],
     caretVisible: Bool,
     in context: CGContext
   ) {
@@ -1810,6 +1851,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
             drawBackgrounds(row: row, cells: cells, in: context)
           }
           drawSelection(frame: frame, rows: rows)
+          drawSearchMatches(searchMatches)
           for row in rows {
             drawText(row: row, cells: cells, graphemes: graphemes, in: context)
           }
@@ -1847,6 +1889,22 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       drewSelection = true
     }
     hasRenderedSelection = drewSelection
+  }
+
+  private func drawSearchMatches(_ matches: [TerminalSearchMatch]) {
+    for match in matches {
+      let color =
+        match.isSelected
+        ? NSColor.findHighlightColor
+        : NSColor.findHighlightColor.withAlphaComponent(0.35)
+      color.setFill()
+      TerminalPaneGeometry.searchMatchRect(
+        match,
+        bounds: bounds,
+        metrics: metrics,
+        insets: TerminalPaneLayoutMetrics.contentInsets
+      ).fill()
+    }
   }
 
   private func drawBackgrounds(

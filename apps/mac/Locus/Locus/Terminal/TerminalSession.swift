@@ -72,6 +72,12 @@ final class TerminalSession: ObservableObject {
     let atBottom: Bool
     let title: String?
     let workingDirectory: URL?
+    let search: SearchState?
+  }
+
+  struct SearchState: Equatable, Sendable {
+    let status: TerminalSearchStatus
+    let viewportMatches: [TerminalSearchMatch]
   }
 
   enum State: Equatable, Sendable {
@@ -174,6 +180,21 @@ final class TerminalSession: ObservableObject {
   /// Returns the viewport to the live bottom of the terminal.
   func scrollToBottom() {
     worker.scrollToBottom()
+  }
+
+  func searchStart(_ needle: String) {
+    guard !needle.isEmpty else {
+      return
+    }
+    worker.searchStart(needle)
+  }
+
+  func searchEnd() {
+    worker.searchEnd()
+  }
+
+  func searchSelect(_ direction: TerminalSearchDirection) {
+    worker.searchSelect(direction)
   }
 
   func terminate() {
@@ -314,6 +335,9 @@ private final class TerminalSessionWorker {
       modifiers: TerminalModifiers
     )
     case scrollToBottom
+    case searchStart(String)
+    case searchEnd
+    case searchSelect(TerminalSearchDirection)
     case sendMouse(
       kind: TerminalMouseEventKind,
       button: TerminalMouseButton,
@@ -358,6 +382,7 @@ private final class TerminalSessionWorker {
   private var lastWorkingDirectoryReport = ""
   private var cachedTitle: String?
   private var cachedWorkingDirectory: URL?
+  private var searchIsActive = false
   private var columns: UInt16
   private var rows: UInt16
   private let maxScrollback: Int
@@ -443,6 +468,18 @@ private final class TerminalSessionWorker {
 
   func scrollToBottom() {
     enqueue(.scrollToBottom)
+  }
+
+  func searchStart(_ needle: String) {
+    enqueue(.searchStart(needle))
+  }
+
+  func searchEnd() {
+    enqueue(.searchEnd)
+  }
+
+  func searchSelect(_ direction: TerminalSearchDirection) {
+    enqueue(.searchSelect(direction))
   }
 
   func terminate() {
@@ -595,6 +632,12 @@ private final class TerminalSessionWorker {
       )
     case .scrollToBottom:
       scrollToBottomOnQueue()
+    case .searchStart(let needle):
+      searchStartOnQueue(needle)
+    case .searchEnd:
+      searchEndOnQueue()
+    case .searchSelect(let direction):
+      searchSelectOnQueue(direction)
     case .sendMouse(let kind, let button, let column, let row, let modifiers):
       sendMouseOnQueue(
         kind: kind,
@@ -1025,6 +1068,17 @@ private final class TerminalSessionWorker {
     refreshReportedMetadata(from: terminal)
     generation &+= 1
     let cursor = frame.cursor
+    let search: TerminalSession.SearchState?
+    do {
+      search = try searchState(from: terminal)
+    } catch {
+      searchIsActive = false
+      handleMouseInteractionError(error)
+      guard self.terminal != nil, self.frame != nil else {
+        return
+      }
+      search = nil
+    }
     let snapshot = TerminalSession.Snapshot(
       generation: generation,
       columns: frame.columns,
@@ -1035,9 +1089,67 @@ private final class TerminalSessionWorker {
       cursorBlinking: cursor.blinking,
       atBottom: frame.atBottom,
       title: cachedTitle,
-      workingDirectory: cachedWorkingDirectory
+      workingDirectory: cachedWorkingDirectory,
+      search: search
     )
     publish(snapshot: snapshot)
+  }
+
+  private func searchStartOnQueue(_ needle: String) {
+    guard let terminal, !needle.isEmpty else {
+      return
+    }
+    do {
+      try terminal.searchStart(Data(needle.utf8))
+      searchIsActive = true
+      try renderAndPublish()
+    } catch {
+      clearSearchAfterError(error)
+    }
+  }
+
+  private func searchEndOnQueue() {
+    guard let terminal else {
+      searchIsActive = false
+      return
+    }
+    do {
+      try terminal.searchEnd()
+      searchIsActive = false
+      try renderAndPublish()
+    } catch {
+      clearSearchAfterError(error)
+    }
+  }
+
+  private func searchSelectOnQueue(_ direction: TerminalSearchDirection) {
+    guard searchIsActive, let terminal else {
+      return
+    }
+    do {
+      _ = try terminal.searchSelect(direction)
+      try renderAndPublish()
+    } catch {
+      clearSearchAfterError(error)
+    }
+  }
+
+  private func searchState(from terminal: TerminalCore) throws -> TerminalSession.SearchState? {
+    guard searchIsActive else {
+      return nil
+    }
+    let status = try terminal.searchStatus()
+    let matches = try terminal.searchViewportMatches()
+    return TerminalSession.SearchState(status: status, viewportMatches: matches)
+  }
+
+  private func clearSearchAfterError(_ error: Error) {
+    searchIsActive = false
+    handleMouseInteractionError(error)
+    guard terminal != nil, frame != nil else {
+      return
+    }
+    try? renderAndPublish()
   }
 
   private func refreshReportedMetadata(from terminal: TerminalCore) {
@@ -1215,6 +1327,7 @@ private final class TerminalSessionWorker {
 
   private func finishExited(code: Int32) {
     _ = cancelSource()
+    searchIsActive = false
     pty = nil
     terminal = nil
     frame = nil
@@ -1224,6 +1337,7 @@ private final class TerminalSessionWorker {
   private func terminate(publishExit: Bool) {
     let ptyForTeardown = pty
     let cancellationGroup = cancelSource()
+    searchIsActive = false
     pty = nil
     terminal = nil
     frame = nil
@@ -1236,6 +1350,7 @@ private final class TerminalSessionWorker {
   private func fail(_ error: Error) {
     let ptyForTeardown = pty
     let cancellationGroup = cancelSource()
+    searchIsActive = false
     pty = nil
     terminal = nil
     frame = nil

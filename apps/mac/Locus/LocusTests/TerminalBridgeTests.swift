@@ -4,6 +4,50 @@ import XCTest
 @testable import Locus
 
 final class TerminalBridgeTests: XCTestCase {
+  func testSearchRoundTripThroughFeed() throws {
+    let terminal = try TerminalCore(columns: 40, rows: 8)
+    try terminal.feed(Data("Fizz\r\nBuzz\r\nFizz".utf8))
+
+    try terminal.searchStart(Data("Fizz".utf8))
+
+    XCTAssertEqual(
+      try terminal.searchStatus(),
+      TerminalSearchStatus(active: true, complete: true, total: 2, selectedIndex: nil)
+    )
+    let matches = try terminal.searchViewportMatches()
+    XCTAssertEqual(matches.count, 2)
+    XCTAssertTrue(matches.allSatisfy { !$0.isSelected })
+
+    XCTAssertEqual(try terminal.searchSelect(.next).selectedIndex, 0)
+    XCTAssertEqual(try terminal.searchViewportMatches().filter(\.isSelected).count, 1)
+
+    try terminal.searchEnd()
+    try terminal.searchEnd()
+    XCTAssertEqual(
+      try terminal.searchStatus(),
+      TerminalSearchStatus(active: false, complete: false, total: 0, selectedIndex: nil)
+    )
+  }
+
+  func testDecodeSearchMatchesHandlesStrideAndTruncation() {
+    var data = Data()
+    for value: UInt16 in [2, 3, 5, 0, 7, 11, 13, 1] {
+      var nativeValue = value
+      withUnsafeBytes(of: &nativeValue) { data.append(contentsOf: $0) }
+    }
+    XCTAssertEqual(
+      TerminalCore.decodeSearchMatches(data),
+      [
+        TerminalSearchMatch(y: 2, xStart: 3, xEnd: 5, isSelected: false),
+        TerminalSearchMatch(y: 7, xStart: 11, xEnd: 13, isSelected: true),
+      ]
+    )
+    XCTAssertEqual(
+      TerminalCore.decodeSearchMatches(Data(data.prefix(12))),
+      [TerminalSearchMatch(y: 2, xStart: 3, xEnd: 5, isSelected: false)]
+    )
+  }
+
   func testInitAndDeinitRoundTrip() throws {
     do {
       _ = try TerminalCore(columns: 80, rows: 24)

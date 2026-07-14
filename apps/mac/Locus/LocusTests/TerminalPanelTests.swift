@@ -4,6 +4,88 @@ import XCTest
 
 @MainActor
 final class TerminalPanelTests: XCTestCase {
+  func testFindCountLabelFormatsAllStates() {
+    XCTAssertEqual(TerminalPanelPresentation.findCountLabel(search: nil), "—")
+    XCTAssertEqual(
+      TerminalPanelPresentation.findCountLabel(
+        search: TerminalSession.SearchState(
+          status: TerminalSearchStatus(
+            active: false,
+            complete: false,
+            total: 4,
+            selectedIndex: nil
+          ),
+          viewportMatches: []
+        )
+      ),
+      "—"
+    )
+    XCTAssertEqual(
+      TerminalPanelPresentation.findCountLabel(
+        search: TerminalSession.SearchState(
+          status: TerminalSearchStatus(
+            active: true,
+            complete: true,
+            total: 0,
+            selectedIndex: nil
+          ),
+          viewportMatches: []
+        )
+      ),
+      "0"
+    )
+    XCTAssertEqual(
+      TerminalPanelPresentation.findCountLabel(
+        search: TerminalSession.SearchState(
+          status: TerminalSearchStatus(
+            active: true,
+            complete: true,
+            total: 7,
+            selectedIndex: nil
+          ),
+          viewportMatches: []
+        )
+      ),
+      "7"
+    )
+    XCTAssertEqual(
+      TerminalPanelPresentation.findCountLabel(
+        search: TerminalSession.SearchState(
+          status: TerminalSearchStatus(
+            active: true,
+            complete: true,
+            total: 7,
+            selectedIndex: 2
+          ),
+          viewportMatches: []
+        )
+      ),
+      "3/7"
+    )
+  }
+
+  func testFindBarLifecycleEndsSearchOnHide() throws {
+    let state = TerminalPanelState(startCommand: "/bin/sh")
+    defer { state.shutdown() }
+    state.toggle()
+    let session = try XCTUnwrap(state.session)
+    session.send(Data("printf 'panel-find-marker\\n'\n".utf8))
+    XCTAssertTrue(
+      waitForTerminalPanelCondition {
+        session.plainTextForTesting()?.contains("panel-find-marker") == true
+      }
+    )
+    state.showFindBar()
+    session.searchStart("panel-find-marker")
+    XCTAssertTrue(waitForTerminalPanelCondition { session.snapshot?.search != nil })
+
+    state.toggle()
+
+    XCTAssertFalse(state.isVisible)
+    XCTAssertFalse(state.isFindBarVisible)
+    XCTAssertTrue(waitForTerminalPanelCondition { session.snapshot?.search == nil })
+  }
+
   func testJumpPillVisibilityFollowsSnapshotBottomState() {
     XCTAssertFalse(TerminalPanelPresentation.shouldShowJumpToBottom(snapshot: nil))
     XCTAssertFalse(
@@ -319,7 +401,8 @@ private func terminalPanelSnapshot(
     cursorBlinking: true,
     atBottom: atBottom,
     title: title,
-    workingDirectory: workingDirectory
+    workingDirectory: workingDirectory,
+    search: nil
   )
 }
 

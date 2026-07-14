@@ -98,6 +98,25 @@ enum TerminalMouseButton: UInt32 {
   case none = 0xFFFF_FFFF
 }
 
+struct TerminalSearchStatus: Equatable, Sendable {
+  let active: Bool
+  let complete: Bool
+  let total: UInt32
+  let selectedIndex: UInt32?
+}
+
+struct TerminalSearchMatch: Equatable, Sendable {
+  let y: UInt16
+  let xStart: UInt16
+  let xEnd: UInt16
+  let isSelected: Bool
+}
+
+enum TerminalSearchDirection: UInt32, Sendable {
+  case next = 0
+  case previous = 1
+}
+
 /// Wraps one `locus_term` handle. This class is not thread-safe: use one
 /// instance from a single serial execution context. If a call throws
 /// `.corePanic`, discard this instance and create a new one.
@@ -192,6 +211,61 @@ final class TerminalCore {
 
     try Self.checkStatus(status)
     return .safe(Self.copyAndFree(bytes: &bytes))
+  }
+
+  func searchStart(_ needle: Data) throws {
+    let status = needle.withUnsafeBytes { buffer in
+      locus_term_search_start(
+        handle,
+        buffer.bindMemory(to: UInt8.self).baseAddress,
+        buffer.count
+      )
+    }
+    try Self.checkStatus(status)
+  }
+
+  func searchEnd() throws {
+    try Self.checkStatus(locus_term_search_end(handle))
+  }
+
+  func searchStatus() throws -> TerminalSearchStatus {
+    var status = LocusTermSearchStatus(active: false, complete: false, total: 0, selected: 0)
+    try Self.checkStatus(locus_term_search_status(handle, &status))
+    return Self.searchStatus(from: status)
+  }
+
+  func searchSelect(_ direction: TerminalSearchDirection) throws -> TerminalSearchStatus {
+    var status = LocusTermSearchStatus(active: false, complete: false, total: 0, selected: 0)
+    try Self.checkStatus(locus_term_search_select(handle, direction.rawValue, &status))
+    return Self.searchStatus(from: status)
+  }
+
+  func searchViewportMatches() throws -> [TerminalSearchMatch] {
+    var bytes = LocusTermBytes(ptr: nil, len: 0, cap: 0)
+    try Self.checkStatus(locus_term_search_viewport_matches(handle, &bytes))
+    return Self.decodeSearchMatches(Self.copyAndFree(bytes: &bytes))
+  }
+
+  static func decodeSearchMatches(_ data: Data) -> [TerminalSearchMatch] {
+    let stride = MemoryLayout<LocusTermSearchMatch>.stride
+    guard stride == 8, data.count >= stride else {
+      return []
+    }
+
+    var matches: [TerminalSearchMatch] = []
+    matches.reserveCapacity(data.count / stride)
+    for offset in Swift.stride(from: 0, through: data.count - stride, by: stride) {
+      let flags = nativeUInt16(in: data, at: offset + 6)
+      matches.append(
+        TerminalSearchMatch(
+          y: nativeUInt16(in: data, at: offset),
+          xStart: nativeUInt16(in: data, at: offset + 2),
+          xEnd: nativeUInt16(in: data, at: offset + 4),
+          isSelected: flags & 1 != 0
+        )
+      )
+    }
+    return matches
   }
 
   func scroll(byRows delta: Int) throws {
@@ -336,6 +410,23 @@ final class TerminalCore {
       return Data()
     }
     return Data(bytes: pointer, count: bytes.len)
+  }
+
+  private static func searchStatus(from status: LocusTermSearchStatus) -> TerminalSearchStatus {
+    TerminalSearchStatus(
+      active: status.active,
+      complete: status.complete,
+      total: status.total,
+      selectedIndex: !status.active || status.selected == UInt32.max ? nil : status.selected
+    )
+  }
+
+  private static func nativeUInt16(in data: Data, at offset: Int) -> UInt16 {
+    var value: UInt16 = 0
+    withUnsafeMutableBytes(of: &value) { destination in
+      _ = data.copyBytes(to: destination, from: offset..<(offset + 2))
+    }
+    return value
   }
 }
 

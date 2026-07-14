@@ -4,6 +4,64 @@ import XCTest
 
 @MainActor
 final class TerminalSessionTests: XCTestCase {
+  func testSearchStartPublishesStatusAndMatches() {
+    let session = TerminalSession(columns: 60, rows: 10)
+    defer { session.terminate() }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    session.send(Data("printf 'Fi%s\\nFi%s\\n' zz zz\n".utf8))
+    XCTAssertTrue(waitUntil { session.plainTextForTesting()?.contains("Fizz") == true })
+
+    session.searchStart("Fizz")
+
+    XCTAssertTrue(
+      waitUntil {
+        guard let search = session.snapshot?.search else { return false }
+        return search.status.active
+          && search.status.complete
+          && search.status.total == 2
+          && search.viewportMatches.count == 2
+      }
+    )
+  }
+
+  func testSearchSelectMarksSelectedMatch() {
+    let session = TerminalSession(columns: 60, rows: 10)
+    defer { session.terminate() }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    session.send(Data("printf 'Fi%s\\nFi%s\\n' zz zz\n".utf8))
+    XCTAssertTrue(waitUntil { session.plainTextForTesting()?.contains("Fizz") == true })
+    session.searchStart("Fizz")
+    XCTAssertTrue(waitUntil { session.snapshot?.search?.status.total == 2 })
+
+    session.searchSelect(.next)
+
+    XCTAssertTrue(
+      waitUntil {
+        guard let search = session.snapshot?.search else { return false }
+        return search.status.selectedIndex == 0
+          && search.viewportMatches.filter(\.isSelected).count == 1
+      }
+    )
+  }
+
+  func testSearchEndClearsPublishedState() {
+    let session = TerminalSession(columns: 60, rows: 10)
+    defer { session.terminate() }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    session.send(Data("printf 'end-search-marker\\n'\n".utf8))
+    XCTAssertTrue(
+      waitUntil { session.plainTextForTesting()?.contains("end-search-marker") == true })
+    session.searchStart("end-search-marker")
+    XCTAssertTrue(waitUntil { session.snapshot?.search != nil })
+
+    session.searchEnd()
+
+    XCTAssertTrue(waitUntil { session.snapshot?.search == nil })
+  }
+
   func testShellEnvironmentIsCleanAndLocalized() {
     let session = TerminalSession(columns: 120, rows: 40)
     defer {
