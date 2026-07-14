@@ -32,6 +32,7 @@ use terminal::stream::Stream;
 use terminal::stream_terminal::{Effects, TerminalHandler};
 use terminal::style::{FgOptions, Style};
 use terminal::terminal::{Options as TerminalOptions, Terminal};
+use terminal::url;
 
 use crate::{clear_last_error_message, set_last_error_message, LOCUS_STATUS_OK};
 
@@ -350,6 +351,15 @@ pub struct LocusTermSearchMatch {
     pub flags: u16,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LocusTermLinkMatch {
+    pub y: u16,
+    pub x_start: u16,
+    pub x_end: u16,
+    pub link_id: u16,
+}
+
 struct LocusTermSearch {
     screen_key: ScreenKey,
     screen: ScreenSearch,
@@ -366,6 +376,9 @@ pub struct LocusTerm {
     // Search pins belong to screens inside the terminal. Plain handle drop is
     // safe because those screens and all pin storage are destroyed together.
     search: Option<LocusTermSearch>,
+    // Link IDs are indices into this per-query snapshot and remain valid only
+    // until the next viewport-links scan.
+    last_viewport_links: Vec<String>,
 }
 
 impl LocusTerm {
@@ -538,6 +551,7 @@ pub extern "C" fn locus_term_new(cols: u16, rows: u16, max_scrollback: usize) ->
             last_mouse_cell: None,
             synchronized_output_started_at: None,
             search: None,
+            last_viewport_links: Vec::new(),
         }))
     })) {
         Ok(term) => term,
@@ -1487,6 +1501,91 @@ pub unsafe extern "C" fn locus_term_search_viewport_matches(
     })
 }
 
+/// Returns packed `LocusTermLinkMatch` records for visible link rows.
+///
+/// Link IDs index the URI snapshot retained until the next call to this
+/// function.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle. `out` must point to writable storage
+/// for a `LocusTermBytes`, later freed with `locus_term_bytes_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_viewport_links(
+    term: *mut LocusTerm,
+    out: *mut LocusTermBytes,
+) -> u32 {
+    term_status(|| {
+        if out.is_null() {
+            set_last_error_message("out must not be NULL");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is non-null and caller-provided writable storage.
+        unsafe { *out = LocusTermBytes::default() };
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+
+        term.last_viewport_links.clear();
+        let screen = term.stream.handler.terminal.active_screen();
+        let links = url::viewport_links(screen);
+        let mut matches = Vec::new();
+        for link in links {
+            let Ok(link_id) = u16::try_from(term.last_viewport_links.len()) else {
+                break;
+            };
+            append_viewport_link_rows(&screen.pages, link.selection, link_id, &mut matches);
+            term.last_viewport_links.push(link.uri);
+        }
+        let limit = usize::from(screen.pages.rows) * SEARCH_MATCHES_PER_VIEWPORT_ROW_LIMIT;
+        matches.sort_unstable_by_key(|item| (item.y, item.x_start));
+        matches.truncate(limit);
+
+        let mut bytes = Vec::with_capacity(matches.len() * size_of::<LocusTermLinkMatch>());
+        for item in matches {
+            bytes.extend_from_slice(&item.y.to_ne_bytes());
+            bytes.extend_from_slice(&item.x_start.to_ne_bytes());
+            bytes.extend_from_slice(&item.x_end.to_ne_bytes());
+            bytes.extend_from_slice(&item.link_id.to_ne_bytes());
+        }
+        // SAFETY: `out` remains valid for this synchronous call.
+        unsafe { *out = bytes_from_vec(bytes) };
+        LOCUS_STATUS_OK
+    })
+}
+
+/// Copies the URI associated with a link ID from the last viewport scan.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle. `out` must point to writable storage
+/// for a `LocusTermBytes`, later freed with `locus_term_bytes_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_link_uri(
+    term: *mut LocusTerm,
+    link_id: u32,
+    out: *mut LocusTermBytes,
+) -> u32 {
+    term_status(|| {
+        if out.is_null() {
+            set_last_error_message("out must not be NULL");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is non-null and caller-provided writable storage.
+        unsafe { *out = LocusTermBytes::default() };
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        let bytes = usize::try_from(link_id)
+            .ok()
+            .and_then(|index| term.last_viewport_links.get(index))
+            .map_or_else(Vec::new, |uri| uri.as_bytes().to_vec());
+        // SAFETY: `out` remains valid for this synchronous call.
+        unsafe { *out = bytes_from_vec(bytes) };
+        LOCUS_STATUS_OK
+    })
+}
+
 fn term_status(action: impl FnOnce() -> u32) -> u32 {
     clear_last_error_message();
     match catch_unwind(AssertUnwindSafe(action)) {
@@ -1638,6 +1737,70 @@ fn append_viewport_search_rows(
                 flags: selected_flag,
             });
         }
+    }
+}
+
+fn append_viewport_link_rows(
+    pages: &terminal::page_list::PageList,
+    selection: terminal::selection::Selection,
+    link_id: u16,
+    output: &mut Vec<LocusTermLinkMatch>,
+) {
+    let (Some(start_pin), Some(end_pin)) =
+        (selection.top_left(pages), selection.bottom_right(pages))
+    else {
+        return;
+    };
+    let (Some(start), Some(end)) = (
+        pages.point_from_pin(Tag::Screen, start_pin),
+        pages.point_from_pin(Tag::Screen, end_pin),
+    ) else {
+        return;
+    };
+    let start = start.coord();
+    let end = end.coord();
+    let bottom = u32::from(pages.rows.saturating_sub(1));
+    let mut rows = pages.row_iterator(
+        terminal::page_list::Direction::RightDown,
+        Point::viewport(0, 0),
+        Some(Point::viewport(0, bottom)),
+    );
+
+    while let Some(row) = rows.next(pages) {
+        let Some(screen_row) = pages
+            .point_from_pin(Tag::Screen, row)
+            .map(|point| point.coord())
+        else {
+            continue;
+        };
+        if screen_row.y < start.y || screen_row.y > end.y {
+            continue;
+        }
+        let x_start = if screen_row.y == start.y { start.x } else { 0 };
+        let x_end = if screen_row.y == end.y {
+            end.x
+        } else {
+            pages.cols.saturating_sub(1)
+        };
+        let start_pin = Pin { x: x_start, ..row };
+        let end_pin = Pin { x: x_end, ..row };
+        let (Some(view_start), Some(view_end)) = (
+            pages.point_from_pin(Tag::Viewport, start_pin),
+            pages.point_from_pin(Tag::Viewport, end_pin),
+        ) else {
+            continue;
+        };
+        let view_start = view_start.coord();
+        let view_end = view_end.coord();
+        if view_start.y != view_end.y || view_start.y >= u32::from(pages.rows) {
+            continue;
+        }
+        output.push(LocusTermLinkMatch {
+            y: view_start.y as u16,
+            x_start: view_start.x,
+            x_end: view_end.x,
+            link_id,
+        });
     }
 }
 
@@ -2183,6 +2346,38 @@ mod tests {
             .collect()
     }
 
+    unsafe fn link_matches(term: *mut LocusTerm) -> Vec<LocusTermLinkMatch> {
+        let mut bytes = LocusTermBytes::default();
+        // SAFETY: test callers pass a live terminal handle and writable output.
+        assert_eq!(
+            unsafe { locus_term_viewport_links(term, &mut bytes) },
+            LOCUS_STATUS_OK
+        );
+        // SAFETY: bytes is returned by this ABI and consumed exactly once.
+        let bytes = unsafe { owned_bytes(&mut bytes) };
+        assert_eq!(bytes.len() % size_of::<LocusTermLinkMatch>(), 0);
+        bytes
+            .chunks_exact(size_of::<LocusTermLinkMatch>())
+            .map(|record| LocusTermLinkMatch {
+                y: u16::from_ne_bytes([record[0], record[1]]),
+                x_start: u16::from_ne_bytes([record[2], record[3]]),
+                x_end: u16::from_ne_bytes([record[4], record[5]]),
+                link_id: u16::from_ne_bytes([record[6], record[7]]),
+            })
+            .collect()
+    }
+
+    unsafe fn link_uri(term: *mut LocusTerm, id: u32) -> Vec<u8> {
+        let mut bytes = LocusTermBytes::default();
+        // SAFETY: test callers pass a live terminal handle and writable output.
+        assert_eq!(
+            unsafe { locus_term_link_uri(term, id, &mut bytes) },
+            LOCUS_STATUS_OK
+        );
+        // SAFETY: bytes is returned by this ABI and consumed exactly once.
+        unsafe { owned_bytes(&mut bytes) }
+    }
+
     #[test]
     fn abi_version_is_nonzero() {
         assert_eq!(locus_term_abi_version(), LOCUS_TERM_ABI_VERSION);
@@ -2206,6 +2401,119 @@ mod tests {
         assert_eq!(offset_of!(LocusTermSearchMatch, x_start), 2);
         assert_eq!(offset_of!(LocusTermSearchMatch, x_end), 4);
         assert_eq!(offset_of!(LocusTermSearchMatch, flags), 6);
+    }
+
+    #[test]
+    fn link_match_layout_is_stable() {
+        assert_eq!(size_of::<LocusTermLinkMatch>(), 8);
+        assert_eq!(align_of::<LocusTermLinkMatch>(), 2);
+        assert_eq!(offset_of!(LocusTermLinkMatch, y), 0);
+        assert_eq!(offset_of!(LocusTermLinkMatch, x_start), 2);
+        assert_eq!(offset_of!(LocusTermLinkMatch, x_end), 4);
+        assert_eq!(offset_of!(LocusTermLinkMatch, link_id), 6);
+    }
+
+    #[test]
+    fn viewport_links_detect_plain_url_and_round_trip_uri() {
+        let term = locus_term_new(40, 4, 1024);
+        let input = b"visit https://example.test";
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                link_matches(term),
+                vec![LocusTermLinkMatch {
+                    y: 0,
+                    x_start: 6,
+                    x_end: 25,
+                    link_id: 0,
+                }]
+            );
+            assert_eq!(link_uri(term, 0), b"https://example.test");
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn viewport_links_preserve_osc8_target_uri() {
+        let term = locus_term_new(30, 3, 1024);
+        let input = b"\x1b]8;;https://target.test\x1b\\label\x1b]8;;\x1b\\";
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                link_matches(term),
+                vec![LocusTermLinkMatch {
+                    y: 0,
+                    x_start: 0,
+                    x_end: 4,
+                    link_id: 0,
+                }]
+            );
+            assert_eq!(link_uri(term, 0), b"https://target.test");
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn viewport_link_id_is_empty_after_refresh_removes_it() {
+        let term = locus_term_new(30, 3, 1024);
+        let input = b"https://example.test";
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(link_matches(term).len(), 1);
+            assert_eq!(link_uri(term, 0), input);
+            let clear = b"\x1b[2J";
+            assert_eq!(
+                locus_term_feed(term, clear.as_ptr(), clear.len()),
+                LOCUS_STATUS_OK
+            );
+            assert!(link_matches(term).is_empty());
+            assert!(link_uri(term, 0).is_empty());
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn viewport_links_validate_nulls_and_follow_scrolling() {
+        let term = locus_term_new(30, 3, 1024 * 1024);
+        let input = b"https://example.test\r\nline1\r\nline2\r\nline3\r\nline4";
+        let mut bytes = LocusTermBytes::default();
+        unsafe {
+            assert_eq!(
+                locus_term_viewport_links(ptr::null_mut(), &mut bytes),
+                LOCUS_TERM_STATUS_INVALID_ARGUMENT
+            );
+            assert_eq!(
+                locus_term_viewport_links(term, ptr::null_mut()),
+                LOCUS_TERM_STATUS_INVALID_ARGUMENT
+            );
+            assert_eq!(
+                locus_term_link_uri(term, 0, ptr::null_mut()),
+                LOCUS_TERM_STATUS_INVALID_ARGUMENT
+            );
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert!(link_matches(term).is_empty());
+            assert_eq!(locus_term_scroll(term, -3), LOCUS_STATUS_OK);
+            let matches = link_matches(term);
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0].y, 0);
+            assert_eq!(
+                link_uri(term, u32::from(matches[0].link_id)),
+                b"https://example.test"
+            );
+            locus_term_free(term);
+        }
     }
 
     #[test]

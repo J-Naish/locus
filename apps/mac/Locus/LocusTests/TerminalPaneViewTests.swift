@@ -6,6 +6,81 @@ import XCTest
 
 @MainActor
 final class TerminalPaneViewTests: XCTestCase {
+  func testLinkHitTesterHandlesInsideOutsideAndMultiRowLinks() {
+    let matches = [
+      TerminalLinkMatch(y: 2, xStart: 4, xEnd: 9, linkID: 7),
+      TerminalLinkMatch(y: 3, xStart: 0, xEnd: 5, linkID: 7),
+      TerminalLinkMatch(y: 5, xStart: 2, xEnd: 6, linkID: 8),
+    ]
+
+    XCTAssertEqual(
+      TerminalLinkHitTester.match(
+        at: TerminalCellCoordinate(column: 6, row: 2),
+        in: matches
+      ),
+      matches[0]
+    )
+    XCTAssertEqual(
+      TerminalLinkHitTester.match(
+        at: TerminalCellCoordinate(column: 3, row: 3),
+        in: matches
+      ),
+      matches[1]
+    )
+    XCTAssertNil(
+      TerminalLinkHitTester.match(
+        at: TerminalCellCoordinate(column: 10, row: 2),
+        in: matches
+      )
+    )
+    XCTAssertNil(
+      TerminalLinkHitTester.match(
+        at: TerminalCellCoordinate(column: 4, row: 4),
+        in: matches
+      )
+    )
+  }
+
+  func testLinkUnderlineRectUsesInclusiveGridCellsAndFontBaseline() {
+    let metrics = TerminalCellMetrics()
+    let insets = TerminalPaneLayoutMetrics.contentInsets
+    let bounds = NSRect(x: 0, y: 0, width: 400, height: 300)
+    let match = TerminalLinkMatch(y: 2, xStart: 3, xEnd: 5, linkID: 7)
+
+    let rect = TerminalPaneGeometry.linkUnderlineRect(
+      match,
+      bounds: bounds,
+      metrics: metrics,
+      insets: insets
+    )
+    let baselineY =
+      bounds.height - insets.top - CGFloat(match.y) * metrics.cellHeight
+      - metrics.baselineOffset
+
+    XCTAssertEqual(rect.minX, insets.left + 3 * metrics.cellWidth, accuracy: 0.001)
+    XCTAssertEqual(rect.width, 3 * metrics.cellWidth, accuracy: 0.001)
+    XCTAssertEqual(
+      rect.minY,
+      baselineY + CGFloat(CTFontGetUnderlinePosition(metrics.font as CTFont)),
+      accuracy: 0.001
+    )
+    XCTAssertGreaterThanOrEqual(rect.height, 1)
+  }
+
+  func testLinkURLValidatorAllowsOnlyHttpAndHttps() {
+    XCTAssertEqual(
+      TerminalLinkURLValidator.url(from: "https://example.com/path")?.absoluteString,
+      "https://example.com/path"
+    )
+    XCTAssertEqual(
+      TerminalLinkURLValidator.url(from: "HTTP://example.com")?.scheme?.lowercased(),
+      "http"
+    )
+    XCTAssertNil(TerminalLinkURLValidator.url(from: "file:///tmp/private"))
+    XCTAssertNil(TerminalLinkURLValidator.url(from: "javascript:alert(1)"))
+    XCTAssertNil(TerminalLinkURLValidator.url(from: "not a url"))
+  }
+
   func testWheelAccumulatorEmitsWholeRowsWithCarry() {
     var accumulator = TerminalWheelAccumulator()
 

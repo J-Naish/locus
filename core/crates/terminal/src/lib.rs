@@ -43,5 +43,6 @@ pub mod style;
 pub mod tabstops;
 pub mod terminal;
 pub mod unicode;
+pub mod url;
 pub mod utf8;
 pub mod x11_color;

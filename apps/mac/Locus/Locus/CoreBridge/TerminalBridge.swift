@@ -112,6 +112,13 @@ struct TerminalSearchMatch: Equatable, Sendable {
   let isSelected: Bool
 }
 
+struct TerminalLinkMatch: Equatable, Sendable {
+  let y: UInt16
+  let xStart: UInt16
+  let xEnd: UInt16
+  let linkID: UInt16
+}
+
 enum TerminalSearchDirection: UInt32, Sendable {
   case next = 0
   case previous = 1
@@ -262,6 +269,39 @@ final class TerminalCore {
           xStart: nativeUInt16(in: data, at: offset + 2),
           xEnd: nativeUInt16(in: data, at: offset + 4),
           isSelected: flags & 1 != 0
+        )
+      )
+    }
+    return matches
+  }
+
+  func viewportLinks() throws -> [TerminalLinkMatch] {
+    var bytes = LocusTermBytes(ptr: nil, len: 0, cap: 0)
+    try Self.checkStatus(locus_term_viewport_links(handle, &bytes))
+    return Self.decodeLinkMatches(Self.copyAndFree(bytes: &bytes))
+  }
+
+  func linkURI(_ id: UInt32) throws -> String {
+    var bytes = LocusTermBytes(ptr: nil, len: 0, cap: 0)
+    try Self.checkStatus(locus_term_link_uri(handle, id, &bytes))
+    return String(decoding: Self.copyAndFree(bytes: &bytes), as: UTF8.self)
+  }
+
+  static func decodeLinkMatches(_ data: Data) -> [TerminalLinkMatch] {
+    let stride = MemoryLayout<LocusTermLinkMatch>.stride
+    guard stride == 8, data.count >= stride else {
+      return []
+    }
+
+    var matches: [TerminalLinkMatch] = []
+    matches.reserveCapacity(data.count / stride)
+    for offset in Swift.stride(from: 0, through: data.count - stride, by: stride) {
+      matches.append(
+        TerminalLinkMatch(
+          y: nativeUInt16(in: data, at: offset),
+          xStart: nativeUInt16(in: data, at: offset + 2),
+          xEnd: nativeUInt16(in: data, at: offset + 4),
+          linkID: nativeUInt16(in: data, at: offset + 6)
         )
       )
     }

@@ -836,6 +836,13 @@ typedef struct LocusTermSearchMatch {
     uint16_t flags;
 } LocusTermSearchMatch;
 
+typedef struct LocusTermLinkMatch {
+    uint16_t y;
+    uint16_t x_start;
+    uint16_t x_end;
+    uint16_t link_id;
+} LocusTermLinkMatch;
+
 uint32_t locus_term_abi_version(void);
 LocusTerm *locus_term_new(uint16_t cols, uint16_t rows, size_t max_scrollback);
 void locus_term_free(LocusTerm *term);
@@ -863,6 +870,19 @@ LocusStatus locus_term_search_select(
  */
 LocusStatus locus_term_search_viewport_matches(
     LocusTerm *term, LocusTermBytes *out);
+/*
+ * Packed LocusTermLinkMatch records sorted by (y, x_start), capped at
+ * rows * 64 records and freed with locus_term_bytes_free. Link IDs remain
+ * valid until the next locus_term_viewport_links call.
+ */
+LocusStatus locus_term_viewport_links(
+    LocusTerm *term, LocusTermBytes *out);
+/*
+ * UTF-8 URI for a link ID from the last viewport-links call. Unknown or stale
+ * IDs return an empty byte buffer.
+ */
+LocusStatus locus_term_link_uri(
+    LocusTerm *term, uint32_t link_id, LocusTermBytes *out);
 /* Bit 0 = modifyOtherKeys state 2; bit 1 = active kitty keyboard flags. */
 uint32_t locus_term_key_protocol_active(const LocusTerm *term);
 /*

@@ -277,6 +277,18 @@ final class TerminalSession: ObservableObject {
     worker.selectionText()
   }
 
+  /// Synchronously scans links in the current viewport. Do not call this
+  /// from inside `withFrame` because both accessors share the worker queue.
+  func viewportLinks() -> [TerminalLinkMatch] {
+    worker.viewportLinks()
+  }
+
+  /// Resolves an ID returned by the latest `viewportLinks` call. Do not call
+  /// this from inside `withFrame`; unknown, stale, and failed lookups return nil.
+  func linkURI(_ id: UInt32) -> String? {
+    worker.linkURI(id)
+  }
+
   fileprivate func publish(state: State) {
     self.state = state
   }
@@ -587,6 +599,24 @@ private final class TerminalSessionWorker {
     }
     return queue.sync {
       selectionTextOnQueue()
+    }
+  }
+
+  func viewportLinks() -> [TerminalLinkMatch] {
+    if DispatchQueue.getSpecific(key: queueKey) != nil {
+      return viewportLinksOnQueue()
+    }
+    return queue.sync {
+      viewportLinksOnQueue()
+    }
+  }
+
+  func linkURI(_ id: UInt32) -> String? {
+    if DispatchQueue.getSpecific(key: queueKey) != nil {
+      return linkURIOnQueue(id)
+    }
+    return queue.sync {
+      linkURIOnQueue(id)
     }
   }
 
@@ -1001,6 +1031,31 @@ private final class TerminalSessionWorker {
     } catch {
       handleMouseInteractionError(error)
       return ""
+    }
+  }
+
+  private func viewportLinksOnQueue() -> [TerminalLinkMatch] {
+    guard let terminal else {
+      return []
+    }
+    do {
+      return try terminal.viewportLinks()
+    } catch {
+      handleMouseInteractionError(error)
+      return []
+    }
+  }
+
+  private func linkURIOnQueue(_ id: UInt32) -> String? {
+    guard let terminal else {
+      return nil
+    }
+    do {
+      let uri = try terminal.linkURI(id)
+      return uri.isEmpty ? nil : uri
+    } catch {
+      handleMouseInteractionError(error)
+      return nil
     }
   }
 

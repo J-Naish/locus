@@ -4,6 +4,24 @@ import XCTest
 
 @MainActor
 final class TerminalSessionTests: XCTestCase {
+  func testViewportLinksReturnsFedURLRow() {
+    let session = TerminalSession(columns: 60, rows: 10)
+    defer { session.terminate() }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+    session.send(Data("printf 'https://example.com/session-link\\n'\n".utf8))
+    XCTAssertTrue(
+      waitUntil {
+        session.plainTextForTesting()?.contains("https://example.com/session-link") == true
+      }
+    )
+
+    let matches = session.viewportLinks()
+
+    XCTAssertFalse(matches.isEmpty)
+    XCTAssertEqual(session.linkURI(UInt32(matches[0].linkID)), "https://example.com/session-link")
+  }
+
   func testSearchStartPublishesStatusAndMatches() {
     let session = TerminalSession(columns: 60, rows: 10)
     defer { session.terminate() }

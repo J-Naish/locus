@@ -4,6 +4,39 @@ import XCTest
 @testable import Locus
 
 final class TerminalBridgeTests: XCTestCase {
+  func testLinkRoundTripThroughFeed() throws {
+    let terminal = try TerminalCore(columns: 40, rows: 8)
+    try terminal.feed(Data("https://example.com".utf8))
+
+    let matches = try terminal.viewportLinks()
+
+    XCTAssertEqual(
+      matches,
+      [TerminalLinkMatch(y: 0, xStart: 0, xEnd: 18, linkID: 0)]
+    )
+    XCTAssertEqual(try terminal.linkURI(UInt32(matches[0].linkID)), "https://example.com")
+  }
+
+  func testDecodeLinkMatchesHandlesStrideAndTruncation() {
+    var data = Data()
+    for value: UInt16 in [2, 3, 5, 7, 11, 13, 17, 19] {
+      var nativeValue = value
+      withUnsafeBytes(of: &nativeValue) { data.append(contentsOf: $0) }
+    }
+
+    XCTAssertEqual(
+      TerminalCore.decodeLinkMatches(data),
+      [
+        TerminalLinkMatch(y: 2, xStart: 3, xEnd: 5, linkID: 7),
+        TerminalLinkMatch(y: 11, xStart: 13, xEnd: 17, linkID: 19),
+      ]
+    )
+    XCTAssertEqual(
+      TerminalCore.decodeLinkMatches(Data(data.prefix(12))),
+      [TerminalLinkMatch(y: 2, xStart: 3, xEnd: 5, linkID: 7)]
+    )
+  }
+
   func testSearchRoundTripThroughFeed() throws {
     let terminal = try TerminalCore(columns: 40, rows: 8)
     try terminal.feed(Data("Fizz\r\nBuzz\r\nFizz".utf8))

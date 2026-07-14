@@ -528,6 +528,48 @@ enum TerminalPaneGeometry {
       insets: insets
     )
   }
+
+  static func linkUnderlineRect(
+    _ match: TerminalLinkMatch,
+    bounds: NSRect,
+    metrics: TerminalCellMetrics,
+    insets: TerminalContentInsets
+  ) -> NSRect {
+    let baselineY =
+      bounds.height - rowTopOffset(match.y, metrics: metrics, insets: insets)
+      - metrics.baselineOffset
+    let font = metrics.font as CTFont
+    return NSRect(
+      x: insets.left + CGFloat(match.xStart) * metrics.cellWidth,
+      y: baselineY + CGFloat(CTFontGetUnderlinePosition(font)),
+      width: CGFloat(Int(match.xEnd) - Int(match.xStart) + 1) * metrics.cellWidth,
+      height: max(1, CGFloat(CTFontGetUnderlineThickness(font)))
+    )
+  }
+}
+
+enum TerminalLinkHitTester {
+  static func match(
+    at coordinate: TerminalCellCoordinate,
+    in matches: [TerminalLinkMatch]
+  ) -> TerminalLinkMatch? {
+    matches.first { match in
+      match.y == coordinate.row
+        && match.xStart <= coordinate.column
+        && coordinate.column <= match.xEnd
+    }
+  }
+}
+
+enum TerminalLinkURLValidator {
+  static func url(from uri: String) -> URL? {
+    guard let url = URL(string: uri), let scheme = url.scheme?.lowercased(),
+      scheme == "http" || scheme == "https"
+    else {
+      return nil
+    }
+    return url
+  }
 }
 
 /// Accumulates AppKit scrolling deltas into whole terminal rows. AppKit's
@@ -1087,6 +1129,11 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
     let cell: TerminalCellCoordinate
   }
 
+  private struct HoveredLink: Equatable {
+    let match: TerminalLinkMatch
+    let uri: String
+  }
+
   private static let selectionAutoscrollInterval: TimeInterval = 0.05
 
   var onWindowChange: ((TerminalPaneView) -> Void)?
@@ -1096,6 +1143,8 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       guard oldValue !== session else {
         return
       }
+      cachedLinks = nil
+      clearHoveredLink()
       subscribeToSession()
       if window != nil {
         synchronizeTerminalSize()
@@ -1130,6 +1179,9 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   private var lastDrawnCaretVisibility: Bool?
   private var lastDrawnCaretRect: NSRect?
   private var wheelAccumulator = TerminalWheelAccumulator()
+  private var linkTrackingArea: NSTrackingArea?
+  private var hoveredLink: HoveredLink?
+  private var cachedLinks: (generation: UInt64, matches: [TerminalLinkMatch])?
 
   override var acceptsFirstResponder: Bool { true }
   override var isOpaque: Bool { true }
@@ -1212,6 +1264,46 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
     scheduleTerminalResizeIfNeeded()
   }
 
+  override func updateTrackingAreas() {
+    if let linkTrackingArea {
+      removeTrackingArea(linkTrackingArea)
+    }
+    let trackingArea = NSTrackingArea(
+      rect: .zero,
+      options: [
+        .mouseMoved,
+        .mouseEnteredAndExited,
+        .activeInKeyWindow,
+        .inVisibleRect,
+      ],
+      owner: self,
+      userInfo: nil
+    )
+    addTrackingArea(trackingArea)
+    linkTrackingArea = trackingArea
+    super.updateTrackingAreas()
+  }
+
+  override func mouseMoved(with event: NSEvent) {
+    updateLinkHover(with: event)
+    super.mouseMoved(with: event)
+  }
+
+  override func mouseEntered(with event: NSEvent) {
+    updateLinkHover(with: event)
+    super.mouseEntered(with: event)
+  }
+
+  override func mouseExited(with event: NSEvent) {
+    clearHoveredLink()
+    super.mouseExited(with: event)
+  }
+
+  override func flagsChanged(with event: NSEvent) {
+    updateLinkHover(with: event)
+    super.flagsChanged(with: event)
+  }
+
   override func scrollWheel(with event: NSEvent) {
     guard let session, let gridSize = currentGridSize() else {
       super.scrollWheel(with: event)
@@ -1250,6 +1342,16 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       grid: gridSize
     )
     let modifiers = TerminalKeyTranslator.modifiers(for: event)
+    if event.modifierFlags.contains(.command), event.clickCount == 1,
+      let link = resolvedLink(at: hit.coordinate)
+    {
+      mouseRouting = .none
+      pendingClick = nil
+      if let url = TerminalLinkURLValidator.url(from: link.uri) {
+        NSWorkspace.shared.open(url)
+      }
+      return
+    }
     if session.routeMousePress(
       button: .left,
       column: hit.coordinate.column,
@@ -1283,6 +1385,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   }
 
   override func mouseDragged(with event: NSEvent) {
+    clearHoveredLink()
     guard let session, let gridSize = currentGridSize() else {
       pendingClick = nil
       super.mouseDragged(with: event)
@@ -1438,6 +1541,21 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   override func resetCursorRects() {
     super.resetCursorRects()
     addCursorRect(bounds, cursor: .iBeam)
+    guard let hoveredLink else {
+      return
+    }
+    for match in linkSegments(for: hoveredLink.match.linkID) {
+      addCursorRect(
+        TerminalPaneGeometry.selectionRect(
+          columns: match.xStart...match.xEnd,
+          row: match.y,
+          bounds: bounds,
+          metrics: metrics,
+          insets: TerminalPaneLayoutMetrics.contentInsets
+        ),
+        cursor: .pointingHand
+      )
+    }
   }
 
   override func becomeFirstResponder() -> Bool {
@@ -1668,11 +1786,13 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
 
     let drawTime = CACurrentMediaTime()
     let searchMatches = session.snapshot?.search?.viewportMatches ?? []
+    let hoveredLinkMatches = hoveredLink.map { linkSegments(for: $0.match.linkID) } ?? []
     session.withFrame { frame in
       let caretVisible = caretIsVisible(cursor: frame.cursor, at: drawTime)
       draw(
         frame: frame,
         searchMatches: searchMatches,
+        hoveredLinkMatches: hoveredLinkMatches,
         caretVisible: caretVisible,
         in: context
       )
@@ -1738,6 +1858,10 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       return
     }
 
+    if cachedLinks?.generation != generation {
+      cachedLinks = nil
+      clearHoveredLink()
+    }
     hasPendingFrameChange = false
     lastScheduledGeneration = generation
     needsDisplay = true
@@ -1841,6 +1965,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   private func draw(
     frame: TerminalFrame,
     searchMatches: [TerminalSearchMatch],
+    hoveredLinkMatches: [TerminalLinkMatch],
     caretVisible: Bool,
     in context: CGContext
   ) {
@@ -1855,6 +1980,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
           for row in rows {
             drawText(row: row, cells: cells, graphemes: graphemes, in: context)
           }
+          drawHoveredLinkUnderlines(hoveredLinkMatches, in: context)
         }
       }
     }
@@ -1904,6 +2030,23 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
         metrics: metrics,
         insets: TerminalPaneLayoutMetrics.contentInsets
       ).fill()
+    }
+  }
+
+  private func drawHoveredLinkUnderlines(
+    _ matches: [TerminalLinkMatch],
+    in context: CGContext
+  ) {
+    context.setFillColor(NSColor.textColor.withAlphaComponent(0.8).cgColor)
+    for match in matches {
+      context.fill(
+        TerminalPaneGeometry.linkUnderlineRect(
+          match,
+          bounds: bounds,
+          metrics: metrics,
+          insets: TerminalPaneLayoutMetrics.contentInsets
+        )
+      )
     }
   }
 
@@ -2312,6 +2455,80 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       insets: TerminalPaneLayoutMetrics.contentInsets,
       grid: gridSize
     )
+  }
+
+  private func updateLinkHover(with event: NSEvent) {
+    guard event.modifierFlags.contains(.command), mouseRouting == .none,
+      let gridSize = currentGridSize()
+    else {
+      clearHoveredLink()
+      restoreIBeamIfPointerIsInside(event)
+      return
+    }
+    let hit = cellHit(for: event, gridSize: gridSize)
+    guard let link = resolvedLink(at: hit.coordinate) else {
+      clearHoveredLink()
+      NSCursor.iBeam.set()
+      return
+    }
+    guard hoveredLink != link else {
+      NSCursor.pointingHand.set()
+      return
+    }
+
+    hoveredLink = link
+    toolTip = link.uri
+    window?.invalidateCursorRects(for: self)
+    needsDisplay = true
+    NSCursor.pointingHand.set()
+  }
+
+  private func resolvedLink(at coordinate: TerminalCellCoordinate) -> HoveredLink? {
+    guard let match = TerminalLinkHitTester.match(at: coordinate, in: linksForCurrentGeneration()),
+      let uri = session?.linkURI(UInt32(match.linkID))
+    else {
+      return nil
+    }
+    return HoveredLink(match: match, uri: uri)
+  }
+
+  private func linksForCurrentGeneration() -> [TerminalLinkMatch] {
+    guard let session, let generation = session.snapshot?.generation else {
+      return []
+    }
+    if let cachedLinks, cachedLinks.generation == generation {
+      return cachedLinks.matches
+    }
+    let matches = session.viewportLinks()
+    cachedLinks = (generation, matches)
+    return matches
+  }
+
+  private func linkSegments(for linkID: UInt16) -> [TerminalLinkMatch] {
+    guard let generation = session?.snapshot?.generation,
+      let cachedLinks,
+      cachedLinks.generation == generation
+    else {
+      return []
+    }
+    return cachedLinks.matches.filter { $0.linkID == linkID }
+  }
+
+  private func clearHoveredLink() {
+    guard hoveredLink != nil || toolTip != nil else {
+      return
+    }
+    hoveredLink = nil
+    toolTip = nil
+    window?.invalidateCursorRects(for: self)
+    needsDisplay = true
+  }
+
+  private func restoreIBeamIfPointerIsInside(_ event: NSEvent) {
+    let point = convert(event.locationInWindow, from: nil)
+    if bounds.contains(point) {
+      NSCursor.iBeam.set()
+    }
   }
 
   private func startSelectionAutoscrollIfNeeded() {
