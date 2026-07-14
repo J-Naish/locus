@@ -842,6 +842,306 @@ final class TerminalPaneViewTests: XCTestCase {
     XCTAssertTrue(bitmapHasMultipleColors(bitmap))
   }
 
+  func testDrawPassTimingProbe() throws {
+    let columns: UInt16 = 120
+    let rows: UInt16 = 40
+    let metrics = TerminalCellMetrics()
+    let session = TerminalSession(columns: columns, rows: rows)
+    defer {
+      session.terminate()
+    }
+    let view = TerminalPaneView(session: session, metrics: metrics)
+    view.frame = gridFrame(columns: columns, rows: rows, metrics: metrics)
+    session.start(command: "/bin/sh")
+    let command =
+      "i=0; printf '\\033[2J\\033[H'; while [ \"$i\" -lt 45 ]; do c=$((i % 7 + 1)); "
+      + "printf '\\033[3%smrow-%02d ASCII-%02d 日本語-%02d \\033[0m "
+      + "payload-%02d-abcdefghijklmnopqrstuvwxyz-0123456789\\r\\n' "
+      + "\"$c\" \"$i\" \"$i\" \"$i\" \"$i\"; i=$((i + 1)); done\n"
+    session.send(Data(command.utf8))
+    XCTAssertTrue(
+      waitForPaneCondition(timeout: 5) {
+        session.plainTextForTesting()?.contains("row-44") == true
+      },
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
+    )
+    view.needsDisplay = true
+    view.displayIfNeeded()
+
+    guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+      XCTFail("Failed to create timing-probe bitmap")
+      return
+    }
+
+    // Standing renderer probe: report cold full paints and steady-state
+    // cached paints independently without a machine-dependent assertion.
+    let fullSamples = (0..<20).map { _ in
+      terminalDrawDurationMilliseconds {
+        view.clearRowTextPoolForTesting()
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+      }
+    }
+    view.cacheDisplay(in: view.bounds, to: bitmap)
+    let cachedSamples = (0..<20).map { _ in
+      terminalDrawDurationMilliseconds {
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+      }
+    }
+    XCTAssertGreaterThan(view.rowTextPoolStatisticsForTesting.hits, 0)
+    XCTAssertEqual(view.rowTextPoolStatisticsForTesting.misses, 0)
+    let caretRect = NSRect(
+      x: TerminalPaneLayoutMetrics.contentInsets.left,
+      y: TerminalPaneLayoutMetrics.contentInsets.bottom,
+      width: 2,
+      height: metrics.cellHeight
+    )
+    let caretSamples = (0..<20).map { _ in
+      terminalDrawDurationMilliseconds {
+        view.cacheDisplay(in: caretRect, to: bitmap)
+      }
+    }
+
+    terminalRecordProbeMetric(
+      "draw_pass_full_ms_per_frame",
+      value: terminalMedian(fullSamples)
+    )
+    terminalRecordProbeMetric(
+      "draw_pass_cached_ms_per_frame",
+      value: terminalMedian(cachedSamples)
+    )
+    terminalRecordProbeMetric(
+      "draw_pass_caret_rect_ms",
+      value: terminalMedian(caretSamples)
+    )
+    XCTAssertTrue(bitmapHasMultipleColors(bitmap))
+  }
+
+  func testRowSignatureChangesWithContentAndStyle() {
+    let row = LocusTermRow(
+      y: 0,
+      cell_start: 0,
+      cell_count: 1,
+      dirty: false,
+      wrapped: false,
+      sel_start: .max,
+      sel_end: .max
+    )
+    let base = terminalTestCell(codepoint: 0x41, foregroundRed: 1, graphemeLength: 1)
+    let changedCodepoint = terminalTestCell(
+      codepoint: 0x42,
+      foregroundRed: 1,
+      graphemeLength: 1
+    )
+    let changedForeground = terminalTestCell(
+      codepoint: 0x41,
+      foregroundRed: 2,
+      graphemeLength: 1
+    )
+    let baseGraphemes: [UInt32] = [0x301]
+    let changedGraphemes: [UInt32] = [0x302]
+
+    let signature = [base].withUnsafeBufferPointer { cells in
+      baseGraphemes.withUnsafeBufferPointer { graphemes in
+        TerminalRowSignature.signature(row: row, cells: cells, graphemes: graphemes)
+      }
+    }
+    let equalSignature = [base].withUnsafeBufferPointer { cells in
+      baseGraphemes.withUnsafeBufferPointer { graphemes in
+        TerminalRowSignature.signature(row: row, cells: cells, graphemes: graphemes)
+      }
+    }
+    let codepointSignature = [changedCodepoint].withUnsafeBufferPointer { cells in
+      baseGraphemes.withUnsafeBufferPointer { graphemes in
+        TerminalRowSignature.signature(row: row, cells: cells, graphemes: graphemes)
+      }
+    }
+    let foregroundSignature = [changedForeground].withUnsafeBufferPointer { cells in
+      baseGraphemes.withUnsafeBufferPointer { graphemes in
+        TerminalRowSignature.signature(row: row, cells: cells, graphemes: graphemes)
+      }
+    }
+    let graphemeSignature = [base].withUnsafeBufferPointer { cells in
+      changedGraphemes.withUnsafeBufferPointer { graphemes in
+        TerminalRowSignature.signature(row: row, cells: cells, graphemes: graphemes)
+      }
+    }
+
+    XCTAssertEqual(signature, equalSignature)
+    XCTAssertNotEqual(signature, codepointSignature)
+    XCTAssertNotEqual(signature, foregroundSignature)
+    XCTAssertNotEqual(signature, graphemeSignature)
+  }
+
+  func testRowSignatureStreamingAgreesWithMaterializedBytes() {
+    let row = LocusTermRow(
+      y: 0,
+      cell_start: 0,
+      cell_count: 1,
+      dirty: false,
+      wrapped: false,
+      sel_start: .max,
+      sel_end: .max
+    )
+    let base = terminalTestCell(codepoint: 0x41, foregroundRed: 1, graphemeLength: 1)
+    let changed = terminalTestCell(codepoint: 0x41, foregroundRed: 2, graphemeLength: 1)
+    let graphemes: [UInt32] = [0x301]
+    let signature = [base].withUnsafeBufferPointer { cells in
+      graphemes.withUnsafeBufferPointer { graphemes in
+        TerminalRowSignature.signature(row: row, cells: cells, graphemes: graphemes)
+      }
+    }
+    let streamedHash = [base].withUnsafeBufferPointer { cells in
+      graphemes.withUnsafeBufferPointer { graphemes in
+        TerminalRowSignature.hash(row: row, cells: cells, graphemes: graphemes)
+      }
+    }
+
+    XCTAssertEqual(streamedHash, TerminalRowSignature.hash(signature: signature))
+    XCTAssertTrue(
+      [base].withUnsafeBufferPointer { cells in
+        graphemes.withUnsafeBufferPointer { graphemes in
+          TerminalRowSignature.matches(
+            signature,
+            row: row,
+            cells: cells,
+            graphemes: graphemes
+          )
+        }
+      }
+    )
+    XCTAssertFalse(
+      [changed].withUnsafeBufferPointer { cells in
+        graphemes.withUnsafeBufferPointer { graphemes in
+          TerminalRowSignature.matches(
+            signature,
+            row: row,
+            cells: cells,
+            graphemes: graphemes
+          )
+        }
+      }
+    )
+  }
+
+  func testCachedPaintIsPixelIdenticalToColdPaint() throws {
+    let fixture = makeTerminalRenderFixture(columns: 60, rows: 12, lineCount: 16)
+    defer {
+      fixture.session.terminate()
+    }
+    guard let bitmap = fixture.view.bitmapImageRepForCachingDisplay(in: fixture.view.bounds) else {
+      XCTFail("Failed to create cache-test bitmap")
+      return
+    }
+
+    fixture.view.clearRowTextPoolForTesting()
+    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
+    let coldPixels = terminalBitmapBytes(bitmap)
+    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
+    let warmPixels = terminalBitmapBytes(bitmap)
+
+    XCTAssertEqual(warmPixels, coldPixels)
+    XCTAssertGreaterThanOrEqual(fixture.view.rowTextPoolStatisticsForTesting.hits, 1)
+    XCTAssertEqual(fixture.view.rowTextPoolStatisticsForTesting.misses, 0)
+
+    fixture.view.clearRowTextPoolForTesting()
+    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
+    XCTAssertEqual(terminalBitmapBytes(bitmap), coldPixels)
+    XCTAssertGreaterThanOrEqual(fixture.view.rowTextPoolStatisticsForTesting.misses, 1)
+  }
+
+  func testScrolledContentReusesPooledRows() throws {
+    let fixture = makeTerminalRenderFixture(columns: 60, rows: 12, lineCount: 16)
+    defer {
+      fixture.session.terminate()
+    }
+    guard let bitmap = fixture.view.bitmapImageRepForCachingDisplay(in: fixture.view.bounds) else {
+      XCTFail("Failed to create scroll-cache bitmap")
+      return
+    }
+    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
+    let generation = fixture.session.snapshot?.generation ?? 0
+
+    fixture.session.send(Data("printf 'new-0\\r\\nnew-1\\r\\nnew-2\\r\\n'\n".utf8))
+    XCTAssertTrue(
+      waitForPaneCondition {
+        (fixture.session.snapshot?.generation ?? 0) > generation
+          && fixture.session.plainTextForTesting()?.contains("new-2") == true
+      }
+    )
+    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
+
+    XCTAssertGreaterThan(fixture.view.rowTextPoolStatisticsForTesting.hits, 0)
+    XCTAssertGreaterThan(fixture.view.rowTextPoolStatisticsForTesting.misses, 0)
+  }
+
+  func testCachedPaintIsPixelIdenticalForInverseWideOverflowRow() throws {
+    let fixture = makeTerminalRenderFixture(columns: 60, rows: 12, lineCount: 12)
+    defer {
+      fixture.session.terminate()
+    }
+    let generation = fixture.session.snapshot?.generation ?? 0
+    fixture.session.send(Data("printf '\\033[7m逆向き-日本語→○\\033[0m\\r\\n'\n".utf8))
+    XCTAssertTrue(
+      waitForPaneCondition {
+        (fixture.session.snapshot?.generation ?? 0) > generation
+          && fixture.session.plainTextForTesting()?.contains("逆向き-日本語→○") == true
+      }
+    )
+    guard let bitmap = fixture.view.bitmapImageRepForCachingDisplay(in: fixture.view.bounds) else {
+      XCTFail("Failed to create inverse-wide cache bitmap")
+      return
+    }
+
+    fixture.view.clearRowTextPoolForTesting()
+    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
+    let coldPixels = terminalBitmapBytes(bitmap)
+    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
+
+    XCTAssertEqual(terminalBitmapBytes(bitmap), coldPixels)
+    XCTAssertGreaterThan(fixture.view.rowTextPoolStatisticsForTesting.hits, 0)
+    XCTAssertEqual(fixture.view.rowTextPoolStatisticsForTesting.misses, 0)
+  }
+
+  func testPartialDirtyRectPaintMatchesFullPaint() throws {
+    let fixture = makeTerminalRenderFixture(columns: 60, rows: 12, lineCount: 16)
+    defer {
+      fixture.session.terminate()
+    }
+    guard let bitmap = fixture.view.bitmapImageRepForCachingDisplay(in: fixture.view.bounds) else {
+      XCTFail("Failed to create dirty-rect bitmap")
+      return
+    }
+    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
+    let fullPixels = terminalBitmapBytes(bitmap)
+    let fullRows = fixture.view.rowsDrawnForTesting
+    guard let partialBitmap = bitmap.copy() as? NSBitmapImageRep else {
+      XCTFail("Failed to copy dirty-rect bitmap")
+      return
+    }
+    XCTAssertEqual(terminalBitmapBytes(partialBitmap), fullPixels)
+    let dirtyRect = NSRect(
+      x: TerminalPaneLayoutMetrics.contentInsets.left,
+      y: TerminalPaneLayoutMetrics.contentInsets.bottom,
+      width: 2,
+      height: fixture.metrics.cellHeight
+    )
+
+    fixture.view.cacheDisplay(in: dirtyRect, to: partialBitmap)
+
+    let partialPixels = terminalBitmapBytes(partialBitmap)
+    if partialPixels != fullPixels {
+      let changed = zip(partialPixels, fullPixels).enumerated().compactMap { index, bytes in
+        bytes.0 == bytes.1 ? nil : index
+      }
+      XCTFail(
+        "Partial paint changed \(changed.count) bytes; first=\(changed.first ?? -1) "
+          + "last=\(changed.last ?? -1), bytesPerRow=\(partialBitmap.bytesPerRow)"
+      )
+    }
+    XCTAssertGreaterThan(fullRows, fixture.view.rowsDrawnForTesting)
+    XCTAssertGreaterThanOrEqual(fixture.view.rowsDrawnForTesting, 1)
+  }
+
   func testCopyWritesSelectionToInjectedPasteboard() {
     let pasteboard = NSPasteboard(name: .init("locus-terminal-copy-\(UUID().uuidString)"))
     pasteboard.clearContents()
@@ -1028,6 +1328,86 @@ private func bitmapHasMultipleColors(_ bitmap: NSBitmapImageRep) -> Bool {
     y += 1
   }
   return false
+}
+
+private func terminalDrawDurationMilliseconds(_ draw: () -> Void) -> Double {
+  let start = DispatchTime.now().uptimeNanoseconds
+  draw()
+  let elapsed = DispatchTime.now().uptimeNanoseconds - start
+  return Double(elapsed) / 1_000_000
+}
+
+private func terminalMedian(_ values: [Double]) -> Double {
+  guard !values.isEmpty else {
+    return 0
+  }
+  let sorted = values.sorted()
+  let middle = sorted.count / 2
+  if sorted.count.isMultiple(of: 2) {
+    return (sorted[middle - 1] + sorted[middle]) / 2
+  }
+  return sorted[middle]
+}
+
+@MainActor
+private func terminalRecordProbeMetric(_ name: String, value: Double) {
+  let result = "\(name)=\(value)"
+  print(result)
+  XCTContext.runActivity(named: result) { _ in }
+}
+
+@MainActor
+private func makeTerminalRenderFixture(
+  columns: UInt16,
+  rows: UInt16,
+  lineCount: Int
+) -> (session: TerminalSession, view: TerminalPaneView, metrics: TerminalCellMetrics) {
+  let metrics = TerminalCellMetrics()
+  let session = TerminalSession(columns: columns, rows: rows)
+  let view = TerminalPaneView(session: session, metrics: metrics)
+  view.frame = gridFrame(columns: columns, rows: rows, metrics: metrics)
+  session.start(command: "/bin/sh")
+  let command =
+    "i=0; printf '\\033[2J\\033[H'; while [ \"$i\" -lt \(lineCount) ]; do "
+    + "c=$((i % 7 + 1)); printf '\\033[3%smfixture-%02d 日本語-%02d "
+    + "payload-abcdefghijklmnopqrstuvwxyz\\033[0m\\r\\n' \"$c\" \"$i\" \"$i\"; "
+    + "i=$((i + 1)); done\n"
+  session.send(Data(command.utf8))
+  let finalLine = String(format: "fixture-%02d", max(0, lineCount - 1))
+  XCTAssertTrue(
+    waitForPaneCondition(timeout: 5) {
+      session.plainTextForTesting()?.contains(finalLine) == true
+    },
+    "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
+  )
+  view.needsDisplay = true
+  view.displayIfNeeded()
+  return (session, view, metrics)
+}
+
+private func terminalTestCell(
+  codepoint: UInt32,
+  foregroundRed: UInt8,
+  graphemeLength: Int
+) -> LocusTermCell {
+  LocusTermCell(
+    codepoint: codepoint,
+    raw: 0,
+    fg: LocusTermRgb(r: foregroundRed, g: 3, b: 4),
+    bg: LocusTermRgb(r: 5, g: 6, b: 7),
+    flags: 0,
+    wide: 0,
+    grapheme_start: 0,
+    grapheme_len: graphemeLength,
+    hyperlink_id: 0
+  )
+}
+
+private func terminalBitmapBytes(_ bitmap: NSBitmapImageRep) -> Data {
+  guard let data = bitmap.bitmapData else {
+    return Data()
+  }
+  return Data(bytes: data, count: bitmap.bytesPerRow * bitmap.pixelsHigh)
 }
 
 private func terminalPanePlainText(in frame: TerminalFrame) -> String {

@@ -276,6 +276,116 @@ enum TerminalLineRunBuilder {
   }
 }
 
+enum TerminalRowSignature {
+  private static let fnvOffsetBasis: UInt64 = 14_695_981_039_346_656_037
+  private static let fnvPrime: UInt64 = 1_099_511_628_211
+
+  /// Materialized byte signature used only when a new cache entry is stored.
+  static func signature(
+    row: LocusTermRow,
+    cells: UnsafeBufferPointer<LocusTermCell>,
+    graphemes: UnsafeBufferPointer<UInt32>
+  ) -> [UInt8] {
+    var result: [UInt8] = []
+    result.reserveCapacity(min(row.cell_count, cells.count) * 32)
+    _ = stream(row: row, cells: cells, graphemes: graphemes) { bytes in
+      result.append(contentsOf: bytes)
+      return true
+    }
+    return result
+  }
+
+  static func hash(
+    row: LocusTermRow,
+    cells: UnsafeBufferPointer<LocusTermCell>,
+    graphemes: UnsafeBufferPointer<UInt32>
+  ) -> UInt64 {
+    var result = fnvOffsetBasis
+    _ = stream(row: row, cells: cells, graphemes: graphemes) { bytes in
+      for byte in bytes {
+        result = (result ^ UInt64(byte)) &* fnvPrime
+      }
+      return true
+    }
+    return result
+  }
+
+  static func hash(signature: [UInt8]) -> UInt64 {
+    signature.reduce(into: fnvOffsetBasis) { hash, byte in
+      hash = (hash ^ UInt64(byte)) &* fnvPrime
+    }
+  }
+
+  static func matches(
+    _ signature: [UInt8],
+    row: LocusTermRow,
+    cells: UnsafeBufferPointer<LocusTermCell>,
+    graphemes: UnsafeBufferPointer<UInt32>
+  ) -> Bool {
+    var cursor = 0
+    let matched = stream(row: row, cells: cells, graphemes: graphemes) { bytes in
+      guard cursor + bytes.count <= signature.count else {
+        return false
+      }
+      for byte in bytes {
+        guard signature[cursor] == byte else {
+          return false
+        }
+        cursor += 1
+      }
+      return true
+    }
+    return matched && cursor == signature.count
+  }
+
+  private static func stream(
+    row: LocusTermRow,
+    cells: UnsafeBufferPointer<LocusTermCell>,
+    graphemes: UnsafeBufferPointer<UInt32>,
+    consume: (UnsafeRawBufferPointer) -> Bool
+  ) -> Bool {
+    func emit<Value: FixedWidthInteger>(_ value: Value) -> Bool {
+      var littleEndian = value.littleEndian
+      return withUnsafeBytes(of: &littleEndian, consume)
+    }
+
+    let start = min(row.cell_start, cells.count)
+    let count = min(row.cell_count, cells.count - start)
+    guard emit(UInt64(count)) else {
+      return false
+    }
+
+    for cell in cells[start..<(start + count)] {
+      guard
+        emit(cell.codepoint),
+        emit(cell.raw),
+        emit(cell.fg.r),
+        emit(cell.fg.g),
+        emit(cell.fg.b),
+        emit(cell.bg.r),
+        emit(cell.bg.g),
+        emit(cell.bg.b),
+        emit(cell.flags),
+        emit(cell.wide)
+      else {
+        return false
+      }
+
+      let graphemeStart = min(cell.grapheme_start, graphemes.count)
+      let graphemeCount = min(cell.grapheme_len, graphemes.count - graphemeStart)
+      guard emit(UInt64(graphemeCount)) else {
+        return false
+      }
+      for codepoint in graphemes[graphemeStart..<(graphemeStart + graphemeCount)] {
+        guard emit(codepoint) else {
+          return false
+        }
+      }
+    }
+    return true
+  }
+}
+
 struct TerminalGlyphGridCell: Equatable, Hashable {
   let utf16Range: Range<Int>
   let startColumn: Int
@@ -1134,7 +1244,34 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
     let uri: String
   }
 
+  private struct GlyphBatch {
+    let font: CTFont
+    let glyphs: [CGGlyph]
+    let positions: [CGPoint]
+    let overflowScaleX: CGFloat?
+    let overflowAnchorX: CGFloat?
+  }
+
+  private struct CachedTextRun {
+    let run: TerminalTextRun
+    let glyphBatches: [GlyphBatch]
+  }
+
+  private struct BackgroundFill {
+    let startColumn: Int
+    let cellCount: Int
+    let color: NSColor
+  }
+
+  private struct CachedRowText {
+    let signature: [UInt8]
+    let runs: [CachedTextRun]
+    let backgroundFills: [BackgroundFill]
+    var lastUsedPaint: UInt64
+  }
+
   private static let selectionAutoscrollInterval: TimeInterval = 0.05
+  private static let rowTextPoolCapacity = 240
 
   var onWindowChange: ((TerminalPaneView) -> Void)?
   var onFindRequested: (() -> Void)?
@@ -1145,6 +1282,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       }
       cachedLinks = nil
       clearHoveredLink()
+      clearRowTextPool()
       subscribeToSession()
       if window != nil {
         synchronizeTerminalSize()
@@ -1182,9 +1320,21 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   private var linkTrackingArea: NSTrackingArea?
   private var hoveredLink: HoveredLink?
   private var cachedLinks: (generation: UInt64, matches: [TerminalLinkMatch])?
+  // Content signatures deliberately ignore row dirty flags and scrollDelta:
+  // display-link coalescing may skip the generations those fields describe.
+  private var rowTextPool: [UInt64: [CachedRowText]] = [:]
+  private var paintCounter: UInt64 = 0
+  private(set) var rowTextPoolStatisticsForTesting = (hits: 0, misses: 0)
+  private(set) var rowsDrawnForTesting = 0
 
   override var acceptsFirstResponder: Bool { true }
   override var isOpaque: Bool { true }
+
+  override func viewDidChangeEffectiveAppearance() {
+    super.viewDidChangeEffectiveAppearance()
+    clearRowTextPool()
+    needsDisplay = true
+  }
 
   /// A new snapshot generation always schedules a paint. Frame dirty state
   /// must not gate this: query-only feeds can consume earlier dirty flags,
@@ -1775,6 +1925,10 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
     guard let context = NSGraphicsContext.current?.cgContext else {
       return
     }
+    beginRowTextPaint()
+    defer {
+      finishRowTextPaint()
+    }
 
     backgroundColor.setFill()
     dirtyRect.fill()
@@ -1794,6 +1948,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
         searchMatches: searchMatches,
         hoveredLinkMatches: hoveredLinkMatches,
         caretVisible: caretVisible,
+        dirtyRect: dirtyRect,
         in: context
       )
       lastDrawnCaretVisibility = caretVisible
@@ -1812,7 +1967,10 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
 
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = graphicsContext
+    graphicsContext.cgContext.saveGState()
+    graphicsContext.cgContext.clip(to: rect)
     draw(rect)
+    graphicsContext.cgContext.restoreGState()
     NSGraphicsContext.restoreGraphicsState()
   }
 
@@ -1922,6 +2080,9 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   }
 
   private func deliverTerminalResize(_ gridSize: TerminalGridSize) {
+    if lastGridSize != gridSize {
+      clearRowTextPool()
+    }
     lastGridSize = gridSize
     resizeObserver?(gridSize)
     // TerminalSession performs a full terminal render after every delivered
@@ -1967,20 +2128,29 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
     searchMatches: [TerminalSearchMatch],
     hoveredLinkMatches: [TerminalLinkMatch],
     caretVisible: Bool,
+    dirtyRect: NSRect,
     in context: CGContext
   ) {
     frame.withRows { rows in
       frame.withCells { cells in
         frame.withGraphemes { graphemes in
-          for row in rows {
-            drawBackgrounds(row: row, cells: cells, in: context)
+          var cachedRows: [(row: LocusTermRow, cached: CachedRowText)] = []
+          cachedRows.reserveCapacity(rows.count)
+          for row in rows where rowPaintRect(row.y).intersects(dirtyRect) {
+            cachedRows.append(
+              (row, cachedRowText(row: row, cells: cells, graphemes: graphemes))
+            )
           }
-          drawSelection(frame: frame, rows: rows)
-          drawSearchMatches(searchMatches)
-          for row in rows {
-            drawText(row: row, cells: cells, graphemes: graphemes, in: context)
+
+          for item in cachedRows {
+            drawBackgrounds(row: item.row, cached: item.cached, in: context)
           }
-          drawHoveredLinkUnderlines(hoveredLinkMatches, in: context)
+          drawSelection(frame: frame, rows: rows, dirtyRect: dirtyRect)
+          drawSearchMatches(searchMatches, dirtyRect: dirtyRect)
+          for item in cachedRows {
+            drawText(row: item.row, cached: item.cached, in: context)
+          }
+          drawHoveredLinkUnderlines(hoveredLinkMatches, dirtyRect: dirtyRect, in: context)
         }
       }
     }
@@ -1993,7 +2163,8 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
 
   private func drawSelection(
     frame: TerminalFrame,
-    rows: UnsafeBufferPointer<LocusTermRow>
+    rows: UnsafeBufferPointer<LocusTermRow>,
+    dirtyRect: NSRect
   ) {
     let color: NSColor =
       hasActiveKeyboardFocus
@@ -2005,20 +2176,22 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       guard let columns = frame.selectionRange(forRow: index) else {
         continue
       }
-      TerminalPaneGeometry.selectionRect(
-        columns: columns,
-        row: row.y,
-        bounds: bounds,
-        metrics: metrics,
-        insets: TerminalPaneLayoutMetrics.contentInsets
-      ).fill()
       drewSelection = true
+      if rowPaintRect(row.y).intersects(dirtyRect) {
+        TerminalPaneGeometry.selectionRect(
+          columns: columns,
+          row: row.y,
+          bounds: bounds,
+          metrics: metrics,
+          insets: TerminalPaneLayoutMetrics.contentInsets
+        ).fill()
+      }
     }
     hasRenderedSelection = drewSelection
   }
 
-  private func drawSearchMatches(_ matches: [TerminalSearchMatch]) {
-    for match in matches {
+  private func drawSearchMatches(_ matches: [TerminalSearchMatch], dirtyRect: NSRect) {
+    for match in matches where rowPaintRect(match.y).intersects(dirtyRect) {
       let color =
         match.isSelected
         ? NSColor.findHighlightColor
@@ -2035,10 +2208,11 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
 
   private func drawHoveredLinkUnderlines(
     _ matches: [TerminalLinkMatch],
+    dirtyRect: NSRect,
     in context: CGContext
   ) {
     context.setFillColor(NSColor.textColor.withAlphaComponent(0.8).cgColor)
-    for match in matches {
+    for match in matches where rowPaintRect(match.y).intersects(dirtyRect) {
       context.fill(
         TerminalPaneGeometry.linkUnderlineRect(
           match,
@@ -2052,48 +2226,87 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
 
   private func drawBackgrounds(
     row: LocusTermRow,
-    cells: UnsafeBufferPointer<LocusTermCell>,
+    cached: CachedRowText,
     in context: CGContext
   ) {
-    let range = cellRange(for: row, cells: cells)
-    guard !range.isEmpty else {
-      return
-    }
-
-    var column = 0
-    for cell in cells[range] {
-      guard TerminalCellWidth(rawValue: cell.wide) != .spacerTail else {
-        continue
-      }
-
-      let style = TerminalTextStyle(cell)
-      let colors = style.resolvedColors
-      let width = displayCellCount(for: cell)
-      if colors.background != .defaultBackground {
-        colors.background.nsColor.setFill()
+    for fill in cached.backgroundFills {
+      context.setFillColor(fill.color.cgColor)
+      context.fill(
         NSRect(
           x: TerminalPaneLayoutMetrics.contentInsets.left
-            + CGFloat(column) * metrics.cellWidth,
+            + CGFloat(fill.startColumn) * metrics.cellWidth,
           y: rowRectY(row.y),
-          width: CGFloat(width) * metrics.cellWidth,
+          width: CGFloat(fill.cellCount) * metrics.cellWidth,
           height: metrics.cellHeight
-        ).fill()
-      }
-      column += width
+        )
+      )
     }
   }
 
   private func drawText(
     row: LocusTermRow,
-    cells: UnsafeBufferPointer<LocusTermCell>,
-    graphemes: UnsafeBufferPointer<UInt32>,
+    cached: CachedRowText,
     in context: CGContext
   ) {
-    let range = cellRange(for: row, cells: cells)
-    guard !range.isEmpty else {
+    guard !cached.runs.isEmpty else {
       return
     }
+    rowsDrawnForTesting += 1
+    let baselineY = bounds.height - rowTopOffset(row.y) - metrics.baselineOffset
+    for run in cached.runs {
+      drawCachedTextRun(run, baselineY: baselineY, in: context)
+    }
+  }
 
+  private func cachedRowText(
+    row: LocusTermRow,
+    cells: UnsafeBufferPointer<LocusTermCell>,
+    graphemes: UnsafeBufferPointer<UInt32>
+  ) -> CachedRowText {
+    let hash = TerminalRowSignature.hash(
+      row: row,
+      cells: cells,
+      graphemes: graphemes
+    )
+    if var bucket = rowTextPool[hash],
+      let index = bucket.firstIndex(where: {
+        TerminalRowSignature.matches(
+          $0.signature,
+          row: row,
+          cells: cells,
+          graphemes: graphemes
+        )
+      })
+    {
+      bucket[index].lastUsedPaint = paintCounter
+      let cached = bucket[index]
+      rowTextPool[hash] = bucket
+      rowTextPoolStatisticsForTesting.hits += 1
+      return cached
+    }
+
+    rowTextPoolStatisticsForTesting.misses += 1
+    let cached = buildCachedRowText(
+      row: row,
+      cells: cells,
+      graphemes: graphemes,
+      signature: TerminalRowSignature.signature(
+        row: row,
+        cells: cells,
+        graphemes: graphemes
+      )
+    )
+    rowTextPool[hash, default: []].append(cached)
+    return cached
+  }
+
+  private func buildCachedRowText(
+    row: LocusTermRow,
+    cells: UnsafeBufferPointer<LocusTermCell>,
+    graphemes: UnsafeBufferPointer<UInt32>,
+    signature: [UInt8]
+  ) -> CachedRowText {
+    let range = cellRange(for: row, cells: cells)
     var renderableCells: [TerminalRenderableCell] = []
     renderableCells.reserveCapacity(range.count)
     for cell in cells[range] {
@@ -2108,11 +2321,70 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
         )
       )
     }
-
-    let baselineY = bounds.height - rowTopOffset(row.y) - metrics.baselineOffset
-    for run in TerminalLineRunBuilder.runs(for: renderableCells) where !run.text.isEmpty {
-      drawGridAlignedText(run, baselineY: baselineY, in: context)
+    let runs: [CachedTextRun] = TerminalLineRunBuilder.runs(for: renderableCells).compactMap {
+      run -> CachedTextRun? in
+      guard !run.text.isEmpty else {
+        return nil
+      }
+      let line = CTLineCreateWithAttributedString(attributedString(for: run))
+      return CachedTextRun(
+        run: run,
+        glyphBatches: buildGlyphBatches(run: run, line: line)
+      )
     }
+    return CachedRowText(
+      signature: signature,
+      runs: runs,
+      backgroundFills: buildBackgroundFills(cells: cells, range: range),
+      lastUsedPaint: paintCounter
+    )
+  }
+
+  private func buildBackgroundFills(
+    cells: UnsafeBufferPointer<LocusTermCell>,
+    range: Range<Int>
+  ) -> [BackgroundFill] {
+    var fills: [BackgroundFill] = []
+    var activeStart = 0
+    var activeCount = 0
+    var activeColor: TerminalColor?
+    var column = 0
+
+    func flush() {
+      guard let color = activeColor, activeCount > 0 else {
+        return
+      }
+      fills.append(
+        BackgroundFill(
+          startColumn: activeStart,
+          cellCount: activeCount,
+          color: color.nsColor
+        )
+      )
+      activeCount = 0
+      activeColor = nil
+    }
+
+    for cell in cells[range] {
+      guard TerminalCellWidth(rawValue: cell.wide) != .spacerTail else {
+        continue
+      }
+      let width = displayCellCount(for: cell)
+      let color = TerminalTextStyle(cell).resolvedColors.background
+      if color == .defaultBackground {
+        flush()
+      } else if activeColor == color {
+        activeCount += width
+      } else {
+        flush()
+        activeStart = column
+        activeCount = width
+        activeColor = color
+      }
+      column += width
+    }
+    flush()
+    return fills
   }
 
   private func attributedString(for run: TerminalTextRun) -> NSAttributedString {
@@ -2131,47 +2403,33 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
     return NSAttributedString(string: run.text, attributes: attributes)
   }
 
-  private func drawGridAlignedText(
-    _ run: TerminalTextRun,
-    baselineY: CGFloat,
-    in context: CGContext
-  ) {
-    let line = CTLineCreateWithAttributedString(attributedString(for: run))
+  private func buildGlyphBatches(run: TerminalTextRun, line: CTLine) -> [GlyphBatch] {
     let gridCellsByUTF16Index = TerminalGlyphGridLayout.cellsByUTF16Index(for: run)
-    let foreground = resolvedForegroundColor(for: run.style)
     let isPureASCII = run.text.utf8.allSatisfy { $0 < 0x80 }
-
-    context.saveGState()
-    context.textMatrix = .identity
-    context.setFillColor(foreground.cgColor)
-
+    var batches: [GlyphBatch] = []
     for case let glyphRun as CTRun in CTLineGetGlyphRuns(line) as NSArray {
-      drawGlyphRun(
-        glyphRun,
-        line: line,
-        terminalRun: run,
-        gridCellsByUTF16Index: gridCellsByUTF16Index,
-        measureOverflow: !isPureASCII,
-        baselineY: baselineY,
-        in: context
-      )
+      batches.append(
+        contentsOf: buildGlyphBatches(
+          glyphRun,
+          line: line,
+          terminalRun: run,
+          gridCellsByUTF16Index: gridCellsByUTF16Index,
+          measureOverflow: !isPureASCII
+        ))
     }
-    drawDecorations(for: run, baselineY: baselineY, color: foreground, in: context)
-    context.restoreGState()
+    return batches
   }
 
-  private func drawGlyphRun(
+  private func buildGlyphBatches(
     _ glyphRun: CTRun,
     line: CTLine,
     terminalRun: TerminalTextRun,
     gridCellsByUTF16Index: [TerminalGlyphGridCell],
-    measureOverflow: Bool,
-    baselineY: CGFloat,
-    in context: CGContext
-  ) {
+    measureOverflow: Bool
+  ) -> [GlyphBatch] {
     let count = CTRunGetGlyphCount(glyphRun)
     guard count > 0 else {
-      return
+      return []
     }
 
     var glyphs = [CGGlyph](repeating: 0, count: count)
@@ -2194,7 +2452,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
             x: TerminalPaneLayoutMetrics.contentInsets.left
               + CGFloat(terminalRun.startColumn) * metrics.cellWidth
               + naturalPosition.x,
-            y: baselineY + naturalPosition.y
+            y: naturalPosition.y
           )
         )
         continue
@@ -2209,7 +2467,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       gridPositions.append(
         CGPoint(
           x: gridCellX + naturalPosition.x - naturalCellX,
-          y: baselineY + naturalPosition.y
+          y: naturalPosition.y
         )
       )
     }
@@ -2218,8 +2476,15 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
     let runFont = attributes[kCTFontAttributeName as String] as? NSFont
     let font = (runFont ?? metrics.font(for: terminalRun.style.flags)) as CTFont
     guard measureOverflow else {
-      drawGlyphs(glyphs, at: gridPositions, font: font, in: context)
-      return
+      return [
+        GlyphBatch(
+          font: font,
+          glyphs: glyphs,
+          positions: gridPositions,
+          overflowScaleX: nil,
+          overflowAnchorX: nil
+        )
+      ]
     }
 
     var advances = [CGSize](repeating: .zero, count: count)
@@ -2243,48 +2508,84 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       }
     }
     mainGlyphIndices.sort()
-    drawGlyphs(
+    var batches: [GlyphBatch] = []
+    if let main = glyphBatch(
       at: mainGlyphIndices,
       from: glyphs,
       positions: gridPositions,
       font: font,
-      in: context
-    )
-
+      overflowScaleX: nil,
+      overflowAnchorX: nil
+    ) {
+      batches.append(main)
+    }
     for (cluster, scale) in overflowClusters {
       let gridOriginX =
         TerminalPaneLayoutMetrics.contentInsets.left
         + CGFloat(terminalRun.startColumn + cluster.cell.startColumn) * metrics.cellWidth
-      context.saveGState()
-      context.translateBy(x: gridOriginX, y: 0)
-      context.scaleBy(x: scale, y: 1)
-      context.translateBy(x: -gridOriginX, y: 0)
       // Clipping amputates arrowheads and circles. Condensing preserves the
       // complete fallback glyph while keeping its ink inside the wcwidth grid.
-      drawGlyphs(
+      if let overflow = glyphBatch(
         at: cluster.glyphIndices,
         from: glyphs,
         positions: gridPositions,
         font: font,
-        in: context
-      )
-      context.restoreGState()
+        overflowScaleX: scale,
+        overflowAnchorX: gridOriginX
+      ) {
+        batches.append(overflow)
+      }
     }
+    return batches
   }
 
-  private func drawGlyphs(
+  private func glyphBatch(
     at indices: [Int],
     from glyphs: [CGGlyph],
     positions: [CGPoint],
     font: CTFont,
+    overflowScaleX: CGFloat?,
+    overflowAnchorX: CGFloat?
+  ) -> GlyphBatch? {
+    guard !indices.isEmpty else {
+      return nil
+    }
+    return GlyphBatch(
+      font: font,
+      glyphs: indices.map { glyphs[$0] },
+      positions: indices.map { positions[$0] },
+      overflowScaleX: overflowScaleX,
+      overflowAnchorX: overflowAnchorX
+    )
+  }
+
+  private func drawCachedTextRun(
+    _ cached: CachedTextRun,
+    baselineY: CGFloat,
     in context: CGContext
   ) {
-    guard !indices.isEmpty else {
-      return
+    let foreground = resolvedForegroundColor(for: cached.run.style)
+    context.saveGState()
+    context.textMatrix = .identity
+    context.setFillColor(foreground.cgColor)
+    context.translateBy(x: 0, y: baselineY)
+    for batch in cached.glyphBatches {
+      context.saveGState()
+      if let scale = batch.overflowScaleX, let anchor = batch.overflowAnchorX {
+        context.translateBy(x: anchor, y: 0)
+        context.scaleBy(x: scale, y: 1)
+        context.translateBy(x: -anchor, y: 0)
+      }
+      drawGlyphs(batch.glyphs, at: batch.positions, font: batch.font, in: context)
+      context.restoreGState()
     }
-    let selectedGlyphs = indices.map { glyphs[$0] }
-    let selectedPositions = indices.map { positions[$0] }
-    drawGlyphs(selectedGlyphs, at: selectedPositions, font: font, in: context)
+    context.restoreGState()
+    drawDecorations(
+      for: cached.run,
+      baselineY: baselineY,
+      color: foreground,
+      in: context
+    )
   }
 
   private func drawGlyphs(
@@ -2787,6 +3088,40 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
     }
   }
 
+  func clearRowTextPoolForTesting() {
+    clearRowTextPool()
+  }
+
+  private func clearRowTextPool() {
+    rowTextPool.removeAll(keepingCapacity: true)
+    rowTextPoolStatisticsForTesting = (hits: 0, misses: 0)
+  }
+
+  private func beginRowTextPaint() {
+    if paintCounter == .max {
+      rowTextPool.removeAll(keepingCapacity: true)
+      paintCounter = 1
+    } else {
+      paintCounter += 1
+    }
+    rowTextPoolStatisticsForTesting = (hits: 0, misses: 0)
+    rowsDrawnForTesting = 0
+  }
+
+  private func finishRowTextPaint() {
+    let count = rowTextPool.values.reduce(into: 0) { $0 += $1.count }
+    guard count > Self.rowTextPoolCapacity else {
+      return
+    }
+
+    for key in Array(rowTextPool.keys) {
+      rowTextPool[key]?.removeAll { $0.lastUsedPaint != paintCounter }
+      if rowTextPool[key]?.isEmpty == true {
+        rowTextPool.removeValue(forKey: key)
+      }
+    }
+  }
+
   private func text(
     for cell: LocusTermCell,
     graphemes: UnsafeBufferPointer<UInt32>
@@ -2824,6 +3159,15 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       bounds: bounds,
       metrics: metrics,
       insets: TerminalPaneLayoutMetrics.contentInsets
+    )
+  }
+
+  private func rowPaintRect(_ row: UInt16) -> NSRect {
+    NSRect(
+      x: bounds.minX,
+      y: rowRectY(row),
+      width: bounds.width,
+      height: metrics.cellHeight
     )
   }
 
