@@ -33,6 +33,12 @@
 		1A0000010000000000000FAE /* TerminalKeyTranslationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FAD /* TerminalKeyTranslationTests.swift */; };
 		1A0000010000000000000FB0 /* TerminalPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FAF /* TerminalPanel.swift */; };
 		1A0000010000000000000FB2 /* TerminalPanelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FB1 /* TerminalPanelTests.swift */; };
+		1A0000010000000000000FC0 /* TerminalGlyphAtlas.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FC1 /* TerminalGlyphAtlas.swift */; };
+		1A0000010000000000000FC2 /* TerminalGlyphRasterizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FC3 /* TerminalGlyphRasterizer.swift */; };
+		1A0000010000000000000FC4 /* TerminalGlyphCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FC5 /* TerminalGlyphCache.swift */; };
+		1A0000010000000000000FC6 /* TerminalGlyphAtlasTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FC7 /* TerminalGlyphAtlasTests.swift */; };
+		1A0000010000000000000FC8 /* TerminalGlyphCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FC9 /* TerminalGlyphCacheTests.swift */; };
+		1A0000010000000000000FCA /* TerminalMetalSmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FCB /* TerminalMetalSmokeTests.swift */; };
 		1A00000100000000000000AA /* InitialFolderURLResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */; };
 		1A0000010000000000000090 /* FileLocationShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000091 /* FileLocationShortcut.swift */; };
 		1A000001000000000000007E /* FileLocationBookmarkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000007F /* FileLocationBookmarkStore.swift */; };
@@ -146,6 +152,12 @@
 		1A0000010000000000000FAD /* TerminalKeyTranslationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalKeyTranslationTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000FAF /* TerminalPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPanel.swift; sourceTree = "<group>"; };
 		1A0000010000000000000FB1 /* TerminalPanelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPanelTests.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FC1 /* TerminalGlyphAtlas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalGlyphAtlas.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FC3 /* TerminalGlyphRasterizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalGlyphRasterizer.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FC5 /* TerminalGlyphCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalGlyphCache.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FC7 /* TerminalGlyphAtlasTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalGlyphAtlasTests.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FC9 /* TerminalGlyphCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalGlyphCacheTests.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FCB /* TerminalMetalSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalMetalSmokeTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000F45 /* DocumentTabsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentTabsTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000AB /* InitialFolderURLResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InitialFolderURLResolverTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000015 /* LocusCoreBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LocusCoreBridge.h; sourceTree = "<group>"; };
@@ -298,6 +310,9 @@
 				1A0000010000000000000FAD /* TerminalKeyTranslationTests.swift */,
 				1A0000010000000000000FB1 /* TerminalPanelTests.swift */,
 				1A0000010000000000000FA7 /* TerminalSessionTests.swift */,
+				1A0000010000000000000FC7 /* TerminalGlyphAtlasTests.swift */,
+				1A0000010000000000000FC9 /* TerminalGlyphCacheTests.swift */,
+				1A0000010000000000000FCB /* TerminalMetalSmokeTests.swift */,
 				1A00000100000000000000A7 /* WorkspaceDocumentSurfaceSupportTests.swift */,
 				1A00000100000000000000AF /* WorkspaceHomeVisibilityTests.swift */,
 				1A000001000000000000006B /* WorkspaceNavigationTests.swift */,
@@ -349,6 +364,9 @@
 		1A0000010000000000000FA8 /* Terminal */ = {
 			isa = PBXGroup;
 			children = (
+				1A0000010000000000000FC1 /* TerminalGlyphAtlas.swift */,
+				1A0000010000000000000FC5 /* TerminalGlyphCache.swift */,
+				1A0000010000000000000FC3 /* TerminalGlyphRasterizer.swift */,
 				1A0000010000000000000FAA /* TerminalPaneView.swift */,
 				1A0000010000000000000FAF /* TerminalPanel.swift */,
 				1A0000010000000000000FA5 /* TerminalSession.swift */,
@@ -583,6 +601,9 @@
 				1A0000010000000000000FA9 /* TerminalPaneView.swift in Sources */,
 				1A0000010000000000000FB0 /* TerminalPanel.swift in Sources */,
 				1A0000010000000000000FA4 /* TerminalSession.swift in Sources */,
+				1A0000010000000000000FC0 /* TerminalGlyphAtlas.swift in Sources */,
+				1A0000010000000000000FC4 /* TerminalGlyphCache.swift in Sources */,
+				1A0000010000000000000FC2 /* TerminalGlyphRasterizer.swift in Sources */,
 				1A00000100000000000000E2 /* TextBuffer.swift in Sources */,
 				1A000001000000000000006C /* ClipboardService.swift in Sources */,
 				1A0000010000000000000078 /* EmptyWorkspaceView.swift in Sources */,
@@ -666,6 +687,9 @@
 				1A0000010000000000000FAE /* TerminalKeyTranslationTests.swift in Sources */,
 				1A0000010000000000000FB2 /* TerminalPanelTests.swift in Sources */,
 				1A0000010000000000000FA6 /* TerminalSessionTests.swift in Sources */,
+				1A0000010000000000000FC6 /* TerminalGlyphAtlasTests.swift in Sources */,
+				1A0000010000000000000FC8 /* TerminalGlyphCacheTests.swift in Sources */,
+				1A0000010000000000000FCA /* TerminalMetalSmokeTests.swift in Sources */,
 				1A00000100000000000000A6 /* WorkspaceDocumentSurfaceSupportTests.swift in Sources */,
 				1A00000100000000000000AE /* WorkspaceHomeVisibilityTests.swift in Sources */,
 				1A000001000000000000006A /* WorkspaceNavigationTests.swift in Sources */,
