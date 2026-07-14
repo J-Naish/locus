@@ -663,6 +663,12 @@ LocusStatus locus_large_file_position_for_line_column(
 #define LOCUS_TERM_STATUS_PANIC ((LocusStatus)301u)
 #define LOCUS_TERM_STATUS_UNSAFE_PASTE ((LocusStatus)302u)
 
+#define LOCUS_TERM_SEARCH_SELECT_NEXT ((uint32_t)0u) /* toward older */
+#define LOCUS_TERM_SEARCH_SELECT_PREV ((uint32_t)1u) /* toward newer */
+#define LOCUS_TERM_SEARCH_NO_SELECTION UINT32_MAX
+#define LOCUS_TERM_SEARCH_MATCH_SELECTED ((uint16_t)(1u << 0))
+#define LOCUS_TERM_SEARCH_MAX_NEEDLE_BYTES ((size_t)1024u)
+
 /* Terminal resource limits; must match app-ffi. */
 #define LOCUS_TERM_MAX_COLS ((uint16_t)4096u)
 #define LOCUS_TERM_MAX_ROWS ((uint16_t)4096u)
@@ -814,6 +820,22 @@ typedef struct LocusTermKeyEvent {
     uint32_t unshifted_codepoint;
 } LocusTermKeyEvent;
 
+typedef struct LocusTermSearchStatus {
+    bool active;
+    bool complete;
+    uint32_t total;
+    /* Index from newest, or LOCUS_TERM_SEARCH_NO_SELECTION. */
+    uint32_t selected;
+} LocusTermSearchStatus;
+
+typedef struct LocusTermSearchMatch {
+    uint16_t y;
+    uint16_t x_start;
+    uint16_t x_end;
+    /* Bit 0 means this row belongs to the selected match. */
+    uint16_t flags;
+} LocusTermSearchMatch;
+
 uint32_t locus_term_abi_version(void);
 LocusTerm *locus_term_new(uint16_t cols, uint16_t rows, size_t max_scrollback);
 void locus_term_free(LocusTerm *term);
@@ -828,6 +850,19 @@ LocusTermFrame *locus_term_frame_new(void);
 void locus_term_frame_free(LocusTermFrame *frame);
 LocusStatus locus_term_key(
     LocusTerm *term, const LocusTermKeyEvent *event, LocusTermBytes *out);
+LocusStatus locus_term_search_start(
+    LocusTerm *term, const uint8_t *needle, size_t len);
+LocusStatus locus_term_search_end(LocusTerm *term);
+LocusStatus locus_term_search_status(
+    LocusTerm *term, LocusTermSearchStatus *out);
+LocusStatus locus_term_search_select(
+    LocusTerm *term, uint32_t direction, LocusTermSearchStatus *out);
+/*
+ * Packed LocusTermSearchMatch records sorted by (y, x_start). The result is
+ * capped at rows * 64 records and must be freed with locus_term_bytes_free.
+ */
+LocusStatus locus_term_search_viewport_matches(
+    LocusTerm *term, LocusTermBytes *out);
 /* Bit 0 = modifyOtherKeys state 2; bit 1 = active kitty keyboard flags. */
 uint32_t locus_term_key_protocol_active(const LocusTerm *term);
 /*

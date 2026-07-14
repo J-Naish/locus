@@ -16,11 +16,12 @@ use terminal::input::mouse_encode::{
 use terminal::input::{self, Action, Key, KeyEvent, Mods, OptionAsAlt};
 use terminal::modes::Mode;
 use terminal::page::CellWide;
-use terminal::page_list::Scroll;
-use terminal::point::{Coordinate, Point};
+use terminal::page_list::{Pin, Scroll};
+use terminal::point::{Coordinate, Point, Tag};
 use terminal::render::{DirtyState, RenderState};
 use terminal::screen::{CursorStyle, SelectionStringOptions};
 use terminal::screen_set::ScreenKey;
+use terminal::search::{ScreenSearch, Select, ViewportSearch};
 use terminal::selection_codepoints::DEFAULT_WORD_BOUNDARIES;
 use terminal::selection_gesture::{
     Autoscroll, AutoscrollTick, Behavior as SelectionBehavior, Drag as SelectionDrag,
@@ -43,10 +44,17 @@ const SELECTION_BEHAVIORS: [SelectionBehavior; 3] = [
     SelectionBehavior::Word,
     SelectionBehavior::Line,
 ];
+pub const LOCUS_TERM_SEARCH_MAX_NEEDLE_BYTES: usize = 1_024;
+const SEARCH_MATCHES_PER_VIEWPORT_ROW_LIMIT: usize = 64;
 
 pub const LOCUS_TERM_STATUS_INVALID_ARGUMENT: u32 = 300;
 pub const LOCUS_TERM_STATUS_PANIC: u32 = 301;
 pub const LOCUS_TERM_STATUS_UNSAFE_PASTE: u32 = 302;
+
+pub const LOCUS_TERM_SEARCH_SELECT_NEXT: u32 = 0;
+pub const LOCUS_TERM_SEARCH_SELECT_PREV: u32 = 1;
+pub const LOCUS_TERM_SEARCH_NO_SELECTION: u32 = u32::MAX;
+pub const LOCUS_TERM_SEARCH_MATCH_SELECTED: u16 = 1 << 0;
 
 /// Upper bounds for terminal dimensions accepted over the ABI. These are
 /// generous for real displays while keeping hostile sizes from allocating
@@ -324,6 +332,30 @@ pub struct LocusTermKeyEvent {
     pub unshifted_codepoint: u32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LocusTermSearchStatus {
+    pub active: bool,
+    pub complete: bool,
+    pub total: u32,
+    pub selected: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LocusTermSearchMatch {
+    pub y: u16,
+    pub x_start: u16,
+    pub x_end: u16,
+    pub flags: u16,
+}
+
+struct LocusTermSearch {
+    screen_key: ScreenKey,
+    screen: ScreenSearch,
+    viewport: ViewportSearch,
+}
+
 pub struct LocusTerm {
     stream: Stream<TerminalHandler<FfiEffects>>,
     render_state: RenderState,
@@ -331,6 +363,9 @@ pub struct LocusTerm {
     selection_clock: u64,
     last_mouse_cell: Option<Coordinate>,
     synchronized_output_started_at: Option<Instant>,
+    // Search pins belong to screens inside the terminal. Plain handle drop is
+    // safe because those screens and all pin storage are destroyed together.
+    search: Option<LocusTermSearch>,
 }
 
 impl LocusTerm {
@@ -502,6 +537,7 @@ pub extern "C" fn locus_term_new(cols: u16, rows: u16, max_scrollback: usize) ->
             selection_clock: 0,
             last_mouse_cell: None,
             synchronized_output_started_at: None,
+            search: None,
         }))
     })) {
         Ok(term) => term,
@@ -1234,6 +1270,223 @@ pub unsafe extern "C" fn locus_term_scroll_wheel(
     })
 }
 
+/// Starts a synchronous search on the currently active terminal screen.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle. `needle` must point to `len`
+/// readable bytes, or may be NULL when `len == 0`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_search_start(
+    term: *mut LocusTerm,
+    needle: *const u8,
+    len: usize,
+) -> u32 {
+    term_status(|| {
+        let Some(needle) = bytes_slice(needle, len) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        if needle.is_empty() || needle.len() > LOCUS_TERM_SEARCH_MAX_NEEDLE_BYTES {
+            set_last_error_message("search needle must contain 1 to 1024 bytes");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+
+        search_end_internal(term);
+        let terminal = &mut term.stream.handler.terminal;
+        let screen_key = terminal.screens.active_key();
+        let Some(screen) = terminal.screens.get_mut(screen_key) else {
+            set_last_error_message("active terminal screen is unavailable");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        let Ok(mut screen_search) = ScreenSearch::new(screen, needle) else {
+            set_last_error_message("terminal search could not be initialized");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        if screen_search.search_all(screen).is_err() {
+            screen_search.deinit(screen);
+            set_last_error_message("terminal search could not scan the screen");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        term.search = Some(LocusTermSearch {
+            screen_key,
+            screen: screen_search,
+            viewport: ViewportSearch::new(needle),
+        });
+        LOCUS_STATUS_OK
+    })
+}
+
+/// Ends the current terminal search. Calling this without a search is valid.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_search_end(term: *mut LocusTerm) -> u32 {
+    term_status(|| {
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        search_end_internal(term);
+        LOCUS_STATUS_OK
+    })
+}
+
+/// Reads the current terminal search status.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle and `out` must point to writable
+/// storage for one `LocusTermSearchStatus`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_search_status(
+    term: *mut LocusTerm,
+    out: *mut LocusTermSearchStatus,
+) -> u32 {
+    term_status(|| {
+        if out.is_null() {
+            set_last_error_message("out must not be NULL");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is non-null and caller-provided writable storage.
+        unsafe { *out = LocusTermSearchStatus::default() };
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        search_refresh(term);
+        // SAFETY: `out` remains valid for this synchronous call.
+        unsafe { *out = search_status_value(term) };
+        LOCUS_STATUS_OK
+    })
+}
+
+/// Selects the next older or previous newer search match and scrolls it into
+/// view.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle and `out` must point to writable
+/// storage for one `LocusTermSearchStatus`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_search_select(
+    term: *mut LocusTerm,
+    direction: u32,
+    out: *mut LocusTermSearchStatus,
+) -> u32 {
+    term_status(|| {
+        if out.is_null() {
+            set_last_error_message("out must not be NULL");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is non-null and caller-provided writable storage.
+        unsafe { *out = LocusTermSearchStatus::default() };
+        let direction = match direction {
+            LOCUS_TERM_SEARCH_SELECT_NEXT => Select::Next,
+            LOCUS_TERM_SEARCH_SELECT_PREV => Select::Prev,
+            _ => {
+                set_last_error_message("unknown search selection direction");
+                return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+            }
+        };
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        search_refresh(term);
+        let active_key = term.stream.handler.terminal.screens.active_key();
+        if term.search.as_ref().map(|search| search.screen_key) != Some(active_key) {
+            return LOCUS_STATUS_OK;
+        }
+
+        let Some(mut search) = term.search.take() else {
+            return LOCUS_STATUS_OK;
+        };
+        let terminal = &mut term.stream.handler.terminal;
+        let Some(screen) = terminal.screens.get_mut(search.screen_key) else {
+            return LOCUS_STATUS_OK;
+        };
+        if search.screen.select(screen, direction).is_err() {
+            search.screen.deinit(screen);
+            return LOCUS_STATUS_OK;
+        }
+        if let Some((start, _)) = search.screen.selected_match().and_then(search_match_pins) {
+            screen.pages.scroll(Scroll::Pin(start));
+        }
+        term.search = Some(search);
+        // SAFETY: `out` remains valid for this synchronous call.
+        unsafe { *out = search_status_value(term) };
+        LOCUS_STATUS_OK
+    })
+}
+
+/// Returns packed `LocusTermSearchMatch` records for visible match rows.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle. `out` must point to writable storage
+/// for a `LocusTermBytes`, later freed with `locus_term_bytes_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_search_viewport_matches(
+    term: *mut LocusTerm,
+    out: *mut LocusTermBytes,
+) -> u32 {
+    term_status(|| {
+        if out.is_null() {
+            set_last_error_message("out must not be NULL");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is non-null and caller-provided writable storage.
+        unsafe { *out = LocusTermBytes::default() };
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        search_refresh(term);
+        let active_key = term.stream.handler.terminal.screens.active_key();
+        if term.search.as_ref().map(|search| search.screen_key) != Some(active_key) {
+            return LOCUS_STATUS_OK;
+        }
+
+        let Some(mut search) = term.search.take() else {
+            return LOCUS_STATUS_OK;
+        };
+        let terminal = &mut term.stream.handler.terminal;
+        let Some(screen) = terminal.screens.get_mut(search.screen_key) else {
+            return LOCUS_STATUS_OK;
+        };
+
+        // The ABI returns a complete snapshot rather than a change signal, so
+        // rebuild an exhausted viewport iterator even when its fingerprint is
+        // unchanged from the preceding call.
+        search.viewport.reset();
+        if search.viewport.update(&screen.pages).is_err() {
+            search.screen.deinit(screen);
+            return LOCUS_STATUS_OK;
+        }
+        let selected = search.screen.selected_match().and_then(search_match_pins);
+        let mut matches = Vec::new();
+        while let Some(found) = search.viewport.next(&screen.pages) {
+            append_viewport_search_rows(&screen.pages, &found, selected, &mut matches);
+        }
+        let limit = usize::from(screen.pages.rows) * SEARCH_MATCHES_PER_VIEWPORT_ROW_LIMIT;
+        matches.sort_unstable_by_key(|item| (item.y, item.x_start));
+        matches.truncate(limit);
+        term.search = Some(search);
+
+        let mut bytes = Vec::with_capacity(matches.len() * size_of::<LocusTermSearchMatch>());
+        for item in matches {
+            bytes.extend_from_slice(&item.y.to_ne_bytes());
+            bytes.extend_from_slice(&item.x_start.to_ne_bytes());
+            bytes.extend_from_slice(&item.x_end.to_ne_bytes());
+            bytes.extend_from_slice(&item.flags.to_ne_bytes());
+        }
+        // SAFETY: `out` remains valid for this synchronous call.
+        unsafe { *out = bytes_from_vec(bytes) };
+        LOCUS_STATUS_OK
+    })
+}
+
 fn term_status(action: impl FnOnce() -> u32) -> u32 {
     clear_last_error_message();
     match catch_unwind(AssertUnwindSafe(action)) {
@@ -1241,6 +1494,149 @@ fn term_status(action: impl FnOnce() -> u32) -> u32 {
         Err(_) => {
             set_last_error_message("terminal FFI call panicked");
             LOCUS_TERM_STATUS_PANIC
+        }
+    }
+}
+
+fn search_end_internal(term: &mut LocusTerm) {
+    let Some(mut search) = term.search.take() else {
+        return;
+    };
+    if let Some(screen) = term
+        .stream
+        .handler
+        .terminal
+        .screens
+        .get_mut(search.screen_key)
+    {
+        search.screen.deinit(screen);
+    }
+}
+
+fn search_refresh(term: &mut LocusTerm) {
+    let Some(screen_key) = term.search.as_ref().map(|search| search.screen_key) else {
+        return;
+    };
+    let terminal = &mut term.stream.handler.terminal;
+    if terminal.screens.active_key() != screen_key {
+        return;
+    }
+    let Some(mut search) = term.search.take() else {
+        return;
+    };
+    let Some(screen) = terminal.screens.get_mut(screen_key) else {
+        return;
+    };
+    if search.screen.reload_active(screen).is_err() || search.screen.search_all(screen).is_err() {
+        search.screen.deinit(screen);
+        return;
+    }
+    term.search = Some(search);
+}
+
+fn search_status_value(term: &LocusTerm) -> LocusTermSearchStatus {
+    let active_key = term.stream.handler.terminal.screens.active_key();
+    let Some(search) = term
+        .search
+        .as_ref()
+        .filter(|search| search.screen_key == active_key)
+    else {
+        return LocusTermSearchStatus::default();
+    };
+    let matches = search.screen.matches();
+    let selected = search
+        .screen
+        .selected_match()
+        .and_then(|selected| matches.iter().position(|found| found == selected))
+        .map(saturating_u32)
+        .unwrap_or(LOCUS_TERM_SEARCH_NO_SELECTION);
+    LocusTermSearchStatus {
+        active: true,
+        // The FFI starts and refreshes with search_all synchronously, so an
+        // observable active search is always complete.
+        complete: true,
+        total: saturating_u32(search.screen.matches_len()),
+        selected,
+    }
+}
+
+fn search_match_pins(found: &terminal::highlight::Flattened) -> Option<(Pin, Pin)> {
+    let first = found.chunks.first()?;
+    let last = found.chunks.last()?;
+    Some((
+        Pin {
+            node: first.node,
+            x: found.top_x,
+            y: first.start,
+            garbage: false,
+        },
+        Pin {
+            node: last.node,
+            x: found.bot_x,
+            y: last.end.checked_sub(1)?,
+            garbage: false,
+        },
+    ))
+}
+
+fn append_viewport_search_rows(
+    pages: &terminal::page_list::PageList,
+    found: &terminal::highlight::Flattened,
+    selected: Option<(Pin, Pin)>,
+    output: &mut Vec<LocusTermSearchMatch>,
+) {
+    let Some(found_pins) = search_match_pins(found) else {
+        return;
+    };
+    let selected_flag = if selected
+        .is_some_and(|selected| selected.0.eql(found_pins.0) && selected.1.eql(found_pins.1))
+    {
+        LOCUS_TERM_SEARCH_MATCH_SELECTED
+    } else {
+        0
+    };
+    let Some(last_chunk_index) = found.chunks.len().checked_sub(1) else {
+        return;
+    };
+    for (chunk_index, chunk) in found.chunks.iter().enumerate() {
+        for y in chunk.start..chunk.end {
+            let first_row = chunk_index == 0 && y == chunk.start;
+            let last_row = chunk_index == last_chunk_index && y + 1 == chunk.end;
+            let x_start = if first_row { found.top_x } else { 0 };
+            let x_end = if last_row {
+                found.bot_x
+            } else {
+                pages.cols.saturating_sub(1)
+            };
+            let start = Pin {
+                node: chunk.node,
+                x: x_start,
+                y,
+                garbage: false,
+            };
+            let end = Pin {
+                node: chunk.node,
+                x: x_end,
+                y,
+                garbage: false,
+            };
+            let (Some(start_point), Some(end_point)) = (
+                pages.point_from_pin(Tag::Viewport, start),
+                pages.point_from_pin(Tag::Viewport, end),
+            ) else {
+                continue;
+            };
+            let start = start_point.coord();
+            let end = end_point.coord();
+            if start.y != end.y || start.y >= u32::from(pages.rows) {
+                continue;
+            }
+            output.push(LocusTermSearchMatch {
+                y: start.y as u16,
+                x_start: start.x,
+                x_end: end.x,
+                flags: selected_flag,
+            });
         }
     }
 }
@@ -1701,6 +2097,7 @@ fn mods_from_bits(bits: u16) -> Mods {
 mod tests {
     use std::ffi::CStr;
     use std::mem::{align_of, offset_of, size_of};
+    use std::time::Instant;
 
     use super::*;
     use ::terminal::input::Side;
@@ -1755,9 +2152,351 @@ mod tests {
         result
     }
 
+    unsafe fn search_status(term: *mut LocusTerm) -> LocusTermSearchStatus {
+        let mut status = LocusTermSearchStatus::default();
+        // SAFETY: test callers pass a live terminal handle and a writable out value.
+        assert_eq!(
+            unsafe { locus_term_search_status(term, &mut status) },
+            LOCUS_STATUS_OK
+        );
+        status
+    }
+
+    unsafe fn search_matches(term: *mut LocusTerm) -> Vec<LocusTermSearchMatch> {
+        let mut bytes = LocusTermBytes::default();
+        // SAFETY: test callers pass a live terminal handle and a writable byte handle.
+        assert_eq!(
+            unsafe { locus_term_search_viewport_matches(term, &mut bytes) },
+            LOCUS_STATUS_OK
+        );
+        // SAFETY: bytes is returned by the ABI and is consumed exactly once.
+        let bytes = unsafe { owned_bytes(&mut bytes) };
+        assert_eq!(bytes.len() % size_of::<LocusTermSearchMatch>(), 0);
+        bytes
+            .chunks_exact(size_of::<LocusTermSearchMatch>())
+            .map(|record| LocusTermSearchMatch {
+                y: u16::from_ne_bytes([record[0], record[1]]),
+                x_start: u16::from_ne_bytes([record[2], record[3]]),
+                x_end: u16::from_ne_bytes([record[4], record[5]]),
+                flags: u16::from_ne_bytes([record[6], record[7]]),
+            })
+            .collect()
+    }
+
     #[test]
     fn abi_version_is_nonzero() {
         assert_eq!(locus_term_abi_version(), LOCUS_TERM_ABI_VERSION);
+    }
+
+    #[test]
+    fn search_status_layout_is_stable() {
+        assert_eq!(size_of::<LocusTermSearchStatus>(), 12);
+        assert_eq!(align_of::<LocusTermSearchStatus>(), 4);
+        assert_eq!(offset_of!(LocusTermSearchStatus, active), 0);
+        assert_eq!(offset_of!(LocusTermSearchStatus, complete), 1);
+        assert_eq!(offset_of!(LocusTermSearchStatus, total), 4);
+        assert_eq!(offset_of!(LocusTermSearchStatus, selected), 8);
+    }
+
+    #[test]
+    fn search_match_layout_is_stable() {
+        assert_eq!(size_of::<LocusTermSearchMatch>(), 8);
+        assert_eq!(align_of::<LocusTermSearchMatch>(), 2);
+        assert_eq!(offset_of!(LocusTermSearchMatch, y), 0);
+        assert_eq!(offset_of!(LocusTermSearchMatch, x_start), 2);
+        assert_eq!(offset_of!(LocusTermSearchMatch, x_end), 4);
+        assert_eq!(offset_of!(LocusTermSearchMatch, flags), 6);
+    }
+
+    #[test]
+    fn search_start_and_status_round_trip() {
+        let term = new_term();
+        let input = b"Fizz\r\nBuzz\r\nFizz";
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_search_start(term, b"Fizz".as_ptr(), 4),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                search_status(term),
+                LocusTermSearchStatus {
+                    active: true,
+                    complete: true,
+                    total: 2,
+                    selected: LOCUS_TERM_SEARCH_NO_SELECTION,
+                }
+            );
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn search_selection_cycles_and_reverses() {
+        let term = new_term();
+        let input = b"Fizz\r\nBuzz\r\nFizz";
+        let mut status = LocusTermSearchStatus::default();
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_search_start(term, b"Fizz".as_ptr(), 4),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_search_select(term, LOCUS_TERM_SEARCH_SELECT_NEXT, &mut status),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(status.selected, 0);
+            assert_eq!(
+                locus_term_search_select(term, LOCUS_TERM_SEARCH_SELECT_NEXT, &mut status),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(status.selected, 1);
+            assert_eq!(
+                locus_term_search_select(term, LOCUS_TERM_SEARCH_SELECT_NEXT, &mut status),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(status.selected, 0);
+            assert_eq!(
+                locus_term_search_select(term, LOCUS_TERM_SEARCH_SELECT_PREV, &mut status),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(status.selected, 1);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn search_viewport_matches_include_selected_flag() {
+        let term = new_term();
+        let input = b"Fizz\r\nBuzz\r\nFizz";
+        let mut status = LocusTermSearchStatus::default();
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_search_start(term, b"Fizz".as_ptr(), 4),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_search_select(term, LOCUS_TERM_SEARCH_SELECT_NEXT, &mut status),
+                LOCUS_STATUS_OK
+            );
+            let expected = vec![
+                LocusTermSearchMatch {
+                    y: 0,
+                    x_start: 0,
+                    x_end: 3,
+                    flags: 0,
+                },
+                LocusTermSearchMatch {
+                    y: 2,
+                    x_start: 0,
+                    x_end: 3,
+                    flags: LOCUS_TERM_SEARCH_MATCH_SELECTED,
+                },
+            ];
+            assert_eq!(search_matches(term), expected);
+            assert_eq!(search_matches(term), expected);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn search_multiline_match_emits_one_record_per_row() {
+        let term = locus_term_new(5, 3, 1024);
+        assert!(!term.is_null());
+        let input = b"abcdeFG";
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_search_start(term, b"deFG".as_ptr(), 4),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                search_matches(term),
+                vec![
+                    LocusTermSearchMatch {
+                        y: 0,
+                        x_start: 3,
+                        x_end: 4,
+                        flags: 0,
+                    },
+                    LocusTermSearchMatch {
+                        y: 1,
+                        x_start: 0,
+                        x_end: 1,
+                        flags: 0,
+                    },
+                ]
+            );
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn search_selection_scrolls_to_scrollback_match() {
+        let term = locus_term_new(12, 2, 1024 * 1024);
+        let frame = locus_term_frame_new();
+        assert!(!term.is_null());
+        assert!(!frame.is_null());
+        let input = b"Fizz0\r\nplain1\r\nplain2\r\nFizz3\r\nplain4\r\nplain5";
+        let mut status = LocusTermSearchStatus::default();
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_search_start(term, b"Fizz".as_ptr(), 4),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(search_status(term).total, 2);
+            assert_eq!(
+                locus_term_search_select(term, LOCUS_TERM_SEARCH_SELECT_NEXT, &mut status),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            assert!(!(*frame).at_bottom);
+            assert!((*frame).viewport_offset_rows > 0);
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn search_status_refreshes_after_new_output() {
+        let term = new_term();
+        unsafe {
+            assert_eq!(locus_term_feed(term, b"Fizz".as_ptr(), 4), LOCUS_STATUS_OK);
+            assert_eq!(
+                locus_term_search_start(term, b"Fizz".as_ptr(), 4),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(search_status(term).total, 1);
+            let input = b"\r\nFizz";
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(search_status(term).total, 2);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn search_survives_alternate_screen_round_trip() {
+        let term = new_term();
+        unsafe {
+            assert_eq!(locus_term_feed(term, b"Fizz".as_ptr(), 4), LOCUS_STATUS_OK);
+            assert_eq!(
+                locus_term_search_start(term, b"Fizz".as_ptr(), 4),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(search_status(term).total, 1);
+
+            let alternate = b"\x1b[?1049h";
+            assert_eq!(
+                locus_term_feed(term, alternate.as_ptr(), alternate.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(search_status(term), LocusTermSearchStatus::default());
+
+            let primary = b"\x1b[?1049l";
+            assert_eq!(
+                locus_term_feed(term, primary.as_ptr(), primary.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(search_status(term).total, 1);
+            assert!(search_status(term).active);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn search_guards_and_replacement_are_safe() {
+        let term = new_term();
+        let oversized = vec![b'x'; LOCUS_TERM_SEARCH_MAX_NEEDLE_BYTES + 1];
+        let mut status = LocusTermSearchStatus::default();
+        let mut bytes = LocusTermBytes::default();
+        unsafe {
+            assert_eq!(
+                locus_term_search_start(term, ptr::null(), 0),
+                LOCUS_TERM_STATUS_INVALID_ARGUMENT
+            );
+            assert_eq!(
+                locus_term_search_start(term, oversized.as_ptr(), oversized.len()),
+                LOCUS_TERM_STATUS_INVALID_ARGUMENT
+            );
+            assert_eq!(
+                locus_term_search_status(term, ptr::null_mut()),
+                LOCUS_TERM_STATUS_INVALID_ARGUMENT
+            );
+            assert_eq!(
+                locus_term_search_select(term, 99, &mut status),
+                LOCUS_TERM_STATUS_INVALID_ARGUMENT
+            );
+            assert_eq!(
+                locus_term_search_viewport_matches(term, ptr::null_mut()),
+                LOCUS_TERM_STATUS_INVALID_ARGUMENT
+            );
+            assert_eq!(locus_term_search_end(term), LOCUS_STATUS_OK);
+            assert_eq!(locus_term_search_end(term), LOCUS_STATUS_OK);
+
+            assert_eq!(
+                locus_term_search_start(term, b"one".as_ptr(), 3),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_search_start(term, b"two".as_ptr(), 3),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_search_end(term), LOCUS_STATUS_OK);
+            assert_eq!(
+                locus_term_search_viewport_matches(term, &mut bytes),
+                LOCUS_STATUS_OK
+            );
+            assert!(owned_bytes(&mut bytes).is_empty());
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn search_start_large_scrollback_reports_timing() {
+        let term = locus_term_new(80, 24, 16 * 1024 * 1024);
+        assert!(!term.is_null());
+        let mut input = Vec::with_capacity(2 * 1024 * 1024);
+        while input.len() < 2 * 1024 * 1024 {
+            input.extend_from_slice(b"000001 sequence search needle payload\r\n");
+        }
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            let started = Instant::now();
+            assert_eq!(
+                locus_term_search_start(term, b"needle".as_ptr(), 6),
+                LOCUS_STATUS_OK
+            );
+            eprintln!(
+                "search_start_2mb_ms={:.3}",
+                started.elapsed().as_secs_f64() * 1_000.0
+            );
+            assert!(search_status(term).total > 0);
+            locus_term_free(term);
+        }
     }
 
     #[test]

@@ -242,7 +242,7 @@ impl ScreenSearch {
     pub fn reload_active(&mut self, screen: &mut Screen) -> Result<(), AppendError> {
         // Ghostty's allocation-failure tripwire has no Rust equivalent: Vec
         // allocation is infallible at this layer.
-        let should_select_prev = self
+        let mut should_select_prev = self
             .selected
             .as_ref()
             .and_then(|selected| selected.highlight.untracked(&screen.pages))
@@ -258,7 +258,7 @@ impl ScreenSearch {
         }
 
         let history_node = self.active.update(&screen.pages)?;
-        self.reload_history(screen, history_node)?;
+        should_select_prev |= self.reload_history(screen, history_node)?;
 
         let old_active_len = self.active_results.len();
         let old_selection_idx = self.selected.as_ref().map(|selected| selected.idx);
@@ -276,7 +276,10 @@ impl ScreenSearch {
         self.fixup_selection_after_active_reload(screen, old_active_len, old_selection_idx);
 
         if should_select_prev {
-            let _ = self.select_prev(screen);
+            // ghostty: terminal/search/screen.zig:409-413
+            // The nested reload sees no selected match, so this public-path
+            // fallback cannot recursively request another fallback.
+            let _ = self.select(screen, Select::Prev)?;
         }
         Ok(())
     }
@@ -285,28 +288,29 @@ impl ScreenSearch {
         &mut self,
         screen: &mut Screen,
         history_node: Option<NodeId>,
-    ) -> Result<(), AppendError> {
+    ) -> Result<bool, AppendError> {
         let Some(history_node) = history_node else {
             if let Some(mut history) = self.history.take() {
                 history.deinit(&mut screen.pages);
                 self.history_results.clear();
             }
             let active_len = self.active_results.len();
-            if self
+            let should_select_prev = self
                 .selected
                 .as_ref()
-                .is_some_and(|selected| selected.idx >= active_len)
-            {
+                .is_some_and(|selected| selected.idx >= active_len);
+            if should_select_prev {
                 if let Some(selected) = self.selected.take() {
                     selected.deinit(&mut screen.pages);
                 }
             }
-            return Ok(());
+            // ghostty: terminal/search/screen.zig:550-558
+            return Ok(should_select_prev);
         };
 
         if screen.no_scrollback {
             debug_assert!(self.history.is_none());
-            return Ok(());
+            return Ok(false);
         }
 
         let history_is_garbage = self.history.as_ref().is_some_and(|history| {
@@ -330,17 +334,17 @@ impl ScreenSearch {
                 searcher,
                 start_pin,
             });
-            return Ok(());
+            return Ok(false);
         }
 
         let Some(start_pin_id) = self.history.as_ref().map(|history| history.start_pin) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(mut start_pin) = screen.pages.tracked_pin(start_pin_id) else {
             return Err(AppendError::InvalidNode);
         };
         if start_pin.node == history_node {
-            return Ok(());
+            return Ok(false);
         }
 
         let mut window = SlidingWindow::new(Direction::Forward, self.needle());
@@ -366,7 +370,7 @@ impl ScreenSearch {
             }
         }
         if results.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
 
         let added_len = results.len();
@@ -378,7 +382,7 @@ impl ScreenSearch {
                 selected.idx += added_len;
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     fn prune_inactive_results(&mut self, pages: &PageList) {
@@ -784,6 +788,37 @@ mod tests {
     }
 
     #[test]
+    // port regression: upstream screen.zig:550-558
+    fn history_selection_reselects_after_history_disappears() {
+        let mut stream = terminal_stream(10, 2, usize::MAX);
+        stream.next_slice(b"Fizz\r\n");
+        grow_to_pages(&mut stream, 3, b"\r\n");
+        append_blank_rows(&mut stream, 2);
+        stream.next_slice(b"hello.");
+        let mut search = ScreenSearch::new(stream.handler.active_screen_mut(), b"Fizz").unwrap();
+        search
+            .search_all(stream.handler.active_screen_mut())
+            .unwrap();
+        assert!(search
+            .select(stream.handler.active_screen_mut(), Select::Next)
+            .unwrap());
+
+        stream.handler.full_reset();
+        stream.next_slice(b"new Fizz");
+        search
+            .reload_active(stream.handler.active_screen_mut())
+            .unwrap();
+
+        assert_match(
+            search.selected_match().unwrap(),
+            stream.handler.active_screen(),
+            Point::screen(4, 0),
+            Point::screen(7, 0),
+        );
+        search.deinit(stream.handler.active_screen_mut());
+    }
+
+    #[test]
     // ghostty: "select prev" (screen.zig:1229)
     fn select_prev() {
         let mut stream = two_match_stream();
@@ -941,6 +976,7 @@ mod tests {
         search
             .select(stream.handler.active_screen_mut(), Select::Next)
             .unwrap();
+        assert!(search.selected_match().is_some());
         stream
             .handler
             .erase_display(EraseDisplay::Scrollback, false);
