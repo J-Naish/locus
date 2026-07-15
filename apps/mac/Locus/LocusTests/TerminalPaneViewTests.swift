@@ -793,16 +793,22 @@ final class TerminalPaneViewTests: XCTestCase {
 
   func testCaretMoveEventsRightAndLeft() {
     let rightEvents = TerminalCaretMovement.events(
-      from: TerminalCellCoordinate(column: 5, row: 2),
-      to: TerminalCellCoordinate(column: 9, row: 2)
+      fromColumn: 5,
+      fromIsWideTail: false,
+      toColumn: 9,
+      rowWideCodes: Array(repeating: 0, count: 10)
     )
     let leftEvents = TerminalCaretMovement.events(
-      from: TerminalCellCoordinate(column: 9, row: 2),
-      to: TerminalCellCoordinate(column: 5, row: 2)
+      fromColumn: 9,
+      fromIsWideTail: false,
+      toColumn: 5,
+      rowWideCodes: Array(repeating: 0, count: 10)
     )
     let unchangedEvents = TerminalCaretMovement.events(
-      from: TerminalCellCoordinate(column: 5, row: 2),
-      to: TerminalCellCoordinate(column: 5, row: 2)
+      fromColumn: 5,
+      fromIsWideTail: false,
+      toColumn: 5,
+      rowWideCodes: Array(repeating: 0, count: 10)
     )
 
     XCTAssertEqual(rightEvents.count, 4)
@@ -810,6 +816,130 @@ final class TerminalPaneViewTests: XCTestCase {
     XCTAssertEqual(leftEvents.count, 4)
     XCTAssertTrue(leftEvents.allSatisfy { $0.key == LOCUS_TERM_KEY_ARROW_LEFT })
     XCTAssertTrue(unchangedEvents.isEmpty)
+  }
+
+  func testCaretMovementPreservesAllNarrowCellDelta() {
+    let events = TerminalCaretMovement.events(
+      fromColumn: 9,
+      fromIsWideTail: false,
+      toColumn: 0,
+      rowWideCodes: Array(repeating: 0, count: 10)
+    )
+
+    XCTAssertEqual(events.count, 9)
+    XCTAssertTrue(events.allSatisfy { $0.key == LOCUS_TERM_KEY_ARROW_LEFT })
+  }
+
+  func testCaretMovementCountsWideCharactersWhenMovingLeft() {
+    let events = TerminalCaretMovement.events(
+      fromColumn: 9,
+      fromIsWideTail: false,
+      toColumn: 0,
+      rowWideCodes: [1, 3, 1, 3, 1, 3, 0, 0, 0]
+    )
+
+    XCTAssertEqual(events.count, 6)
+    XCTAssertTrue(events.allSatisfy { $0.key == LOCUS_TERM_KEY_ARROW_LEFT })
+  }
+
+  func testCaretMovementCountsWideCharactersWhenMovingRight() {
+    let events = TerminalCaretMovement.events(
+      fromColumn: 0,
+      fromIsWideTail: false,
+      toColumn: 6,
+      rowWideCodes: [1, 3, 1, 3, 1, 3, 0, 0, 0]
+    )
+
+    XCTAssertEqual(events.count, 3)
+    XCTAssertTrue(events.allSatisfy { $0.key == LOCUS_TERM_KEY_ARROW_RIGHT })
+  }
+
+  func testCaretMovementTreatsWideHeadAndTailClicksAsCharacterBoundaries() {
+    let wideCodes: [UInt8] = [1, 3, 1, 3, 1, 3, 0, 0, 0]
+    let headEvents = TerminalCaretMovement.events(
+      fromColumn: 0,
+      fromIsWideTail: false,
+      toColumn: 4,
+      rowWideCodes: wideCodes
+    )
+    let tailEvents = TerminalCaretMovement.events(
+      fromColumn: 0,
+      fromIsWideTail: false,
+      toColumn: 5,
+      rowWideCodes: wideCodes
+    )
+
+    XCTAssertEqual(headEvents.count, 2)
+    XCTAssertEqual(tailEvents.count, 3)
+    XCTAssertTrue(headEvents.allSatisfy { $0.key == LOCUS_TERM_KEY_ARROW_RIGHT })
+    XCTAssertTrue(tailEvents.allSatisfy { $0.key == LOCUS_TERM_KEY_ARROW_RIGHT })
+  }
+
+  func testCaretMovementNormalizesCursorFromWideTailToHead() {
+    let wideCodes: [UInt8] = [1, 3, 1, 3, 1, 3, 0, 0, 0]
+    let fromTail = TerminalCaretMovement.events(
+      fromColumn: 5,
+      fromIsWideTail: true,
+      toColumn: 0,
+      rowWideCodes: wideCodes
+    )
+    let fromHead = TerminalCaretMovement.events(
+      fromColumn: 4,
+      fromIsWideTail: false,
+      toColumn: 0,
+      rowWideCodes: wideCodes
+    )
+
+    XCTAssertEqual(fromTail, fromHead)
+    XCTAssertEqual(fromTail.count, 2)
+  }
+
+  func testCaretMovementSkipsSpacerHeadAtLineEnd() {
+    let events = TerminalCaretMovement.events(
+      fromColumn: 0,
+      fromIsWideTail: false,
+      toColumn: 2,
+      rowWideCodes: [0, 2]
+    )
+
+    XCTAssertEqual(events.count, 1)
+    XCTAssertTrue(events.allSatisfy { $0.key == LOCUS_TERM_KEY_ARROW_RIGHT })
+  }
+
+  func testCaretClickOnJapaneseInputEmitsOneArrowPerCharacter() {
+    let session = TerminalSession(columns: 40, rows: 10)
+    var received: [TerminalKeyEvent] = []
+    let view = TerminalPaneView(
+      session: session,
+      keyEventObserver: { received.append($0) }
+    )
+    defer {
+      session.terminate()
+    }
+    session.start(command: "/bin/sh")
+    session.send(Data("printf '\\033[2J\\033[H日本語abc'; sleep 5\n".utf8))
+
+    var cursor: TerminalCellCoordinate?
+    XCTAssertTrue(
+      waitForPaneCondition {
+        session.withFrame { frame in
+          guard frame.cursor.x == 9 else {
+            return
+          }
+          cursor = TerminalCellCoordinate(column: frame.cursor.x, row: frame.cursor.y)
+        }
+        return cursor != nil
+      },
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
+    )
+    guard let cursor else {
+      return
+    }
+
+    view.moveCaretForTesting(to: TerminalCellCoordinate(column: 0, row: cursor.row))
+
+    XCTAssertEqual(received.count, 6)
+    XCTAssertTrue(received.allSatisfy { $0.key == LOCUS_TERM_KEY_ARROW_LEFT })
   }
 
   func testCaretBlinkVisibilityResetsAndAlternates() {

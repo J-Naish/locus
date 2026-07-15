@@ -844,19 +844,42 @@ struct TerminalKeyEvent: Equatable, Sendable {
 
 enum TerminalCaretMovement {
   static func events(
-    from current: TerminalCellCoordinate,
-    to destination: TerminalCellCoordinate
+    fromColumn: Int,
+    fromIsWideTail: Bool,
+    toColumn: Int,
+    rowWideCodes: [UInt8]
   ) -> [TerminalKeyEvent] {
-    guard current.row == destination.row else {
+    let columnCount = rowWideCodes.count
+    let normalizedFrom = min(
+      max(fromColumn - (fromIsWideTail ? 1 : 0), 0),
+      columnCount
+    )
+    var normalizedTo = min(max(toColumn, 0), columnCount)
+    if normalizedTo < columnCount, rowWideCodes[normalizedTo] == 3 {
+      normalizedTo = min(normalizedTo + 1, columnCount)
+    }
+    guard normalizedFrom != normalizedTo else {
       return []
     }
-    let delta = Int(destination.column) - Int(current.column)
-    guard delta != 0 else {
+
+    let lowerBound = min(normalizedFrom, normalizedTo)
+    let upperBound = max(normalizedFrom, normalizedTo)
+    // Narrow cells and wide heads each represent one shell character. Wide tails and
+    // spacer heads consume grid columns without requiring an additional arrow event.
+    // An all-narrow row therefore remains byte-for-byte equivalent to the old cell delta.
+    let characterCount = rowWideCodes[lowerBound..<upperBound].count { code in
+      code == 0 || code == 1
+    }
+    guard characterCount > 0 else {
       return []
     }
-    let key = delta > 0 ? LOCUS_TERM_KEY_ARROW_RIGHT : LOCUS_TERM_KEY_ARROW_LEFT
+
+    let key =
+      normalizedTo > normalizedFrom
+      ? LOCUS_TERM_KEY_ARROW_RIGHT
+      : LOCUS_TERM_KEY_ARROW_LEFT
     let event = TerminalKeyEvent.keyPress(key)
-    return Array(repeating: event, count: abs(delta))
+    return Array(repeating: event, count: characterCount)
   }
 }
 
@@ -3001,16 +3024,28 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
     guard let session else {
       return
     }
-    var cursorCoordinate: TerminalCellCoordinate?
-    var resolvedColumn: UInt16?
+    var cursorColumn: Int?
+    var cursorIsWideTail = false
+    var cursorRowWideCodes: [UInt8] = []
+    var resolvedColumn: Int?
     session.withFrame { frame in
       guard frame.columns > 0, frame.rows > 0 else {
         return
       }
-      cursorCoordinate = TerminalCellCoordinate(
-        column: min(frame.cursor.x, frame.columns - 1),
-        row: min(frame.cursor.y, frame.rows - 1)
-      )
+      let cursorRow = min(frame.cursor.y, frame.rows - 1)
+      cursorColumn = Int(min(frame.cursor.x, frame.columns - 1))
+      cursorIsWideTail = frame.cursor.wide_tail
+      frame.withRows { rows in
+        guard let row = rows.first(where: { $0.y == cursorRow }) else {
+          return
+        }
+        frame.withCells { cells in
+          cursorRowWideCodes = TerminalRowShapingCache.cellRange(
+            for: row,
+            cells: cells
+          ).map { cells[$0].wide }
+        }
+      }
       let frameRows = terminalBlankRows(frame: frame)
       if let column = TerminalCaretClickResolver.resolveCaretClick(
         row: Int(min(clickedCoordinate.row, frame.rows - 1)),
@@ -3018,22 +3053,27 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
         cursorRow: Int(frame.cursor.y),
         frameRows: frameRows
       ) {
-        resolvedColumn = UInt16(clamping: column)
+        resolvedColumn = column
       }
     }
-    guard let cursorCoordinate, let resolvedColumn else {
+    guard let cursorColumn, let resolvedColumn else {
       return
     }
-    let destination = TerminalCellCoordinate(
-      column: resolvedColumn,
-      row: cursorCoordinate.row
+    let events = TerminalCaretMovement.events(
+      fromColumn: cursorColumn,
+      fromIsWideTail: cursorIsWideTail,
+      toColumn: resolvedColumn,
+      rowWideCodes: cursorRowWideCodes
     )
-    let events = TerminalCaretMovement.events(from: cursorCoordinate, to: destination)
     guard !events.isEmpty else {
       return
     }
     resetCaretBlink()
     sendTerminalKeys(events)
+  }
+
+  func moveCaretForTesting(to clickedCoordinate: TerminalCellCoordinate) {
+    moveCaret(to: clickedCoordinate)
   }
 
   private func observeActiveFocusChanges() {
