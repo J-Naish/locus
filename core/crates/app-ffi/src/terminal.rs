@@ -1981,17 +1981,56 @@ fn render_into_frame(term: &mut LocusTerm, frame: &mut LocusTermFrame, full: boo
                 hyperlink_id: cell.hyperlink.unwrap_or(0),
             });
         }
+        let selection = row.selection.and_then(|value| {
+            snap_selection_to_wide_boundaries(
+                value.start,
+                value.end,
+                &storage.cell_storage[cell_start..],
+            )
+        });
         storage.row_storage.push(LocusTermRow {
             y: row_index as u16,
             cell_start,
             cell_count: row.cells.len(),
             dirty: row.dirty,
             wrapped: row.raw.wrap(),
-            sel_start: row.selection.map(|value| value.start).unwrap_or(u16::MAX),
-            sel_end: row.selection.map(|value| value.end).unwrap_or(u16::MAX),
+            sel_start: selection.map(|value| value.0).unwrap_or(u16::MAX),
+            sel_end: selection.map(|value| value.1).unwrap_or(u16::MAX),
         });
     }
     frame.refresh_pointers();
+}
+
+/// Presentation policy (not part of the ghostty port): the painted range must
+/// match what `selection_string` copies. A wide head includes its tail, while
+/// a range starting on a spacer tail drops that unselected half glyph.
+fn snap_selection_to_wide_boundaries(
+    start: u16,
+    end: u16,
+    cells: &[LocusTermCell],
+) -> Option<(u16, u16)> {
+    let mut start = start;
+    let mut end = end;
+
+    if cells
+        .get(usize::from(start))
+        .is_some_and(|cell| cell.wide == 3)
+    {
+        start = start.saturating_add(1);
+    }
+
+    if cells
+        .get(usize::from(end))
+        .is_some_and(|cell| cell.wide == 1)
+    {
+        let next_index = usize::from(end).saturating_add(1);
+        if let Some(next) = cells.get(next_index) {
+            debug_assert_eq!(next.wide, 3, "wide head must be followed by a spacer tail");
+            end = end.saturating_add(1);
+        }
+    }
+
+    (start <= end).then_some((start, end))
 }
 
 fn synchronized_output_blocks_render(term: &mut LocusTerm) -> bool {
@@ -3667,6 +3706,234 @@ mod tests {
             assert_eq!(owned_bytes(&mut out), b"bcd");
             locus_term_free(term);
         }
+    }
+
+    #[test]
+    fn selection_frame_keeps_tail_started_wide_selection_copy_consistent() {
+        // P12 probe A: press-tail(5,f0.9) -> drag(7).
+        let term = new_term();
+        let frame = locus_term_frame_new();
+        let mut out = LocusTermBytes::default();
+        let text = "日本語";
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, text.as_ptr(), text.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 0, 5, 0, 0.9, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 1, 7, 0, 0.9, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            let rows = std::slice::from_raw_parts((*frame).rows_ptr, (*frame).row_count);
+            assert_eq!((rows[0].sel_start, rows[0].sel_end), (6, 7));
+            assert_eq!(locus_term_selection_string(term, &mut out), LOCUS_STATUS_OK);
+            assert!(owned_bytes(&mut out).is_empty());
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn selection_frame_extends_wide_head_end_to_match_copy() {
+        // P12 probe B: press(0) -> drag-head(4,f0.9).
+        let term = new_term();
+        let frame = locus_term_frame_new();
+        let mut out = LocusTermBytes::default();
+        let text = "日本語";
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, text.as_ptr(), text.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 0, 0, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 1, 4, 0, 0.9, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            let rows = std::slice::from_raw_parts((*frame).rows_ptr, (*frame).row_count);
+            assert_eq!((rows[0].sel_start, rows[0].sel_end), (0, 5));
+            assert_eq!(locus_term_selection_string(term, &mut out), LOCUS_STATUS_OK);
+            assert_eq!(owned_bytes(&mut out), text.as_bytes());
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn selection_frame_extends_wide_head_end_for_reverse_fraction() {
+        // P12 probe C: press(0) -> drag-tail(5,f0.4).
+        let term = new_term();
+        let frame = locus_term_frame_new();
+        let mut out = LocusTermBytes::default();
+        let text = "日本語";
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, text.as_ptr(), text.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 0, 0, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 1, 5, 0, 0.4, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            let rows = std::slice::from_raw_parts((*frame).rows_ptr, (*frame).row_count);
+            assert_eq!((rows[0].sel_start, rows[0].sel_end), (0, 5));
+            assert_eq!(locus_term_selection_string(term, &mut out), LOCUS_STATUS_OK);
+            assert_eq!(owned_bytes(&mut out), text.as_bytes());
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn selection_frame_leaves_existing_spacer_tail_end_unchanged() {
+        let term = new_term();
+        let frame = locus_term_frame_new();
+        let mut out = LocusTermBytes::default();
+        let text = "日本語";
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, text.as_ptr(), text.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 0, 0, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 1, 5, 0, 0.9, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            let rows = std::slice::from_raw_parts((*frame).rows_ptr, (*frame).row_count);
+            assert_eq!((rows[0].sel_start, rows[0].sel_end), (0, 5));
+            assert_eq!(locus_term_selection_string(term, &mut out), LOCUS_STATUS_OK);
+            assert_eq!(owned_bytes(&mut out), text.as_bytes());
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn selection_frame_drops_spacer_tail_start_to_match_empty_copy() {
+        // P12 probe D: press-tail(5,f0.4) -> drag(7).
+        let term = new_term();
+        let frame = locus_term_frame_new();
+        let mut out = LocusTermBytes::default();
+        let text = "日本語";
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, text.as_ptr(), text.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 0, 5, 0, 0.4, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 1, 7, 0, 0.9, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            let rows = std::slice::from_raw_parts((*frame).rows_ptr, (*frame).row_count);
+            assert_eq!((rows[0].sel_start, rows[0].sel_end), (6, 7));
+            assert_eq!(locus_term_selection_string(term, &mut out), LOCUS_STATUS_OK);
+            assert!(owned_bytes(&mut out).is_empty());
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn selection_frame_includes_mixed_row_wide_character_tail() {
+        let term = new_term();
+        let frame = locus_term_frame_new();
+        let mut out = LocusTermBytes::default();
+        let text = "a漢b";
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, text.as_ptr(), text.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 0, 0, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 1, 1, 0, 0.9, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            let rows = std::slice::from_raw_parts((*frame).rows_ptr, (*frame).row_count);
+            assert_eq!((rows[0].sel_start, rows[0].sel_end), (0, 2));
+            assert_eq!(locus_term_selection_string(term, &mut out), LOCUS_STATUS_OK);
+            assert_eq!(owned_bytes(&mut out), "a漢".as_bytes());
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn rectangular_selection_snaps_each_wide_row_independently() {
+        let term = new_term();
+        let frame = locus_term_frame_new();
+        let text = "日本語\r\n日本語";
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, text.as_ptr(), text.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 0, 0, 0, 0.5, false),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(
+                locus_term_selection_gesture(term, 1, 4, 1, 0.9, true),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(locus_term_render(term, frame, true), LOCUS_STATUS_OK);
+            let rows = std::slice::from_raw_parts((*frame).rows_ptr, (*frame).row_count);
+            assert_eq!((rows[0].sel_start, rows[0].sel_end), (0, 5));
+            assert_eq!((rows[1].sel_start, rows[1].sel_end), (0, 5));
+            locus_term_frame_free(frame);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn selection_snap_clears_tail_only_range() {
+        let cells = [LocusTermCell {
+            wide: 3,
+            ..LocusTermCell::default()
+        }];
+
+        assert_eq!(snap_selection_to_wide_boundaries(0, 0, &cells), None);
+    }
+
+    #[test]
+    fn selection_snap_does_not_extend_malformed_row_end() {
+        let cells = [LocusTermCell {
+            wide: 1,
+            ..LocusTermCell::default()
+        }];
+
+        assert_eq!(
+            snap_selection_to_wide_boundaries(0, 0, &cells),
+            Some((0, 0))
+        );
     }
 
     #[test]
