@@ -59,6 +59,10 @@ final class TerminalGlyphCache {
 
   func glyph(font: CTFont, glyph: CGGlyph) -> Entry {
     let fontIndex = fontIndex(for: font)
+    return self.glyph(fontIndex: fontIndex, font: font, glyph: glyph)
+  }
+
+  func glyph(fontIndex: Int, font: CTFont, glyph: CGGlyph) -> Entry {
     // v1 deliberately has a single horizontal subpixel bucket. Keeping the
     // bucket in the key avoids an API migration when M2 adds quantized shifts.
     let key = Key(fontIndex: fontIndex, glyph: glyph, shiftBucket: 0)

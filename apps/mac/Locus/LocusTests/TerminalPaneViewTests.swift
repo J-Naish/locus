@@ -6,6 +6,34 @@ import XCTest
 
 @MainActor
 final class TerminalPaneViewTests: XCTestCase {
+  func testCacheDisplayHonorsViewAppearance() throws {
+    let view = TerminalPaneView()
+    view.frame = NSRect(x: 0, y: 0, width: 32, height: 32)
+    view.appearance = try XCTUnwrap(NSAppearance(named: .aqua))
+    let bitmap = try XCTUnwrap(
+      NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: 32,
+        pixelsHigh: 32,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .calibratedRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+      )
+    )
+    bitmap.size = view.bounds.size
+
+    view.cacheDisplay(in: view.bounds, to: bitmap)
+
+    let color = try XCTUnwrap(bitmap.colorAt(x: 1, y: 1)?.usingColorSpace(.sRGB))
+    XCTAssertGreaterThan(color.redComponent, 0.9)
+    XCTAssertGreaterThan(color.greenComponent, 0.9)
+    XCTAssertGreaterThan(color.blueComponent, 0.9)
+  }
+
   func testLinkHitTesterHandlesInsideOutsideAndMultiRowLinks() {
     let matches = [
       TerminalLinkMatch(y: 2, xStart: 4, xEnd: 9, linkID: 7),
