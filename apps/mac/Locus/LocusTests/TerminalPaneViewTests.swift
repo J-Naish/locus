@@ -526,6 +526,90 @@ final class TerminalPaneViewTests: XCTestCase {
     }
   }
 
+  func testWideRegularFontUsesGridFittedHiraginoSans() {
+    let metrics = TerminalCellMetrics()
+    let font = metrics.wideFont(for: [])
+
+    XCTAssertEqual(font.familyName, "Hiragino Sans")
+    XCTAssertEqual(font.fontName, "HiraginoSans-W4")
+    XCTAssertEqual(
+      font.pointSize,
+      TerminalCellMetrics.defaultWideGlyphFillRatio * 2 * metrics.cellWidth,
+      accuracy: 0.001
+    )
+  }
+
+  func testWideBoldFontUsesGridFittedHiraginoSansW6() {
+    let metrics = TerminalCellMetrics()
+    let font = metrics.wideFont(for: [.bold])
+
+    XCTAssertEqual(font.familyName, "Hiragino Sans")
+    XCTAssertEqual(font.fontName, "HiraginoSans-W6")
+    XCTAssertEqual(
+      font.pointSize,
+      TerminalCellMetrics.defaultWideGlyphFillRatio * 2 * metrics.cellWidth,
+      accuracy: 0.001
+    )
+  }
+
+  func testWideCellShapesWithWideFontWhileNarrowCellsKeepBaseFont() {
+    let metrics = TerminalCellMetrics()
+    let shaped = terminalShapedRow(
+      cells: [
+        terminalShapingCell(codepoint: 0x61, width: .narrow),
+        terminalShapingCell(codepoint: 0x6F22, width: .wide),
+        terminalShapingCell(codepoint: 0, width: .spacerTail),
+        terminalShapingCell(codepoint: 0x62, width: .narrow),
+      ],
+      metrics: metrics
+    )
+    let batchFonts = shaped.runs.flatMap(\.glyphBatches).map(\.font)
+
+    XCTAssertTrue(
+      batchFonts.contains {
+        CTFontCopyPostScriptName($0) as String == "HiraginoSans-W4"
+          && abs(CTFontGetSize($0) - metrics.wideFont(for: []).pointSize) < 0.001
+      }
+    )
+    XCTAssertTrue(
+      batchFonts.contains {
+        CTFontCopyPostScriptName($0) as String == metrics.font.fontName
+      }
+    )
+  }
+
+  func testAmbiguousWidthCellDoesNotUseWideFont() {
+    let metrics = TerminalCellMetrics()
+    let shaped = terminalShapedRow(
+      cells: [terminalShapingCell(codepoint: 0x2460, width: .narrow)],
+      metrics: metrics
+    )
+
+    XCTAssertFalse(
+      shaped.runs.flatMap(\.glyphBatches).contains {
+        CTFontCopyPostScriptName($0.font) as String == "HiraginoSans-W4"
+      }
+    )
+  }
+
+  func testGridFittedWideKanjiDoesNotRequireCondensing() throws {
+    let metrics = TerminalCellMetrics()
+    let font = metrics.wideFont(for: []) as CTFont
+    var character = UniChar(0x6F22)
+    var glyph = CGGlyph()
+    XCTAssertTrue(CTFontGetGlyphsForCharacters(font, &character, &glyph, 1))
+    var advance = CGSize.zero
+    CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
+
+    XCTAssertNil(
+      TerminalGlyphOverflow.overflowScale(
+        clusterAdvance: advance.width,
+        cellCount: 2,
+        cellWidth: metrics.cellWidth
+      )
+    )
+  }
+
   func testCursorRectMatchesColumnPosition() {
     let metrics = TerminalCellMetrics()
     let insets = TerminalPaneLayoutMetrics.contentInsets
@@ -910,6 +994,22 @@ final class TerminalPaneViewTests: XCTestCase {
     view.cacheDisplay(in: view.bounds, to: bitmap)
 
     XCTAssertTrue(bitmapHasMultipleColors(bitmap))
+  }
+
+  func testWideGlyphFillReducesInternalInkGap() throws {
+    let defaultMetrics = TerminalCellMetrics()
+    let legacyMetrics = TerminalCellMetrics(
+      wideGlyphFillRatio: 12 / (2 * defaultMetrics.cellWidth)
+    )
+
+    let defaultGap = try terminalWideGlyphInternalGap(metrics: defaultMetrics)
+    let legacyGap = try terminalWideGlyphInternalGap(metrics: legacyMetrics)
+
+    XCTAssertLessThan(
+      defaultGap,
+      legacyGap,
+      "Grid-fitted wide glyphs should leave less internal whitespace than the legacy 12pt look"
+    )
   }
 
   func testMetalSceneIncludesSelectionAndUpdatesMenuValidation() throws {
@@ -1614,11 +1714,138 @@ private func terminalTestCell(
   )
 }
 
+private func terminalShapingCell(
+  codepoint: UInt32,
+  width: TerminalCellWidth,
+  flags: TerminalCellFlags = []
+) -> LocusTermCell {
+  LocusTermCell(
+    codepoint: codepoint,
+    raw: 0,
+    fg: LocusTermRgb(r: 0xC5, g: 0xC8, b: 0xC6),
+    bg: LocusTermRgb(r: 0x1D, g: 0x1F, b: 0x21),
+    flags: flags.rawValue,
+    wide: width.rawValue,
+    grapheme_start: 0,
+    grapheme_len: 0,
+    hyperlink_id: 0
+  )
+}
+
+@MainActor
+private func terminalShapedRow(
+  cells: [LocusTermCell],
+  metrics: TerminalCellMetrics
+) -> TerminalShapedRow {
+  let row = LocusTermRow(
+    y: 0,
+    cell_start: 0,
+    cell_count: cells.count,
+    dirty: false,
+    wrapped: false,
+    sel_start: .max,
+    sel_end: .max
+  )
+  let cache = TerminalRowShapingCache(
+    metrics: metrics,
+    insets: TerminalPaneLayoutMetrics.contentInsets
+  )
+  return cells.withUnsafeBufferPointer { cellBuffer in
+    [UInt32]().withUnsafeBufferPointer { graphemeBuffer in
+      cache.beginPaint()
+      return cache.shapedRow(row: row, cells: cellBuffer, graphemes: graphemeBuffer)
+    }
+  }
+}
+
 private func terminalBitmapBytes(_ bitmap: NSBitmapImageRep) -> Data {
   guard let data = bitmap.bitmapData else {
     return Data()
   }
   return Data(bytes: data, count: bitmap.bytesPerRow * bitmap.pixelsHigh)
+}
+
+@MainActor
+private func terminalWideGlyphInternalGap(metrics: TerminalCellMetrics) throws -> Int {
+  let columns: UInt16 = 8
+  let rows: UInt16 = 4
+  let text = "漢漢"
+  let session = TerminalSession(columns: columns, rows: rows)
+  defer { session.terminate() }
+  let view = TerminalPaneView(session: session, metrics: metrics, backend: .coreGraphics)
+  view.appearance = try XCTUnwrap(NSAppearance(named: .aqua))
+  view.frame = gridFrame(columns: columns, rows: rows, metrics: metrics)
+  session.start(command: "/bin/sh")
+  session.send(Data("printf '\\033[2J\\033[H%s' '漢漢'\n".utf8))
+
+  var contentRow: UInt16?
+  XCTAssertTrue(
+    waitForPaneCondition(timeout: 5) {
+      session.withFrame { frame in
+        let lines = frame.plainText().split(separator: "\n", omittingEmptySubsequences: false)
+        if let index = lines.firstIndex(where: { $0.contains(text) }) {
+          contentRow = UInt16(clamping: index)
+        }
+      }
+      return contentRow != nil
+    },
+    "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
+  )
+
+  let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+  view.cacheDisplay(in: view.bounds, to: bitmap)
+  let row = try XCTUnwrap(contentRow)
+  let insets = TerminalPaneLayoutMetrics.contentInsets
+  let region = NSRect(
+    x: insets.left,
+    y: TerminalPaneGeometry.rowRectY(
+      row,
+      bounds: view.bounds,
+      metrics: metrics,
+      insets: insets
+    ),
+    width: metrics.cellWidth * 4,
+    height: metrics.cellHeight
+  )
+  return try terminalMaximumInternalInkGap(in: bitmap, region: region)
+}
+
+private func terminalMaximumInternalInkGap(
+  in bitmap: NSBitmapImageRep,
+  region: NSRect
+) throws -> Int {
+  let scaleX = CGFloat(bitmap.pixelsWide) / bitmap.size.width
+  let scaleY = CGFloat(bitmap.pixelsHigh) / bitmap.size.height
+  let xStart = max(0, Int(floor(region.minX * scaleX)))
+  let xEnd = min(bitmap.pixelsWide, Int(ceil(region.maxX * scaleX)))
+  let xRange = xStart..<xEnd
+  let yStart = max(0, bitmap.pixelsHigh - Int(ceil(region.maxY * scaleY)))
+  let yEnd = min(bitmap.pixelsHigh, bitmap.pixelsHigh - Int(floor(region.minY * scaleY)))
+  let yRange = yStart..<yEnd
+  let inkedColumns = xRange.filter { x in
+    yRange.contains { y in
+      guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else {
+        return false
+      }
+      return color.redComponent < 0.65
+        || color.greenComponent < 0.65
+        || color.blueComponent < 0.65
+    }
+  }
+  let firstInk = try XCTUnwrap(inkedColumns.first)
+  let lastInk = try XCTUnwrap(inkedColumns.last)
+  let inked = Set(inkedColumns)
+  var longestGap = 0
+  var currentGap = 0
+  for x in (firstInk + 1)..<lastInk {
+    if inked.contains(x) {
+      longestGap = max(longestGap, currentGap)
+      currentGap = 0
+    } else {
+      currentGap += 1
+    }
+  }
+  return max(longestGap, currentGap)
 }
 
 private func terminalPanePlainText(in frame: TerminalFrame) -> String {

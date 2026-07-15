@@ -164,15 +164,27 @@ struct TerminalTextStyle: Equatable {
 }
 
 struct TerminalCellMetrics {
+  static let defaultWideGlyphFillRatio: CGFloat = 0.9
+  private static let wideRegularPostScriptName = "HiraginoSans-W4"
+  private static let wideBoldPostScriptName = "HiraginoSans-W6"
+  private static let wideFontFamily = "Hiragino Sans"
+
   let font: NSFont
   let boldFont: NSFont
   let italicFont: NSFont
   let boldItalicFont: NSFont
+  let wideFont: NSFont
+  let wideBoldFont: NSFont
+  let wideItalicFont: NSFont
+  let wideBoldItalicFont: NSFont
   let cellWidth: CGFloat
   let cellHeight: CGFloat
   let baselineOffset: CGFloat
 
-  init(font: NSFont = .monospacedSystemFont(ofSize: 13, weight: .regular)) {
+  init(
+    font: NSFont = .monospacedSystemFont(ofSize: 13, weight: .regular),
+    wideGlyphFillRatio: CGFloat = Self.defaultWideGlyphFillRatio
+  ) {
     self.font = font
     let manager = NSFontManager.shared
     boldFont = manager.convert(font, toHaveTrait: .boldFontMask)
@@ -180,7 +192,29 @@ struct TerminalCellMetrics {
     boldItalicFont = manager.convert(boldFont, toHaveTrait: .italicFontMask)
 
     let ctFont = font as CTFont
-    cellWidth = ceil(Self.advance(for: "0", font: font))
+    let resolvedCellWidth = ceil(Self.advance(for: "0", font: font))
+    cellWidth = resolvedCellWidth
+    let wideFontSize = wideGlyphFillRatio * 2 * resolvedCellWidth
+    wideFont = Self.wideFont(
+      postScriptName: Self.wideRegularPostScriptName,
+      size: wideFontSize,
+      fallback: font
+    )
+    wideBoldFont = Self.wideFont(
+      postScriptName: Self.wideBoldPostScriptName,
+      size: wideFontSize,
+      fallback: boldFont
+    )
+    wideItalicFont = Self.wideFont(
+      postScriptName: Self.wideRegularPostScriptName,
+      size: wideFontSize,
+      fallback: italicFont
+    )
+    wideBoldItalicFont = Self.wideFont(
+      postScriptName: Self.wideBoldPostScriptName,
+      size: wideFontSize,
+      fallback: boldItalicFont
+    )
     let ascent = CTFontGetAscent(ctFont)
     let descent = CTFontGetDescent(ctFont)
     let leading = CTFontGetLeading(ctFont)
@@ -205,6 +239,19 @@ struct TerminalCellMetrics {
     }
   }
 
+  func wideFont(for flags: TerminalCellFlags) -> NSFont {
+    switch (flags.contains(.bold), flags.contains(.italic)) {
+    case (true, true):
+      return wideBoldItalicFont
+    case (true, false):
+      return wideBoldFont
+    case (false, true):
+      return wideItalicFont
+    case (false, false):
+      return wideFont
+    }
+  }
+
   static func gridSize(
     for size: CGSize,
     metrics: TerminalCellMetrics,
@@ -224,6 +271,21 @@ struct TerminalCellMetrics {
     let attributed = NSAttributedString(string: text, attributes: [.font: font])
     let line = CTLineCreateWithAttributedString(attributed)
     return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+  }
+
+  private static func wideFont(
+    postScriptName: String,
+    size: CGFloat,
+    fallback: NSFont
+  ) -> NSFont {
+    guard
+      let font = NSFont(name: postScriptName, size: size),
+      font.familyName == wideFontFamily,
+      font.fontName == postScriptName
+    else {
+      return fallback
+    }
+    return font
   }
 }
 

@@ -184,7 +184,22 @@ final class TerminalRowShapingCache {
       .foregroundColor: foreground,
       .ligature: 0,
     ]
-    return NSAttributedString(string: run.text, attributes: attributes)
+    let attributed = NSMutableAttributedString(string: run.text, attributes: attributes)
+    var utf16Offset = 0
+    for cell in run.cells {
+      let utf16Length = cell.text.utf16.count
+      if cell.cellCount == 2, utf16Length > 0 {
+        // wcwidth-wide cells shape with a grid-fitted Japanese font; ambiguous-width stays on
+        // the base font so the R13 condense behavior is untouched.
+        attributed.addAttribute(
+          .font,
+          value: metrics.wideFont(for: run.style.flags),
+          range: NSRange(location: utf16Offset, length: utf16Length)
+        )
+      }
+      utf16Offset += utf16Length
+    }
+    return attributed
   }
 
   private func buildGlyphBatches(
