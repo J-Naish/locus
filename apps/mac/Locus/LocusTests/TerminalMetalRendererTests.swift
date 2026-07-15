@@ -332,6 +332,148 @@ final class TerminalMetalRendererTests: XCTestCase {
     )
   }
 
+  func testMarkedTextSceneRendersBackgroundGlyphUnderlineAndCaret() throws {
+    let harness = try makeHarness(columns: 12, rows: 3)
+    var scene = makeScene(harness: harness, rows: [])
+    let backgroundRect = CGRect(x: 12, y: 10, width: 54, height: metrics.cellHeight)
+    let underlineRect = CGRect(x: 14, y: 14, width: 28, height: 2)
+    let caretRect = CGRect(x: 62, y: 10, width: 2, height: metrics.cellHeight)
+    scene.markedText = TerminalMetalMarkedTextScene(
+      backgroundRect: backgroundRect,
+      attributedString: NSAttributedString(
+        string: "IME",
+        attributes: [.font: metrics.font]
+      ),
+      baselineOrigin: CGPoint(x: 14, y: 20),
+      underlineRect: underlineRect,
+      caretRect: caretRect,
+      backgroundColor: SIMD4(0.125, 0.25, 0.5, 1),
+      textColor: SIMD4(0.8, 0.1, 0.05, 1),
+      caretColor: SIMD4(0.1, 0.75, 0.25, 1)
+    )
+
+    XCTAssertTrue(
+      harness.renderer.render(scene: scene, into: harness.texture, waitUntilCompleted: true)
+    )
+    let pixels = readPixels(harness.texture)
+    let backgroundPx = TerminalMetalRenderer.devicePixelRect(
+      backgroundRect,
+      viewSize: harness.viewSize,
+      scale: 1
+    )
+    let underlinePx = TerminalMetalRenderer.devicePixelRect(
+      underlineRect,
+      viewSize: harness.viewSize,
+      scale: 1
+    )
+    let caretPx = TerminalMetalRenderer.devicePixelRect(
+      caretRect,
+      viewSize: harness.viewSize,
+      scale: 1
+    )
+
+    assertBGRA(
+      pixels,
+      width: harness.texture.width,
+      x: Int(backgroundPx.x) + 1,
+      y: Int(backgroundPx.y) + 1,
+      equals: [128, 64, 32, 255]
+    )
+    XCTAssertTrue(
+      pixelsContain(
+        pixels,
+        width: harness.texture.width,
+        rect: backgroundPx,
+        where: { $0[2] > 150 && $0[1] < 80 && $0[0] < 80 }
+      )
+    )
+    assertBGRA(
+      pixels,
+      width: harness.texture.width,
+      x: Int(underlinePx.x),
+      y: Int(underlinePx.y),
+      equals: [13, 26, 204, 255]
+    )
+    assertBGRA(
+      pixels,
+      width: harness.texture.width,
+      x: Int(caretPx.x),
+      y: Int(caretPx.y),
+      equals: [64, 191, 26, 255]
+    )
+  }
+
+  func testMarkedTextOccludesCellContentBeneath() throws {
+    let harness = try makeHarness(columns: 8, rows: 3)
+    let shaped = shapedRow(text: "MMM")
+    let row = TerminalMetalScene.Row(
+      y: 0,
+      shaped: shaped,
+      runForegrounds: [SIMD4(0.08, 0.08, 0.08, 1)]
+    )
+    let sceneWithoutMarkedText = makeScene(harness: harness, rows: [row])
+
+    XCTAssertTrue(
+      harness.renderer.render(
+        scene: sceneWithoutMarkedText,
+        into: harness.texture,
+        waitUntilCompleted: true
+      )
+    )
+    let pixelsWithoutMarkedText = readPixels(harness.texture)
+    let firstCellRect = cellPixelRect(
+      TerminalCellCoordinate(column: 0, row: 0),
+      width: harness.texture.width,
+      height: harness.texture.height
+    )
+    let probe = try XCTUnwrap(
+      firstPixelCoordinate(
+        pixelsWithoutMarkedText,
+        width: harness.texture.width,
+        rect: firstCellRect,
+        where: { pixel in pixel[0] < 200 || pixel[1] < 200 || pixel[2] < 200 }
+      ),
+      "Expected visible row glyph ink in the first cell"
+    )
+
+    var sceneWithMarkedText = sceneWithoutMarkedText
+    let backgroundRect = CGRect(
+      x: insets.left,
+      y: harness.viewSize.height - insets.top - metrics.cellHeight,
+      width: 3 * metrics.cellWidth,
+      height: metrics.cellHeight
+    )
+    sceneWithMarkedText.markedText = TerminalMetalMarkedTextScene(
+      backgroundRect: backgroundRect,
+      attributedString: NSAttributedString(
+        string: " ",
+        attributes: [.font: metrics.font]
+      ),
+      baselineOrigin: CGPoint(x: insets.left, y: backgroundRect.minY + metrics.baselineOffset),
+      underlineRect: CGRect(x: insets.left, y: 1, width: metrics.cellWidth, height: 1),
+      caretRect: CGRect(x: insets.left, y: 2, width: 1, height: 1),
+      backgroundColor: SIMD4(1, 1, 1, 1),
+      textColor: SIMD4(0, 0, 0, 1),
+      caretColor: SIMD4(0, 0, 0, 1)
+    )
+
+    XCTAssertTrue(
+      harness.renderer.render(
+        scene: sceneWithMarkedText,
+        into: harness.texture,
+        waitUntilCompleted: true
+      )
+    )
+    let pixelsWithMarkedText = readPixels(harness.texture)
+    assertBGRA(
+      pixelsWithMarkedText,
+      width: harness.texture.width,
+      x: probe.x,
+      y: probe.y,
+      equals: [255, 255, 255, 255]
+    )
+  }
+
   func testAttachmentImageChannelOrder() throws {
     let source = PixelBuffer(width: 1, height: 1, bytes: [0, 0, 255, 255])
     let image = try XCTUnwrap(image(from: source))
@@ -1016,6 +1158,51 @@ final class TerminalMetalRendererTests: XCTestCase {
       )
     }
     return pixels
+  }
+
+  private func pixelsContain(
+    _ pixels: [UInt8],
+    width: Int,
+    rect: SIMD4<Float>,
+    where predicate: ([UInt8]) -> Bool
+  ) -> Bool {
+    let height = pixels.count / (width * 4)
+    let minX = max(0, Int(rect.x))
+    let maxX = min(width, Int(rect.x + rect.z))
+    let minY = max(0, Int(rect.y))
+    let maxY = min(height, Int(rect.y + rect.w))
+    for y in minY..<maxY {
+      for x in minX..<maxX {
+        let offset = (y * width + x) * 4
+        if predicate(Array(pixels[offset..<(offset + 4)])) {
+          return true
+        }
+      }
+    }
+    return false
+  }
+
+  private func firstPixelCoordinate(
+    _ pixels: [UInt8],
+    width: Int,
+    rect: CGRect,
+    where predicate: ([UInt8]) -> Bool
+  ) -> (x: Int, y: Int)? {
+    let height = pixels.count / (width * 4)
+    let minX = max(0, Int(rect.minX))
+    let maxX = min(width, Int(rect.maxX))
+    let minY = max(0, Int(rect.minY))
+    let maxY = min(height, Int(rect.maxY))
+    for y in minY..<maxY {
+      for x in minX..<maxX {
+        let offset = (y * width + x) * 4
+        let pixel = Array(pixels[offset..<(offset + 4)])
+        if predicate(pixel) {
+          return (x, y)
+        }
+      }
+    }
+    return nil
   }
 
   private struct Pixel {

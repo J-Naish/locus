@@ -1,6 +1,7 @@
 import AppKit
 import CoreText
 import Metal
+import QuartzCore
 
 struct TerminalSolidInstance {
   var rectPx: SIMD4<Float>
@@ -15,6 +16,17 @@ struct TerminalGlyphInstance {
   var padding0: UInt32 = 0
   var padding1: UInt32 = 0
   var padding2: UInt32 = 0
+}
+
+struct TerminalMetalMarkedTextScene {
+  var backgroundRect: CGRect
+  var attributedString: NSAttributedString
+  var baselineOrigin: CGPoint
+  var underlineRect: CGRect
+  var caretRect: CGRect
+  var backgroundColor: SIMD4<Float>
+  var textColor: SIMD4<Float>
+  var caretColor: SIMD4<Float>
 }
 
 struct TerminalMetalScene {
@@ -35,6 +47,7 @@ struct TerminalMetalScene {
   var linkUnderlineColor: SIMD4<Float>
   var caretRect: CGRect?
   var caretColor: SIMD4<Float>
+  var markedText: TerminalMetalMarkedTextScene? = nil
 }
 
 enum TerminalMetalColor {
@@ -111,6 +124,12 @@ struct TerminalMetalRenderTiming {
 
 @MainActor
 final class TerminalMetalRenderer {
+  enum PresentMode {
+    case none
+    case afterCommit(any CAMetalDrawable)
+    case withTransaction(any CAMetalDrawable)
+  }
+
   private struct Uniforms {
     var drawableSizePx: SIMD2<Float>
   }
@@ -125,6 +144,9 @@ final class TerminalMetalRenderer {
     var segmentA: MTLBuffer?
     var glyphs: MTLBuffer?
     var segmentB: MTLBuffer?
+    var markedBackground: MTLBuffer?
+    var markedGlyphs: MTLBuffer?
+    var markedOverlay: MTLBuffer?
   }
 
   private let device: MTLDevice
@@ -182,6 +204,20 @@ final class TerminalMetalRenderer {
     into texture: MTLTexture,
     waitUntilCompleted: Bool
   ) -> Bool {
+    render(
+      scene: scene,
+      into: texture,
+      present: .none,
+      waitUntilCompleted: waitUntilCompleted
+    )
+  }
+
+  func render(
+    scene: TerminalMetalScene,
+    into texture: MTLTexture,
+    present: PresentMode,
+    waitUntilCompleted: Bool
+  ) -> Bool {
     guard
       scene.scale > 0,
       scene.viewSize.width > 0,
@@ -200,20 +236,32 @@ final class TerminalMetalRenderer {
     var segmentA: [TerminalSolidInstance] = []
     var segmentB: [TerminalSolidInstance] = []
     var glyphDrafts: [GlyphDraft] = []
+    var markedBackground: [TerminalSolidInstance] = []
+    var markedGlyphDrafts: [GlyphDraft] = []
+    var markedOverlay: [TerminalSolidInstance] = []
     let runEstimate = scene.rows.reduce(into: 0) { $0 += $1.shaped.runs.count }
     segmentA.reserveCapacity(
       scene.rows.count * 2 + scene.selectionRects.count + scene.searchRects.count)
     segmentB.reserveCapacity(
       runEstimate + scene.linkUnderlineRects.count + (scene.caretRect == nil ? 0 : 1))
     glyphDrafts.reserveCapacity(runEstimate * 8)
+    if scene.markedText != nil {
+      markedBackground.reserveCapacity(1)
+      markedGlyphDrafts.reserveCapacity(4)
+      markedOverlay.reserveCapacity(2)
+    }
     buildInstances(
       scene: scene,
       glyphCache: glyphCache,
       segmentA: &segmentA,
       glyphDrafts: &glyphDrafts,
-      segmentB: &segmentB
+      segmentB: &segmentB,
+      markedBackground: &markedBackground,
+      markedGlyphDrafts: &markedGlyphDrafts,
+      markedOverlay: &markedOverlay
     )
     let glyphs = finishGlyphInstances(glyphDrafts, cache: glyphCache)
+    let markedGlyphs = finishGlyphInstances(markedGlyphDrafts, cache: glyphCache)
     guard synchronizeAtlasTextures(cache: glyphCache) else {
       return false
     }
@@ -230,6 +278,18 @@ final class TerminalMetalRenderer {
     bufferRing[bufferRingIndex].segmentB = upload(
       segmentB,
       reusing: bufferRing[bufferRingIndex].segmentB
+    )
+    bufferRing[bufferRingIndex].markedBackground = upload(
+      markedBackground,
+      reusing: bufferRing[bufferRingIndex].markedBackground
+    )
+    bufferRing[bufferRingIndex].markedGlyphs = upload(
+      markedGlyphs,
+      reusing: bufferRing[bufferRingIndex].markedGlyphs
+    )
+    bufferRing[bufferRingIndex].markedOverlay = upload(
+      markedOverlay,
+      reusing: bufferRing[bufferRingIndex].markedOverlay
     )
 
     let pass = MTLRenderPassDescriptor()
@@ -264,8 +324,34 @@ final class TerminalMetalRenderer {
       buffer: bufferRing[bufferRingIndex].segmentB,
       encoder: encoder
     )
+    // CG draws marked text last (drawMarkedText is the final step of draw(_:)); the preedit must occlude the cells beneath it.
+    encodeSolids(
+      markedBackground,
+      buffer: bufferRing[bufferRingIndex].markedBackground,
+      encoder: encoder
+    )
+    encodeGlyphs(
+      markedGlyphs,
+      buffer: bufferRing[bufferRingIndex].markedGlyphs,
+      encoder: encoder
+    )
+    encodeSolids(
+      markedOverlay,
+      buffer: bufferRing[bufferRingIndex].markedOverlay,
+      encoder: encoder
+    )
     encoder.endEncoding()
-    commandBuffer.commit()
+    switch present {
+    case .none:
+      commandBuffer.commit()
+    case .afterCommit(let drawable):
+      commandBuffer.present(drawable)
+      commandBuffer.commit()
+    case .withTransaction(let drawable):
+      commandBuffer.commit()
+      commandBuffer.waitUntilScheduled()
+      drawable.present()
+    }
     let committed = CFAbsoluteTimeGetCurrent()
     if waitUntilCompleted {
       commandBuffer.waitUntilCompleted()
@@ -315,7 +401,10 @@ final class TerminalMetalRenderer {
     glyphCache: TerminalGlyphCache,
     segmentA: inout [TerminalSolidInstance],
     glyphDrafts: inout [GlyphDraft],
-    segmentB: inout [TerminalSolidInstance]
+    segmentB: inout [TerminalSolidInstance],
+    markedBackground: inout [TerminalSolidInstance],
+    markedGlyphDrafts: inout [GlyphDraft],
+    markedOverlay: inout [TerminalSolidInstance]
   ) {
     for row in scene.rows {
       for fill in row.shaped.backgroundFills {
@@ -396,7 +485,6 @@ final class TerminalMetalRenderer {
         }
       }
     }
-
     // Unlike CG (:2583), Metal draws all glyphs before all decorations. The
     // only observable difference is italic ink overhanging a neighboring
     // run's underline; keeping three batches avoids per-run draw calls.
@@ -440,6 +528,82 @@ final class TerminalMetalRenderer {
     }
     if let caretRect = scene.caretRect {
       segmentB.append(solid(rect: caretRect, color: scene.caretColor, scene: scene))
+    }
+    if let markedText = scene.markedText {
+      markedBackground.append(
+        solid(
+          rect: markedText.backgroundRect,
+          color: markedText.backgroundColor,
+          scene: scene
+        ))
+      appendMarkedTextGlyphs(
+        markedText,
+        scene: scene,
+        glyphCache: glyphCache,
+        glyphDrafts: &markedGlyphDrafts
+      )
+      markedOverlay.append(
+        solid(
+          rect: markedText.underlineRect,
+          color: markedText.textColor,
+          scene: scene
+        ))
+      markedOverlay.append(
+        solid(
+          rect: markedText.caretRect,
+          color: markedText.caretColor,
+          scene: scene
+        ))
+    }
+  }
+
+  private func appendMarkedTextGlyphs(
+    _ markedText: TerminalMetalMarkedTextScene,
+    scene: TerminalMetalScene,
+    glyphCache: TerminalGlyphCache,
+    glyphDrafts: inout [GlyphDraft]
+  ) {
+    let line = CTLineCreateWithAttributedString(markedText.attributedString)
+    let runs = CTLineGetGlyphRuns(line) as NSArray
+    for case let run as CTRun in runs {
+      let attributes = CTRunGetAttributes(run) as NSDictionary
+      let runFont = attributes[kCTFontAttributeName as String] as? NSFont
+      let font = (runFont ?? metrics.font) as CTFont
+      let glyphCount = CTRunGetGlyphCount(run)
+      guard glyphCount > 0 else {
+        continue
+      }
+      var glyphs = [CGGlyph](repeating: 0, count: glyphCount)
+      var positions = [CGPoint](repeating: .zero, count: glyphCount)
+      CTRunGetGlyphs(run, CFRange(location: 0, length: 0), &glyphs)
+      CTRunGetPositions(run, CFRange(location: 0, length: 0), &positions)
+      let fontIndex = glyphCache.fontIndex(for: font)
+      for (glyph, position) in zip(glyphs, positions) {
+        let entry = glyphCache.glyph(fontIndex: fontIndex, font: font, glyph: glyph)
+        guard entry.width > 0, entry.height > 0 else {
+          continue
+        }
+        let left =
+          markedText.baselineOrigin.x + position.x
+          + CGFloat(entry.offsetX) / scene.scale
+        let bottom =
+          markedText.baselineOrigin.y + position.y
+          + CGFloat(entry.offsetY) / scene.scale
+        glyphDrafts.append(
+          GlyphDraft(
+            entry: entry,
+            rectPx: SIMD4(
+              Float(round(left * scene.scale)),
+              Float(
+                round((scene.viewSize.height - bottom) * scene.scale)
+                  - CGFloat(entry.height)
+              ),
+              Float(entry.width),
+              Float(entry.height)
+            ),
+            color: markedText.textColor
+          ))
+      }
     }
   }
 

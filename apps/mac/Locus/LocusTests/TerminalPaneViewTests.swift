@@ -1,11 +1,53 @@
 import AppKit
 import CoreText
+import Metal
+import QuartzCore
 import XCTest
 
 @testable import Locus
 
 @MainActor
 final class TerminalPaneViewTests: XCTestCase {
+  func testRenderBackendDefaultsToMetal() {
+    XCTAssertEqual(TerminalRenderBackend.fromEnvironment(nil), .metal)
+  }
+
+  func testRenderBackendAcceptsCoreGraphicsEscapeHatch() {
+    XCTAssertEqual(TerminalRenderBackend.fromEnvironment("cg"), .coreGraphics)
+  }
+
+  func testRenderBackendTreatsOtherEnvironmentValuesAsMetal() {
+    XCTAssertEqual(TerminalRenderBackend.fromEnvironment("metal"), .metal)
+    XCTAssertEqual(TerminalRenderBackend.fromEnvironment("unexpected"), .metal)
+  }
+
+  func testMetalBackendUsesConfiguredMetalLayer() throws {
+    let view = TerminalPaneView(backend: .metal)
+    let layer = try XCTUnwrap(view.layer as? CAMetalLayer)
+
+    XCTAssertEqual(layer.pixelFormat, .bgra8Unorm)
+    XCTAssertEqual(layer.colorspace?.name, CGColorSpace.sRGB)
+    XCTAssertTrue(layer.isOpaque)
+    XCTAssertTrue(layer.framebufferOnly)
+  }
+
+  func testCoreGraphicsBackendDoesNotUseMetalLayer() {
+    let view = TerminalPaneView(backend: .coreGraphics)
+
+    XCTAssertFalse(view.layer is CAMetalLayer)
+  }
+
+  func testMetalDrawableSizeTracksTestingScale() throws {
+    let view = TerminalPaneView(backend: .metal)
+    view.metalContentsScaleForTesting = 2
+    view.setFrameSize(NSSize(width: 200, height: 100))
+    let layer = try XCTUnwrap(view.layer as? CAMetalLayer)
+    XCTAssertEqual(layer.drawableSize, CGSize(width: 400, height: 200))
+
+    view.metalContentsScaleForTesting = 1
+    XCTAssertEqual(layer.drawableSize, CGSize(width: 200, height: 100))
+  }
+
   func testCacheDisplayHonorsViewAppearance() throws {
     let view = TerminalPaneView()
     view.frame = NSRect(x: 0, y: 0, width: 32, height: 32)
@@ -870,6 +912,103 @@ final class TerminalPaneViewTests: XCTestCase {
     XCTAssertTrue(bitmapHasMultipleColors(bitmap))
   }
 
+  func testMetalSceneIncludesSelectionAndUpdatesMenuValidation() throws {
+    let fixture = try makeMetalPaneFixture(text: "selection-value")
+    defer { fixture.session.terminate() }
+    fixture.session.selectionGesture(
+      .press,
+      column: 0,
+      row: fixture.contentRow,
+      cellFractionX: 0.5,
+      rectangle: false
+    )
+    fixture.session.selectionGesture(
+      .drag,
+      column: 8,
+      row: fixture.contentRow,
+      cellFractionX: 0.9,
+      rectangle: false
+    )
+    fixture.session.selectionGesture(
+      .release,
+      column: 8,
+      row: fixture.contentRow,
+      cellFractionX: 0.9,
+      rectangle: false
+    )
+    XCTAssertTrue(waitForPaneCondition { !fixture.session.selectionText().isEmpty })
+
+    let scene = try XCTUnwrap(fixture.view.buildMetalSceneForTesting())
+
+    XCTAssertEqual(scene.selectionRects.count, 1)
+    XCTAssertTrue(fixture.view.hasRenderedSelectionForTesting)
+  }
+
+  func testMetalSceneIncludesSelectedAndUnselectedSearchMatches() throws {
+    let fixture = try makeMetalPaneFixture(text: "needle needle")
+    defer { fixture.session.terminate() }
+    fixture.session.searchStart("needle")
+    XCTAssertTrue(
+      waitForPaneCondition {
+        (fixture.session.snapshot?.search?.viewportMatches.count ?? 0) >= 2
+      }
+    )
+    fixture.session.searchSelect(.next)
+    XCTAssertTrue(
+      waitForPaneCondition {
+        fixture.session.snapshot?.search?.viewportMatches.contains(where: \.isSelected) == true
+      }
+    )
+
+    let scene = try XCTUnwrap(fixture.view.buildMetalSceneForTesting())
+    let alphas = scene.searchRects.map { $0.color.w }
+
+    XCTAssertEqual(scene.searchRects.count, 2)
+    XCTAssertTrue(alphas.contains { $0 > 0.35 })
+    XCTAssertTrue(alphas.contains { abs($0 - 0.35) < 0.001 })
+  }
+
+  func testMetalSceneUsesMarkedTextInsteadOfRegularCaret() throws {
+    let fixture = try makeMetalPaneFixture(text: "ime")
+    defer { fixture.session.terminate() }
+    fixture.view.setMarkedText(
+      "日本",
+      selectedRange: NSRange(location: 2, length: 0),
+      replacementRange: NSRange(location: NSNotFound, length: 0)
+    )
+
+    let scene = try XCTUnwrap(fixture.view.buildMetalSceneForTesting())
+
+    XCTAssertNil(scene.caretRect)
+    XCTAssertEqual(scene.markedText?.attributedString.string, "日本")
+    XCTAssertNotNil(scene.markedText?.underlineRect)
+    XCTAssertNotNil(scene.markedText?.caretRect)
+  }
+
+  func testMetalBlinkTransitionRequestsRender() throws {
+    let fixture = try makeMetalPaneFixture(text: "blink", hosted: true)
+    defer { fixture.session.terminate() }
+    fixture.view.hasActiveKeyboardFocusForTesting = true
+    fixture.view.renderMetalFrame()
+    let rendersBeforeBlink = fixture.view.metalRendersForTesting
+
+    fixture.view.invalidateCaretForBlinkForTesting(
+      at: CACurrentMediaTime() + TerminalCaretBlink.phaseDuration + 0.1
+    )
+
+    XCTAssertGreaterThan(fixture.view.metalRendersForTesting, rendersBeforeBlink)
+  }
+
+  func testMetalProductionPathRendersIntoLayerDrawable() throws {
+    let fixture = try makeMetalPaneFixture(text: "live-metal", hosted: true)
+    defer { fixture.session.terminate() }
+
+    fixture.view.renderMetalFrame()
+
+    XCTAssertEqual(fixture.view.lastMetalRenderSucceededForTesting, true)
+    XCTAssertGreaterThan(fixture.view.metalRendersForTesting, 0)
+  }
+
   func testDrawPassTimingProbe() throws {
     let columns: UInt16 = 120
     let rows: UInt16 = 40
@@ -1298,6 +1437,50 @@ private final class TerminalPaneViewHost {
     window.contentView = contentView
     contentView.addSubview(view)
   }
+}
+
+@MainActor
+private struct TerminalMetalPaneFixture {
+  let session: TerminalSession
+  let view: TerminalPaneView
+  let contentRow: UInt16
+  let host: TerminalPaneViewHost?
+}
+
+@MainActor
+private func makeMetalPaneFixture(
+  text: String,
+  hosted: Bool = false
+) throws -> TerminalMetalPaneFixture {
+  let columns: UInt16 = 40
+  let rows: UInt16 = 10
+  let metrics = TerminalCellMetrics()
+  let session = TerminalSession(columns: columns, rows: rows)
+  let view = TerminalPaneView(session: session, metrics: metrics, backend: .metal)
+  view.metalContentsScaleForTesting = 1
+  view.frame = gridFrame(columns: columns, rows: rows, metrics: metrics)
+  let host = hosted ? TerminalPaneViewHost(view: view) : nil
+  session.start(command: "/bin/sh")
+  session.send(Data("printf '\\033[2J\\033[H%s\\r\\n' '\(text)'\n".utf8))
+  var contentRow: UInt16?
+  XCTAssertTrue(
+    waitForPaneCondition(timeout: 5) {
+      session.withFrame { frame in
+        let lines = frame.plainText().split(separator: "\n", omittingEmptySubsequences: false)
+        if let index = lines.firstIndex(where: { $0.contains(text) }) {
+          contentRow = UInt16(clamping: index)
+        }
+      }
+      return contentRow != nil
+    },
+    "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
+  )
+  return TerminalMetalPaneFixture(
+    session: session,
+    view: view,
+    contentRow: try XCTUnwrap(contentRow),
+    host: host
+  )
 }
 
 private func gridFrame(
