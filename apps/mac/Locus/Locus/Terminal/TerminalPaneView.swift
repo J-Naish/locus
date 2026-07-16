@@ -883,6 +883,18 @@ enum TerminalCaretMovement {
   }
 }
 
+enum TerminalWideCellNormalizer {
+  /// Spacer tails are the right half of a wide glyph; word and line gestures
+  /// target the glyph head because upstream word selection rejects cells without text.
+  /// See codex-archive/codex-term-p14.md for the upstream selection contract.
+  static func headColumn(for column: Int, rowWideCodes: [UInt8]) -> Int {
+    guard rowWideCodes.indices.contains(column), rowWideCodes[column] == 3 else {
+      return column
+    }
+    return max(0, column - 1)
+  }
+}
+
 enum TerminalCaretClickResolver {
   static func resolveCaretClick(
     row: Int,
@@ -1667,9 +1679,22 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
 
     mouseRouting = .localSelection
     lastDragRectangle = event.modifierFlags.contains(.option)
+    var selectionColumn = hit.coordinate.column
+    if event.clickCount >= 2 {
+      var wideCodes: [UInt8] = []
+      session.withFrame { frame in
+        wideCodes = rowWideCodes(forRow: hit.coordinate.row, in: frame)
+      }
+      selectionColumn = UInt16(
+        clamping: TerminalWideCellNormalizer.headColumn(
+          for: Int(hit.coordinate.column),
+          rowWideCodes: wideCodes
+        )
+      )
+    }
     session.selectionGesture(
       event.clickCount == 1 ? .press : .pressRepeat,
-      column: hit.coordinate.column,
+      column: selectionColumn,
       row: hit.coordinate.row,
       cellFractionX: hit.fractionX,
       rectangle: lastDragRectangle
@@ -3035,17 +3060,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       let cursorRow = min(frame.cursor.y, frame.rows - 1)
       cursorColumn = Int(min(frame.cursor.x, frame.columns - 1))
       cursorIsWideTail = frame.cursor.wide_tail
-      frame.withRows { rows in
-        guard let row = rows.first(where: { $0.y == cursorRow }) else {
-          return
-        }
-        frame.withCells { cells in
-          cursorRowWideCodes = TerminalRowShapingCache.cellRange(
-            for: row,
-            cells: cells
-          ).map { cells[$0].wide }
-        }
-      }
+      cursorRowWideCodes = rowWideCodes(forRow: cursorRow, in: frame)
       let frameRows = terminalBlankRows(frame: frame)
       if let column = TerminalCaretClickResolver.resolveCaretClick(
         row: Int(min(clickedCoordinate.row, frame.rows - 1)),
@@ -3074,6 +3089,21 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
 
   func moveCaretForTesting(to clickedCoordinate: TerminalCellCoordinate) {
     moveCaret(to: clickedCoordinate)
+  }
+
+  private func rowWideCodes(forRow rowIndex: UInt16, in frame: TerminalFrame) -> [UInt8] {
+    var result: [UInt8] = []
+    frame.withRows { rows in
+      guard let row = rows.first(where: { $0.y == rowIndex }) else {
+        return
+      }
+      frame.withCells { cells in
+        result = TerminalRowShapingCache.cellRange(for: row, cells: cells).map {
+          cells[$0].wide
+        }
+      }
+    }
+    return result
   }
 
   private func observeActiveFocusChanges() {

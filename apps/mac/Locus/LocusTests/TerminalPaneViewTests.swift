@@ -906,6 +906,33 @@ final class TerminalPaneViewTests: XCTestCase {
     XCTAssertTrue(events.allSatisfy { $0.key == LOCUS_TERM_KEY_ARROW_RIGHT })
   }
 
+  func testWideCellNormalizerMapsTailToHead() {
+    let wideCodes: [UInt8] = [1, 3, 1, 3]
+
+    XCTAssertEqual(TerminalWideCellNormalizer.headColumn(for: 1, rowWideCodes: wideCodes), 0)
+    XCTAssertEqual(TerminalWideCellNormalizer.headColumn(for: 3, rowWideCodes: wideCodes), 2)
+  }
+
+  func testWideCellNormalizerLeavesHeadAndNarrowUnchanged() {
+    XCTAssertEqual(
+      TerminalWideCellNormalizer.headColumn(for: 0, rowWideCodes: [1, 3]),
+      0
+    )
+    XCTAssertEqual(
+      TerminalWideCellNormalizer.headColumn(for: 1, rowWideCodes: [0, 0]),
+      1
+    )
+  }
+
+  func testWideCellNormalizerHandlesOutOfBoundsAndMalformedRows() {
+    XCTAssertEqual(
+      TerminalWideCellNormalizer.headColumn(for: 7, rowWideCodes: [1, 3, 1, 3]),
+      7
+    )
+    XCTAssertEqual(TerminalWideCellNormalizer.headColumn(for: 4, rowWideCodes: []), 4)
+    XCTAssertEqual(TerminalWideCellNormalizer.headColumn(for: 0, rowWideCodes: [3]), 0)
+  }
+
   func testCaretClickOnJapaneseInputEmitsOneArrowPerCharacter() {
     let session = TerminalSession(columns: 40, rows: 10)
     var received: [TerminalKeyEvent] = []
@@ -940,6 +967,50 @@ final class TerminalPaneViewTests: XCTestCase {
 
     XCTAssertEqual(received.count, 6)
     XCTAssertTrue(received.allSatisfy { $0.key == LOCUS_TERM_KEY_ARROW_LEFT })
+  }
+
+  func testDoubleClickWideTailSelectsWholeGlyph() throws {
+    let fixture = try makeMetalPaneFixture(text: "日本語", hosted: true)
+    defer { fixture.session.terminate() }
+
+    try terminalDoubleClick(
+      view: fixture.view,
+      column: 1,
+      row: fixture.contentRow
+    )
+
+    XCTAssertTrue(
+      waitForPaneCondition {
+        var range: ClosedRange<UInt16>?
+        fixture.session.withFrame { frame in
+          range = frame.selectionRange(forRow: Int(fixture.contentRow))
+        }
+        return range == 0...1 && fixture.session.selectionText() == "日"
+      },
+      "Selection was \(fixture.session.selectionText())"
+    )
+  }
+
+  func testDoubleClickWideHeadStillSelectsWholeGlyph() throws {
+    let fixture = try makeMetalPaneFixture(text: "日本語", hosted: true)
+    defer { fixture.session.terminate() }
+
+    try terminalDoubleClick(
+      view: fixture.view,
+      column: 0,
+      row: fixture.contentRow
+    )
+
+    XCTAssertTrue(
+      waitForPaneCondition {
+        var range: ClosedRange<UInt16>?
+        fixture.session.withFrame { frame in
+          range = frame.selectionRange(forRow: Int(fixture.contentRow))
+        }
+        return range == 0...1 && fixture.session.selectionText() == "日"
+      },
+      "Selection was \(fixture.session.selectionText())"
+    )
   }
 
   func testCaretBlinkVisibilityResetsAndAlternates() {
@@ -1725,6 +1796,40 @@ private func gridFrame(
     width: insets.left + metrics.cellWidth * CGFloat(columns) + insets.right,
     height: insets.top + metrics.cellHeight * CGFloat(rows) + insets.bottom
   )
+}
+
+@MainActor
+private func terminalDoubleClick(
+  view: TerminalPaneView,
+  column: UInt16,
+  row: UInt16
+) throws {
+  let metrics = TerminalCellMetrics()
+  let insets = TerminalPaneLayoutMetrics.contentInsets
+  let topLeftPoint = NSPoint(
+    x: insets.left + (CGFloat(column) + 0.5) * metrics.cellWidth,
+    y: insets.top + (CGFloat(row) + 0.5) * metrics.cellHeight
+  )
+  let localPoint = NSPoint(x: topLeftPoint.x, y: view.bounds.height - topLeftPoint.y)
+  let windowPoint = view.convert(localPoint, to: nil)
+  let event: (NSEvent.EventType, Int) throws -> NSEvent = { type, clickCount in
+    try XCTUnwrap(
+      NSEvent.mouseEvent(
+        with: type,
+        location: windowPoint,
+        modifierFlags: [],
+        timestamp: 0,
+        windowNumber: view.window?.windowNumber ?? 0,
+        context: nil,
+        eventNumber: 0,
+        clickCount: clickCount,
+        pressure: 1
+      )
+    )
+  }
+  view.mouseDown(with: try event(.leftMouseDown, 1))
+  view.mouseUp(with: try event(.leftMouseUp, 1))
+  view.mouseDown(with: try event(.leftMouseDown, 2))
 }
 
 @MainActor
