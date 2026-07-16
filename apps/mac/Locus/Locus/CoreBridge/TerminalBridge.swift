@@ -177,6 +177,14 @@ final class TerminalCore {
     return Self.copyAndFree(bytes: &bytes)
   }
 
+  func takeClipboardWrite() throws -> Data? {
+    var bytes = LocusTermBytes(ptr: nil, len: 0, cap: 0)
+    let status = locus_term_take_clipboard_write(handle, &bytes)
+    try Self.checkStatus(status)
+    let data = Self.copyAndFree(bytes: &bytes)
+    return data.isEmpty ? nil : data
+  }
+
   func resize(columns: UInt16, rows: UInt16) throws {
     try Self.checkStatus(locus_term_resize(handle, columns, rows))
   }

@@ -137,6 +137,7 @@ pub trait Handler {
     }
     fn kitty_color_protocol(&mut self, _requests: &[KittyColorRequest], _terminator: Terminator) {}
     fn report_pwd(&mut self, _value: &[u8]) {}
+    fn clipboard_contents(&mut self, _kind: u8, _data: &[u8]) {}
     fn xtversion(&mut self) {}
     fn device_status(&mut self, _request: device_status::Request) {}
     fn device_attributes(&mut self, _req: device_attributes::Req) {}
@@ -396,6 +397,10 @@ impl<H: Handler> Stream<H> {
             }
             crate::osc::Command::SemanticPrompt(cmd) => handler.semantic_prompt(cmd),
             crate::osc::Command::ReportPwd { value } => handler.report_pwd(value),
+            // ghostty: stream.zig:1991
+            crate::osc::Command::ClipboardContents { kind, data } => {
+                handler.clipboard_contents(kind, data);
+            }
             crate::osc::Command::MouseShape { value } => handler.mouse_shape(value),
             crate::osc::Command::ColorOperation {
                 kind,
@@ -1032,6 +1037,7 @@ mod tests {
         apc_started: bool,
         apc_bytes: Vec<u8>,
         apc_ended: bool,
+        clipboard_contents: Vec<(u8, Vec<u8>)>,
     }
 
     impl Handler for RecordingHandler {
@@ -1171,6 +1177,10 @@ mod tests {
 
         fn apc_end(&mut self) {
             self.apc_ended = true;
+        }
+
+        fn clipboard_contents(&mut self, kind: u8, data: &[u8]) {
+            self.clipboard_contents.push((kind, data.to_vec()));
         }
     }
 
@@ -1710,5 +1720,42 @@ mod tests {
         );
         assert_eq!(stream.handler.mode, Some(Mode::KeypadKeys));
         assert!(stream.handler.reset_mode_seen);
+    }
+
+    // port-added: OSC 52 BEL termination dispatches the raw selection and payload.
+    #[test]
+    fn osc_52_bel_dispatches_raw_clipboard_contents() {
+        let mut stream = Stream::new(RecordingHandler::default());
+
+        stream.next_slice(b"\x1B]52;c;aGVsbG8=\x07");
+
+        assert_eq!(
+            stream.handler.clipboard_contents,
+            [(b'c', b"aGVsbG8=".to_vec())]
+        );
+    }
+
+    // port-added: OSC 52 ST termination reaches the same raw handler contract.
+    #[test]
+    fn osc_52_st_dispatches_raw_clipboard_contents() {
+        let mut stream = Stream::new(RecordingHandler::default());
+
+        stream.next_slice(b"\x1B]52;c;aGVsbG8=\x1B\\");
+
+        assert_eq!(
+            stream.handler.clipboard_contents,
+            [(b'c', b"aGVsbG8=".to_vec())]
+        );
+    }
+
+    // port-added: embedders that do not care about OSC 52 retain a no-op default.
+    #[test]
+    fn osc_52_default_handler_is_a_no_op() {
+        #[derive(Default)]
+        struct DefaultHandler;
+        impl Handler for DefaultHandler {}
+
+        let mut stream = Stream::new(DefaultHandler);
+        stream.next_slice(b"\x1B]52;c;aGVsbG8=\x07");
     }
 }

@@ -150,6 +150,14 @@ final class TerminalBridgeTests: XCTestCase {
     XCTAssertEqual(response.first, 0x1B)
   }
 
+  func testTakeClipboardWriteCopiesAndClearsPendingData() throws {
+    let terminal = try TerminalCore(columns: 80, rows: 24)
+    try terminal.feed(Data("\u{1B}]52;c;aGVsbG8=\u{07}".utf8))
+
+    XCTAssertEqual(try terminal.takeClipboardWrite(), Data("hello".utf8))
+    XCTAssertNil(try terminal.takeClipboardWrite())
+  }
+
   func testResizeChangesFrameDimensions() throws {
     let terminal = try TerminalCore(columns: 80, rows: 24)
     let frame = try TerminalFrame()

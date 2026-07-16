@@ -40,9 +40,10 @@ ownership inside our Rust workspace.
   editor for running and reviewing agent CLI sessions. It is not an
   always-visible IDE terminal, and IDE-oriented chrome stays out of
   scope.
-- OSC 52 (escape sequences asking the terminal to write the clipboard) is
-  parsed but not honored. The policy decision is deferred; the safe
-  default stands until it is made deliberately.
+- OSC 52 clipboard WRITES are honored, matching modern terminals
+  (ghostty, kitty, alacritty ship write-allow defaults), with a 1 MiB
+  size guard and system-clipboard (`c`) scope only. Clipboard READ
+  requests are never honored.
 
 ## Consequences
 

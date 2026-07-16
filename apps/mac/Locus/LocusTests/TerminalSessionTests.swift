@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 
 @testable import Locus
@@ -822,6 +823,57 @@ final class TerminalSessionTests: XCTestCase {
 
     XCTAssertTrue(waitUntil { session.snapshot?.atBottom == true })
   }
+
+  func testOsc52WriteUpdatesInjectedPasteboard() {
+    let pasteboard = makeTerminalPasteboard()
+    let session = TerminalSession(columns: 80, rows: 12, pasteboard: pasteboard)
+    defer { session.terminate() }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+
+    session.send(
+      Data("printf '\\033]52;c;aGVsbG8=\\007'; printf 'osc52-write-done\\n'\n".utf8)
+    )
+
+    XCTAssertTrue(
+      waitUntil {
+        pasteboard.string(forType: .string) == "hello"
+          && session.plainTextForTesting()?.contains("osc52-write-done") == true
+      }
+    )
+  }
+
+  func testOsc52ReadLeavesInjectedPasteboardUntouched() {
+    let pasteboard = makeTerminalPasteboard(initialValue: "sentinel")
+    let session = TerminalSession(columns: 80, rows: 12, pasteboard: pasteboard)
+    defer { session.terminate() }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+
+    session.send(
+      Data("printf '\\033]52;c;?\\007'; printf 'osc52-read-done\\n'\n".utf8)
+    )
+
+    XCTAssertTrue(
+      waitUntil { session.plainTextForTesting()?.contains("osc52-read-done") == true })
+    XCTAssertEqual(pasteboard.string(forType: .string), "sentinel")
+  }
+
+  func testOsc52InvalidBase64LeavesInjectedPasteboardUntouched() {
+    let pasteboard = makeTerminalPasteboard(initialValue: "sentinel")
+    let session = TerminalSession(columns: 80, rows: 12, pasteboard: pasteboard)
+    defer { session.terminate() }
+    session.start(command: "/bin/sh")
+    XCTAssertTrue(waitForInitialShellFrame(session))
+
+    session.send(
+      Data("printf '\\033]52;c;aGVs!G8=\\007'; printf 'osc52-invalid-done\\n'\n".utf8)
+    )
+
+    XCTAssertTrue(
+      waitUntil { session.plainTextForTesting()?.contains("osc52-invalid-done") == true })
+    XCTAssertEqual(pasteboard.string(forType: .string), "sentinel")
+  }
 }
 
 @MainActor
@@ -955,4 +1007,14 @@ private func makeTerminalSessionDirectory() throws -> URL {
     filePath: "/tmp/locus-terminal-\(UUID().uuidString)", directoryHint: .isDirectory)
   try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
   return directory
+}
+
+@MainActor
+private func makeTerminalPasteboard(initialValue: String? = nil) -> NSPasteboard {
+  let pasteboard = NSPasteboard(name: NSPasteboard.Name("locus-terminal-\(UUID().uuidString)"))
+  pasteboard.clearContents()
+  if let initialValue {
+    pasteboard.setString(initialValue, forType: .string)
+  }
+  return pasteboard
 }

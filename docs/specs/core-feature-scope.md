@@ -243,13 +243,13 @@ Must support:
 - selection and copy where the highlight always matches what is copied
 - find in the terminal (⌘F) and ⌘-click opening of http/https URLs
 - a multi-line paste warning unless bracketed paste makes it safe
+- honor program clipboard copies (OSC 52 writes) with a size guard;
+  clipboard read requests are never honored
 
 Not a goal:
 
 - an always-visible terminal layout or multiple panes/tabs/splits
 - shell configuration management, profiles, or theming surfaces
-- honoring clipboard-write requests from programs (OSC 52) until the
-  deferred policy decision is made deliberately
 
 ## Security and Privacy
 

@@ -43,6 +43,7 @@ pub trait Effects {
     }
     fn title_changed(&mut self, _title: Option<&str>) {}
     fn pwd_changed(&mut self, _pwd: Option<&str>) {}
+    fn clipboard_contents(&mut self, _kind: u8, _data: &[u8]) {}
     fn mouse_shape_changed(&mut self, _shape: Option<&str>) {}
 }
 
@@ -57,6 +58,7 @@ pub struct CapturedEffects {
     pub xtversion_response: Option<String>,
     pub titles: Vec<Option<String>>,
     pub pwds: Vec<Option<String>>,
+    pub clipboard_contents: Vec<(u8, Vec<u8>)>,
     pub mouse_shapes: Vec<Option<String>>,
 }
 
@@ -95,6 +97,10 @@ impl Effects for CapturedEffects {
 
     fn pwd_changed(&mut self, pwd: Option<&str>) {
         self.pwds.push(pwd.map(ToOwned::to_owned));
+    }
+
+    fn clipboard_contents(&mut self, kind: u8, data: &[u8]) {
+        self.clipboard_contents.push((kind, data.to_vec()));
     }
 
     fn mouse_shape_changed(&mut self, shape: Option<&str>) {
@@ -703,6 +709,10 @@ impl<E: Effects> Handler for TerminalHandler<E> {
             self.terminal.set_pwd(pwd);
             self.effects.pwd_changed(self.terminal.pwd());
         }
+    }
+
+    fn clipboard_contents(&mut self, kind: u8, data: &[u8]) {
+        self.effects.clipboard_contents(kind, data);
     }
 
     fn xtversion(&mut self) {
@@ -1628,6 +1638,19 @@ mod tests {
         assert_eq!(
             stream.handler.effects.titles,
             vec![Some("Quarterly Review".to_owned())]
+        );
+    }
+
+    // port-added: the terminal adapter forwards OSC 52 without applying embedder policy.
+    #[test]
+    fn osc_52_forwards_raw_clipboard_contents_to_effects() {
+        let mut stream = stream(CapturedEffects::default());
+
+        stream.next_slice(b"\x1B]52;c;aGVsbG8=\x07");
+
+        assert_eq!(
+            stream.handler.effects.clipboard_contents,
+            [(b'c', b"aGVsbG8=".to_vec())]
         );
     }
 

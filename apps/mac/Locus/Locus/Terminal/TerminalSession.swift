@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Dispatch
 import Foundation
@@ -103,7 +104,8 @@ final class TerminalSession: ObservableObject {
     columns: UInt16 = 80,
     rows: UInt16 = 24,
     maxScrollback: Int = TerminalSession.defaultMaxScrollbackBytes,
-    pendingOutputStallGrace: TimeInterval = 5
+    pendingOutputStallGrace: TimeInterval = 5,
+    pasteboard: NSPasteboard = .general
   ) {
     let publisher = TerminalSessionPublisher()
     self.publisher = publisher
@@ -117,6 +119,10 @@ final class TerminalSession: ObservableObject {
       },
       publishSnapshot: { [weak publisher] snapshot in
         publisher?.publish(snapshot: snapshot)
+      },
+      writeClipboard: { text in
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
       }
     )
     publisher.session = self
@@ -378,6 +384,7 @@ private final class TerminalSessionWorker {
   private let queueKey = DispatchSpecificKey<Void>()
   private let publishState: @MainActor (TerminalSession.State) -> Void
   private let publishSnapshot: @MainActor (TerminalSession.Snapshot) -> Void
+  private let writeClipboard: @MainActor (String) -> Void
 
   private var pty: PtySession?
   private var terminal: TerminalCore?
@@ -406,7 +413,8 @@ private final class TerminalSessionWorker {
     maxScrollback: Int,
     pendingOutputStallGrace: TimeInterval,
     publishState: @escaping @MainActor (TerminalSession.State) -> Void,
-    publishSnapshot: @escaping @MainActor (TerminalSession.Snapshot) -> Void
+    publishSnapshot: @escaping @MainActor (TerminalSession.Snapshot) -> Void,
+    writeClipboard: @escaping @MainActor (String) -> Void
   ) {
     self.columns = columns
     self.rows = rows
@@ -416,6 +424,7 @@ private final class TerminalSessionWorker {
     )
     self.publishState = publishState
     self.publishSnapshot = publishSnapshot
+    self.writeClipboard = writeClipboard
     queue.setSpecific(key: queueKey, value: ())
   }
 
@@ -1100,6 +1109,12 @@ private final class TerminalSessionWorker {
         if !responses.isEmpty {
           try enqueueWrite(responses)
         }
+        if let clipboardData = try terminal.takeClipboardWrite(),
+          // OSC 52 carries text. Binary clipboard formats are out of scope.
+          let clipboardText = String(data: clipboardData, encoding: .utf8)
+        {
+          publishClipboardWrite(clipboardText)
+        }
       }
 
       if didRead {
@@ -1469,6 +1484,12 @@ private final class TerminalSessionWorker {
   private func publish(snapshot: TerminalSession.Snapshot) {
     Task { @MainActor [publishSnapshot] in
       publishSnapshot(snapshot)
+    }
+  }
+
+  private func publishClipboardWrite(_ text: String) {
+    Task { @MainActor [writeClipboard] in
+      writeClipboard(text)
     }
   }
 

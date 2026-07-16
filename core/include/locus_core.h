@@ -849,6 +849,12 @@ void locus_term_free(LocusTerm *term);
 
 LocusStatus locus_term_feed(LocusTerm *term, const uint8_t *bytes, size_t len);
 LocusStatus locus_term_take_responses(LocusTerm *term, LocusTermBytes *out);
+/*
+ * Copies and clears the latest honored OSC 52 clipboard write. Clipboard read
+ * requests are never honored. Free the result with locus_term_bytes_free.
+ */
+LocusStatus locus_term_take_clipboard_write(
+    LocusTerm *term, LocusTermBytes *out);
 void locus_term_bytes_free(LocusTermBytes *bytes);
 LocusStatus locus_term_resize(LocusTerm *term, uint16_t cols, uint16_t rows);
 LocusStatus locus_term_render(

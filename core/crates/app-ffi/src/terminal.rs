@@ -47,6 +47,10 @@ const SELECTION_BEHAVIORS: [SelectionBehavior; 3] = [
 ];
 pub const LOCUS_TERM_SEARCH_MAX_NEEDLE_BYTES: usize = 1_024;
 const SEARCH_MATCHES_PER_VIEWPORT_ROW_LIMIT: usize = 64;
+/// Clipboard writes are bounded to prevent untrusted terminal output from
+/// allocating an unbounded pasteboard payload.
+const OSC52_MAX_DECODED_BYTES: usize = 1 << 20;
+const OSC52_MAX_ENCODED_BYTES: usize = OSC52_MAX_DECODED_BYTES * 4 / 3 + 4;
 
 pub const LOCUS_TERM_STATUS_INVALID_ARGUMENT: u32 = 300;
 pub const LOCUS_TERM_STATUS_PANIC: u32 = 301;
@@ -398,6 +402,7 @@ impl LocusTerm {
 #[derive(Debug, Default)]
 struct FfiEffects {
     pty: Vec<u8>,
+    clipboard_write: Option<Vec<u8>>,
     latest_title: Option<String>,
     latest_pwd: Option<String>,
     latest_mouse_shape: Option<String>,
@@ -406,6 +411,18 @@ struct FfiEffects {
 impl Effects for FfiEffects {
     fn write_pty(&mut self, bytes: &[u8]) {
         self.pty.extend_from_slice(bytes);
+    }
+
+    fn clipboard_contents(&mut self, kind: u8, data: &[u8]) {
+        if kind != b'c' || data == b"?" || data.len() > OSC52_MAX_ENCODED_BYTES {
+            return;
+        }
+        let Some(decoded) = decode_osc52_base64(data) else {
+            return;
+        };
+        if decoded.len() <= OSC52_MAX_DECODED_BYTES {
+            self.clipboard_write = Some(decoded);
+        }
     }
 
     fn title_changed(&mut self, title: Option<&str>) {
@@ -630,6 +647,44 @@ pub unsafe extern "C" fn locus_term_take_responses(
             return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
         };
         let bytes = std::mem::take(&mut term.stream.handler.effects.pty);
+        // SAFETY: out is still valid for this synchronous call.
+        unsafe {
+            *out = bytes_from_vec(bytes);
+        }
+        LOCUS_STATUS_OK
+    })
+}
+
+/// Copies out and clears the most recent honored OSC 52 clipboard write.
+///
+/// # Safety
+///
+/// `term` must be a live terminal handle. `out` must point to writable storage
+/// for a `LocusTermBytes`, later freed with `locus_term_bytes_free`.
+#[no_mangle]
+pub unsafe extern "C" fn locus_term_take_clipboard_write(
+    term: *mut LocusTerm,
+    out: *mut LocusTermBytes,
+) -> u32 {
+    term_status(|| {
+        if out.is_null() {
+            set_last_error_message("out must not be NULL");
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is non-null and caller-provided writable storage.
+        unsafe {
+            *out = LocusTermBytes::default();
+        }
+        let Some(term) = term_mut(term) else {
+            return LOCUS_TERM_STATUS_INVALID_ARGUMENT;
+        };
+        let bytes = term
+            .stream
+            .handler
+            .effects
+            .clipboard_write
+            .take()
+            .unwrap_or_default();
         // SAFETY: out is still valid for this synchronous call.
         unsafe {
             *out = bytes_from_vec(bytes);
@@ -1901,6 +1956,63 @@ fn bytes_slice<'a>(bytes: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { std::slice::from_raw_parts(bytes, len) })
 }
 
+fn decode_osc52_base64(encoded: &[u8]) -> Option<Vec<u8>> {
+    if !encoded.len().is_multiple_of(4) {
+        return None;
+    }
+
+    let padding = match encoded {
+        [.., b'=', b'='] => 2,
+        [.., b'='] => 1,
+        _ => 0,
+    };
+    let decoded_len = encoded.len().checked_div(4)?.checked_mul(3)? - padding;
+    if decoded_len > OSC52_MAX_DECODED_BYTES {
+        return None;
+    }
+
+    let mut decoded = Vec::with_capacity(decoded_len);
+    let chunk_count = encoded.len() / 4;
+    for (index, chunk) in encoded.chunks_exact(4).enumerate() {
+        let is_last = index + 1 == chunk_count;
+        let a = base64_value(chunk[0])?;
+        let b = base64_value(chunk[1])?;
+        decoded.push((a << 2) | (b >> 4));
+
+        if chunk[2] == b'=' {
+            if !is_last || chunk[3] != b'=' || b & 0x0f != 0 {
+                return None;
+            }
+            continue;
+        }
+
+        let c = base64_value(chunk[2])?;
+        decoded.push((b << 4) | (c >> 2));
+        if chunk[3] == b'=' {
+            if !is_last || c & 0x03 != 0 {
+                return None;
+            }
+            continue;
+        }
+
+        let d = base64_value(chunk[3])?;
+        decoded.push((c << 6) | d);
+    }
+
+    (decoded.len() == decoded_len).then_some(decoded)
+}
+
+fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
 fn bytes_from_vec(mut bytes: Vec<u8>) -> LocusTermBytes {
     let result = LocusTermBytes {
         ptr: bytes.as_mut_ptr(),
@@ -2352,6 +2464,17 @@ mod tests {
         // SAFETY: the allocation belongs to this byte handle and is freed once.
         unsafe { locus_term_bytes_free(bytes) };
         result
+    }
+
+    unsafe fn take_clipboard_write(term: *mut LocusTerm) -> Vec<u8> {
+        let mut bytes = LocusTermBytes::default();
+        // SAFETY: test callers pass a live terminal handle and writable output.
+        assert_eq!(
+            unsafe { locus_term_take_clipboard_write(term, &mut bytes) },
+            LOCUS_STATUS_OK
+        );
+        // SAFETY: the ABI returned ownership of this byte handle.
+        unsafe { owned_bytes(&mut bytes) }
     }
 
     unsafe fn search_status(term: *mut LocusTerm) -> LocusTermSearchStatus {
@@ -3368,6 +3491,160 @@ mod tests {
             assert_eq!(locus_term_take_responses(term, &mut bytes), LOCUS_STATUS_OK);
             assert_eq!(bytes.len, 0);
             locus_term_bytes_free(&mut bytes);
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn osc_52_clipboard_write_decodes_and_drains() {
+        let term = new_term();
+        let input = b"\x1b]52;c;aGVsbG8=\x07";
+        // SAFETY: term is live and input remains readable during the feed.
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(take_clipboard_write(term), b"hello");
+            assert!(take_clipboard_write(term).is_empty());
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn osc_52_empty_selection_defaults_to_system_clipboard() {
+        let term = new_term();
+        let input = b"\x1b]52;;aGVsbG8=\x07";
+        // SAFETY: term is live and input remains readable during the feed.
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(take_clipboard_write(term), b"hello");
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn osc_52_non_system_selection_is_ignored() {
+        let term = new_term();
+        let input = b"\x1b]52;p;aGVsbG8=\x07";
+        // SAFETY: term is live and input remains readable during the feed.
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert!(take_clipboard_write(term).is_empty());
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn osc_52_clipboard_read_is_ignored_without_response() {
+        let term = new_term();
+        let input = b"\x1b]52;c;?\x07";
+        let mut responses = LocusTermBytes::default();
+        // SAFETY: term is live; input and output storage remain valid for each call.
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert!(take_clipboard_write(term).is_empty());
+            assert_eq!(
+                locus_term_take_responses(term, &mut responses),
+                LOCUS_STATUS_OK
+            );
+            assert!(owned_bytes(&mut responses).is_empty());
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn osc_52_invalid_base64_is_ignored() {
+        let term = new_term();
+        let invalid_character = b"\x1b]52;c;aGVs!G8=\x07";
+        let invalid_length = b"\x1b]52;c;abc\x07";
+        // SAFETY: term is live and input remains readable during the feed.
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, invalid_character.as_ptr(), invalid_character.len()),
+                LOCUS_STATUS_OK
+            );
+            assert!(take_clipboard_write(term).is_empty());
+            assert_eq!(
+                locus_term_feed(term, invalid_length.as_ptr(), invalid_length.len()),
+                LOCUS_STATUS_OK
+            );
+            assert!(take_clipboard_write(term).is_empty());
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn osc_52_oversized_encoded_payload_is_dropped_before_decode() {
+        let term = new_term();
+        let mut input = b"\x1b]52;c;".to_vec();
+        input.resize(input.len() + OSC52_MAX_ENCODED_BYTES + 1, b'A');
+        input.push(0x07);
+        // SAFETY: term is live and input remains readable during the feed.
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert!(take_clipboard_write(term).is_empty());
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn osc_52_last_honored_writer_wins() {
+        let term = new_term();
+        let input = b"\x1b]52;c;Zmlyc3Q=\x07\x1b]52;c;c2Vjb25k\x07";
+        // SAFETY: term is live and input remains readable during the feed.
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(take_clipboard_write(term), b"second");
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn osc_52_take_clears_pending_write() {
+        let term = new_term();
+        let input = b"\x1b]52;c;eA==\x07";
+        // SAFETY: term is live and input remains readable during the feed.
+        unsafe {
+            assert_eq!(
+                locus_term_feed(term, input.as_ptr(), input.len()),
+                LOCUS_STATUS_OK
+            );
+            assert_eq!(take_clipboard_write(term), b"x");
+            assert!(take_clipboard_write(term).is_empty());
+            locus_term_free(term);
+        }
+    }
+
+    #[test]
+    fn osc_52_take_rejects_null_arguments() {
+        let term = new_term();
+        let mut bytes = LocusTermBytes::default();
+        // SAFETY: these deliberately adversarial calls verify null checks.
+        unsafe {
+            assert_eq!(
+                locus_term_take_clipboard_write(ptr::null_mut(), &mut bytes),
+                LOCUS_TERM_STATUS_INVALID_ARGUMENT
+            );
+            assert_eq!(
+                locus_term_take_clipboard_write(term, ptr::null_mut()),
+                LOCUS_TERM_STATUS_INVALID_ARGUMENT
+            );
             locus_term_free(term);
         }
     }

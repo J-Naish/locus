@@ -66,13 +66,16 @@ Decision record: ADR 0012. Emulation lives in `core/crates/terminal`
   opened.
 - Paste: multi-line paste warns before sending unless the running program
   uses bracketed paste (where it is safe by construction).
+- Programs can place text on the clipboard via OSC 52 (for example vim/tmux
+  yanks over SSH).
 
 ## Security posture
 
 - The terminal runs only what the user types; the app never initiates
   commands.
-- OSC 52 clipboard-write requests from programs are parsed but not
-  honored (deferred policy; see ADR 0012).
+- Programs may write the clipboard via OSC 52 (write-allow, matching modern
+  terminals), guarded by a 1 MiB cap and restricted to the system clipboard;
+  clipboard READ requests are never honored.
 - Link opening is restricted to `http`/`https`.
 - Terminal output, titles, and reported paths are treated as untrusted
   input at the FFI boundary (dimension caps, safe-paste gating, validated
