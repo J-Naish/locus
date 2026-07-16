@@ -227,6 +227,30 @@ Not a goal:
 - video editing
 - audio editing
 
+## Terminal
+
+The terminal is an on-demand companion for running and reviewing agent CLI
+sessions (ADR 0012). Full behavior is specified in `docs/specs/terminal.md`.
+
+Must support:
+
+- toggle the panel with ⌘J / Ctrl+` below the editor; the session survives
+  hiding the panel
+- run the user's login shell with faithful VT/xterm-family emulation,
+  including full-screen TUIs, mouse reporting, and bounded scrollback
+- comfortable Japanese text: correct wide-character layout, inline IME
+  preedit, selection and caret interaction that work per character
+- selection and copy where the highlight always matches what is copied
+- find in the terminal (⌘F) and ⌘-click opening of http/https URLs
+- a multi-line paste warning unless bracketed paste makes it safe
+
+Not a goal:
+
+- an always-visible terminal layout or multiple panes/tabs/splits
+- shell configuration management, profiles, or theming surfaces
+- honoring clipboard-write requests from programs (OSC 52) until the
+  deferred policy decision is made deliberately
+
 ## Security and Privacy
 
 Must preserve:
@@ -239,7 +263,8 @@ Must preserve:
 - no built-in AI chat or agent
 - no bundled AI model
 - no plugin execution
-- no arbitrary code execution features
+- no app-initiated code execution; the terminal panel runs only what the
+  user types (ADR 0012)
 - minimal network behavior
 
 Should support:
