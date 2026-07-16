@@ -32,10 +32,10 @@ ownership inside our Rust workspace.
   frames; presentation policy (for example, snapping selection highlights
   to wide-glyph boundaries) lives at that boundary, never as silent edits
   to ported files.
-- The macOS pane is native AppKit/SwiftUI. Live rendering uses Metal
-  (glyph atlas plus instanced quads); the Core Graphics draw path is
-  retained as the offscreen oracle that differential tests compare
-  against.
+- The macOS pane is native AppKit/SwiftUI, rendered via Metal (glyph atlas
+  plus instanced quads). A Core Graphics twin served as the bring-up oracle
+  for differential testing and was removed after on-Mac acceptance; Metal
+  correctness is pinned by readback tests.
 - The terminal is an on-demand toggle panel (⌘J / Ctrl+`) below the
   editor for running and reviewing agent CLI sessions. It is not an
   always-visible IDE terminal, and IDE-oriented chrome stays out of
@@ -56,7 +56,8 @@ ownership inside our Rust workspace.
   keeps future upstream comparisons meaningful.
 - ghostty's MIT license and the ported snapshot hash are recorded in
   `core/THIRD_PARTY_NOTICES.md`.
-- The Metal renderer adds a shader and glyph-atlas subsystem; the CG
-  oracle keeps it honest. A future Windows app can reuse the same
-  architecture (Direct3D/DirectWrite against the identical frame ABI).
+- The Metal renderer adds a shader and glyph-atlas subsystem; the CG oracle
+  served through bring-up and was retired. A future Windows app can reuse
+  the same architecture (Direct3D/DirectWrite against the identical frame
+  ABI).
 - Behavior users can rely on is specified in `docs/specs/terminal.md`.

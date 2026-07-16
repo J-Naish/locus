@@ -36,10 +36,9 @@ Decision record: ADR 0012. Emulation lives in `core/crates/terminal`
 
 ## Rendering
 
-- The pane renders live via Metal: glyphs are rasterized once into an
-  atlas and drawn as instanced quads. `LOCUS_TERMINAL_RENDERER=cg`
-  launches with the Core Graphics path instead; that path also serves as
-  the offscreen oracle for the pixel-parity and differential tests.
+- The pane renders via Metal: glyphs are rasterized once into an atlas and
+  drawn as instanced quads. Rendering correctness is pinned by readback tests
+  over the shared shaping pipeline.
 - Wide (2-cell) CJK glyphs render with a grid-fitted Japanese font so
   kanji and kana read as continuous text; ambiguous-width symbols
   (※ ① ○ →) condense into their single cell instead of overflowing.
@@ -87,6 +86,5 @@ Decision record: ADR 0012. Emulation lives in `core/crates/terminal`
   release builds); display updates coalesce to the display refresh so
   floods stay responsive and Ctrl+C is immediate.
 - The Metal draw path keeps per-frame CPU work in the low milliseconds
-  (debug builds) with sub-0.1 ms GPU time; standing probes in
-  `LocusTests` (`testDrawPassTimingProbe`,
-  `testMetalRenderPassTimingProbe`) track regressions.
+  (debug builds) with sub-0.1 ms GPU time; the standing
+  `testMetalRenderPassTimingProbe` in `LocusTests` tracks regressions.

@@ -25,8 +25,7 @@ Expected stack:
 - SwiftUI
 - Core Text (custom virtualized text engine over the Rust buffer; text editing
   does not use NSTextView/TextKit)
-- Metal (terminal pane rendering via a glyph atlas; the Core Graphics
-  path is retained as the offscreen test oracle)
+- Metal (terminal pane rendering via a glyph atlas)
 - PDFKit
 - Quick Look
 - AVKit

@@ -6,15 +6,6 @@ import Metal
 import QuartzCore
 import SwiftUI
 
-enum TerminalRenderBackend: Equatable {
-  case coreGraphics
-  case metal
-
-  static func fromEnvironment(_ value: String?) -> TerminalRenderBackend {
-    value == "cg" ? .coreGraphics : .metal
-  }
-}
-
 struct TerminalGridSize: Equatable {
   let columns: UInt16
   let rows: UInt16
@@ -1378,7 +1369,6 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
     }
   }
 
-  private(set) var backend: TerminalRenderBackend
   private let metrics: TerminalCellMetrics
   private let rowShapingCache: TerminalRowShapingCache
   private var foregroundColorCache = TerminalForegroundColorCache()
@@ -1411,8 +1401,8 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   private var cachedLinks: (generation: UInt64, matches: [TerminalLinkMatch])?
   private var metalRenderer: TerminalMetalRenderer?
   private var metalRendererInitializationAttempted = false
-  private var loggedMetalFallback = false
-  private(set) var rowsDrawnForTesting = 0
+  private var metalRenderingUnavailable = false
+  private var loggedMetalUnavailable = false
   private(set) var metalRendersForTesting = 0
   private(set) var lastMetalRenderSucceededForTesting: Bool?
   var metalFramebufferOnlyForTesting = true {
@@ -1437,15 +1427,13 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
 
   override var acceptsFirstResponder: Bool { true }
   override var isOpaque: Bool { true }
-  override var wantsUpdateLayer: Bool { backend == .metal }
+  override var wantsUpdateLayer: Bool { true }
 
   override func makeBackingLayer() -> CALayer {
-    guard backend == .metal else {
-      return super.makeBackingLayer()
-    }
     guard let device = MTLCreateSystemDefaultDevice() else {
-      backend = .coreGraphics
-      logMetalFallbackIfNeeded()
+      // Supported Macs always provide Metal; keep the session alive but render nothing otherwise.
+      metalRenderingUnavailable = true
+      logMetalUnavailableIfNeeded()
       return super.makeBackingLayer()
     }
     let metalLayer = CAMetalLayer()
@@ -1490,9 +1478,6 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   init(
     session: TerminalSession? = nil,
     metrics: TerminalCellMetrics = TerminalCellMetrics(),
-    backend: TerminalRenderBackend = .fromEnvironment(
-      ProcessInfo.processInfo.environment["LOCUS_TERMINAL_RENDERER"]
-    ),
     pasteboard: NSPasteboard = .general,
     resizeObserver: ((TerminalGridSize) -> Void)? = nil,
     keyEventObserver: ((TerminalKeyEvent) -> Void)? = nil,
@@ -1500,7 +1485,6 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   ) {
     self.session = session
     self.metrics = metrics
-    self.backend = backend
     self.rowShapingCache = TerminalRowShapingCache(
       metrics: metrics,
       insets: TerminalPaneLayoutMetrics.contentInsets
@@ -1511,9 +1495,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
     self.caretResetObserver = caretResetObserver
     super.init(frame: .zero)
     wantsLayer = true
-    if backend == .metal {
-      layerContentsRedrawPolicy = .never
-    }
+    layerContentsRedrawPolicy = .never
     observeActiveFocusChanges()
     subscribeToSession()
   }
@@ -1555,7 +1537,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   override func setFrameSize(_ newSize: NSSize) {
     super.setFrameSize(newSize)
     updateMetalLayerGeometry()
-    if backend == .metal, inLiveResize {
+    if inLiveResize {
       renderMetalFrame()
     }
     scheduleTerminalResizeIfNeeded()
@@ -2098,66 +2080,15 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
     0
   }
 
-  override func draw(_ dirtyRect: NSRect) {
-    guard let context = NSGraphicsContext.current?.cgContext else {
-      return
-    }
-    rowShapingCache.beginPaint()
-    rowsDrawnForTesting = 0
-    defer {
-      rowShapingCache.finishPaint()
-    }
-
-    backgroundColor.setFill()
-    dirtyRect.fill()
-
-    hasRenderedSelection = false
-    guard let session else {
-      return
-    }
-
-    let drawTime = CACurrentMediaTime()
-    let searchMatches = session.snapshot?.search?.viewportMatches ?? []
-    let hoveredLinkMatches = hoveredLink.map { linkSegments(for: $0.match.linkID) } ?? []
-    session.withFrame { frame in
-      let caretVisible = caretIsVisible(cursor: frame.cursor, at: drawTime)
-      draw(
-        frame: frame,
-        searchMatches: searchMatches,
-        hoveredLinkMatches: hoveredLinkMatches,
-        caretVisible: caretVisible,
-        dirtyRect: dirtyRect,
-        in: context
-      )
-      lastDrawnCaretVisibility = caretVisible
-      lastDrawnCaretRect =
-        caretVisible && !hasMarkedText()
-        ? caretRect(for: frame.cursor)
-        : nil
-    }
-  }
-
-  override func cacheDisplay(in rect: NSRect, to bitmapImageRep: NSBitmapImageRep) {
-    guard let graphicsContext = NSGraphicsContext(bitmapImageRep: bitmapImageRep) else {
-      super.cacheDisplay(in: rect, to: bitmapImageRep)
-      return
-    }
-
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = graphicsContext
-    graphicsContext.cgContext.saveGState()
-    graphicsContext.cgContext.clip(to: rect)
-    effectiveAppearance.performAsCurrentDrawingAppearance {
-      draw(rect)
-    }
-    graphicsContext.cgContext.restoreGState()
-    NSGraphicsContext.restoreGraphicsState()
-  }
-
   @discardableResult
   func renderMetalFrame() -> Bool {
     metalRendersForTesting &+= 1
-    guard backend == .metal, window != nil, bounds.width > 0, bounds.height > 0 else {
+    guard
+      !metalRenderingUnavailable,
+      window != nil,
+      bounds.width > 0,
+      bounds.height > 0
+    else {
       lastMetalRenderSucceededForTesting = false
       return false
     }
@@ -2386,31 +2317,20 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
         insets: TerminalPaneLayoutMetrics.contentInsets
       )
     else {
-      fallBackToCoreGraphics()
+      metalRenderingUnavailable = true
+      logMetalUnavailableIfNeeded()
       return nil
     }
     metalRenderer = renderer
     return renderer
   }
 
-  private func fallBackToCoreGraphics() {
-    guard backend == .metal else {
+  private func logMetalUnavailableIfNeeded() {
+    guard !loggedMetalUnavailable else {
       return
     }
-    backend = .coreGraphics
-    logMetalFallbackIfNeeded()
-    wantsLayer = false
-    wantsLayer = true
-    layerContentsRedrawPolicy = .duringViewResize
-    needsDisplay = true
-  }
-
-  private func logMetalFallbackIfNeeded() {
-    guard !loggedMetalFallback else {
-      return
-    }
-    NSLog("Locus terminal: Metal renderer unavailable; falling back to Core Graphics")
-    loggedMetalFallback = true
+    NSLog("Locus terminal: Metal renderer unavailable; terminal rendering is disabled")
+    loggedMetalUnavailable = true
   }
 
   private func currentMetalContentsScale() -> CGFloat {
@@ -2418,7 +2338,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   }
 
   private func updateMetalLayerGeometry() {
-    guard backend == .metal, let metalLayer = layer as? CAMetalLayer else {
+    guard let metalLayer = layer as? CAMetalLayer else {
       return
     }
     let scale = currentMetalContentsScale()
@@ -2430,10 +2350,8 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
   }
 
   private func requestViewPaint() {
-    if backend == .metal, window != nil {
+    if window != nil {
       renderMetalFrame()
-    } else {
-      needsDisplay = true
     }
   }
 
@@ -2483,20 +2401,13 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       cachedLinks = nil
       clearHoveredLink()
     }
-    if backend == .metal {
-      if !renderedBlinkTransition, !renderMetalFrame() {
-        // A temporarily unavailable drawable must not consume this frame.
-        // Keep the generation pending so the next display-link tick retries.
-        if backend == .metal {
-          return
-        }
-      }
+    if !renderedBlinkTransition, !renderMetalFrame(), !metalRenderingUnavailable {
+      // A temporarily unavailable drawable must not consume this frame.
+      // Keep the generation pending so the next display-link tick retries.
+      return
     }
     hasPendingFrameChange = false
     lastScheduledGeneration = generation
-    if backend == .coreGraphics {
-      needsDisplay = true
-    }
   }
 
   private func scheduleTerminalResizeIfNeeded() {
@@ -2598,239 +2509,6 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       ?? (window?.firstResponder === self && window?.isKeyWindow == true && NSApp.isActive)
   }
 
-  private func draw(
-    frame: TerminalFrame,
-    searchMatches: [TerminalSearchMatch],
-    hoveredLinkMatches: [TerminalLinkMatch],
-    caretVisible: Bool,
-    dirtyRect: NSRect,
-    in context: CGContext
-  ) {
-    frame.withRows { rows in
-      frame.withCells { cells in
-        frame.withGraphemes { graphemes in
-          var cachedRows: [(row: LocusTermRow, cached: TerminalShapedRow)] = []
-          cachedRows.reserveCapacity(rows.count)
-          for row in rows where rowPaintRect(row.y).intersects(dirtyRect) {
-            cachedRows.append(
-              (row, rowShapingCache.shapedRow(row: row, cells: cells, graphemes: graphemes))
-            )
-          }
-
-          for item in cachedRows {
-            drawBackgrounds(row: item.row, cached: item.cached, in: context)
-          }
-          drawSelection(frame: frame, rows: rows, dirtyRect: dirtyRect)
-          drawSearchMatches(searchMatches, dirtyRect: dirtyRect)
-          for item in cachedRows {
-            drawText(row: item.row, cached: item.cached, in: context)
-          }
-          drawHoveredLinkUnderlines(hoveredLinkMatches, dirtyRect: dirtyRect, in: context)
-        }
-      }
-    }
-    if hasMarkedText() {
-      drawMarkedText(frame.cursor, in: context)
-    } else {
-      drawCursor(frame.cursor, visible: caretVisible, in: context)
-    }
-  }
-
-  private func drawSelection(
-    frame: TerminalFrame,
-    rows: UnsafeBufferPointer<LocusTermRow>,
-    dirtyRect: NSRect
-  ) {
-    let color: NSColor =
-      hasActiveKeyboardFocus
-      ? .selectedTextBackgroundColor
-      : .unemphasizedSelectedTextBackgroundColor
-    var drewSelection = false
-    color.setFill()
-    for (index, row) in rows.enumerated() {
-      guard let columns = frame.selectionRange(forRow: index) else {
-        continue
-      }
-      drewSelection = true
-      if rowPaintRect(row.y).intersects(dirtyRect) {
-        TerminalPaneGeometry.selectionRect(
-          columns: columns,
-          row: row.y,
-          bounds: bounds,
-          metrics: metrics,
-          insets: TerminalPaneLayoutMetrics.contentInsets
-        ).fill()
-      }
-    }
-    hasRenderedSelection = drewSelection
-  }
-
-  private func drawSearchMatches(_ matches: [TerminalSearchMatch], dirtyRect: NSRect) {
-    for match in matches where rowPaintRect(match.y).intersects(dirtyRect) {
-      let color =
-        match.isSelected
-        ? NSColor.findHighlightColor
-        : NSColor.findHighlightColor.withAlphaComponent(0.35)
-      color.setFill()
-      TerminalPaneGeometry.searchMatchRect(
-        match,
-        bounds: bounds,
-        metrics: metrics,
-        insets: TerminalPaneLayoutMetrics.contentInsets
-      ).fill()
-    }
-  }
-
-  private func drawHoveredLinkUnderlines(
-    _ matches: [TerminalLinkMatch],
-    dirtyRect: NSRect,
-    in context: CGContext
-  ) {
-    context.setFillColor(NSColor.textColor.withAlphaComponent(0.8).cgColor)
-    for match in matches where rowPaintRect(match.y).intersects(dirtyRect) {
-      context.fill(
-        TerminalPaneGeometry.linkUnderlineRect(
-          match,
-          bounds: bounds,
-          metrics: metrics,
-          insets: TerminalPaneLayoutMetrics.contentInsets
-        )
-      )
-    }
-  }
-
-  private func drawBackgrounds(
-    row: LocusTermRow,
-    cached: TerminalShapedRow,
-    in context: CGContext
-  ) {
-    for fill in cached.backgroundFills {
-      context.setFillColor(fill.color.cgColor)
-      context.fill(
-        NSRect(
-          x: TerminalPaneLayoutMetrics.contentInsets.left
-            + CGFloat(fill.startColumn) * metrics.cellWidth,
-          y: rowRectY(row.y),
-          width: CGFloat(fill.cellCount) * metrics.cellWidth,
-          height: metrics.cellHeight
-        )
-      )
-    }
-  }
-
-  private func drawText(
-    row: LocusTermRow,
-    cached: TerminalShapedRow,
-    in context: CGContext
-  ) {
-    guard !cached.runs.isEmpty else {
-      return
-    }
-    rowsDrawnForTesting += 1
-    let baselineY = bounds.height - rowTopOffset(row.y) - metrics.baselineOffset
-    for run in cached.runs {
-      drawCachedTextRun(run, baselineY: baselineY, in: context)
-    }
-  }
-
-  private func drawCachedTextRun(
-    _ cached: TerminalShapedRun,
-    baselineY: CGFloat,
-    in context: CGContext
-  ) {
-    let foreground = resolvedForegroundColor(for: cached.run.style)
-    context.saveGState()
-    context.textMatrix = .identity
-    context.setFillColor(foreground.cgColor)
-    context.translateBy(x: 0, y: baselineY)
-    for batch in cached.glyphBatches {
-      context.saveGState()
-      if let scale = batch.overflowScaleX, let anchor = batch.overflowAnchorX {
-        context.translateBy(x: anchor, y: 0)
-        context.scaleBy(x: scale, y: 1)
-        context.translateBy(x: -anchor, y: 0)
-      }
-      drawGlyphs(batch.glyphs, at: batch.positions, font: batch.font, in: context)
-      context.restoreGState()
-    }
-    context.restoreGState()
-    drawDecorations(
-      for: cached.run,
-      baselineY: baselineY,
-      color: foreground,
-      in: context
-    )
-  }
-
-  private func drawGlyphs(
-    _ glyphs: [CGGlyph],
-    at positions: [CGPoint],
-    font: CTFont,
-    in context: CGContext
-  ) {
-    guard !glyphs.isEmpty, glyphs.count == positions.count else {
-      return
-    }
-    glyphs.withUnsafeBufferPointer { glyphBuffer in
-      positions.withUnsafeBufferPointer { positionBuffer in
-        guard
-          let glyphBaseAddress = glyphBuffer.baseAddress,
-          let positionBaseAddress = positionBuffer.baseAddress
-        else {
-          return
-        }
-        CTFontDrawGlyphs(
-          font,
-          glyphBaseAddress,
-          positionBaseAddress,
-          glyphs.count,
-          context
-        )
-      }
-    }
-  }
-
-  private func drawDecorations(
-    for run: TerminalTextRun,
-    baselineY: CGFloat,
-    color: NSColor,
-    in context: CGContext
-  ) {
-    guard run.style.flags.contains(.underline) || run.style.flags.contains(.strikethrough) else {
-      return
-    }
-
-    let font = metrics.font(for: run.style.flags) as CTFont
-    let x =
-      TerminalPaneLayoutMetrics.contentInsets.left
-      + CGFloat(run.startColumn) * metrics.cellWidth
-    let width = CGFloat(run.cellCount) * metrics.cellWidth
-    context.setFillColor(color.cgColor)
-    if run.style.flags.contains(.underline) {
-      let thickness = max(1, CGFloat(CTFontGetUnderlineThickness(font)))
-      let y = baselineY + CGFloat(CTFontGetUnderlinePosition(font))
-      context.fill(CGRect(x: x, y: y, width: width, height: thickness))
-    }
-    if run.style.flags.contains(.strikethrough) {
-      let thickness = max(1, CGFloat(CTFontGetUnderlineThickness(font)))
-      let y = baselineY + CGFloat(CTFontGetXHeight(font)) * 0.5
-      context.fill(CGRect(x: x, y: y, width: width, height: thickness))
-    }
-  }
-
-  private func drawCursor(
-    _ cursor: LocusTermCursor,
-    visible: Bool,
-    in context: CGContext
-  ) {
-    guard visible else {
-      return
-    }
-
-    cursorColor.setFill()
-    caretRect(for: cursor).fill()
-  }
-
   private func caretRect(for cursor: LocusTermCursor) -> NSRect {
     if cursor.style == 2 {
       let cellRect = TerminalPaneGeometry.cursorCellRect(
@@ -2855,56 +2533,6 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       metrics: metrics,
       insets: TerminalPaneLayoutMetrics.contentInsets
     )
-  }
-
-  private func drawMarkedText(_ cursor: LocusTermCursor, in context: CGContext) {
-    guard let markedTextStorage, markedTextStorage.length > 0 else {
-      return
-    }
-
-    let attributed = NSMutableAttributedString(attributedString: markedTextStorage)
-    let range = NSRange(location: 0, length: attributed.length)
-    attributed.addAttributes(
-      [
-        .font: metrics.font,
-        .foregroundColor: NSColor.textColor,
-        .underlineStyle: NSUnderlineStyle.single.rawValue,
-      ],
-      range: range
-    )
-    let line = CTLineCreateWithAttributedString(attributed)
-    let width = max(
-      metrics.cellWidth,
-      CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
-    )
-    let x =
-      TerminalPaneLayoutMetrics.contentInsets.left
-      + CGFloat(cursor.x) * metrics.cellWidth
-    backgroundColor.setFill()
-    NSRect(x: x, y: rowRectY(cursor.y), width: width, height: metrics.cellHeight).fill()
-
-    context.saveGState()
-    context.textMatrix = .identity
-    context.textPosition = CGPoint(
-      x: x,
-      y: bounds.height - rowTopOffset(cursor.y) - metrics.baselineOffset
-    )
-    CTLineDraw(line, context)
-    context.restoreGState()
-
-    let cursorX = min(
-      x + width,
-      bounds.maxX
-        - TerminalPaneLayoutMetrics.contentInsets.right
-        - TerminalCursorMetrics.thickness
-    )
-    cursorColor.setFill()
-    NSRect(
-      x: cursorX,
-      y: rowRectY(cursor.y),
-      width: TerminalCursorMetrics.thickness,
-      height: metrics.cellHeight
-    ).fill()
   }
 
   private var cursorColor: NSColor {
@@ -3186,31 +2814,7 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
       return false
     }
 
-    if backend == .metal {
-      let rendered = renderMetalFrame()
-      if backend == .metal {
-        return rendered
-      }
-    }
-
-    var currentRect: NSRect?
-    if currentVisible {
-      session?.withFrame { frame in
-        if frame.cursor.visible {
-          currentRect = caretRect(for: frame.cursor)
-        }
-      }
-    }
-    guard
-      let invalidationRect = TerminalCaretInvalidation.invalidationRect(
-        previous: lastDrawnCaretRect,
-        current: currentRect
-      )
-    else {
-      return false
-    }
-    setNeedsDisplay(invalidationRect)
-    return false
+    return renderMetalFrame()
   }
 
   func invalidateCaretForBlinkForTesting(at time: TimeInterval) {
@@ -3303,24 +2907,4 @@ final class TerminalPaneView: NSView, @preconcurrency NSTextInputClient, NSMenuI
     )
   }
 
-  private func rowPaintRect(_ row: UInt16) -> NSRect {
-    NSRect(
-      x: bounds.minX,
-      y: rowRectY(row),
-      width: bounds.width,
-      height: metrics.cellHeight
-    )
-  }
-
-  private func resolvedForegroundColor(for style: TerminalTextStyle) -> NSColor {
-    var foreground = nsColor(forForeground: style.resolvedColors.foreground)
-    if style.flags.contains(.faint) {
-      foreground = foreground.withAlphaComponent(0.55)
-    }
-    return foreground
-  }
-
-  private func nsColor(forForeground color: TerminalColor) -> NSColor {
-    color == .defaultForeground ? .textColor : color.nsColor
-  }
 }

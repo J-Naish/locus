@@ -474,104 +474,70 @@ final class TerminalMetalRendererTests: XCTestCase {
     )
   }
 
-  func testAttachmentImageChannelOrder() throws {
-    let source = PixelBuffer(width: 1, height: 1, bytes: [0, 0, 255, 255])
-    let image = try XCTUnwrap(image(from: source))
-    let rendered = try sRGBPixels(width: 1, height: 1) {
-      image.draw(in: NSRect(x: 0, y: 0, width: 1, height: 1))
-    }
-    let pixel = rendered.pixel(x: 0, y: 0)
-
-    XCTAssertGreaterThanOrEqual(pixel[2], 250)
-    XCTAssertLessThanOrEqual(pixel[1], 5)
-    XCTAssertLessThanOrEqual(pixel[0], 5)
-    XCTAssertEqual(pixel[3], 255)
-  }
-
-  func testDifferentialSolidStructureMatchesCoreGraphics() throws {
+  func testWarmShapingCacheRendersPixelIdenticalToCold() throws {
     let fixture = try makeDifferentialFixture(columns: 60, rows: 18)
     defer { fixture.session.terminate() }
-    let scene = buildSceneForFixture(fixture)
-    let metal = try renderPixels(scene: scene, renderer: fixture.renderer)
-    let cg = try coreGraphicsPixels(view: fixture.view)
-    guard assertSameDimensions(cg: cg, metal: metal) else { return }
-    let blankCells = blankCellCoordinates(in: fixture.session)
-    var differences: [Int] = []
-    var worst: [(coordinate: TerminalCellCoordinate, delta: Int)] = []
-    for coordinate in blankCells {
-      let deltas = cellDifferences(
-        cg: cg,
-        metal: metal,
-        coordinate: coordinate,
-        inset: 1
-      )
-      differences.append(contentsOf: deltas)
-      worst.append((coordinate, deltas.max() ?? 0))
-    }
-    let mean =
-      differences.isEmpty
-      ? 0
-      : Double(differences.reduce(0, +)) / Double(differences.count)
-    let maximum = differences.max() ?? 0
-    print("metal_diff_solid_mean=\(mean) metal_diff_solid_max=\(maximum)")
-    if mean > 2 || maximum > 6 {
-      attachDifferentialImages(cg: cg, metal: metal)
-      XCTFail(
-        "Solid differential exceeded limits; worst=\(worst.sorted { $0.delta > $1.delta }.prefix(10))"
-      )
-    }
-  }
 
-  func testDifferentialGlyphStructureMatchesCoreGraphics() throws {
-    let fixture = try makeDifferentialFixture(columns: 60, rows: 18)
-    defer { fixture.session.terminate() }
-    let scene = buildSceneForFixture(fixture)
-    let metal = try renderPixels(scene: scene, renderer: fixture.renderer)
-    let cg = try coreGraphicsPixels(view: fixture.view)
-    guard assertSameDimensions(cg: cg, metal: metal) else { return }
-    var matches = 0
-    var total = 0
-    var inkDifferences: [Int] = []
-    var worst: [(coordinate: TerminalCellCoordinate, delta: Int)] = []
-    for row in 0..<18 {
-      for column in 0..<60 {
-        let coordinate = TerminalCellCoordinate(
-          column: UInt16(column),
-          row: UInt16(row)
-        )
-        let cgInk = cellHasInk(cg, coordinate: coordinate, threshold: 24)
-        let metalInk = cellHasInk(metal, coordinate: coordinate, threshold: 24)
-        total += 1
-        if cgInk == metalInk {
-          matches += 1
-        }
-        if cgInk || metalInk {
-          let deltas = cellDifferences(
-            cg: cg,
-            metal: metal,
-            coordinate: coordinate,
-            inset: 1
-          )
-          inkDifferences.append(contentsOf: deltas)
-          worst.append((coordinate, deltas.max() ?? 0))
-        }
-      }
-    }
-    let agreement = Double(matches) / Double(max(1, total))
-    let mean =
-      inkDifferences.isEmpty
-      ? 0
-      : Double(inkDifferences.reduce(0, +)) / Double(inkDifferences.count)
-    let maximum = inkDifferences.max() ?? 0
-    print(
-      "metal_diff_glyph_agreement=\(agreement) metal_diff_glyph_mean=\(mean) metal_diff_glyph_max=\(maximum)"
+    fixture.cache.clear()
+    let cold = try renderPixels(
+      scene: buildSceneForFixture(fixture),
+      renderer: fixture.renderer
     )
-    if agreement < 0.98 || mean > 32 {
-      attachDifferentialImages(cg: cg, metal: metal)
-      XCTFail(
-        "Glyph differential exceeded limits; worst=\(worst.sorted { $0.delta > $1.delta }.prefix(10))"
-      )
-    }
+    XCTAssertGreaterThan(fixture.cache.statisticsForTesting.misses, 0)
+
+    let warm = try renderPixels(
+      scene: buildSceneForFixture(fixture),
+      renderer: fixture.renderer
+    )
+
+    XCTAssertEqual(warm.bytes, cold.bytes)
+    XCTAssertGreaterThan(fixture.cache.statisticsForTesting.hits, 0)
+    XCTAssertEqual(fixture.cache.statisticsForTesting.misses, 0)
+  }
+
+  func testWarmCacheIdentityForInverseWideOverflowRow() throws {
+    let fixture = try makeDifferentialFixture(columns: 60, rows: 18)
+    defer { fixture.session.terminate() }
+    let generation = fixture.session.snapshot?.generation ?? 0
+    fixture.session.send(Data("printf '\\033[7m逆向き-日本語→○\\033[0m\\r\\n'\n".utf8))
+    XCTAssertTrue(
+      waitForCondition(timeout: 5) {
+        (fixture.session.snapshot?.generation ?? 0) > generation
+          && fixture.session.plainTextForTesting()?.contains("逆向き-日本語→○") == true
+      }
+    )
+
+    fixture.cache.clear()
+    let cold = try renderPixels(
+      scene: buildSceneForFixture(fixture),
+      renderer: fixture.renderer
+    )
+    XCTAssertGreaterThan(fixture.cache.statisticsForTesting.misses, 0)
+
+    let warm = try renderPixels(
+      scene: buildSceneForFixture(fixture),
+      renderer: fixture.renderer
+    )
+
+    XCTAssertEqual(warm.bytes, cold.bytes)
+    XCTAssertGreaterThan(fixture.cache.statisticsForTesting.hits, 0)
+    XCTAssertEqual(fixture.cache.statisticsForTesting.misses, 0)
+  }
+
+  func testWideGlyphFillReducesInternalInkGap() throws {
+    let defaultMetrics = TerminalCellMetrics()
+    let legacyMetrics = TerminalCellMetrics(
+      wideGlyphFillRatio: 12 / (2 * defaultMetrics.cellWidth)
+    )
+
+    let defaultGap = try metalWideGlyphInternalGap(metrics: defaultMetrics)
+    let legacyGap = try metalWideGlyphInternalGap(metrics: legacyMetrics)
+
+    XCTAssertLessThan(
+      defaultGap,
+      legacyGap,
+      "Grid-fitted wide glyphs should leave less internal whitespace than the legacy 12pt look"
+    )
   }
 
   func testMetalRenderPassTimingProbe() throws {
@@ -818,55 +784,6 @@ final class TerminalMetalRendererTests: XCTestCase {
     )
   }
 
-  private func coreGraphicsPixels(view: TerminalPaneView) throws -> PixelBuffer {
-    let width = Int(view.bounds.width)
-    let height = Int(view.bounds.height)
-    return try sRGBPixels(width: width, height: height) {
-      view.effectiveAppearance.performAsCurrentDrawingAppearance {
-        view.draw(view.bounds)
-      }
-    }
-  }
-
-  private func sRGBPixels(
-    width: Int,
-    height: Int,
-    draw: () -> Void
-  ) throws -> PixelBuffer {
-    let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
-    let bitmapInfo = CGBitmapInfo(
-      rawValue: CGBitmapInfo.byteOrder32Little.rawValue
-        | CGImageAlphaInfo.premultipliedFirst.rawValue
-    )
-    var bytes = [UInt8](repeating: 0, count: width * height * 4)
-    let rendered = bytes.withUnsafeMutableBytes { storage in
-      guard
-        let context = CGContext(
-          data: storage.baseAddress,
-          width: width,
-          height: height,
-          bitsPerComponent: 8,
-          bytesPerRow: width * 4,
-          space: colorSpace,
-          bitmapInfo: bitmapInfo.rawValue
-        )
-      else {
-        return false
-      }
-      let graphicsContext = NSGraphicsContext(cgContext: context, flipped: false)
-      NSGraphicsContext.saveGraphicsState()
-      NSGraphicsContext.current = graphicsContext
-      context.saveGState()
-      context.clip(to: CGRect(x: 0, y: 0, width: width, height: height))
-      draw()
-      context.restoreGState()
-      NSGraphicsContext.restoreGraphicsState()
-      return true
-    }
-    XCTAssertTrue(rendered, "Could not create the sRGB oracle context")
-    return PixelBuffer(width: width, height: height, bytes: bytes)
-  }
-
   private func renderPixels(
     scene: TerminalMetalScene,
     renderer: TerminalMetalRenderer
@@ -881,91 +798,86 @@ final class TerminalMetalRendererTests: XCTestCase {
     return PixelBuffer(width: texture.width, height: texture.height, bytes: readPixels(texture))
   }
 
-  private func blankCellCoordinates(in session: TerminalSession) -> [TerminalCellCoordinate] {
-    var result: [TerminalCellCoordinate] = []
-    session.withFrame { frame in
-      frame.withRows { rows in
-        frame.withCells { cells in
-          for row in rows {
-            var populated = [Bool](repeating: false, count: Int(frame.columns))
-            var column = 0
-            for cell in cells[TerminalRowShapingCache.cellRange(for: row, cells: cells)] {
-              if TerminalCellWidth(rawValue: cell.wide) == .spacerTail {
-                continue
-              }
-              let width = TerminalCellWidth(rawValue: cell.wide) == .wide ? 2 : 1
-              let scalar = cell.codepoint == 0 ? nil : UnicodeScalar(cell.codepoint)
-              let isBlank = scalar == nil || scalar?.properties.isWhitespace == true
-              for offset in 0..<width where column + offset < populated.count {
-                populated[column + offset] = !isBlank
-              }
-              column += width
-            }
-            for column in populated.indices where !populated[column] {
-              result.append(
-                TerminalCellCoordinate(column: UInt16(column), row: row.y)
-              )
-            }
-          }
-        }
-      }
-    }
-    return result
-  }
-
-  private func cellDifferences(
-    cg: PixelBuffer,
-    metal: PixelBuffer,
-    coordinate: TerminalCellCoordinate,
-    inset: Int
-  ) -> [Int] {
-    let rect = cellPixelRect(coordinate, width: cg.width, height: cg.height).insetBy(
-      dx: CGFloat(inset),
-      dy: CGFloat(inset)
+  private func metalWideGlyphInternalGap(metrics: TerminalCellMetrics) throws -> Int {
+    let columns: UInt16 = 8
+    let rows: UInt16 = 4
+    let text = "漢漢"
+    let session = TerminalSession(columns: columns, rows: rows)
+    defer { session.terminate() }
+    let view = TerminalPaneView(session: session, metrics: metrics)
+    view.appearance = try XCTUnwrap(NSAppearance(named: .aqua))
+    view.metalContentsScaleForTesting = 1
+    view.frame = CGRect(
+      x: 0,
+      y: 0,
+      width: insets.left + CGFloat(columns) * metrics.cellWidth + insets.right,
+      height: insets.top + CGFloat(rows) * metrics.cellHeight + insets.bottom
     )
-    guard rect.width > 0, rect.height > 0 else { return [] }
-    var result: [Int] = []
-    for y in Int(rect.minY)..<Int(rect.maxY) {
-      for x in Int(rect.minX)..<Int(rect.maxX) {
-        let lhs = cg.pixel(x: x, y: y)
-        let rhs = metal.pixel(x: x, y: y)
-        for channel in 0..<3 {
-          result.append(abs(Int(lhs[channel]) - Int(rhs[channel])))
-        }
-      }
-    }
-    return result
+    session.start(command: "/bin/cat")
+    session.send(Data(text.utf8))
+    XCTAssertTrue(
+      waitForCondition(timeout: 5) {
+        session.plainTextForTesting()?.contains(text) == true
+      },
+      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
+    )
+
+    let scene = try XCTUnwrap(view.buildMetalSceneForTesting())
+    let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+    let renderer = try XCTUnwrap(
+      TerminalMetalRenderer(device: device, metrics: metrics, insets: insets)
+    )
+    let pixels = try renderPixels(scene: scene, renderer: renderer)
+    let contentRow = try XCTUnwrap(
+      scene.rows.first(where: { row in
+        row.shaped.runs.contains(where: { $0.run.text.contains(text) })
+      })?.y
+    )
+    let region = CGRect(
+      x: insets.left,
+      y: insets.top + CGFloat(contentRow) * metrics.cellHeight,
+      width: metrics.cellWidth * 4,
+      height: metrics.cellHeight
+    )
+    return try maximumInternalInkGap(in: pixels, region: region)
   }
 
-  private func cellHasInk(
-    _ buffer: PixelBuffer,
-    coordinate: TerminalCellCoordinate,
-    threshold: Int
-  ) -> Bool {
-    let rect = cellPixelRect(
-      coordinate,
-      width: buffer.width,
-      height: buffer.height
-    ).insetBy(dx: 1, dy: 1)
-    var histogram: [[UInt8]: Int] = [:]
-    for y in Int(rect.minY)..<Int(rect.maxY) {
-      for x in Int(rect.minX)..<Int(rect.maxX) {
-        let rgb = Array(buffer.pixel(x: x, y: y).prefix(3))
-        histogram[rgb, default: 0] += 1
+  private func maximumInternalInkGap(
+    in pixels: PixelBuffer,
+    region: CGRect
+  ) throws -> Int {
+    let xRange =
+      max(
+        0, Int(floor(region.minX)))..<min(
+        pixels.width,
+        Int(ceil(region.maxX))
+      )
+    let yRange =
+      max(
+        0, Int(floor(region.minY)))..<min(
+        pixels.height,
+        Int(ceil(region.maxY))
+      )
+    let inkedColumns = xRange.filter { x in
+      yRange.contains { y in
+        let pixel = pixels.pixel(x: x, y: y)
+        return pixel[0] < 166 || pixel[1] < 166 || pixel[2] < 166
       }
     }
-    guard let dominant = histogram.max(by: { $0.value < $1.value })?.key else {
-      return false
-    }
-    for y in Int(rect.minY)..<Int(rect.maxY) {
-      for x in Int(rect.minX)..<Int(rect.maxX) {
-        let pixel = buffer.pixel(x: x, y: y)
-        if (0..<3).contains(where: { abs(Int(pixel[$0]) - Int(dominant[$0])) > threshold }) {
-          return true
-        }
+    let firstInk = try XCTUnwrap(inkedColumns.first)
+    let lastInk = try XCTUnwrap(inkedColumns.last)
+    let inked = Set(inkedColumns)
+    var longestGap = 0
+    var currentGap = 0
+    for x in (firstInk + 1)..<lastInk {
+      if inked.contains(x) {
+        longestGap = max(longestGap, currentGap)
+        currentGap = 0
+      } else {
+        currentGap += 1
       }
     }
-    return false
+    return max(longestGap, currentGap)
   }
 
   private func cellPixelRect(
@@ -979,55 +891,6 @@ final class TerminalMetalRendererTests: XCTestCase {
       width: min(metrics.cellWidth, CGFloat(width)),
       height: min(metrics.cellHeight, CGFloat(height))
     )
-  }
-
-  private func attachDifferentialImages(cg: PixelBuffer, metal: PixelBuffer) {
-    for (name, buffer) in [("Core Graphics", cg), ("Metal", metal)] {
-      guard let image = image(from: buffer) else { continue }
-      let attachment = XCTAttachment(image: image)
-      attachment.name = name
-      attachment.lifetime = .keepAlways
-      add(attachment)
-    }
-  }
-
-  private func image(from buffer: PixelBuffer) -> NSImage? {
-    let bitmapInfo = CGBitmapInfo(
-      rawValue: CGBitmapInfo.byteOrder32Little.rawValue
-        | CGImageAlphaInfo.premultipliedFirst.rawValue
-    )
-    guard
-      let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-      let provider = CGDataProvider(data: Data(buffer.bytes) as CFData),
-      let image = CGImage(
-        width: buffer.width,
-        height: buffer.height,
-        bitsPerComponent: 8,
-        bitsPerPixel: 32,
-        bytesPerRow: buffer.width * 4,
-        space: colorSpace,
-        bitmapInfo: bitmapInfo,
-        provider: provider,
-        decode: nil,
-        shouldInterpolate: false,
-        intent: .defaultIntent
-      )
-    else {
-      return nil
-    }
-    return NSImage(
-      cgImage: image,
-      size: NSSize(width: buffer.width, height: buffer.height)
-    )
-  }
-
-  private func assertSameDimensions(cg: PixelBuffer, metal: PixelBuffer) -> Bool {
-    let matches = cg.width == metal.width && cg.height == metal.height
-    XCTAssertTrue(
-      matches,
-      "CG oracle is \(cg.width)x\(cg.height), Metal is \(metal.width)x\(metal.height)"
-    )
-    return matches
   }
 
   private func waitForCondition(

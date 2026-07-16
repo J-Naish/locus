@@ -8,37 +8,27 @@ import XCTest
 
 @MainActor
 final class TerminalPaneViewTests: XCTestCase {
-  func testRenderBackendDefaultsToMetal() {
-    XCTAssertEqual(TerminalRenderBackend.fromEnvironment(nil), .metal)
+  func testTerminalPaneUsesMetalLayerByDefault() {
+    XCTAssertTrue(TerminalPaneView().layer is CAMetalLayer)
   }
 
-  func testRenderBackendAcceptsCoreGraphicsEscapeHatch() {
-    XCTAssertEqual(TerminalRenderBackend.fromEnvironment("cg"), .coreGraphics)
-  }
+  func testTerminalPaneMetalLayerIsOpaqueAndFramebufferOnly() throws {
+    let layer = try XCTUnwrap(TerminalPaneView().layer as? CAMetalLayer)
 
-  func testRenderBackendTreatsOtherEnvironmentValuesAsMetal() {
-    XCTAssertEqual(TerminalRenderBackend.fromEnvironment("metal"), .metal)
-    XCTAssertEqual(TerminalRenderBackend.fromEnvironment("unexpected"), .metal)
-  }
-
-  func testMetalBackendUsesConfiguredMetalLayer() throws {
-    let view = TerminalPaneView(backend: .metal)
-    let layer = try XCTUnwrap(view.layer as? CAMetalLayer)
-
-    XCTAssertEqual(layer.pixelFormat, .bgra8Unorm)
-    XCTAssertEqual(layer.colorspace?.name, CGColorSpace.sRGB)
     XCTAssertTrue(layer.isOpaque)
     XCTAssertTrue(layer.framebufferOnly)
   }
 
-  func testCoreGraphicsBackendDoesNotUseMetalLayer() {
-    let view = TerminalPaneView(backend: .coreGraphics)
+  func testMetalLayerUsesBGRA8SRGBConfiguration() throws {
+    let view = TerminalPaneView()
+    let layer = try XCTUnwrap(view.layer as? CAMetalLayer)
 
-    XCTAssertFalse(view.layer is CAMetalLayer)
+    XCTAssertEqual(layer.pixelFormat, .bgra8Unorm)
+    XCTAssertEqual(layer.colorspace?.name, CGColorSpace.sRGB)
   }
 
   func testMetalDrawableSizeTracksTestingScale() throws {
-    let view = TerminalPaneView(backend: .metal)
+    let view = TerminalPaneView()
     view.metalContentsScaleForTesting = 2
     view.setFrameSize(NSSize(width: 200, height: 100))
     let layer = try XCTUnwrap(view.layer as? CAMetalLayer)
@@ -46,34 +36,6 @@ final class TerminalPaneViewTests: XCTestCase {
 
     view.metalContentsScaleForTesting = 1
     XCTAssertEqual(layer.drawableSize, CGSize(width: 200, height: 100))
-  }
-
-  func testCacheDisplayHonorsViewAppearance() throws {
-    let view = TerminalPaneView()
-    view.frame = NSRect(x: 0, y: 0, width: 32, height: 32)
-    view.appearance = try XCTUnwrap(NSAppearance(named: .aqua))
-    let bitmap = try XCTUnwrap(
-      NSBitmapImageRep(
-        bitmapDataPlanes: nil,
-        pixelsWide: 32,
-        pixelsHigh: 32,
-        bitsPerSample: 8,
-        samplesPerPixel: 4,
-        hasAlpha: true,
-        isPlanar: false,
-        colorSpaceName: .calibratedRGB,
-        bytesPerRow: 0,
-        bitsPerPixel: 0
-      )
-    )
-    bitmap.size = view.bounds.size
-
-    view.cacheDisplay(in: view.bounds, to: bitmap)
-
-    let color = try XCTUnwrap(bitmap.colorAt(x: 1, y: 1)?.usingColorSpace(.sRGB))
-    XCTAssertGreaterThan(color.redComponent, 0.9)
-    XCTAssertGreaterThan(color.greenComponent, 0.9)
-    XCTAssertGreaterThan(color.blueComponent, 0.9)
   }
 
   func testLinkHitTesterHandlesInsideOutsideAndMultiRowLinks() {
@@ -1166,53 +1128,6 @@ final class TerminalPaneViewTests: XCTestCase {
     )
   }
 
-  func testOffscreenRenderSmoke() throws {
-    let metrics = TerminalCellMetrics()
-    let session = TerminalSession(columns: 40, rows: 10)
-    defer {
-      session.terminate()
-    }
-    let view = TerminalPaneView(session: session, metrics: metrics)
-    view.frame = gridFrame(columns: 40, rows: 10, metrics: metrics)
-    session.start(command: "/bin/sh")
-    session.send(Data("echo hi\n".utf8))
-    XCTAssertTrue(
-      waitForPaneCondition { session.plainTextForTesting()?.contains("hi") == true },
-      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
-    )
-    var frameText = ""
-    session.withFrame { frame in
-      frameText = terminalPanePlainText(in: frame)
-    }
-    XCTAssertTrue(frameText.contains("hi"), "Frame was: \(frameText)")
-    view.needsDisplay = true
-    view.displayIfNeeded()
-
-    guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
-      XCTFail("Failed to create bitmap")
-      return
-    }
-    view.cacheDisplay(in: view.bounds, to: bitmap)
-
-    XCTAssertTrue(bitmapHasMultipleColors(bitmap))
-  }
-
-  func testWideGlyphFillReducesInternalInkGap() throws {
-    let defaultMetrics = TerminalCellMetrics()
-    let legacyMetrics = TerminalCellMetrics(
-      wideGlyphFillRatio: 12 / (2 * defaultMetrics.cellWidth)
-    )
-
-    let defaultGap = try terminalWideGlyphInternalGap(metrics: defaultMetrics)
-    let legacyGap = try terminalWideGlyphInternalGap(metrics: legacyMetrics)
-
-    XCTAssertLessThan(
-      defaultGap,
-      legacyGap,
-      "Grid-fitted wide glyphs should leave less internal whitespace than the legacy 12pt look"
-    )
-  }
-
   func testMetalSceneIncludesSelectionAndUpdatesMenuValidation() throws {
     let fixture = try makeMetalPaneFixture(text: "selection-value")
     defer { fixture.session.terminate() }
@@ -1308,80 +1223,6 @@ final class TerminalPaneViewTests: XCTestCase {
 
     XCTAssertEqual(fixture.view.lastMetalRenderSucceededForTesting, true)
     XCTAssertGreaterThan(fixture.view.metalRendersForTesting, 0)
-  }
-
-  func testDrawPassTimingProbe() throws {
-    let columns: UInt16 = 120
-    let rows: UInt16 = 40
-    let metrics = TerminalCellMetrics()
-    let session = TerminalSession(columns: columns, rows: rows)
-    defer {
-      session.terminate()
-    }
-    let view = TerminalPaneView(session: session, metrics: metrics)
-    view.frame = gridFrame(columns: columns, rows: rows, metrics: metrics)
-    session.start(command: "/bin/sh")
-    let command =
-      "i=0; printf '\\033[2J\\033[H'; while [ \"$i\" -lt 45 ]; do c=$((i % 7 + 1)); "
-      + "printf '\\033[3%smrow-%02d ASCII-%02d 日本語-%02d \\033[0m "
-      + "payload-%02d-abcdefghijklmnopqrstuvwxyz-0123456789\\r\\n' "
-      + "\"$c\" \"$i\" \"$i\" \"$i\" \"$i\"; i=$((i + 1)); done\n"
-    session.send(Data(command.utf8))
-    XCTAssertTrue(
-      waitForPaneCondition(timeout: 5) {
-        session.plainTextForTesting()?.contains("row-44") == true
-      },
-      "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
-    )
-    view.needsDisplay = true
-    view.displayIfNeeded()
-
-    guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
-      XCTFail("Failed to create timing-probe bitmap")
-      return
-    }
-
-    // Standing renderer probe: report cold full paints and steady-state
-    // cached paints independently without a machine-dependent assertion.
-    let fullSamples = (0..<20).map { _ in
-      terminalDrawDurationMilliseconds {
-        view.clearRowTextPoolForTesting()
-        view.cacheDisplay(in: view.bounds, to: bitmap)
-      }
-    }
-    view.cacheDisplay(in: view.bounds, to: bitmap)
-    let cachedSamples = (0..<20).map { _ in
-      terminalDrawDurationMilliseconds {
-        view.cacheDisplay(in: view.bounds, to: bitmap)
-      }
-    }
-    XCTAssertGreaterThan(view.rowTextPoolStatisticsForTesting.hits, 0)
-    XCTAssertEqual(view.rowTextPoolStatisticsForTesting.misses, 0)
-    let caretRect = NSRect(
-      x: TerminalPaneLayoutMetrics.contentInsets.left,
-      y: TerminalPaneLayoutMetrics.contentInsets.bottom,
-      width: 2,
-      height: metrics.cellHeight
-    )
-    let caretSamples = (0..<20).map { _ in
-      terminalDrawDurationMilliseconds {
-        view.cacheDisplay(in: caretRect, to: bitmap)
-      }
-    }
-
-    terminalRecordProbeMetric(
-      "draw_pass_full_ms_per_frame",
-      value: terminalMedian(fullSamples)
-    )
-    terminalRecordProbeMetric(
-      "draw_pass_cached_ms_per_frame",
-      value: terminalMedian(cachedSamples)
-    )
-    terminalRecordProbeMetric(
-      "draw_pass_caret_rect_ms",
-      value: terminalMedian(caretSamples)
-    )
-    XCTAssertTrue(bitmapHasMultipleColors(bitmap))
   }
 
   func testRowSignatureChangesWithContentAndStyle() {
@@ -1491,42 +1332,12 @@ final class TerminalPaneViewTests: XCTestCase {
     )
   }
 
-  func testCachedPaintIsPixelIdenticalToColdPaint() throws {
-    let fixture = makeTerminalRenderFixture(columns: 60, rows: 12, lineCount: 16)
-    defer {
-      fixture.session.terminate()
-    }
-    guard let bitmap = fixture.view.bitmapImageRepForCachingDisplay(in: fixture.view.bounds) else {
-      XCTFail("Failed to create cache-test bitmap")
-      return
-    }
-
-    fixture.view.clearRowTextPoolForTesting()
-    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
-    let coldPixels = terminalBitmapBytes(bitmap)
-    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
-    let warmPixels = terminalBitmapBytes(bitmap)
-
-    XCTAssertEqual(warmPixels, coldPixels)
-    XCTAssertGreaterThanOrEqual(fixture.view.rowTextPoolStatisticsForTesting.hits, 1)
-    XCTAssertEqual(fixture.view.rowTextPoolStatisticsForTesting.misses, 0)
-
-    fixture.view.clearRowTextPoolForTesting()
-    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
-    XCTAssertEqual(terminalBitmapBytes(bitmap), coldPixels)
-    XCTAssertGreaterThanOrEqual(fixture.view.rowTextPoolStatisticsForTesting.misses, 1)
-  }
-
   func testScrolledContentReusesPooledRows() throws {
     let fixture = makeTerminalRenderFixture(columns: 60, rows: 12, lineCount: 16)
     defer {
       fixture.session.terminate()
     }
-    guard let bitmap = fixture.view.bitmapImageRepForCachingDisplay(in: fixture.view.bounds) else {
-      XCTFail("Failed to create scroll-cache bitmap")
-      return
-    }
-    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
+    XCTAssertNotNil(fixture.view.buildMetalSceneForTesting())
     let generation = fixture.session.snapshot?.generation ?? 0
 
     fixture.session.send(Data("printf 'new-0\\r\\nnew-1\\r\\nnew-2\\r\\n'\n".utf8))
@@ -1536,78 +1347,10 @@ final class TerminalPaneViewTests: XCTestCase {
           && fixture.session.plainTextForTesting()?.contains("new-2") == true
       }
     )
-    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
+    XCTAssertNotNil(fixture.view.buildMetalSceneForTesting())
 
     XCTAssertGreaterThan(fixture.view.rowTextPoolStatisticsForTesting.hits, 0)
     XCTAssertGreaterThan(fixture.view.rowTextPoolStatisticsForTesting.misses, 0)
-  }
-
-  func testCachedPaintIsPixelIdenticalForInverseWideOverflowRow() throws {
-    let fixture = makeTerminalRenderFixture(columns: 60, rows: 12, lineCount: 12)
-    defer {
-      fixture.session.terminate()
-    }
-    let generation = fixture.session.snapshot?.generation ?? 0
-    fixture.session.send(Data("printf '\\033[7m逆向き-日本語→○\\033[0m\\r\\n'\n".utf8))
-    XCTAssertTrue(
-      waitForPaneCondition {
-        (fixture.session.snapshot?.generation ?? 0) > generation
-          && fixture.session.plainTextForTesting()?.contains("逆向き-日本語→○") == true
-      }
-    )
-    guard let bitmap = fixture.view.bitmapImageRepForCachingDisplay(in: fixture.view.bounds) else {
-      XCTFail("Failed to create inverse-wide cache bitmap")
-      return
-    }
-
-    fixture.view.clearRowTextPoolForTesting()
-    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
-    let coldPixels = terminalBitmapBytes(bitmap)
-    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
-
-    XCTAssertEqual(terminalBitmapBytes(bitmap), coldPixels)
-    XCTAssertGreaterThan(fixture.view.rowTextPoolStatisticsForTesting.hits, 0)
-    XCTAssertEqual(fixture.view.rowTextPoolStatisticsForTesting.misses, 0)
-  }
-
-  func testPartialDirtyRectPaintMatchesFullPaint() throws {
-    let fixture = makeTerminalRenderFixture(columns: 60, rows: 12, lineCount: 16)
-    defer {
-      fixture.session.terminate()
-    }
-    guard let bitmap = fixture.view.bitmapImageRepForCachingDisplay(in: fixture.view.bounds) else {
-      XCTFail("Failed to create dirty-rect bitmap")
-      return
-    }
-    fixture.view.cacheDisplay(in: fixture.view.bounds, to: bitmap)
-    let fullPixels = terminalBitmapBytes(bitmap)
-    let fullRows = fixture.view.rowsDrawnForTesting
-    guard let partialBitmap = bitmap.copy() as? NSBitmapImageRep else {
-      XCTFail("Failed to copy dirty-rect bitmap")
-      return
-    }
-    XCTAssertEqual(terminalBitmapBytes(partialBitmap), fullPixels)
-    let dirtyRect = NSRect(
-      x: TerminalPaneLayoutMetrics.contentInsets.left,
-      y: TerminalPaneLayoutMetrics.contentInsets.bottom,
-      width: 2,
-      height: fixture.metrics.cellHeight
-    )
-
-    fixture.view.cacheDisplay(in: dirtyRect, to: partialBitmap)
-
-    let partialPixels = terminalBitmapBytes(partialBitmap)
-    if partialPixels != fullPixels {
-      let changed = zip(partialPixels, fullPixels).enumerated().compactMap { index, bytes in
-        bytes.0 == bytes.1 ? nil : index
-      }
-      XCTFail(
-        "Partial paint changed \(changed.count) bytes; first=\(changed.first ?? -1) "
-          + "last=\(changed.last ?? -1), bytesPerRow=\(partialBitmap.bytesPerRow)"
-      )
-    }
-    XCTAssertGreaterThan(fullRows, fixture.view.rowsDrawnForTesting)
-    XCTAssertGreaterThanOrEqual(fixture.view.rowsDrawnForTesting, 1)
   }
 
   func testCopyWritesSelectionToInjectedPasteboard() {
@@ -1757,7 +1500,7 @@ private func makeMetalPaneFixture(
   let rows: UInt16 = 10
   let metrics = TerminalCellMetrics()
   let session = TerminalSession(columns: columns, rows: rows)
-  let view = TerminalPaneView(session: session, metrics: metrics, backend: .metal)
+  let view = TerminalPaneView(session: session, metrics: metrics)
   view.metalContentsScaleForTesting = 1
   view.frame = gridFrame(columns: columns, rows: rows, metrics: metrics)
   let host = hosted ? TerminalPaneViewHost(view: view) : nil
@@ -1846,60 +1589,6 @@ private func waitForPaneCondition(
     RunLoop.current.run(until: Date().addingTimeInterval(interval))
   }
   return condition()
-}
-
-private func bitmapHasMultipleColors(_ bitmap: NSBitmapImageRep) -> Bool {
-  var firstColor: NSColor?
-  var y = 0
-  while y < bitmap.pixelsHigh {
-    var x = 0
-    while x < bitmap.pixelsWide {
-      guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
-        x += 1
-        continue
-      }
-      if let firstColor {
-        if abs(firstColor.redComponent - color.redComponent) > 0.01
-          || abs(firstColor.greenComponent - color.greenComponent) > 0.01
-          || abs(firstColor.blueComponent - color.blueComponent) > 0.01
-          || abs(firstColor.alphaComponent - color.alphaComponent) > 0.01
-        {
-          return true
-        }
-      } else {
-        firstColor = color
-      }
-      x += 1
-    }
-    y += 1
-  }
-  return false
-}
-
-private func terminalDrawDurationMilliseconds(_ draw: () -> Void) -> Double {
-  let start = DispatchTime.now().uptimeNanoseconds
-  draw()
-  let elapsed = DispatchTime.now().uptimeNanoseconds - start
-  return Double(elapsed) / 1_000_000
-}
-
-private func terminalMedian(_ values: [Double]) -> Double {
-  guard !values.isEmpty else {
-    return 0
-  }
-  let sorted = values.sorted()
-  let middle = sorted.count / 2
-  if sorted.count.isMultiple(of: 2) {
-    return (sorted[middle - 1] + sorted[middle]) / 2
-  }
-  return sorted[middle]
-}
-
-@MainActor
-private func terminalRecordProbeMetric(_ name: String, value: Double) {
-  let result = "\(name)=\(value)"
-  print(result)
-  XCTContext.runActivity(named: result) { _ in }
 }
 
 @MainActor
@@ -1991,115 +1680,4 @@ private func terminalShapedRow(
       return cache.shapedRow(row: row, cells: cellBuffer, graphemes: graphemeBuffer)
     }
   }
-}
-
-private func terminalBitmapBytes(_ bitmap: NSBitmapImageRep) -> Data {
-  guard let data = bitmap.bitmapData else {
-    return Data()
-  }
-  return Data(bytes: data, count: bitmap.bytesPerRow * bitmap.pixelsHigh)
-}
-
-@MainActor
-private func terminalWideGlyphInternalGap(metrics: TerminalCellMetrics) throws -> Int {
-  let columns: UInt16 = 8
-  let rows: UInt16 = 4
-  let text = "漢漢"
-  let session = TerminalSession(columns: columns, rows: rows)
-  defer { session.terminate() }
-  let view = TerminalPaneView(session: session, metrics: metrics, backend: .coreGraphics)
-  view.appearance = try XCTUnwrap(NSAppearance(named: .aqua))
-  view.frame = gridFrame(columns: columns, rows: rows, metrics: metrics)
-  session.start(command: "/bin/sh")
-  session.send(Data("printf '\\033[2J\\033[H%s' '漢漢'\n".utf8))
-
-  var contentRow: UInt16?
-  XCTAssertTrue(
-    waitForPaneCondition(timeout: 5) {
-      session.withFrame { frame in
-        let lines = frame.plainText().split(separator: "\n", omittingEmptySubsequences: false)
-        if let index = lines.firstIndex(where: { $0.contains(text) }) {
-          contentRow = UInt16(clamping: index)
-        }
-      }
-      return contentRow != nil
-    },
-    "Snapshot was: \(session.plainTextForTesting() ?? "<nil>")"
-  )
-
-  let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
-  view.cacheDisplay(in: view.bounds, to: bitmap)
-  let row = try XCTUnwrap(contentRow)
-  let insets = TerminalPaneLayoutMetrics.contentInsets
-  let region = NSRect(
-    x: insets.left,
-    y: TerminalPaneGeometry.rowRectY(
-      row,
-      bounds: view.bounds,
-      metrics: metrics,
-      insets: insets
-    ),
-    width: metrics.cellWidth * 4,
-    height: metrics.cellHeight
-  )
-  return try terminalMaximumInternalInkGap(in: bitmap, region: region)
-}
-
-private func terminalMaximumInternalInkGap(
-  in bitmap: NSBitmapImageRep,
-  region: NSRect
-) throws -> Int {
-  let scaleX = CGFloat(bitmap.pixelsWide) / bitmap.size.width
-  let scaleY = CGFloat(bitmap.pixelsHigh) / bitmap.size.height
-  let xStart = max(0, Int(floor(region.minX * scaleX)))
-  let xEnd = min(bitmap.pixelsWide, Int(ceil(region.maxX * scaleX)))
-  let xRange = xStart..<xEnd
-  let yStart = max(0, bitmap.pixelsHigh - Int(ceil(region.maxY * scaleY)))
-  let yEnd = min(bitmap.pixelsHigh, bitmap.pixelsHigh - Int(floor(region.minY * scaleY)))
-  let yRange = yStart..<yEnd
-  let inkedColumns = xRange.filter { x in
-    yRange.contains { y in
-      guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else {
-        return false
-      }
-      return color.redComponent < 0.65
-        || color.greenComponent < 0.65
-        || color.blueComponent < 0.65
-    }
-  }
-  let firstInk = try XCTUnwrap(inkedColumns.first)
-  let lastInk = try XCTUnwrap(inkedColumns.last)
-  let inked = Set(inkedColumns)
-  var longestGap = 0
-  var currentGap = 0
-  for x in (firstInk + 1)..<lastInk {
-    if inked.contains(x) {
-      longestGap = max(longestGap, currentGap)
-      currentGap = 0
-    } else {
-      currentGap += 1
-    }
-  }
-  return max(longestGap, currentGap)
-}
-
-private func terminalPanePlainText(in frame: TerminalFrame) -> String {
-  var result = ""
-  frame.withRows { rows in
-    frame.withCells { cells in
-      for row in rows {
-        let start = min(row.cell_start, cells.count)
-        let end = min(row.cell_start + row.cell_count, cells.count)
-        for cell in cells[start..<end] {
-          if cell.codepoint != 0, let scalar = UnicodeScalar(cell.codepoint) {
-            result.unicodeScalars.append(scalar)
-          } else {
-            result.append(" ")
-          }
-        }
-        result.append("\n")
-      }
-    }
-  }
-  return result
 }
