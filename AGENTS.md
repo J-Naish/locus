@@ -58,6 +58,8 @@ Before making product or architecture decisions, read the relevant docs:
 - `core/crates/app-core/`: reusable core logic
 - `core/crates/app-ffi/`: C ABI layer for native app integration
 - `core/crates/app-cli/`: debugging and benchmark CLI
+- `core/crates/terminal/`: terminal emulation core, a faithful Rust port of ghostty's terminal (see ADR 0012)
+- `core/crates/pty/`: PTY process management for the terminal
 - `core/include/`: exported or generated C headers
 - `docs/`: product, architecture, specs, and ADRs
 - `fixtures/`: reusable test fixtures
@@ -86,13 +88,20 @@ Core file experiences should be strong:
 - PDFs should focus on reading, search, highlights, comments, and lightweight review.
 - Office files should focus on preview, search metadata, and external-app handoff.
 
+The on-demand terminal panel (⌘J / Ctrl+`) is accepted product scope
+(ADR 0012): a quiet companion for running and reviewing agent CLI sessions.
+Keep it a toggle below the editor; do not grow it into persistent IDE
+terminal chrome, and keep its behavior spec (`docs/specs/terminal.md`)
+current when it changes.
+
 Avoid adding:
 
 - Electron or desktop Chromium runtime
 - bundled AI models
 - built-in AI chat
 - plugin or extension execution
-- always-on terminal UI
+- always-visible terminal chrome (the on-demand toggle terminal panel is
+  accepted scope — ADR 0012)
 - Git workflow surfaces such as commit, branch, diff, merge, blame, staging,
   LSP, debugger, or other IDE-oriented features
 - heavy parsing or thumbnail generation on startup

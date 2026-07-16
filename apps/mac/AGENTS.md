@@ -8,6 +8,10 @@ Rules for the native macOS app, Swift, SwiftUI, CoreBridge, and Xcode project wo
 - Keep raw C/FFI calls inside the bridge layer; do not spread them through SwiftUI views.
 - Keep UI-specific behavior in Swift, but move work into the Rust core whenever it improves performance, keeping what crosses the FFI boundary compact. Pursue that speedup wherever the boundary stays compact — the FFI shape, not reluctance to optimize, is the limit.
 - Use native OS capabilities for preview, file dialogs, metadata, and logging where practical.
+- The terminal pane renders live via Metal (`TerminalMetalRenderer`); the
+  Core Graphics draw path remains the offscreen oracle for the pixel and
+  differential tests. Keep the two renderers in parity — the differential
+  tests are the arbiter — until the CG path is deliberately retired.
 
 ## Xcode Commands
 
