@@ -378,11 +378,14 @@ final class WorkspaceSearchUITests: XCTestCase {
   @MainActor
   func testCommandBTogglesWorkspaceSidebar() throws {
     let app = try launchAppWithBasicWorkspace()
+    XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10), app.debugDescription)
 
     XCTAssertTrue(
       workspaceSidebarLabel(named: "Reports", in: app).waitForExistence(timeout: 5),
       app.debugDescription)
 
+    app.activate()
+    XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10), app.debugDescription)
     app.typeKey("b", modifierFlags: [.command])
 
     XCTAssertFalse(
@@ -391,10 +394,12 @@ final class WorkspaceSearchUITests: XCTestCase {
     XCTAssertTrue(
       app.staticTexts["Select a File"].waitForExistence(timeout: 2), app.debugDescription)
 
+    app.activate()
+    XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10), app.debugDescription)
     app.typeKey("b", modifierFlags: [.command])
 
     XCTAssertTrue(
-      workspaceSidebarLabel(named: "Reports", in: app).waitForExistence(timeout: 5),
+      workspaceSidebarLabel(named: "Reports", in: app).waitForExistence(timeout: 10),
       app.debugDescription)
   }
 
