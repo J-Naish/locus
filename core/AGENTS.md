@@ -7,7 +7,15 @@ Rules for `core/`, including Rust crates, FFI, generated/exported headers, and c
 - Performance-sensitive, reusable logic belongs in `app-core`. The core exists primarily for speed and efficiency; cross-platform reuse is a secondary benefit.
 - C ABI and memory ownership boundaries belong in `app-ffi`.
 - Debugging and benchmark commands belong in `app-cli`.
-- UI-specific behavior does not belong in Rust. Add logic to the core when it measurably improves performance, not by default, and only when results cross the FFI boundary as compact data rather than large copies.
+- `crates/terminal` is a deliberately faithful port of ghostty's terminal
+  core (Zig → Rust, upstream tests included; ADR 0012). Keep ported logic
+  and tests upstream-faithful: cite upstream locations in `// ghostty:`
+  comments, and mark any deviation with a comment explaining why.
+  Presentation policy and product behavior belong in `app-ffi` or the
+  native app, never as silent edits to ported files.
+- `crates/pty` owns PTY process management (original code, libc only);
+  keep it small and async-signal-safe around fork/exec.
+- UI-specific behavior does not belong in Rust, but add logic to the core whenever it improves performance and results cross the FFI boundary as compact data rather than large copies. The FFI-shape constraint (compact data, coarse boundary), not reluctance to optimize, is what limits what moves here — pursue core-side speed and efficiency wherever the boundary stays clean.
 
 ## Rust Commands
 

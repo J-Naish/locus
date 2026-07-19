@@ -12,6 +12,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
 app-core = { path = "../app-core" }
+terminal = { path = "../terminal" }
+pty = { path = "../pty" }
 
 # This crate is the audited C ABI boundary. It intentionally does not inherit
 # the workspace `unsafe_code` lint because its public surface is implemented

@@ -20,6 +20,9 @@ obj/
 .env.*
 !.env.example
 
+# Local external source checkouts
+.external/
+
 # Generated artifacts
 artifacts/
 coverage/

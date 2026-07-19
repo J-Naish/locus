@@ -101,6 +101,7 @@ struct WorkspaceBrowserView: View {
   let mediaDocumentStore: any MediaDocumentStoring
   let quickLookDocumentStore: any QuickLookDocumentStoring
   let gitWorkspaceStatusProvider: any GitWorkspaceStatusProviding
+  @ObservedObject var terminalPanelState: TerminalPanelState
   @Binding var selectedEntryID: WorkspaceEntry.ID?
   @Binding var documentTabs: DocumentTabsState
   let shortcutActions: FileLocationShortcutActions
@@ -147,6 +148,7 @@ struct WorkspaceBrowserView: View {
     mediaDocumentStore: any MediaDocumentStoring,
     quickLookDocumentStore: any QuickLookDocumentStoring,
     gitWorkspaceStatusProvider: any GitWorkspaceStatusProviding,
+    terminalPanelState: TerminalPanelState,
     selectedEntryID: Binding<WorkspaceEntry.ID?>,
     documentTabs: Binding<DocumentTabsState>,
     shortcutActions: FileLocationShortcutActions,
@@ -163,6 +165,7 @@ struct WorkspaceBrowserView: View {
     self.mediaDocumentStore = mediaDocumentStore
     self.quickLookDocumentStore = quickLookDocumentStore
     self.gitWorkspaceStatusProvider = gitWorkspaceStatusProvider
+    self._terminalPanelState = ObservedObject(wrappedValue: terminalPanelState)
     self._selectedEntryID = selectedEntryID
     self._documentTabs = documentTabs
     self.shortcutActions = shortcutActions
@@ -223,6 +226,9 @@ struct WorkspaceBrowserView: View {
     // sidebar panel and any unpainted chrome around the document card.
     .modifier(LocusWindowFieldBackgroundModifier())
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .background {
+      TerminalPanelShortcutLayer(state: terminalPanelState)
+    }
     .onGeometryChange(for: CGFloat.self) { geometry in
       geometry.size.width
     } action: { width in
@@ -1293,38 +1299,50 @@ struct WorkspaceBrowserView: View {
   }
 
   private var workspaceDetail: some View {
-    Group {
-      if snapshot.entries.isEmpty {
-        ContentUnavailableView(
-          "This Folder Is Empty",
-          systemImage: "folder",
-          description: Text("Files and folders will appear here.")
-        )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-      } else {
-        WorkspaceDocumentSurface(
-          entry: openDocumentEntry,
-          imageDocumentStore: imageDocumentStore,
-          pdfDocumentStore: pdfDocumentStore,
-          mediaDocumentStore: mediaDocumentStore,
-          quickLookDocumentStore: quickLookDocumentStore,
-          onTextInputFocusChange: { isFocused in
-            isDocumentTextInputFocused = isFocused
-          },
-          onDocumentSaved: {
-            requestGitStatusRefresh()
-            // The closure captures this browser's folder by value, so a save
-            // that completes after navigating away credits the folder the
-            // document was saved in, not wherever the user browsed to.
-            actions.recordWorkspaceEngagement(folderURL)
-          },
-          onOpenLinkedFile: { url in
-            openLinkedFile(url)
+    GeometryReader { geometry in
+      VStack(spacing: 0) {
+        Group {
+          if snapshot.entries.isEmpty {
+            ContentUnavailableView(
+              "This Folder Is Empty",
+              systemImage: "folder",
+              description: Text("Files and folders will appear here.")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+          } else {
+            WorkspaceDocumentSurface(
+              entry: openDocumentEntry,
+              imageDocumentStore: imageDocumentStore,
+              pdfDocumentStore: pdfDocumentStore,
+              mediaDocumentStore: mediaDocumentStore,
+              quickLookDocumentStore: quickLookDocumentStore,
+              onTextInputFocusChange: { isFocused in
+                isDocumentTextInputFocused = isFocused
+              },
+              onDocumentSaved: {
+                requestGitStatusRefresh()
+                // The closure captures this browser's folder by value, so a save
+                // that completes after navigating away credits the folder the
+                // document was saved in, not wherever the user browsed to.
+                actions.recordWorkspaceEngagement(folderURL)
+              },
+              onOpenLinkedFile: { url in
+                openLinkedFile(url)
+              }
+            )
           }
-        )
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .modifier(DocumentCardModifier())
+
+        if terminalPanelState.isVisible {
+          TerminalPanelView(
+            state: terminalPanelState,
+            parentHeight: geometry.size.height
+          )
+        }
       }
     }
-    .modifier(DocumentCardModifier())
     // Let the single window-level field background show through so the sidebar
     // and document area sample one continuous glass surface.
     .background(Color.clear)

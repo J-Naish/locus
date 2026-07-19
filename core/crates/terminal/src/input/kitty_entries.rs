@@ -1,0 +1,110 @@
+//! Kitty keyboard protocol key entries.
+
+use super::key::Key;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Entry {
+    pub key: Key,
+    pub code: u32,
+    pub final_byte: u8,
+    pub modifier: bool,
+}
+
+pub const ENTRIES: &[Entry] = &[
+    Entry::new(Key::Escape, 27, b'u', false),
+    Entry::new(Key::Enter, 13, b'u', false),
+    Entry::new(Key::Tab, 9, b'u', false),
+    Entry::new(Key::Backspace, 127, b'u', false),
+    Entry::new(Key::Insert, 2, b'~', false),
+    Entry::new(Key::Delete, 3, b'~', false),
+    Entry::new(Key::ArrowLeft, 1, b'D', false),
+    Entry::new(Key::ArrowRight, 1, b'C', false),
+    Entry::new(Key::ArrowUp, 1, b'A', false),
+    Entry::new(Key::ArrowDown, 1, b'B', false),
+    Entry::new(Key::PageUp, 5, b'~', false),
+    Entry::new(Key::PageDown, 6, b'~', false),
+    Entry::new(Key::Home, 1, b'H', false),
+    Entry::new(Key::End, 1, b'F', false),
+    Entry::new(Key::CapsLock, 57358, b'u', true),
+    Entry::new(Key::ScrollLock, 57359, b'u', false),
+    Entry::new(Key::NumLock, 57360, b'u', true),
+    Entry::new(Key::PrintScreen, 57361, b'u', false),
+    Entry::new(Key::Pause, 57362, b'u', false),
+    Entry::new(Key::F1, 1, b'P', false),
+    Entry::new(Key::F2, 1, b'Q', false),
+    Entry::new(Key::F3, 13, b'~', false),
+    Entry::new(Key::F4, 1, b'S', false),
+    Entry::new(Key::F5, 15, b'~', false),
+    Entry::new(Key::F6, 17, b'~', false),
+    Entry::new(Key::F7, 18, b'~', false),
+    Entry::new(Key::F8, 19, b'~', false),
+    Entry::new(Key::F9, 20, b'~', false),
+    Entry::new(Key::F10, 21, b'~', false),
+    Entry::new(Key::F11, 23, b'~', false),
+    Entry::new(Key::F12, 24, b'~', false),
+    Entry::new(Key::F13, 57376, b'u', false),
+    Entry::new(Key::F14, 57377, b'u', false),
+    Entry::new(Key::F15, 57378, b'u', false),
+    Entry::new(Key::F16, 57379, b'u', false),
+    Entry::new(Key::F17, 57380, b'u', false),
+    Entry::new(Key::F18, 57381, b'u', false),
+    Entry::new(Key::F19, 57382, b'u', false),
+    Entry::new(Key::F20, 57383, b'u', false),
+    Entry::new(Key::F21, 57384, b'u', false),
+    Entry::new(Key::F22, 57385, b'u', false),
+    Entry::new(Key::F23, 57386, b'u', false),
+    Entry::new(Key::F24, 57387, b'u', false),
+    Entry::new(Key::F25, 57388, b'u', false),
+    Entry::new(Key::Numpad0, 57399, b'u', false),
+    Entry::new(Key::Numpad1, 57400, b'u', false),
+    Entry::new(Key::Numpad2, 57401, b'u', false),
+    Entry::new(Key::Numpad3, 57402, b'u', false),
+    Entry::new(Key::Numpad4, 57403, b'u', false),
+    Entry::new(Key::Numpad5, 57404, b'u', false),
+    Entry::new(Key::Numpad6, 57405, b'u', false),
+    Entry::new(Key::Numpad7, 57406, b'u', false),
+    Entry::new(Key::Numpad8, 57407, b'u', false),
+    Entry::new(Key::Numpad9, 57408, b'u', false),
+    Entry::new(Key::NumpadDecimal, 57409, b'u', false),
+    Entry::new(Key::NumpadDivide, 57410, b'u', false),
+    Entry::new(Key::NumpadMultiply, 57411, b'u', false),
+    Entry::new(Key::NumpadSubtract, 57412, b'u', false),
+    Entry::new(Key::NumpadAdd, 57413, b'u', false),
+    Entry::new(Key::NumpadEnter, 57414, b'u', false),
+    Entry::new(Key::NumpadEqual, 57415, b'u', false),
+    Entry::new(Key::NumpadSeparator, 57416, b'u', false),
+    Entry::new(Key::NumpadLeft, 57417, b'u', false),
+    Entry::new(Key::NumpadRight, 57418, b'u', false),
+    Entry::new(Key::NumpadUp, 57419, b'u', false),
+    Entry::new(Key::NumpadDown, 57420, b'u', false),
+    Entry::new(Key::NumpadPageUp, 57421, b'u', false),
+    Entry::new(Key::NumpadPageDown, 57422, b'u', false),
+    Entry::new(Key::NumpadHome, 57423, b'u', false),
+    Entry::new(Key::NumpadEnd, 57424, b'u', false),
+    Entry::new(Key::NumpadInsert, 57425, b'u', false),
+    Entry::new(Key::NumpadDelete, 57426, b'u', false),
+    Entry::new(Key::NumpadBegin, 57427, b'u', false),
+    Entry::new(Key::ShiftLeft, 57441, b'u', true),
+    Entry::new(Key::ShiftRight, 57447, b'u', true),
+    Entry::new(Key::ControlLeft, 57442, b'u', true),
+    Entry::new(Key::ControlRight, 57448, b'u', true),
+    Entry::new(Key::MetaLeft, 57444, b'u', true),
+    Entry::new(Key::MetaRight, 57450, b'u', true),
+    Entry::new(Key::AltLeft, 57443, b'u', true),
+    Entry::new(Key::AltRight, 57449, b'u', true),
+];
+
+impl Entry {
+    const fn new(key: Key, code: u32, final_byte: u8, modifier: bool) -> Self {
+        Self {
+            key,
+            code,
+            final_byte,
+            modifier,
+        }
+    }
+}
+
+pub fn entry_for(key: Key) -> Option<Entry> {
+    ENTRIES.iter().copied().find(|entry| entry.key == key)
+}

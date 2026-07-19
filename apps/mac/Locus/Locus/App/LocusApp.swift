@@ -167,8 +167,10 @@ struct WorkspaceSidebarVisibilityCommand {
 enum LocusPersistedDefaults {
   static let recentFoldersExpanded = "workspace.sidebar.recentFoldersExpanded"
   static let textEditingAutoSaveEnabled = "workspace.textEditing.autoSaveEnabled"
+  static let terminalPanelHeight = "workspace.terminal.panelHeight"
   static let uiTestResetKeys = [
     recentFoldersExpanded,
+    terminalPanelHeight,
     textEditingAutoSaveEnabled,
   ]
 }

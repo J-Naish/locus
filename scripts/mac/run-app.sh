@@ -69,6 +69,25 @@ xcodebuild \
 APP_PATH="$DERIVED_DATA_PATH/Build/Products/$CONFIGURATION/Locus.app"
 
 if [ "$OPEN_APP" = "1" ]; then
+  # `open` reuses a running instance only when the bundle path matches
+  # exactly, so an instance left over from another build path (Debug vs
+  # Release, or a stale build) keeps running and the app shows up twice.
+  # Terminate instances launched from this repo's build output first;
+  # installed copies outside the build directories are untouched. Like
+  # Xcode's Run, dev instances exit without save prompts.
+  for pid in $(pgrep -x Locus 2>/dev/null || true); do
+    exe_path="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+    case "$exe_path" in
+      "$ROOT_DIR/.build/"*|"$DERIVED_DATA_PATH/"*)
+        kill -TERM "$pid" 2>/dev/null || true
+        i=0
+        while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+          sleep 0.1
+          i=$((i + 1))
+        done
+        ;;
+    esac
+  done
   open "$APP_PATH"
 else
   echo "$APP_PATH"

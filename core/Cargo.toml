@@ -3,6 +3,8 @@ members = [
     "crates/app-core",
     "crates/app-ffi",
     "crates/app-cli",
+    "crates/terminal",
+    "crates/pty",
 ]
 resolver = "2"
 
@@ -15,10 +17,14 @@ rust-version = "1.83"
 [workspace.lints.rust]
 unsafe_code = "warn"
 
-# The release artifacts ship behind a C ABI (a staticlib linked into the native
-# app), where unwinding has no meaning: a core panic is a bug, so fail fast
-# with a defined abort at the panic site and keep release codegen free of
-# landing pads. Test profiles ignore this setting, so `cargo test` still
-# unwinds normally.
 [profile.release]
-panic = "abort"
+# Keep the default panic=unwind: app-ffi's catch_unwind firewall must be able
+# to convert core panics into LOCUS_TERM_STATUS_PANIC instead of aborting the
+# host app. (perf/size cost measured and accepted.)
+
+# The terminal port carries ghostty's capacity-stress tests (hash sets filled
+# to their layout cap), which are quadratic-probing-heavy and ~18x slower at
+# opt-level 0. Light optimization keeps the suite fast while debug_assertions
+# stay enabled.
+[profile.test]
+opt-level = 1

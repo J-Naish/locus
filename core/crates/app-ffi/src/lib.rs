@@ -12,6 +12,8 @@ use app_core::workspace::{
 };
 
 pub mod large_file;
+pub mod pty;
+pub mod terminal;
 pub mod text_buffer;
 
 // Version 3 dropped the unused `locus_large_file_max_line_byte_length` export;
@@ -22,8 +24,10 @@ pub mod text_buffer;
 // `out_change` rewritten-span parameter to `locus_text_buffer_undo`/`_redo` —
 // a signature change to existing symbols, hence a bump — and, additively, the
 // snapshot read surface (`locus_text_buffer_take_snapshot` plus the
-// `locus_text_buffer_snapshot_*` line/position reads).
-pub const ABI_VERSION: u32 = 5;
+// `locus_text_buffer_snapshot_*` line/position reads). Version 6 additively
+// added the terminal emulation FFI surface (`locus_term_*`) and PTY process
+// management (`locus_pty_*`).
+pub const ABI_VERSION: u32 = 6;
 
 static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 

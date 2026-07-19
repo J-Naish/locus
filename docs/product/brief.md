@@ -45,7 +45,9 @@ Out of scope:
 - No bundled AI model
 - No built-in AI chat
 - No extension or plugin system
-- No always-on terminal
+- No always-on terminal chrome. An on-demand toggle terminal panel for
+  running and reviewing agent CLI sessions is accepted scope (ADR 0012);
+  it must stay a quiet companion, not a persistent IDE surface
 - No developer-centric workflow features such as commits, branches, LSP, or debuggers.
   Passive read-only Git status coloring is allowed only as a quiet local-change
   indicator for users reviewing files touched by external tools.

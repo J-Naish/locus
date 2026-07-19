@@ -5,6 +5,9 @@ import XCTest
 @testable import Locus
 
 final class GitWorkspaceStatusTests: XCTestCase {
+  // Incidental: these tests are not about the timeout; keep parallel-load process spawning safe.
+  private let generousStatusTimeout: TimeInterval = 30
+
   func testParsesModifiedAndUntrackedPorcelainRecords() {
     let data = Data(" M README.md\u{0}?? Notes/new.md\u{0}".utf8)
 
@@ -276,7 +279,9 @@ final class GitWorkspaceStatusTests: XCTestCase {
       esac
       """
     )
-    let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 1)
+    let provider = GitWorkspaceStatusProvider(
+      gitExecutableURL: scriptURL,
+      statusTimeout: generousStatusTimeout)
 
     let statuses = await provider.sidebarStatuses(
       for: URL(filePath: "/tmp/locus"),
@@ -297,7 +302,9 @@ final class GitWorkspaceStatusTests: XCTestCase {
       esac
       """
     )
-    let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 1)
+    let provider = GitWorkspaceStatusProvider(
+      gitExecutableURL: scriptURL,
+      statusTimeout: generousStatusTimeout)
 
     let statuses = await provider.sidebarStatuses(
       for: URL(filePath: "/tmp/locus"),
@@ -317,7 +324,9 @@ final class GitWorkspaceStatusTests: XCTestCase {
       esac
       """
     )
-    let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 1)
+    let provider = GitWorkspaceStatusProvider(
+      gitExecutableURL: scriptURL,
+      statusTimeout: generousStatusTimeout)
 
     let statuses = await provider.sidebarStatuses(
       for: URL(filePath: "/tmp/locus/apps/mac"),
@@ -339,7 +348,9 @@ final class GitWorkspaceStatusTests: XCTestCase {
       esac
       """
     )
-    let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 1)
+    let provider = GitWorkspaceStatusProvider(
+      gitExecutableURL: scriptURL,
+      statusTimeout: generousStatusTimeout)
 
     let statuses = await provider.sidebarStatuses(
       for: URL(filePath: "/tmp/locus"),
@@ -366,7 +377,9 @@ final class GitWorkspaceStatusTests: XCTestCase {
       esac
       """
     )
-    let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 2)
+    let provider = GitWorkspaceStatusProvider(
+      gitExecutableURL: scriptURL,
+      statusTimeout: generousStatusTimeout)
 
     let statuses = await provider.sidebarStatuses(
       for: URL(filePath: "/tmp/locus"),
@@ -390,7 +403,9 @@ final class GitWorkspaceStatusTests: XCTestCase {
       esac
       """
     )
-    let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 1)
+    let provider = GitWorkspaceStatusProvider(
+      gitExecutableURL: scriptURL,
+      statusTimeout: generousStatusTimeout)
 
     let statuses = await provider.sidebarStatuses(
       for: URL(filePath: "/tmp/locus"),
@@ -433,7 +448,7 @@ final class GitWorkspaceStatusTests: XCTestCase {
   }
 
   func testProviderReturnsEmptyStatusesWhenGitCommandTimesOut() async throws {
-    let scriptURL = try makeExecutableScript("sleep 1")
+    let scriptURL = try makeExecutableScript("sleep 1; printf ' M late.md\\0'")
     let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 0.05)
 
     let start = Date()
@@ -443,7 +458,7 @@ final class GitWorkspaceStatusTests: XCTestCase {
     )
 
     XCTAssertTrue(statuses.isEmpty)
-    XCTAssertLessThan(Date().timeIntervalSince(start), 0.5)
+    XCTAssertLessThan(Date().timeIntervalSince(start), 5)
   }
 
   func testProviderReturnsEmptyStatusesWhenGitOutputExceedsLimit() async throws {
@@ -456,7 +471,7 @@ final class GitWorkspaceStatusTests: XCTestCase {
     )
     let provider = GitWorkspaceStatusProvider(
       gitExecutableURL: scriptURL,
-      statusTimeout: 1,
+      statusTimeout: generousStatusTimeout,
       maxOutputByteCount: 32)
 
     let statuses = await provider.sidebarStatuses(
@@ -469,7 +484,7 @@ final class GitWorkspaceStatusTests: XCTestCase {
   func testProviderStopsPromptlyWhenCallerIsCancelled() async throws {
     // A cancelled status request must terminate the git process and return
     // right away — not run out the (here deliberately long) timeout.
-    let scriptURL = try makeExecutableScript("sleep 5")
+    let scriptURL = try makeExecutableScript("sleep 5; printf ' M late.md\\0'")
     let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 10)
 
     let start = Date()
@@ -484,7 +499,7 @@ final class GitWorkspaceStatusTests: XCTestCase {
     let statuses = await request.value
 
     XCTAssertTrue(statuses.isEmpty)
-    XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+    XCTAssertLessThan(Date().timeIntervalSince(start), 4)
   }
 
   func testRepositoryMetadataParserResolvesRelativeCommonDirectoryFromWorkspace() {
@@ -507,7 +522,9 @@ final class GitWorkspaceStatusTests: XCTestCase {
       printf '/tmp/locus/.git\\n.git\\n/tmp/locus\\n'
       """
     )
-    let provider = GitWorkspaceStatusProvider(gitExecutableURL: scriptURL, statusTimeout: 1)
+    let provider = GitWorkspaceStatusProvider(
+      gitExecutableURL: scriptURL,
+      statusTimeout: generousStatusTimeout)
 
     let metadata = await provider.repositoryMetadata(for: URL(filePath: "/tmp/locus"))
 

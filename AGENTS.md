@@ -58,6 +58,8 @@ Before making product or architecture decisions, read the relevant docs:
 - `core/crates/app-core/`: reusable core logic
 - `core/crates/app-ffi/`: C ABI layer for native app integration
 - `core/crates/app-cli/`: debugging and benchmark CLI
+- `core/crates/terminal/`: terminal emulation core, a faithful Rust port of ghostty's terminal (see ADR 0012)
+- `core/crates/pty/`: PTY process management for the terminal
 - `core/include/`: exported or generated C headers
 - `docs/`: product, architecture, specs, and ADRs
 - `fixtures/`: reusable test fixtures
@@ -70,7 +72,7 @@ Before making product or architecture decisions, read the relevant docs:
 - For Apple platform UI, stay as close as practical to native SwiftUI and
   AppKit patterns before introducing custom chrome or custom-drawn controls.
 - Put performance-sensitive, testable logic in the Rust core. The core exists primarily for speed and efficiency; cross-platform reuse is a secondary benefit.
-- Keep UI-specific behavior in the native app. Move work into the Rust core when it measurably improves performance, not by default, and only when it can cross the FFI boundary as compact data rather than large copies.
+- Keep UI-specific behavior in the native app, but move performance-sensitive work into the Rust core whenever it improves performance and the result can cross the FFI boundary as compact data rather than large copies. Keep the boundary coarse to avoid chatty round-trips; that FFI-shape constraint, not reluctance to optimize, is the real limit on what moves to the core.
 - Use thin platform-specific bridges around the core; do not spread low-level integration details through UI code.
 - Use SQLite for boring, inspectable local persistence unless there is a clear reason not to.
 - Prefer simple native OS capabilities over bundled runtimes, heavy dependencies, or custom infrastructure.
@@ -86,13 +88,20 @@ Core file experiences should be strong:
 - PDFs should focus on reading, search, highlights, comments, and lightweight review.
 - Office files should focus on preview, search metadata, and external-app handoff.
 
+The on-demand terminal panel (⌘J / Ctrl+`) is accepted product scope
+(ADR 0012): a quiet companion for running and reviewing agent CLI sessions.
+Keep it a toggle below the editor; do not grow it into persistent IDE
+terminal chrome, and keep its behavior spec (`docs/specs/terminal.md`)
+current when it changes.
+
 Avoid adding:
 
 - Electron or desktop Chromium runtime
 - bundled AI models
 - built-in AI chat
 - plugin or extension execution
-- always-on terminal UI
+- always-visible terminal chrome (the on-demand toggle terminal panel is
+  accepted scope — ADR 0012)
 - Git workflow surfaces such as commit, branch, diff, merge, blame, staging,
   LSP, debugger, or other IDE-oriented features
 - heavy parsing or thumbnail generation on startup
@@ -105,7 +114,7 @@ direction explicitly changes.
 
 ## Performance, Weight, and Polish Rules
 
-User experience is the top priority: Locus must feel comfortable, responsive, calm, and native to use. Judge performance, weight, and polish work by its effect on that experience — pursue an optimization when it makes the product feel better to use, not for its own sake.
+User experience is the top priority: Locus must feel comfortable, responsive, calm, and native to use. Beyond that, treat speed and efficiency as goals worth pursuing in their own right, and pursue optimization as far as it can go. Do not wait for a slowdown to become perceptible before improving performance: a faster, leaner core is a standing goal, and a proven felt benefit is not a precondition for doing the work. The only reasons to pass on an optimization are cost-based — it would be genuinely hard to implement, or it would considerably complicate the code or its structure. When neither is true, take the optimization. Measure to confirm the win and to guard against regressions, and keep the resulting user experience calm and native rather than exposing the machinery.
 
 Because the product exists to push UX and UI quality as far as it can go, large-scale refactoring in service of that goal is entirely acceptable — there is no penalty for reshaping existing structure when it clears the way for a better experience. Existing code carries no inherent weight: if rebuilding a subsystem, or even starting it over from scratch, is what genuinely raises product value, do it. Treat current implementations as the best attempt so far, not as something to preserve for its own sake. (This is about ambition, not churn: a rewrite should be driven by a concrete UX or quality gain, not restructuring for its own sake, and it does not override the change-hygiene and testing rules below.)
 

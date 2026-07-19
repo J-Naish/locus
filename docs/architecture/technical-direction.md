@@ -25,6 +25,7 @@ Expected stack:
 - SwiftUI
 - Core Text (custom virtualized text engine over the Rust buffer; text editing
   does not use NSTextView/TextKit)
+- Metal (terminal pane rendering via a glyph atlas)
 - PDFKit
 - Quick Look
 - AVKit
@@ -40,6 +41,8 @@ The macOS app owns:
 - native previews
 - native media playback
 - Markdown editing surface
+- terminal pane UI: input, IME, selection, and rendering over the core's
+  terminal frames (ADR 0012)
 
 ## Rust Core
 
@@ -57,6 +60,10 @@ The Rust core owns behavior that should be shared, tested, and reused across pla
 - cache management
 - workspace state
 - Markdown parsing and serialization where useful
+- terminal emulation (`core/crates/terminal`, a faithful ghostty port:
+  VT parsing, screen and scrollback state, selection, search) and PTY
+  process management (`core/crates/pty`) — see ADR 0012 and
+  `docs/specs/terminal.md`
 - CLI tools for debugging and benchmarking
 
 The macOS app keeps the UI, input/IME, text drawing, selection, and text

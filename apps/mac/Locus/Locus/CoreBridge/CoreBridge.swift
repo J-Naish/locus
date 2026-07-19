@@ -97,7 +97,7 @@ struct WorkspacePartialError: Equatable, Identifiable, Sendable {
 }
 
 struct CoreBridge: Sendable {
-  static let expectedABIVersion: UInt32 = 5
+  static let expectedABIVersion: UInt32 = 6
   private static let logger = Logger(subsystem: "Locus", category: "CoreBridge")
 
   func runtimeSummary() async throws -> CoreRuntimeSummary {

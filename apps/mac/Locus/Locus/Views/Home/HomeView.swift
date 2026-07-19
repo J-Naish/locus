@@ -82,6 +82,7 @@ struct HomeView: View {
   @State private var recentFiles: [RecentFile] = []
   @State private var recentFolders: [RecentFolder] = []
   @State private var documentTabs = DocumentTabsState()
+  @StateObject private var terminalPanelState = TerminalPanelState()
   @State private var lastExternalWorkspaceOpen: ExternalWorkspaceOpen?
   // Folder loads can overlap when the directory monitor reloads or users
   // choose another folder.
@@ -165,6 +166,7 @@ struct HomeView: View {
       mediaDocumentStore: mediaDocumentStore,
       quickLookDocumentStore: quickLookDocumentStore,
       gitWorkspaceStatusProvider: gitWorkspaceStatusProvider,
+      terminalPanelState: terminalPanelState,
       selectedEntryID: $selectedEntryID,
       documentTabs: $documentTabs,
       emptyActions: EmptyWorkspaceActions(
@@ -196,9 +198,13 @@ struct HomeView: View {
       minHeight: LocusWindowMetrics.minimumHeight
     )
     .task {
+      terminalPanelState.currentWorkspaceFolder = workspaceState.folderURL
       refreshFileLocationShortcuts()
       loadInitialFolderIfNeeded()
       openPendingWorkspaceFolderRequests()
+    }
+    .onChange(of: workspaceState.folderURL) { _, folderURL in
+      terminalPanelState.currentWorkspaceFolder = folderURL
     }
     .onOpenURL { url in
       openWorkspaceFolderURL(url)
@@ -229,6 +235,9 @@ struct HomeView: View {
       Button("OK", role: .cancel) {}
     } message: {
       Text(workspaceDeletionErrorMessage ?? "Locus couldn't move the item to the Trash.")
+    }
+    .onDisappear {
+      terminalPanelState.shutdown()
     }
   }
 
@@ -1096,6 +1105,7 @@ private struct WorkspaceContentView: View {
   let mediaDocumentStore: any MediaDocumentStoring
   let quickLookDocumentStore: any QuickLookDocumentStoring
   let gitWorkspaceStatusProvider: any GitWorkspaceStatusProviding
+  @ObservedObject var terminalPanelState: TerminalPanelState
   @Binding var selectedEntryID: WorkspaceEntry.ID?
   @Binding var documentTabs: DocumentTabsState
   let emptyActions: EmptyWorkspaceActions
@@ -1129,6 +1139,7 @@ private struct WorkspaceContentView: View {
           mediaDocumentStore: mediaDocumentStore,
           quickLookDocumentStore: quickLookDocumentStore,
           gitWorkspaceStatusProvider: gitWorkspaceStatusProvider,
+          terminalPanelState: terminalPanelState,
           selectedEntryID: $selectedEntryID,
           documentTabs: $documentTabs,
           shortcutActions: shortcutActions,
