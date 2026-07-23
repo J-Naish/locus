@@ -31,6 +31,10 @@ kept as a compact status reference for follow-up implementation.
 - **Links and tasks**: valid external links and local file paths open on
   click; invalid destinations use the invalid-link tint. Task
   checkboxes toggle the source marker with a normal undoable edit.
+- **Find in document**: Cmd-F opens a compact find bar on the text
+  document surface. Search runs over rendered display text, so hidden
+  Markdown markers do not match; highlighted ranges map back onto the
+  visible rows, and Return/Shift-Return navigate between matches.
 - **Code cards and frontmatter**: fenced and indented code render in
   quiet cards. YAML frontmatter renders as a soft metadata panel with
   vertical key/value layout, wrapped chips, and block scalar value cards.

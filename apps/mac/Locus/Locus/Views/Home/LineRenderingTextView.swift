@@ -75,12 +75,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       rebuildWrapIndex(recomputeLongLine: true)
       updateLayout()
       invalidateVisibleArea()
+      onDocumentContentChanged?()
     }
   }
 
   private struct RawSelectionOffsets {
     let anchor: Int
     let head: Int
+  }
+
+  private struct DocumentFindHighlightState {
+    let matches: [DocumentFindMatch]
+    let currentIndex: Int?
   }
 
   private var pendingMarkdownViewModeSelection: RawSelectionOffsets?
@@ -120,6 +126,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       }
       invalidateVisibleArea()
       refreshHoverCursor()
+      onDocumentContentChanged?()
     }
   }
 
@@ -175,6 +182,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// decide whether an external change may safely reload (clean) or conflicts
   /// with unsaved edits.
   var onDirtyChange: ((Bool) -> Void)?
+  /// Requests the SwiftUI host to reveal the document find bar. Kept local to the
+  /// focused text responder; there is no menu/global shortcut in this round.
+  var onFindRequested: (() -> Void)?
+  /// Reports content/display-text changes while find is open so the host can
+  /// recompute matches without coupling search state to the rendering cache.
+  var onDocumentContentChanged: (() -> Void)?
 
   /// Reports focus changes so the host can pause document navigation shortcuts
   /// (e.g. Cmd+[ / Cmd+]) while the editor has the keyboard.
@@ -213,6 +226,26 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// main thread being inserted. Over this, the paste is refused with a beep.
   /// Internal so tests can lower it.
   var maximumPastedByteCount = 64 * 1024 * 1024
+  private var documentFindHighlights: DocumentFindHighlightState? {
+    didSet { invalidateVisibleArea() }
+  }
+  private final class DocumentFindDisplayTextCache {
+    let revision: UInt64
+    let lineCount: Int
+    var lines: [String?]
+    var completeLines: [String]?
+
+    init(revision: UInt64, lineCount: Int) {
+      self.revision = revision
+      self.lineCount = lineCount
+      lines = Array(repeating: nil, count: lineCount)
+    }
+  }
+  private var documentFindDisplayTextCache: DocumentFindDisplayTextCache?
+  private var documentFindDisplayTextProductionCount = 0
+  var documentFindDisplayTextProductionCountForTesting: Int {
+    documentFindDisplayTextProductionCount
+  }
   private static let lineRenderCacheMarginBands = 2
   private struct LineRenderCache {
     var revision: UInt64
@@ -2329,6 +2362,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     copiedCodeBlockToken &+= 1
     maxObservedLineWidth = 0
     selection = nil
+    documentFindHighlights = nil
+    documentFindDisplayTextCache = nil
     isSelecting = false
     verticalGoalX = nil
     composition = nil
@@ -3206,6 +3241,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     let shift = modifiers.contains(.shift)
     switch (key, shift) {
+    case ("f", false):
+      onFindRequested?()
     case ("a", false):
       selectAll(nil)
     case ("c", false):
@@ -3274,6 +3311,86 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     return buffer.text(fromUTF16: range.start, toUTF16: range.end)
       .replacingOccurrences(of: "\r\n", with: "\n")
+  }
+
+  func selectedDisplayTextForFind(maxLengthUTF16: Int = 200) -> String? {
+    guard let selection, !selection.isEmpty, selection.start.line == selection.end.line else {
+      return nil
+    }
+    let line = selection.start.line
+    guard
+      let span = selection.columnSpan(onLine: line, lineLengthUTF16: lineLengthUTF16(line)),
+      span.end > span.start
+    else {
+      return nil
+    }
+    let displayLine = documentFindDisplayLine(line: line)
+    let string = displayLine as NSString
+    let start = min(max(0, span.start), string.length)
+    let end = min(max(start, span.end), string.length)
+    guard end > start else { return nil }
+    let length = min(end - start, max(0, maxLengthUTF16))
+    guard length > 0 else { return nil }
+    return string.substring(with: NSRange(location: start, length: length))
+  }
+
+  func documentFindStartPosition() -> DocumentFindPosition {
+    let endpoint = selection?.start ?? navigationHead
+    return DocumentFindPosition(
+      line: min(max(0, endpoint.line), max(0, lineCount - 1)),
+      columnUTF16: max(0, endpoint.columnUTF16))
+  }
+
+  func documentFindResult(for query: String) -> DocumentFindResult {
+    guard let buffer = reader else {
+      return DocumentFindResult(matches: [], capped: false)
+    }
+    let lineCount = buffer.lineCount
+    guard lineCount > 0 else {
+      return DocumentFindResult(matches: [], capped: false)
+    }
+
+    if usesMarkdownDocumentLayout, syntax == .markdown {
+      let cache = prepareDocumentFindDisplayTextCache(for: buffer)
+      let displayLines: [String]
+      if let completeLines = cache.completeLines {
+        displayLines = completeLines
+      } else {
+        let states = documentFindMarkdownLineStates(for: buffer)
+        displayLines = documentFindMarkdownDisplayLines(states: states, cache: cache)
+      }
+      return DocumentFindEngine.scan(
+        lineCount: lineCount,
+        lineProvider: { displayLines[$0] },
+        query: query)
+    }
+
+    return DocumentFindEngine.scan(
+      lineCount: lineCount,
+      lineProvider: { line in
+        clippedDisplayLine(rawLineText(line))
+      },
+      query: query,
+      deadline: documentFindScanDeadline)
+  }
+
+  func selectFindMatch(_ match: DocumentFindMatch) {
+    let start = TextSelection.Endpoint(line: match.line, columnUTF16: match.range.location)
+    let end = TextSelection.Endpoint(line: match.line, columnUTF16: NSMaxRange(match.range))
+    selection = TextSelection(anchor: start, head: end)
+    showCaretSolid()
+    scrollCaretToVisible(end)
+    invalidateVisibleArea()
+  }
+
+  func setDocumentFindHighlights(matches: [DocumentFindMatch], currentIndex: Int?) {
+    documentFindHighlights = DocumentFindHighlightState(
+      matches: matches,
+      currentIndex: currentIndex)
+  }
+
+  func clearDocumentFindHighlights() {
+    documentFindHighlights = nil
   }
 
   /// The unclipped buffer text spanning `[(fromLine, fromColumn), (toLine, toColumn))`,
@@ -4508,6 +4625,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     invalidateVisibleArea()
     notifyDirtyChanged()
+    onDocumentContentChanged?()
     refreshHoverCursor()
   }
 
@@ -4856,6 +4974,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     }
     invalidateVisibleArea()
     notifyDirtyChanged()
+    onDocumentContentChanged?()
     refreshHoverCursor()
   }
 
@@ -5651,6 +5770,87 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       .components(separatedBy: "\n").first ?? ""
   }
 
+  private func documentFindDisplayLine(line: Int) -> String {
+    guard line >= 0, line < lineCount else { return "" }
+    guard usesMarkdownDocumentLayout, syntax == .markdown, let buffer = reader else {
+      return clippedDisplayLine(rawLineText(line))
+    }
+    let cache = prepareDocumentFindDisplayTextCache(for: buffer)
+    if let completeLines = cache.completeLines,
+      completeLines.indices.contains(line)
+    {
+      return completeLines[line]
+    }
+    let states = documentFindMarkdownLineStates(for: buffer)
+    return documentFindMarkdownDisplayLine(
+      line: line,
+      states: states,
+      cache: cache)
+  }
+
+  private func documentFindMarkdownLineStates(
+    for buffer: any TextDocumentReading
+  ) -> [MarkdownLineStyleState] {
+    if let states = markdownLineStates(for: buffer), states.count >= buffer.lineCount {
+      return states
+    }
+    let rawLines = markdownSourceLines(for: buffer, range: 0..<buffer.lineCount)
+    var states = TextDocumentSyntaxHighlighter.markdownLineStates(for: rawLines)
+    while states.count < buffer.lineCount {
+      states.append(.plain)
+    }
+    return states
+  }
+
+  private func prepareDocumentFindDisplayTextCache(
+    for buffer: any TextDocumentReading
+  ) -> DocumentFindDisplayTextCache {
+    if let cache = documentFindDisplayTextCache,
+      cache.revision == buffer.revision,
+      cache.lineCount == buffer.lineCount
+    {
+      return cache
+    }
+    let cache = DocumentFindDisplayTextCache(
+      revision: buffer.revision,
+      lineCount: buffer.lineCount)
+    documentFindDisplayTextCache = cache
+    return cache
+  }
+
+  private func documentFindMarkdownDisplayLines(
+    states: [MarkdownLineStyleState],
+    cache: DocumentFindDisplayTextCache
+  ) -> [String] {
+    if let completeLines = cache.completeLines {
+      return completeLines
+    }
+    let completeLines = cache.lines.indices.map { line in
+      documentFindMarkdownDisplayLine(line: line, states: states, cache: cache)
+    }
+    cache.completeLines = completeLines
+    return completeLines
+  }
+
+  private func documentFindMarkdownDisplayLine(
+    line: Int,
+    states: [MarkdownLineStyleState],
+    cache: DocumentFindDisplayTextCache
+  ) -> String {
+    guard cache.lines.indices.contains(line) else { return "" }
+    if let cached = cache.lines[line] {
+      return cached
+    }
+
+    let state = line < states.count ? states[line] : .plain
+    let displayText = DocumentFindDisplayText.markdownDisplayText(
+      for: clippedDisplayLine(rawLineText(line)),
+      state: state)
+    cache.lines[line] = displayText
+    documentFindDisplayTextProductionCount += 1
+    return displayText
+  }
+
   private func markdownDisplayMap(forLine line: Int) -> MarkdownDisplayMap? {
     guard usesMarkdownDocumentLayout, syntax == .markdown, let buffer = reader,
       line >= 0, line < buffer.lineCount
@@ -5813,6 +6013,13 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
     if let selection, !selection.isEmpty {
       drawSelectionHighlight(selection, lines: lines, range: range, textX: textX, visibleRows: rows)
+    }
+    if let documentFindHighlights {
+      drawDocumentFindHighlights(
+        documentFindHighlights,
+        lines: lines,
+        range: range,
+        visibleRows: rows)
     }
 
     var widest = maxObservedLineWidth
@@ -7454,8 +7661,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     visibleRows: Range<Int>
   ) {
     let focused = hasActiveKeyboardFocus
-    (focused ? NSColor.selectedTextBackgroundColor : .unemphasizedSelectedTextBackgroundColor)
-      .setFill()
+    let color =
+      focused ? NSColor.selectedTextBackgroundColor : .unemphasizedSelectedTextBackgroundColor
     for line in range {
       let lineTextX = lineTextColumnX(forLine: line)
       let attributed = lines[line - range.lowerBound]
@@ -7468,45 +7675,108 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         if didClip { NSGraphicsContext.restoreGraphicsState() }
         continue
       }
-      if let length = hugeLength(line) {
-        drawHugeSelectionHighlight(
-          line: line, utf16Length: length, span: span, includesNewline: includesNewline,
-          textX: lineTextX, visibleRows: visibleRows)
-        if didClip { NSGraphicsContext.restoreGraphicsState() }
-        continue
-      }
-      let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
-      let rowsTop = yOffset(ofLine: line) + leadingInset(forLine: line)
-      let height = rowHeight(forLine: line)
-      let length = attributed.length
-      for rowIndex in starts.indices {
-        let bounds = rowRange(rowIndex, starts: starts, length: length)
-        let segmentStart = max(span.start, bounds.start)
-        let segmentEnd = min(span.end, bounds.end)
-        let isLastRow = rowIndex == starts.count - 1
-        guard segmentEnd > segmentStart || (includesNewline && isLastRow) else { continue }
-        let rowText = attributed.attributedSubstring(
-          from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
-        let xStart = lineTextX + xOffset(forColumn: segmentStart - bounds.start, in: rowText)
-        var xEnd = lineTextX + xOffset(forColumn: segmentEnd - bounds.start, in: rowText)
-        if includesNewline, isLastRow {
-          xEnd += newlineSelectionWidth
-        }
-        NSRect(
-          x: xStart, y: rowsTop + CGFloat(rowIndex) * height,
-          width: max(0, xEnd - xStart), height: height
-        ).fill()
-      }
+      drawTextRangeHighlight(
+        line: line,
+        attributed: attributed,
+        span: span,
+        includesNewline: includesNewline,
+        textX: lineTextX,
+        visibleRows: visibleRows,
+        color: color,
+        cornerRadius: 0)
       if didClip { NSGraphicsContext.restoreGraphicsState() }
     }
   }
 
-  /// Selection highlight for a huge line: only its visible grid rows are filled,
-  /// each measured from a fetched window, so a selection spanning thousands of
-  /// wrapped rows costs only the visible band.
-  private func drawHugeSelectionHighlight(
+  private func drawDocumentFindHighlights(
+    _ state: DocumentFindHighlightState,
+    lines: [NSAttributedString],
+    range: Range<Int>,
+    visibleRows: Range<Int>
+  ) {
+    guard !state.matches.isEmpty else { return }
+    var index = state.matches.lowerBoundForDocumentFindLine(range.lowerBound)
+    while index < state.matches.count {
+      let match = state.matches[index]
+      guard match.line < range.upperBound else { break }
+      defer { index += 1 }
+      guard match.line >= range.lowerBound else { continue }
+      let attributed = lines[match.line - range.lowerBound]
+      let didClip = beginMarkdownTableClipIfNeeded(forLine: match.line, visibleRows: visibleRows)
+      let color =
+        index == state.currentIndex
+        ? NSColor.findHighlightColor
+        : NSColor.findHighlightColor.withAlphaComponent(0.35)
+      drawTextRangeHighlight(
+        line: match.line,
+        attributed: attributed,
+        span: (start: match.range.location, end: NSMaxRange(match.range)),
+        includesNewline: false,
+        textX: lineTextColumnX(forLine: match.line),
+        visibleRows: visibleRows,
+        color: color,
+        cornerRadius: 3)
+      if didClip { NSGraphicsContext.restoreGraphicsState() }
+    }
+  }
+
+  private func drawTextRangeHighlight(
+    line: Int,
+    attributed: NSAttributedString,
+    span: (start: Int, end: Int),
+    includesNewline: Bool,
+    textX: CGFloat,
+    visibleRows: Range<Int>,
+    color: NSColor,
+    cornerRadius: CGFloat
+  ) {
+    if let length = hugeLength(line) {
+      drawHugeTextRangeHighlight(
+        line: line,
+        utf16Length: length,
+        span: span,
+        includesNewline: includesNewline,
+        textX: textX,
+        visibleRows: visibleRows,
+        color: color,
+        cornerRadius: cornerRadius)
+      return
+    }
+
+    let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
+    let rowsTop = yOffset(ofLine: line) + leadingInset(forLine: line)
+    let height = rowHeight(forLine: line)
+    let length = attributed.length
+    for rowIndex in starts.indices {
+      let bounds = rowRange(rowIndex, starts: starts, length: length)
+      let segmentStart = max(span.start, bounds.start)
+      let segmentEnd = min(span.end, bounds.end)
+      let isLastRow = rowIndex == starts.count - 1
+      guard segmentEnd > segmentStart || (includesNewline && isLastRow) else { continue }
+      let rowText = attributed.attributedSubstring(
+        from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
+      let xStart = textX + xOffset(forColumn: segmentStart - bounds.start, in: rowText)
+      var xEnd = textX + xOffset(forColumn: segmentEnd - bounds.start, in: rowText)
+      if includesNewline, isLastRow {
+        xEnd += newlineSelectionWidth
+      }
+      drawHighlightRect(
+        NSRect(
+          x: xStart,
+          y: rowsTop + CGFloat(rowIndex) * height,
+          width: max(0, xEnd - xStart),
+          height: height),
+        color: color,
+        cornerRadius: cornerRadius)
+    }
+  }
+
+  /// Range highlight for a huge line: only its visible grid rows are filled,
+  /// each measured from a fetched window, so a range spanning thousands of wrapped
+  /// rows costs only the visible band.
+  private func drawHugeTextRangeHighlight(
     line: Int, utf16Length: Int, span: (start: Int, end: Int), includesNewline: Bool,
-    textX: CGFloat, visibleRows: Range<Int>
+    textX: CGFloat, visibleRows: Range<Int>, color: NSColor, cornerRadius: CGFloat
   ) {
     let columns = hugeLineColumns
     let firstRow = firstVisualRow(ofLine: line)
@@ -7528,11 +7798,27 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       if includesNewline, isLastRow {
         xEnd += newlineSelectionWidth
       }
-      NSRect(
-        x: xStart, y: yOffset(ofVisualRow: globalRow),
-        width: max(0, xEnd - xStart), height: layout.lineHeight
-      ).fill()
+      drawHighlightRect(
+        NSRect(
+          x: xStart, y: yOffset(ofVisualRow: globalRow),
+          width: max(0, xEnd - xStart), height: layout.lineHeight),
+        color: color,
+        cornerRadius: cornerRadius)
     }
+  }
+
+  private func drawHighlightRect(_ rect: NSRect, color: NSColor, cornerRadius: CGFloat) {
+    guard rect.width > 0, rect.height > 0 else { return }
+    color.setFill()
+    guard cornerRadius > 0 else {
+      rect.fill()
+      return
+    }
+    NSBezierPath(
+      roundedRect: rect,
+      xRadius: min(cornerRadius, rect.width / 2),
+      yRadius: min(cornerRadius, rect.height / 2)
+    ).fill()
   }
 
   /// Draws the caret at the (empty) selection head while focused and visible, or
@@ -8477,5 +8763,21 @@ extension LineRenderingTextView: @preconcurrency NSTextInputClient {
     updateLayout()
     invalidateVisibleArea()
     inputContext?.invalidateCharacterCoordinates()
+  }
+}
+
+extension Array where Element == DocumentFindMatch {
+  fileprivate func lowerBoundForDocumentFindLine(_ line: Int) -> Int {
+    var low = 0
+    var high = count
+    while low < high {
+      let mid = (low + high) / 2
+      if self[mid].line < line {
+        low = mid + 1
+      } else {
+        high = mid
+      }
+    }
+    return low
   }
 }

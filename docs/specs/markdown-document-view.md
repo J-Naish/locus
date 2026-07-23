@@ -90,6 +90,12 @@ only Markdown styling path.
 - Honest structure: ordered numbers come from the file (never
   renumbered); unsupported constructs render as plain text, never an
   error state.
+- Find-in-document searches the rendered display text that the user sees,
+  not hidden Markdown markers. Cmd-F opens a compact in-surface find bar;
+  matches are highlighted in the document, Return/Shift-Return move
+  through results, Escape closes the bar and returns focus to editing.
+  Regex, replace, and app/menu-wide find commands are intentionally
+  outside this surface for now.
 
 ### Layout and type scale
 
@@ -388,10 +394,11 @@ The current rendering/editing status is summarized in
 Phase A (variable row heights, full type scale), typeset tables with
 cell wrapping and table-local horizontal scroll, image/video blocks,
 clickable links, task checkbox toggles, and the code card (language
-label, copy control, comments/strings tint) have shipped. Later:
+label, copy control, comments/strings tint), plus document find over
+rendered display text with mapped highlights, have shipped. Later:
 Phase R (optional raw editor surface), Phase B (Rust-core
-classification), polish backlog (theme slots, find-in-document with
-mapped highlights, link editor, copy-as-rich-text, richer in-paragraph
+classification), polish backlog (theme slots, link editor,
+copy-as-rich-text, richer in-paragraph
 media, animated GIF playback).
 
 ## Performance
