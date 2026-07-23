@@ -35,6 +35,11 @@ kept as a compact status reference for follow-up implementation.
   document surface. Search runs over rendered display text, so hidden
   Markdown markers do not match; highlighted ranges map back onto the
   visible rows, and Return/Shift-Return navigate between matches.
+- **Quotes and document navigation**: Enter continues quotes and quoted
+  lists with empty-item exit behavior; GitHub's five callout types render
+  with quiet tinted labels and bars. Fragment links scroll to GitHub-style
+  heading anchors, and shortcut reference links reuse the document
+  definitions map.
 - **Code cards and frontmatter**: fenced and indented code render in
   quiet cards. YAML frontmatter renders as a soft metadata panel with
   vertical key/value layout, wrapped chips, and block scalar value cards.
@@ -42,8 +47,7 @@ kept as a compact status reference for follow-up implementation.
 ## Follow-Up Notes
 
 - Some rendered constructs intentionally remain conservative: unsupported
-  Markdown/HTML stays literal, and fragment anchors are styled but inert
-  until document anchors exist.
+  Markdown/HTML stays literal, and unresolved fragment anchors stay inert.
 - Aggregated YAML sequence chips are still display-oriented because a
   line-local display map cannot directly edit values sourced from hidden
   sibling lines. Bracket arrays and block scalars remain editable through

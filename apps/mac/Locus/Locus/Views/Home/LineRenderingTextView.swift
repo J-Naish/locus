@@ -3973,6 +3973,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   private struct MarkdownConcealedSpanCandidate {
     var fullRange: NSRange
     var visibleSourceRange: NSRange
+    var removesOnTerminalCharacterDeletion = false
   }
 
   private static let markdownLinkLikeDeletionExpressions: [NSRegularExpression] = [
@@ -3981,6 +3982,8 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     try! NSRegularExpression(pattern: #"!\[([^\]\n]*)\]\((?:[^\)\n]|\([^\)\n]*\))+\)"#),
     try! NSRegularExpression(pattern: #"!\[([^\]\n]*)\]\[[^\]\n]*\]"#),
   ]
+  private static let markdownCalloutDeletionExpression = try! NSRegularExpression(
+    pattern: #"\[!((?:NOTE|TIP|IMPORTANT|WARNING|CAUTION))\]"#)
 
   /// Inserts a newline. In rendered Markdown, a list item continues with the same
   /// raw prefix so the next visual line still starts at column zero.
@@ -4268,6 +4271,53 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     let rawColumn =
       markdownDisplayMap(forLine: caret.line)?.bufferColumn(forDisplayColumn: caret.columnUTF16)
       ?? caret.columnUTF16
+    let quoteBodyStart = markdownQuoteBodyStartColumn(in: line)
+    if quoteBodyStart > 0 {
+      let nsLine = line as NSString
+      let quotePrefix = nsLine.substring(to: quoteBodyStart)
+      let quoteBody = nsLine.substring(from: quoteBodyStart)
+
+      if let list = markdownListMarker(in: quoteBody) {
+        let contentLength = max(0, (quoteBody as NSString).length - list.contentStart)
+        if contentLength == 0, caret.columnUTF16 == 0 {
+          return MarkdownNewlineEdit(
+            start: lineStart + quoteBodyStart,
+            end: lineStart + quoteBodyStart + list.contentStart,
+            replacement: "")
+        }
+        if caret.columnUTF16 == 0 {
+          return MarkdownNewlineEdit(start: lineStart, end: lineStart, replacement: "\n")
+        }
+        guard rawColumn >= quoteBodyStart + list.contentStart,
+          let listPrefix = markdownListContinuationPrefix(in: quoteBody)
+        else {
+          return nil
+        }
+        return MarkdownNewlineEdit(
+          start: lineStart + rawColumn,
+          end: lineStart + rawColumn,
+          replacement: "\n" + quotePrefix + listPrefix)
+      }
+
+      if quoteBody.trimmingCharacters(in: .whitespaces).isEmpty,
+        caret.columnUTF16 == 0
+      {
+        return MarkdownNewlineEdit(
+          start: lineStart,
+          end: lineStart + nsLine.length,
+          replacement: markdownQuotePrefixRemovingLastLevel(quotePrefix))
+      }
+      if caret.columnUTF16 == 0 {
+        return MarkdownNewlineEdit(start: lineStart, end: lineStart, replacement: "\n")
+      }
+      if rawColumn >= quoteBodyStart {
+        return MarkdownNewlineEdit(
+          start: lineStart + rawColumn,
+          end: lineStart + rawColumn,
+          replacement: "\n" + quotePrefix)
+      }
+      return nil
+    }
     if let list = markdownListMarker(in: line) {
       let contentLength = max(0, (line as NSString).length - list.contentStart)
       if contentLength == 0, caret.columnUTF16 == 0 {
@@ -4298,6 +4348,34 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       return MarkdownNewlineEdit(start: lineStart, end: lineStart, replacement: "\n")
     }
     return nil
+  }
+
+  private func markdownQuotePrefixRemovingLastLevel(_ prefix: String) -> String {
+    let nsPrefix = prefix as NSString
+    var index = 0
+    var lastMarkerStart = 0
+    var depth = 0
+    while index < nsPrefix.length {
+      let levelStart = index
+      var spaces = 0
+      while spaces < 3, index < nsPrefix.length, nsPrefix.character(at: index) == 32 {
+        spaces += 1
+        index += 1
+      }
+      guard index < nsPrefix.length, nsPrefix.character(at: index) == 62 else { break }
+      lastMarkerStart = levelStart
+      depth += 1
+      index += 1
+      if index < nsPrefix.length, nsPrefix.character(at: index) == 32 {
+        index += 1
+      }
+    }
+    guard depth > 1 else { return "" }
+    var result = nsPrefix.substring(to: lastMarkerStart)
+    if !result.hasSuffix(" ") {
+      result.append(" ")
+    }
+    return result
   }
 
   private func markdownHasConcealedBlockPrefix(in line: String) -> Bool {
@@ -4697,16 +4775,26 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     guard selectedDisplayRange.length > 0 else { return nil }
 
     for candidate in markdownConcealedSpanDeletionCandidates(in: line) {
-      guard candidate.visibleSourceRange.location == local.location,
-        candidate.visibleSourceRange.length == local.length,
-        markdownDisplayMap(map, collapses: candidate, to: selectedDisplayRange)
-      else {
-        continue
+      let removesWholeVisibleSpan =
+        candidate.visibleSourceRange.location == local.location
+        && candidate.visibleSourceRange.length == local.length
+        && markdownDisplayMap(map, collapses: candidate, to: selectedDisplayRange)
+      let removesWholeVisibleCallout =
+        candidate.removesOnTerminalCharacterDeletion
+        && local.location <= candidate.fullRange.location
+        && NSMaxRange(local) >= NSMaxRange(candidate.fullRange)
+        && markdownDisplayMap(map, collapses: candidate, to: selectedDisplayRange)
+      let removesTerminalCharacter =
+        candidate.removesOnTerminalCharacterDeletion
+        && local.length == 1
+        && NSMaxRange(local) == NSMaxRange(candidate.visibleSourceRange)
+        && markdownDisplayMapCollapsesCandidate(map, candidate: candidate)
+      if removesWholeVisibleSpan || removesWholeVisibleCallout || removesTerminalCharacter {
+        return (
+          lineStart + candidate.fullRange.location,
+          lineStart + NSMaxRange(candidate.fullRange)
+        )
       }
-      return (
-        lineStart + candidate.fullRange.location,
-        lineStart + NSMaxRange(candidate.fullRange)
-      )
     }
     return nil
   }
@@ -4733,6 +4821,15 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
           MarkdownConcealedSpanCandidate(fullRange: match.range, visibleSourceRange: visible))
       }
     }
+    for match in Self.markdownCalloutDeletionExpression.matches(in: line, range: fullRange) {
+      let visible = match.range(at: 1)
+      guard visible.location != NSNotFound else { continue }
+      candidates.append(
+        MarkdownConcealedSpanCandidate(
+          fullRange: match.range,
+          visibleSourceRange: visible,
+          removesOnTerminalCharacterDeletion: true))
+    }
     return candidates.sorted {
       if $0.fullRange.location != $1.fullRange.location {
         return $0.fullRange.location < $1.fullRange.location
@@ -4752,6 +4849,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       return false
     }
     return fullDisplayRange == selectedDisplayRange && visibleDisplayRange == selectedDisplayRange
+  }
+
+  private func markdownDisplayMapCollapsesCandidate(
+    _ map: MarkdownDisplayMap,
+    candidate: MarkdownConcealedSpanCandidate
+  ) -> Bool {
+    guard let fullDisplayRange = map.displayRange(forSourceRange: candidate.fullRange),
+      let visibleDisplayRange = map.displayRange(forSourceRange: candidate.visibleSourceRange)
+    else {
+      return false
+    }
+    return fullDisplayRange == visibleDisplayRange
   }
 
   private func selectionTouchesCollectedFrontMatterChips(_ selection: TextSelection) -> Bool {
@@ -6283,7 +6392,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
             depth: state.quoteDepth,
             textX: textX,
             y: yOffset(ofVisualRow: startRow),
-            height: CGFloat(endRow - startRow) * rowHeight(forLine: line))
+            height: CGFloat(endRow - startRow) * rowHeight(forLine: line),
+            color: state.quoteCalloutKind.map(MarkdownDocumentMetrics.calloutColor(for:))
+              ?? MarkdownDocumentMetrics.quoteBarColor)
         }
       }
       if let imageSource = state.imageSource, visibleRows.contains(firstRow) {
@@ -6628,10 +6739,16 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
-  private func drawMarkdownQuoteBar(depth: Int, textX: CGFloat, y: CGFloat, height: CGFloat) {
+  private func drawMarkdownQuoteBar(
+    depth: Int,
+    textX: CGFloat,
+    y: CGFloat,
+    height: CGFloat,
+    color: NSColor
+  ) {
     // Structural markers use quiet label-family ink; interactive confirmations
     // remain accent-colored.
-    MarkdownDocumentMetrics.quoteBarColor.setFill()
+    color.setFill()
     for level in 0..<max(1, min(depth, 3)) {
       NSRect(
         x: textX + CGFloat(level) * MarkdownDocumentMetrics.quoteIndentWidth
@@ -7263,7 +7380,33 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       NSWorkspace.shared.open(url)
     case .file(let url):
       onOpenLinkedFile(url)
+    case .anchor:
+      _ = scrollToMarkdownAnchor(destination: target.destination)
     }
+    return true
+  }
+
+  @discardableResult
+  private func scrollToMarkdownAnchor(destination: String) -> Bool {
+    guard usesMarkdownDocumentLayout,
+      let fragments = MarkdownLinkNavigation.anchorFragments(for: destination),
+      let buffer = reader,
+      let states = markdownLineStates(for: buffer)
+    else {
+      return false
+    }
+    let lines = markdownSourceLines(for: buffer, range: 0..<buffer.lineCount)
+    let anchors = MarkdownHeadingAnchorTable.anchors(lines: lines, states: states)
+    guard
+      let line = MarkdownHeadingAnchorTable.resolve(
+        decodedFragment: fragments.decoded,
+        rawFragment: fragments.raw,
+        in: anchors)
+    else {
+      return false
+    }
+    let topInset = enclosingScrollView?.contentInsets.top ?? 0
+    scrollViewport(toY: yOffset(ofLine: line) - topInset)
     return true
   }
 
@@ -7987,6 +8130,11 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     return yOffset(ofLine: line)
   }
 
+  @discardableResult
+  func activateMarkdownAnchorForTesting(destination: String) -> Bool {
+    scrollToMarkdownAnchor(destination: destination)
+  }
+
   func rowHeightForTesting(line: Int) -> CGFloat {
     rowHeight(forLine: line)
   }
@@ -8127,6 +8275,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// drawn bar uses the documented quiet-ink constant.
   static var markdownQuoteBarFillColorForTesting: NSColor {
     MarkdownDocumentMetrics.quoteBarColor
+  }
+
+  static func markdownQuoteBarFillColorForTesting(
+    calloutKind: MarkdownCalloutKind
+  ) -> NSColor {
+    MarkdownDocumentMetrics.calloutColor(for: calloutKind)
   }
 
   func resetRowLayoutComputationCountsForTesting() {
