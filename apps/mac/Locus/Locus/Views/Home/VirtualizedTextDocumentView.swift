@@ -68,6 +68,19 @@ enum TextViewportPresentation {
     }
     return syntax == .markdown && backendIsReadOnly
   }
+
+  static func resolvedLineNumberVisibility(
+    syntax: TextDocumentSyntax,
+    markdownViewMode: MarkdownViewMode,
+    backendIsReadOnly: Bool,
+    override: Bool?
+  ) -> Bool {
+    override
+      ?? usesClassicLineNumberGutter(
+        for: syntax,
+        markdownViewMode: markdownViewMode,
+        backendIsReadOnly: backendIsReadOnly)
+  }
 }
 
 enum LargeTextViewportMetrics {
@@ -94,6 +107,8 @@ struct LargeTextViewport: NSViewRepresentable {
   let syntax: TextDocumentSyntax
   var markdownViewMode: MarkdownViewMode = .rendered
   var showsMarkdownViewModeToggleCursorRect = false
+  var showsLineNumbersOverride: Bool?
+  var documentDiffRowKinds: [DocumentDiffRowKind]?
   /// Whether long lines soft-wrap to the viewport (prose) or scroll horizontally
   /// (structured/code/data). Decided per document by the host.
   let wrapsLines: Bool
@@ -113,6 +128,7 @@ struct LargeTextViewport: NSViewRepresentable {
   var onViewReady: (LineRenderingTextView) -> Void = { _ in }
   var onFindRequested: () -> Void = {}
   var onDocumentContentChanged: () -> Void = {}
+  var onCancelOperation: () -> Bool = { false }
 
   /// A read-only backend is never editable, regardless of the host's `isEditable`.
   private var resolvedIsEditable: Bool {
@@ -127,10 +143,11 @@ struct LargeTextViewport: NSViewRepresentable {
     } else {
       backendIsReadOnly = false
     }
-    return TextViewportPresentation.usesClassicLineNumberGutter(
-      for: syntax,
+    return TextViewportPresentation.resolvedLineNumberVisibility(
+      syntax: syntax,
       markdownViewMode: markdownViewMode,
-      backendIsReadOnly: backendIsReadOnly)
+      backendIsReadOnly: backendIsReadOnly,
+      override: showsLineNumbersOverride)
   }
 
   /// Distinct accessibility identifiers so automation can tell the editable viewer
@@ -188,6 +205,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.onOpenLinkedFile = onOpenLinkedFile
     documentView.onFindRequested = onFindRequested
     documentView.onDocumentContentChanged = onDocumentContentChanged
+    documentView.onCancelOperation = onCancelOperation
     scrollView.documentView = documentView
 
     switch backend {
@@ -196,6 +214,7 @@ struct LargeTextViewport: NSViewRepresentable {
     case .readOnly(let file):
       documentView.setReadOnlyDocument(file)
     }
+    documentView.setDocumentDiffRowKinds(documentDiffRowKinds)
 
     let clipView = scrollView.contentView
     // This view draws viewport-relative chrome (pinned gutter, caret, selection)
@@ -259,6 +278,7 @@ struct LargeTextViewport: NSViewRepresentable {
     documentView.onOpenLinkedFile = onOpenLinkedFile
     documentView.onFindRequested = onFindRequested
     documentView.onDocumentContentChanged = onDocumentContentChanged
+    documentView.onCancelOperation = onCancelOperation
     onViewReady(documentView)
     switch backend {
     case .editable(let buffer):
@@ -272,6 +292,7 @@ struct LargeTextViewport: NSViewRepresentable {
         didSwapDocument = true
       }
     }
+    documentView.setDocumentDiffRowKinds(documentDiffRowKinds)
     if didSwapDocument, preservesScrollPosition {
       restore(scrollView: scrollView, to: previousScrollOrigin)
     }
@@ -319,6 +340,159 @@ struct LargeTextViewport: NSViewRepresentable {
     deinit {
       NotificationCenter.default.removeObserver(self)
     }
+  }
+}
+
+struct DocumentChangeReviewPresentation {
+  let text: String
+  let rowKinds: [DocumentDiffRowKind]
+  let buffer: TextBuffer
+}
+
+@MainActor
+final class DocumentChangeReviewState: ObservableObject {
+  @Published private(set) var isReviewVisible = false
+  @Published private(set) var currentDiff: DocumentDiff?
+  @Published private(set) var presentation: DocumentChangeReviewPresentation?
+  @Published private(set) var changeToken = 0
+
+  private var pendingBaselines: [URL: String] = [:]
+  private var reloadedTexts: [URL: String] = [:]
+  private var selectedURL: URL?
+
+  var showsChip: Bool {
+    guard let selectedURL else { return false }
+    return pendingBaselines[normalized(selectedURL)] != nil
+  }
+
+  func selectDocument(_ url: URL?) {
+    let normalizedURL = url.map(normalized)
+    guard normalizedURL != selectedURL else { return }
+    selectedURL = normalizedURL
+    isReviewVisible = false
+    presentation = nil
+    refreshCurrentDiff()
+    changeToken &+= 1
+  }
+
+  func captureBaseline(_ text: String, for url: URL) {
+    let key = normalized(url)
+    if pendingBaselines[key] == nil {
+      pendingBaselines[key] = text
+      changeToken &+= 1
+    }
+    if key == selectedURL {
+      refreshCurrentDiff()
+    }
+  }
+
+  func reconcileReloadedText(_ text: String, for url: URL) {
+    let key = normalized(url)
+    guard let baseline = pendingBaselines[key] else { return }
+    if text == baseline {
+      clearReview(for: key)
+      return
+    }
+    reloadedTexts[key] = text
+    changeToken &+= 1
+    if key == selectedURL {
+      refreshCurrentDiff()
+      refreshVisiblePresentation()
+    }
+  }
+
+  func pendingBaseline(for url: URL) -> String? {
+    pendingBaselines[normalized(url)]
+  }
+
+  func hasPendingBaseline(for url: URL) -> Bool {
+    pendingBaselines[normalized(url)] != nil
+  }
+
+  func presentReview() {
+    guard
+      let diff = currentDiff,
+      diff.hasChanges,
+      let nextPresentation = makePresentation(from: diff)
+    else { return }
+    presentation = nextPresentation
+    isReviewVisible = true
+  }
+
+  func closeReview() {
+    clearSelectedReview()
+  }
+
+  func dismissChip() {
+    clearSelectedReview()
+  }
+
+  func discardReview(for url: URL) {
+    clearReview(for: normalized(url))
+  }
+
+  private func clearSelectedReview() {
+    guard let selectedURL else { return }
+    clearReview(for: selectedURL)
+  }
+
+  private func clearReview(for url: URL) {
+    pendingBaselines.removeValue(forKey: url)
+    reloadedTexts.removeValue(forKey: url)
+    changeToken &+= 1
+    if url == selectedURL {
+      currentDiff = nil
+      presentation = nil
+      isReviewVisible = false
+    }
+  }
+
+  private func refreshCurrentDiff() {
+    guard
+      let selectedURL,
+      let baseline = pendingBaselines[selectedURL],
+      let current = reloadedTexts[selectedURL]
+    else {
+      currentDiff = nil
+      return
+    }
+    currentDiff = DocumentDiffEngine.diff(
+      base: Self.lines(in: baseline),
+      current: Self.lines(in: current))
+  }
+
+  private func refreshVisiblePresentation() {
+    guard isReviewVisible else { return }
+    guard
+      let currentDiff,
+      let nextPresentation = makePresentation(from: currentDiff)
+    else {
+      presentation = nil
+      isReviewVisible = false
+      return
+    }
+    presentation = nextPresentation
+  }
+
+  private func makePresentation(
+    from diff: DocumentDiff
+  ) -> DocumentChangeReviewPresentation? {
+    let text = diff.rows.map(\.text).joined(separator: "\n")
+    guard let buffer = try? TextBuffer.open(bytes: Data(text.utf8)) else {
+      return nil
+    }
+    return DocumentChangeReviewPresentation(
+      text: text,
+      rowKinds: diff.rows.map(\.kind),
+      buffer: buffer)
+  }
+
+  private func normalized(_ url: URL) -> URL {
+    url.standardizedFileURL
+  }
+
+  private static func lines(in text: String) -> [String] {
+    text.isEmpty ? [] : text.components(separatedBy: "\n")
   }
 }
 
@@ -508,7 +682,7 @@ final class DocumentFindState: ObservableObject {
     clearSearchResults()
   }
 
-  private func focusDocument() {
+  func focusDocument() {
     guard let documentView, let window = documentView.window else { return }
     window.makeFirstResponder(documentView)
   }
@@ -709,6 +883,75 @@ private struct DocumentFindTextField: NSViewRepresentable {
   }
 }
 
+private struct DocumentFloatingBarStyle: ViewModifier {
+  func body(content: Content) -> some View {
+    content
+      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 7))
+      .overlay {
+        RoundedRectangle(cornerRadius: 7)
+          .strokeBorder(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 0.5)
+      }
+  }
+}
+
+extension View {
+  fileprivate func documentFloatingBarStyle() -> some View {
+    modifier(DocumentFloatingBarStyle())
+  }
+}
+
+private struct DocumentChangeReviewChip: View {
+  @ObservedObject var state: DocumentChangeReviewState
+
+  var body: some View {
+    HStack(spacing: 7) {
+      Text(state.isReviewVisible ? "Viewing changes" : "Changed on disk")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+
+      if state.isReviewVisible {
+        actionButton("Done", identifier: "document-change-done") {
+          state.closeReview()
+        }
+      } else {
+        if state.currentDiff != nil {
+          actionButton("View changes", identifier: "document-change-view") {
+            state.presentReview()
+          }
+        }
+        Button {
+          state.dismissChip()
+        } label: {
+          Image(systemName: "xmark")
+            .frame(width: 16, height: 16)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Dismiss")
+        .accessibilityLabel("Dismiss Change Notification")
+        .accessibilityIdentifier("document-change-dismiss")
+      }
+    }
+    .padding(.horizontal, 9)
+    .padding(.vertical, 6)
+    .documentFloatingBarStyle()
+    .accessibilityIdentifier("document-change-chip")
+  }
+
+  private func actionButton(
+    _ title: String,
+    identifier: String,
+    action: @escaping () -> Void
+  ) -> some View {
+    Button(title, action: action)
+      .font(.caption)
+      .buttonStyle(.plain)
+      .foregroundStyle(Color.accentColor)
+      .accessibilityIdentifier(identifier)
+  }
+}
+
 private struct DocumentFindBar: View {
   @ObservedObject var state: DocumentFindState
 
@@ -764,11 +1007,7 @@ private struct DocumentFindBar: View {
     .font(.caption)
     .padding(.horizontal, 8)
     .padding(.vertical, 6)
-    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 7))
-    .overlay {
-      RoundedRectangle(cornerRadius: 7)
-        .strokeBorder(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 0.5)
-    }
+    .documentFloatingBarStyle()
   }
 
   private var findCountLabel: String {
@@ -842,6 +1081,8 @@ struct VirtualizedTextDocumentView: View {
   /// away and back; the view reads from and populates it instead of always opening
   /// a fresh buffer.
   let documentCache: OpenDocumentCache
+  @ObservedObject var documentChangeReviewState: DocumentChangeReviewState
+  var onEditableDocumentLoaded: (TextBuffer) -> Void = { _ in }
 
   @State private var phase: Phase = .loading
   @StateObject private var findState = DocumentFindState()
@@ -863,28 +1104,19 @@ struct VirtualizedTextDocumentView: View {
         // within the grace period, so no spinner ever flashes.
         DelayedProgressView()
       case .editable(let buffer, let encoding):
-        LargeTextViewport(
-          backend: .editable(buffer),
-          accessibilityLabel: accessibilityLabel,
-          syntax: syntax,
-          markdownViewMode: markdownViewMode,
-          showsMarkdownViewModeToggleCursorRect: showsMarkdownViewModeToggleCursorRect,
-          wrapsLines: wrapsLines,
-          isEditable: isEditable,
-          saveURL: url,
-          saveEncoding: encoding,
-          saveRequest: saveRequest,
-          onSaveCompletion: onSaveCompletion,
-          onDirtyChange: onDirtyChange,
-          onFocusChange: onFocusChange,
-          onOpenLinkedFile: onOpenLinkedFile,
-          onViewReady: findState.registerDocumentView,
-          onFindRequested: findState.showFindBar,
-          onDocumentContentChanged: findState.documentDidChange
-        )
-        .overlay(alignment: .topTrailing) {
-          documentFindOverlay
+        ZStack {
+          editableDocumentViewport(buffer: buffer, encoding: encoding)
+            .opacity(documentChangeReviewState.isReviewVisible ? 0 : 1)
+            .allowsHitTesting(!documentChangeReviewState.isReviewVisible)
+
+          if documentChangeReviewState.isReviewVisible,
+            let presentation = documentChangeReviewState.presentation
+          {
+            reviewViewport(presentation)
+          }
         }
+        .overlay(alignment: .topTrailing) { documentFindOverlay }
+        .overlay(alignment: .top) { documentChangeReviewOverlay }
       case .readOnly(let file):
         LargeTextViewport(
           backend: .readOnly(file),
@@ -914,9 +1146,69 @@ struct VirtualizedTextDocumentView: View {
     .onChange(of: url) { _, _ in
       findState.resetForDocumentSwitch()
     }
+    .onChange(of: documentChangeReviewState.isReviewVisible) { _, _ in
+      findState.resetForDocumentSwitch()
+      DispatchQueue.main.async {
+        findState.focusDocument()
+      }
+    }
     .task(id: TextViewportLoad(url: url, token: reloadToken)) {
       await open()
     }
+  }
+
+  private func editableDocumentViewport(
+    buffer: TextBuffer,
+    encoding: String.Encoding
+  ) -> some View {
+    LargeTextViewport(
+      backend: .editable(buffer),
+      accessibilityLabel: accessibilityLabel,
+      syntax: syntax,
+      markdownViewMode: markdownViewMode,
+      showsMarkdownViewModeToggleCursorRect: showsMarkdownViewModeToggleCursorRect,
+      wrapsLines: wrapsLines,
+      isEditable: isEditable && !documentChangeReviewState.isReviewVisible,
+      saveURL: url,
+      saveEncoding: encoding,
+      saveRequest: saveRequest,
+      onSaveCompletion: onSaveCompletion,
+      onDirtyChange: onDirtyChange,
+      onFocusChange: onFocusChange,
+      onOpenLinkedFile: onOpenLinkedFile,
+      onViewReady: findState.registerDocumentView,
+      onFindRequested: findState.showFindBar,
+      onDocumentContentChanged: findState.documentDidChange,
+      onCancelOperation: {
+        guard documentChangeReviewState.isReviewVisible else { return false }
+        documentChangeReviewState.closeReview()
+        return true
+      }
+    )
+  }
+
+  private func reviewViewport(_ presentation: DocumentChangeReviewPresentation) -> some View {
+    LargeTextViewport(
+      backend: .editable(presentation.buffer),
+      accessibilityLabel: "\(accessibilityLabel) changes",
+      syntax: syntax,
+      markdownViewMode: syntax == .markdown ? .rendered : markdownViewMode,
+      showsMarkdownViewModeToggleCursorRect: false,
+      showsLineNumbersOverride: false,
+      documentDiffRowKinds: presentation.rowKinds,
+      wrapsLines: wrapsLines,
+      isEditable: false,
+      saveURL: url,
+      onFocusChange: onFocusChange,
+      onOpenLinkedFile: onOpenLinkedFile,
+      onViewReady: findState.registerDocumentView,
+      onFindRequested: findState.showFindBar,
+      onDocumentContentChanged: findState.documentDidChange,
+      onCancelOperation: {
+        documentChangeReviewState.closeReview()
+        return true
+      }
+    )
   }
 
   @ViewBuilder
@@ -925,6 +1217,14 @@ struct VirtualizedTextDocumentView: View {
       DocumentFindBar(state: findState)
         .padding(.top, 8)
         .padding(.trailing, 12)
+    }
+  }
+
+  @ViewBuilder
+  private var documentChangeReviewOverlay: some View {
+    if documentChangeReviewState.showsChip {
+      DocumentChangeReviewChip(state: documentChangeReviewState)
+        .padding(.top, 8)
     }
   }
 
@@ -940,6 +1240,7 @@ struct VirtualizedTextDocumentView: View {
     if let cached = documentCache.cached(forKey: key) {
       phase = .editable(cached.buffer, encoding: cached.encoding)
       onDirtyChange(cached.buffer.isDirty)
+      onEditableDocumentLoaded(cached.buffer)
       return
     }
     phase = .loading
@@ -980,6 +1281,7 @@ struct VirtualizedTextDocumentView: View {
           buffer: buffer, encoding: encoding, fingerprint: fingerprint, forKey: key)
         phase = .editable(buffer, encoding: encoding)
         onDirtyChange(buffer.isDirty)  // a freshly opened buffer is clean
+        onEditableDocumentLoaded(buffer)
       }
     } catch {
       guard !Task.isCancelled else {

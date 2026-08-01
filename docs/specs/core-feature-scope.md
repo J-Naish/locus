@@ -99,7 +99,8 @@ Should support:
 - frontmatter presentation
 - a raw Markdown editor surface (optional, later)
 - table presentation
-- diff view
+- inline review for external changes
+  (`docs/specs/document-change-review.md`)
 
 ## Structured Text and Code Files
 
@@ -131,7 +132,8 @@ Should support:
 - bracket and quote pairing
 - lightweight validation with clear inline errors
 - schema-aware hints when a schema is available locally or embedded in the file
-- diff view for external changes
+- inline review for external changes
+  (`docs/specs/document-change-review.md`)
 
 Not a goal:
 

@@ -84,6 +84,14 @@ final class OpenDocumentCache: ObservableObject {
     return (entry.buffer, entry.encoding)
   }
 
+  /// Returns the live in-memory contents without changing LRU order. External
+  /// reload review uses this immediately before dropping a buffer so the baseline
+  /// includes edits the user has seen but not yet saved.
+  func currentText(forKey key: String) -> String? {
+    guard let buffer = entries[key]?.buffer else { return nil }
+    return buffer.text(forLineRange: 0, count: buffer.lineCount)
+  }
+
   /// The disk fingerprint the cached buffer for `key` was last in sync with, used
   /// to detect an external change while the document was inactive.
   func fingerprint(forKey key: String) -> DocumentFileFingerprint? {

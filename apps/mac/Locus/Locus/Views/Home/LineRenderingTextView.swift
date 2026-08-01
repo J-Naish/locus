@@ -2,6 +2,19 @@ import AVKit
 import AppKit
 import CoreText
 
+enum DocumentDiffDrawingMetrics {
+  static let addedTintAlpha: CGFloat = 0.10
+  static let removedTintAlpha: CGFloat = 0.10
+  static let removedStrikeAlpha: CGFloat = 0.45
+  static let removedStrikeWidth: CGFloat = 1
+}
+
+struct DocumentDiffDecoration {
+  let kind: DocumentDiffRowKind
+  let tintColor: NSColor?
+  let drawsStrike: Bool
+}
+
 /// Custom flipped `NSView` document view that draws only the visible band of a
 /// [`TextBuffer`], fetching that band from the Rust core on demand. The document
 /// height is synthesized from the visual-row count, so a multi-gigabyte file
@@ -185,6 +198,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// Requests the SwiftUI host to reveal the document find bar. Kept local to the
   /// focused text responder; there is no menu/global shortcut in this round.
   var onFindRequested: (() -> Void)?
+  /// Gives a presentation overlay first refusal on Escape. Returning true means
+  /// the host handled the command and normal editor handling should stop.
+  var onCancelOperation: (() -> Bool)?
   /// Reports content/display-text changes while find is open so the host can
   /// recompute matches without coupling search state to the rendering cache.
   var onDocumentContentChanged: (() -> Void)?
@@ -228,6 +244,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   var maximumPastedByteCount = 64 * 1024 * 1024
   private var documentFindHighlights: DocumentFindHighlightState? {
     didSet { invalidateVisibleArea() }
+  }
+  private var documentDiffRowKinds: [DocumentDiffRowKind]? {
+    didSet {
+      guard documentDiffRowKinds != oldValue else { return }
+      invalidateVisibleArea()
+    }
   }
   private final class DocumentFindDisplayTextCache {
     let revision: UInt64
@@ -2363,6 +2385,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     maxObservedLineWidth = 0
     selection = nil
     documentFindHighlights = nil
+    documentDiffRowKinds = nil
     documentFindDisplayTextCache = nil
     isSelecting = false
     verticalGoalX = nil
@@ -3393,6 +3416,18 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     documentFindHighlights = nil
   }
 
+  func setDocumentDiffRowKinds(_ kinds: [DocumentDiffRowKind]?) {
+    documentDiffRowKinds = kinds
+  }
+
+  var documentDiffRowKindsForTesting: [DocumentDiffRowKind]? {
+    documentDiffRowKinds
+  }
+
+  func documentDiffDecorationForTesting(at line: Int) -> DocumentDiffDecoration {
+    documentDiffDecoration(at: line)
+  }
+
   /// The unclipped buffer text spanning `[(fromLine, fromColumn), (toLine, toColumn))`,
   /// joined with LF. Unlike `displayText`, lines are not clipped to the display
   /// limit, so accessibility reads the real document in full-document coordinates.
@@ -3467,6 +3502,10 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// without a beep — self-inserting text arrives via `insertText`, not here.
   override func doCommand(by selector: Selector) {
     switch selector {
+    case #selector(NSResponder.cancelOperation(_:)):
+      if onCancelOperation?() == true {
+        return
+      }
     case #selector(NSStandardKeyBindingResponding.moveLeft(_:)):
       moveHorizontally(forward: false, extend: false)
     case #selector(NSStandardKeyBindingResponding.moveRight(_:)):
@@ -6119,6 +6158,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         lines: lines, range: range, textX: textX, visibleRows: rows, buffer: buffer)
       drawMarkdownInlineCodeChipBackgrounds(lines: lines, range: range, visibleRows: rows)
     }
+    drawDocumentDiffBackgrounds(range: range)
 
     if let selection, !selection.isEmpty {
       drawSelectionHighlight(selection, lines: lines, range: range, textX: textX, visibleRows: rows)
@@ -6157,6 +6197,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
         textX: lineTextColumnX(forLine: lineIndex),
         visibleRows: rows)
     }
+    drawDocumentDiffRemovedStrikes(lines: lines, range: range, visibleRows: rows)
     // Copy controls draw above the code so a long line never occludes them.
     if usesMarkdownDocumentLayout {
       drawMarkdownCodeCopyControls(range: range, visibleRows: rows)
@@ -7794,6 +7835,98 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       }
     }
     return index
+  }
+
+  private func drawDocumentDiffBackgrounds(range: Range<Int>) {
+    guard documentDiffRowKinds != nil else { return }
+    for line in range {
+      let decoration = documentDiffDecoration(at: line)
+      guard let color = decoration.tintColor else { continue }
+      let top = yOffset(ofLine: line)
+      let bottom =
+        line + 1 < lineCount
+        ? yOffset(ofLine: line + 1)
+        : totalContentHeight
+      let rect = NSRect(
+        x: lineOuterColumnX(forLine: line),
+        y: top,
+        width: lineOuterContentWidth(forLine: line),
+        height: max(0, bottom - top))
+      color.setFill()
+      rect.fill()
+    }
+  }
+
+  private func drawDocumentDiffRemovedStrikes(
+    lines: [NSAttributedString],
+    range: Range<Int>,
+    visibleRows: Range<Int>
+  ) {
+    guard documentDiffRowKinds != nil else { return }
+    let color = NSColor.systemRed.withAlphaComponent(
+      DocumentDiffDrawingMetrics.removedStrikeAlpha)
+    color.setFill()
+
+    for (offset, attributedLine) in lines.enumerated() {
+      let line = range.lowerBound + offset
+      guard documentDiffDecoration(at: line).drawsStrike, !isHugeLine(line) else {
+        continue
+      }
+      let didClip = beginMarkdownTableClipIfNeeded(forLine: line, visibleRows: visibleRows)
+      defer {
+        if didClip {
+          NSGraphicsContext.restoreGraphicsState()
+        }
+      }
+      let attributed = composedLineForDisplay(line: line, base: attributedLine)
+      let starts = visualRowStartOffsets(ofLine: line, attributed: attributed)
+      let rowsTop = yOffset(ofLine: line) + leadingInset(forLine: line)
+      let height = rowHeight(forLine: line)
+      let textX = lineTextColumnX(forLine: line)
+      for rowIndex in starts.indices {
+        let globalRow = firstVisualRow(ofLine: line) + rowIndex
+        guard visibleRows.contains(globalRow) else { continue }
+        let bounds = rowRange(rowIndex, starts: starts, length: attributed.length)
+        let rowText = attributed.attributedSubstring(
+          from: NSRange(location: bounds.start, length: bounds.end - bounds.start))
+        let width = rowText.size().width
+        guard width > 0 else { continue }
+        let strike = NSRect(
+          x: textX,
+          y: rowsTop + CGFloat(rowIndex) * height
+            + (height - DocumentDiffDrawingMetrics.removedStrikeWidth) / 2,
+          width: width,
+          height: DocumentDiffDrawingMetrics.removedStrikeWidth)
+        backingAlignedRect(strike, options: .alignAllEdgesNearest).fill()
+      }
+    }
+  }
+
+  private func documentDiffDecoration(at line: Int) -> DocumentDiffDecoration {
+    guard
+      let documentDiffRowKinds,
+      line >= 0,
+      line < documentDiffRowKinds.count
+    else {
+      return DocumentDiffDecoration(kind: .common, tintColor: nil, drawsStrike: false)
+    }
+    let kind = documentDiffRowKinds[line]
+    switch kind {
+    case .common:
+      return DocumentDiffDecoration(kind: kind, tintColor: nil, drawsStrike: false)
+    case .added:
+      return DocumentDiffDecoration(
+        kind: kind,
+        tintColor: NSColor.systemGreen.withAlphaComponent(
+          DocumentDiffDrawingMetrics.addedTintAlpha),
+        drawsStrike: false)
+    case .removed:
+      return DocumentDiffDecoration(
+        kind: kind,
+        tintColor: NSColor.systemRed.withAlphaComponent(
+          DocumentDiffDrawingMetrics.removedTintAlpha),
+        drawsStrike: true)
+    }
   }
 
   /// Fills the selected column span on each visible line, behind the text. Lines

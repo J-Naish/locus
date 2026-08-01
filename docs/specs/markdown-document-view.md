@@ -405,7 +405,9 @@ Phase A (variable row heights, full type scale), typeset tables with
 cell wrapping and table-local horizontal scroll, image/video blocks,
 clickable links, task checkbox toggles, and the code card (language
 label, copy control, comments/strings tint), plus document find over
-rendered display text with mapped highlights, have shipped. Later:
+rendered display text with mapped highlights, have shipped. External
+rewrites use the inline review defined in
+[document-change-review.md](document-change-review.md). Later:
 Phase R (optional raw editor surface), Phase B (Rust-core
 classification), polish backlog (theme slots, link editor,
 copy-as-rich-text, richer in-paragraph
