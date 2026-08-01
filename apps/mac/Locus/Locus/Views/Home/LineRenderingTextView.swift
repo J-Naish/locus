@@ -278,6 +278,9 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
     var rowSizes: [Int: [CGSize]]
   }
   private var lineRenderCache: LineRenderCache?
+  private var outOfBandAttributedLineMemo:
+    (revision: UInt64, line: Int, attributed: NSAttributedString)?
+  private(set) var outOfBandAttributedLineComputationCountForTesting = 0
   private var rowStartComputationCount = 0
   private var rowSizeComputationCount = 0
   private var markdownLineStateCache: (revision: UInt64, states: [MarkdownLineStyleState])?
@@ -385,6 +388,7 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
 
   private func resetLineRenderCache() {
     lineRenderCache = nil
+    outOfBandAttributedLineMemo = nil
     lastVideoSyncKey = nil
   }
 
@@ -6058,10 +6062,19 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
   /// single-line fetch for an out-of-band line.
   private func attributedLine(forLine line: Int) -> NSAttributedString {
     guard let buffer = reader else { return NSAttributedString() }
-    if let cache = lineRenderCache, cache.revision == buffer.revision,
+    let revision = buffer.revision
+    if let cache = lineRenderCache, cache.revision == revision,
       let cached = cache.attributed[line]
     {
       return cached
+    }
+    let isComposingLine = composition?.anchor.line == line
+    if !isComposingLine,
+      let memo = outOfBandAttributedLineMemo,
+      memo.revision == revision,
+      memo.line == line
+    {
+      return memo.attributed
     }
     let text =
       buffer.text(forLineRange: line, count: 1, maxBytesPerLine: maximumFetchedBytesPerLine)
@@ -6071,7 +6084,12 @@ final class LineRenderingTextView: NSView, NSUserInterfaceValidations {
       line >= 0 && line < (states?.count ?? 0)
       ? states?[line] ?? .plain
       : .plain
-    return highlightedLine(text, lineIndex: line, markdownLineState: state)
+    let attributed = highlightedLine(text, lineIndex: line, markdownLineState: state)
+    outOfBandAttributedLineComputationCountForTesting += 1
+    if !isComposingLine {
+      outOfBandAttributedLineMemo = (revision, line, attributed)
+    }
+    return attributed
   }
 
   private func lineLengthUTF16(_ line: Int) -> Int {

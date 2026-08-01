@@ -352,6 +352,96 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testOutOfBandAttributedLineMemoReusesTheLastLine() throws {
+    let contents = (0..<60).map { "line \($0)" }.joined(separator: "\n")
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+    view.setBuffer(buffer)
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<10)
+
+    let first = view.attributedLineForTesting(forLine: 30)
+    let second = view.attributedLineForTesting(forLine: 30)
+
+    XCTAssertEqual(first.string, second.string)
+    XCTAssertEqual(view.outOfBandAttributedLineComputationCountForTesting, 1)
+  }
+
+  @MainActor
+  func testOutOfBandAttributedLineMemoRecomputesAfterEdit() throws {
+    let contents = (0..<60).map { "line \($0)" }.joined(separator: "\n")
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+    view.setBuffer(buffer)
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<10)
+    _ = view.attributedLineForTesting(forLine: 30)
+
+    let offset = try buffer.position(forLine: 30, columnUTF16: 0).utf16
+    try buffer.insert("updated ", atUTF16: offset)
+    let updated = view.attributedLineForTesting(forLine: 30)
+
+    XCTAssertEqual(updated.string, "updated line 30")
+    XCTAssertEqual(view.outOfBandAttributedLineComputationCountForTesting, 2)
+  }
+
+  @MainActor
+  func testOutOfBandAttributedLineMemoKeepsOnlyTheLastLine() throws {
+    let contents = (0..<60).map { "line \($0)" }.joined(separator: "\n")
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+    view.setBuffer(buffer)
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<10)
+
+    _ = view.attributedLineForTesting(forLine: 30)
+    _ = view.attributedLineForTesting(forLine: 31)
+    _ = view.attributedLineForTesting(forLine: 30)
+
+    XCTAssertEqual(view.outOfBandAttributedLineComputationCountForTesting, 3)
+  }
+
+  @MainActor
+  func testInBandAttributedLineDoesNotTouchOutOfBandMemoCounter() throws {
+    let contents = (0..<60).map { "line \($0)" }.joined(separator: "\n")
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+    view.setBuffer(buffer)
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<10)
+
+    _ = view.attributedLineForTesting(forLine: 5)
+    _ = view.attributedLineForTesting(forLine: 5)
+
+    XCTAssertEqual(view.outOfBandAttributedLineComputationCountForTesting, 0)
+  }
+
+  @MainActor
+  func testComposingLineBypassesOutOfBandAttributedLineMemo() throws {
+    let contents = (0..<60).map { "line \($0)" }.joined(separator: "\n")
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+    view.isEditable = true
+    view.setBuffer(buffer)
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<10)
+    view.beginCaretSelection(at: .init(line: 30, columnUTF16: 0))
+    view.setMarkedText(
+      "かな",
+      selectedRange: NSRange(location: 2, length: 0),
+      replacementRange: Self.noReplacement)
+    view.resetLineRenderCacheForTesting()
+    let countBeforeRequests = view.outOfBandAttributedLineComputationCountForTesting
+
+    _ = view.attributedLineForTesting(forLine: 30)
+    _ = view.attributedLineForTesting(forLine: 30)
+
+    XCTAssertEqual(
+      view.outOfBandAttributedLineComputationCountForTesting - countBeforeRequests,
+      2)
+  }
+
+  @MainActor
   func testLineRenderCacheReusesVisualRowStartsAcrossRepeatedAccess() throws {
     let markdown = String(
       repeating: "A wrapped markdown paragraph with table-like prose. ", count: 8)
