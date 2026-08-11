@@ -883,6 +883,186 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
       ])
   }
 
+  func testMarkdownGFMCalloutHeaderRendersOnlyItsSourceLabel() {
+    let source = "> [!NOTE]"
+    let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [source])[0]
+    let map = TextDocumentSyntaxHighlighter.markdownDisplayMap(for: source, state: state)
+
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        source, font: TextDocumentSyntax.markdown.font, state: state),
+      "NOTE")
+    XCTAssertEqual(map.displayText, "NOTE")
+    XCTAssertNil(map.displayRange(forSourceRange: NSRange(location: 2, length: 2)))
+    XCTAssertNil(map.displayRange(forSourceRange: NSRange(location: 8, length: 1)))
+    XCTAssertEqual(
+      map.bufferRange(
+        forDisplayStart: 0, end: map.displayLength, includeWholeLineMarkers: false),
+      NSRange(location: 4, length: 4))
+  }
+
+  func testMarkdownGFMCalloutKindsUseTheirTintAndRejectInvalidHeaders() {
+    let cases: [(label: String, kind: MarkdownCalloutKind, tint: NSColor)] = [
+      ("NOTE", .note, MarkdownDocumentMetrics.calloutNoteColor),
+      ("TIP", .tip, MarkdownDocumentMetrics.calloutTipColor),
+      ("IMPORTANT", .important, MarkdownDocumentMetrics.calloutImportantColor),
+      ("WARNING", .warning, MarkdownDocumentMetrics.calloutWarningColor),
+      ("CAUTION", .caution, MarkdownDocumentMetrics.calloutCautionColor),
+    ]
+
+    for testCase in cases {
+      let source = "> [!\(testCase.label)]"
+      let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [source])[0]
+      let rendered = TextDocumentSyntaxHighlighter.highlightedLine(
+        source,
+        syntax: .markdown,
+        font: TextDocumentSyntax.markdown.font,
+        markdownLineState: state)
+
+      XCTAssertEqual(state.quoteCalloutKind, testCase.kind)
+      XCTAssertEqual(rendered.string, testCase.label)
+      XCTAssertEqual(
+        rendered.foregroundColor(in: rendered.string, matching: testCase.label),
+        testCase.tint)
+      XCTAssertEqual(
+        LineRenderingTextView.markdownQuoteBarFillColorForTesting(
+          calloutKind: testCase.kind),
+        testCase.tint)
+      XCTAssertTrue(
+        rendered.resolvedFont(at: 0)?.fontDescriptor.symbolicTraits.contains(.bold) == true)
+    }
+
+    for source in ["> [!BOGUS]", "> [!note]", ">> [!NOTE]", "> [!NOTE] extra"] {
+      let state = TextDocumentSyntaxHighlighter.markdownLineStates(for: [source])[0]
+      XCTAssertNil(state.quoteCalloutKind)
+      XCTAssertEqual(
+        TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+          source, font: TextDocumentSyntax.markdown.font, state: state),
+        (source as NSString).substring(
+          from: source.hasPrefix(">>") ? 3 : 2))
+    }
+  }
+
+  func testMarkdownGFMCalloutStateCoversContiguousQuoteRunOnly() {
+    let lines = [
+      "> [!WARNING]",
+      "> Check the deployment.",
+      "> Then retry.",
+      "Plain paragraph.",
+      "> New quote.",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(states[0].quoteCalloutKind, .warning)
+    XCTAssertEqual(states[1].quoteCalloutKind, .warning)
+    XCTAssertEqual(states[2].quoteCalloutKind, .warning)
+    XCTAssertNil(states[3].quoteCalloutKind)
+    XCTAssertNil(states[4].quoteCalloutKind)
+  }
+
+  func testMarkdownGFMCalloutHeaderMustStartItsQuoteRun() {
+    let lines = [
+      "> Ordinary quote.",
+      "> [!NOTE]",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertNil(states[0].quoteCalloutKind)
+    XCTAssertNil(states[1].quoteCalloutKind)
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[1], font: TextDocumentSyntax.markdown.font, state: states[1]),
+      "[!NOTE]")
+  }
+
+  func testMarkdownShortcutReferenceLinksResolveAndUnresolvedStayLiteral() {
+    let lines = [
+      "Read [Locus] and [Missing].",
+      "[locus]: https://example.com/locus",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+    let rendered = TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+      lines[0], font: TextDocumentSyntax.markdown.font, state: states[0])
+
+    XCTAssertEqual(rendered, "Read Locus and [Missing].")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.markdownLinkTargets(for: lines[0], state: states[0]),
+      [
+        MarkdownLinkTarget(
+          displayRange: (rendered as NSString).range(of: "Locus"),
+          destination: "https://example.com/locus")
+      ])
+  }
+
+  func testMarkdownShortcutReferenceLinkGuardsLeaveOtherBracketFamiliesUntouched() {
+    let lines = [
+      "![label] [label](url) [label][other] [^fn]",
+      "[label]: https://example.com/label",
+      "[other]: https://example.com/other",
+      "[^fn]: footnote",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[0], font: TextDocumentSyntax.markdown.font, state: states[0]),
+      "![label] label label [^fn]")
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[1], font: TextDocumentSyntax.markdown.font, state: states[1]),
+      lines[1])
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.markdownLinkTargets(for: lines[0], state: states[0])
+        .map(\.destination),
+      ["url", "https://example.com/other"])
+  }
+
+  func testMarkdownShortcutReferenceLinkUsesFullReferenceCaseNormalization() {
+    let lines = [
+      "[Locus Site] and [Locus][LOCUS SITE]",
+      "[locus site]: https://example.com/locus",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(
+      TextDocumentSyntaxHighlighter.markdownLinkTargets(for: lines[0], state: states[0])
+        .map(\.destination),
+      ["https://example.com/locus", "https://example.com/locus"])
+  }
+
+  func testMarkdownHeadingAnchorsUseRenderedHeadingTextAndGitHubSlugs() {
+    let lines = [
+      "## My Section Title!",
+      "# 見出し テスト",
+      "Setext **Heading**",
+      "===",
+      "## Phase 1 - Setup",
+      "# A  B",
+      "##   Padded   ",
+    ]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(
+      MarkdownHeadingAnchorTable.anchors(lines: lines, states: states),
+      [
+        MarkdownHeadingAnchor(line: 0, slug: "my-section-title"),
+        MarkdownHeadingAnchor(line: 1, slug: "見出し-テスト"),
+        MarkdownHeadingAnchor(line: 2, slug: "setext-heading"),
+        MarkdownHeadingAnchor(line: 4, slug: "phase-1---setup"),
+        MarkdownHeadingAnchor(line: 5, slug: "a--b"),
+        MarkdownHeadingAnchor(line: 6, slug: "padded"),
+      ])
+  }
+
+  func testMarkdownHeadingAnchorsDeduplicateInDocumentOrder() {
+    let lines = ["# Same", "Same", "---", "## Same"]
+    let states = TextDocumentSyntaxHighlighter.markdownLineStates(for: lines)
+
+    XCTAssertEqual(
+      MarkdownHeadingAnchorTable.anchors(lines: lines, states: states).map(\.slug),
+      ["same", "same-1", "same-2"])
+  }
+
   func testMarkdownFootnoteDefinitionsRemainVisibleLiteralText() {
     let lines = [
       "A footnote marker [^1].",
@@ -1023,7 +1203,13 @@ final class WorkspaceTextDocumentSupportTests: XCTestCase {
     XCTAssertEqual(
       MarkdownLinkNavigation.visualState(for: "#overview", baseFileURL: base),
       .valid)
-    XCTAssertNil(MarkdownLinkNavigation.openRequest(for: "#overview", baseFileURL: base))
+    XCTAssertEqual(
+      MarkdownLinkNavigation.openRequest(for: "#overview", baseFileURL: base),
+      .anchor("overview"))
+    XCTAssertEqual(
+      MarkdownLinkNavigation.openRequest(
+        for: "#%E8%A6%8B%E5%87%BA%E3%81%97", baseFileURL: base),
+      .anchor("見出し"))
   }
 
   func testMarkdownImageOnlyLineIsClassifiedWithSourceAndAlt() {

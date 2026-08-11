@@ -58,6 +58,11 @@ enum MarkdownDocumentMetrics {
   static let codeFenceFontSize: CGFloat = 11
   static let quoteBarWidth: CGFloat = 3
   static let quoteBarInset: CGFloat = 14
+  static let calloutNoteColor = NSColor.systemBlue
+  static let calloutTipColor = NSColor.systemGreen
+  static let calloutImportantColor = NSColor.systemPurple
+  static let calloutWarningColor = NSColor.systemOrange
+  static let calloutCautionColor = NSColor.systemRed
   static let markerColumnWidth: CGFloat = 24
   static let bulletGlyphsByDepth = ["•", "◦", "▪"]
   static let quoteIndentWidth: CGFloat = 17
@@ -152,6 +157,21 @@ enum MarkdownDocumentMetrics {
   static let frontMatterBlockValueCornerRadius: CGFloat = 8
   static let frontMatterKeyValueSeparator = "\n"
   static let frontMatterChipDisplaySeparator = "        "
+
+  static func calloutColor(for kind: MarkdownCalloutKind) -> NSColor {
+    switch kind {
+    case .note:
+      calloutNoteColor
+    case .tip:
+      calloutTipColor
+    case .important:
+      calloutImportantColor
+    case .warning:
+      calloutWarningColor
+    case .caution:
+      calloutCautionColor
+    }
+  }
   static let frontMatterKeyValueSeparatorLength =
     (frontMatterKeyValueSeparator as NSString).length
 
@@ -396,6 +416,31 @@ struct MarkdownFrontMatterBlockScalar: Equatable, Sendable {
   var keyRange: NSRange
 }
 
+enum MarkdownCalloutKind: Equatable, Sendable {
+  case note
+  case tip
+  case important
+  case warning
+  case caution
+
+  fileprivate init?(label: String) {
+    switch label {
+    case "NOTE":
+      self = .note
+    case "TIP":
+      self = .tip
+    case "IMPORTANT":
+      self = .important
+    case "WARNING":
+      self = .warning
+    case "CAUTION":
+      self = .caution
+    default:
+      return nil
+    }
+  }
+}
+
 struct MarkdownLineStyleState: Equatable, Sendable {
   var insideFence = false
   var setextHeadingLevel: Int?
@@ -443,6 +488,8 @@ struct MarkdownLineStyleState: Equatable, Sendable {
   var isTableSeparator = false
   var tableColumns: [MarkdownTableColumn] = []
   var quoteDepth = 0
+  /// The recognized callout kind for every line in one contiguous quoted run.
+  var quoteCalloutKind: MarkdownCalloutKind?
   var listDepth = 0
   var imageSource: MarkdownImageSource?
 
@@ -1276,6 +1323,24 @@ enum TextDocumentSyntaxHighlighter {
         foregroundColor: .secondaryLabelColor)
     }
 
+    if let callout = markdownCalloutHeader(in: line),
+      callout.kind == state.quoteCalloutKind
+    {
+      let labelFont = NSFont.systemFont(
+        ofSize: MarkdownDocumentMetrics.bodyFontSize,
+        weight: .semibold)
+      let labelFonts = MarkdownFontSet(
+        regular: labelFont,
+        bold: labelFont,
+        italic: labelFont,
+        boldItalic: labelFont)
+      return block(
+        fonts: labelFonts,
+        displayFont: labelFont,
+        foregroundColor: MarkdownDocumentMetrics.calloutColor(for: callout.kind),
+        stylesInline: false)
+    }
+
     if let heading = markdownHeadingInfo(in: context.body) {
       let fonts = typography.heading(level: heading.level)
       return block(
@@ -1395,6 +1460,14 @@ enum TextDocumentSyntaxHighlighter {
     }
     if state.imageSource != nil, let map = markdownImageCaptionDisplayMap(for: line) {
       return map
+    }
+    if let callout = markdownCalloutHeader(in: line),
+      callout.kind == state.quoteCalloutKind
+    {
+      return .map(
+        sourceText: line,
+        displayText: callout.label,
+        sourceStart: callout.labelRange.location)
     }
     if let heading = markdownHeadingInfo(in: context.body) {
       let start = min(context.quotePrefixLength + heading.prefixLength, sourceLength)
@@ -1902,6 +1975,26 @@ enum TextDocumentSyntaxHighlighter {
           collectedTargets.append(
             MarkdownPendingLinkTarget(sourceRange: sourceGroupRange, destination: destination))
         })
+      replaceRenderedMatchesInMap(
+        expression: shortcutReferenceLinkExpression,
+        replacementGroup: 1,
+        map: &current,
+        protectedRanges: &protectedRanges,
+        protectsReplacement: false,
+        shouldReplace: { match, text in
+          markdownShortcutReferenceLinkDestination(
+            for: match, in: text, definitions: referenceDefinitions) != nil
+        },
+        onReplace: { match, text, _, _, sourceGroupRange in
+          guard
+            let destination = markdownShortcutReferenceLinkDestination(
+              for: match, in: text, definitions: referenceDefinitions)
+          else {
+            return
+          }
+          collectedTargets.append(
+            MarkdownPendingLinkTarget(sourceRange: sourceGroupRange, destination: destination))
+        })
     }
     if shouldRunMarkdownAutolinkPass(in: current.displayText) {
       replaceRenderedMatchesInMap(
@@ -2260,6 +2353,21 @@ enum TextDocumentSyntaxHighlighter {
         protectsReplacement: false,
         shouldReplace: { match, text in
           markdownReferenceLinkDestination(
+            for: match,
+            in: text,
+            definitions: markdownLineState.referenceDefinitions) != nil
+        })
+      replaceRenderedMatches(
+        expression: shortcutReferenceLinkExpression,
+        replacementGroup: 1,
+        attributes: renderedLinkAttributes(
+          font: lineFonts.regular,
+          includeVisualAttributes: includeVisualAttributes),
+        in: attributed,
+        protectedRanges: &protectedRanges,
+        protectsReplacement: false,
+        shouldReplace: { match, text in
+          markdownShortcutReferenceLinkDestination(
             for: match,
             in: text,
             definitions: markdownLineState.referenceDefinitions) != nil
@@ -2733,6 +2841,38 @@ enum TextDocumentSyntaxHighlighter {
     }
   }
 
+  private struct MarkdownCalloutHeader {
+    let kind: MarkdownCalloutKind
+    let label: String
+    let labelRange: NSRange
+  }
+
+  private static func markdownCalloutHeader(in line: String) -> MarkdownCalloutHeader? {
+    let context = markdownLineContext(in: line)
+    guard context.quoteDepth == 1 else { return nil }
+    let body = context.body as NSString
+    var end = body.length
+    while end > 0 {
+      let character = body.character(at: end - 1)
+      guard character == 32 || character == 9 else { break }
+      end -= 1
+    }
+    guard end >= 4, body.character(at: 0) == 91, body.character(at: 1) == 33,
+      body.character(at: end - 1) == 93
+    else {
+      return nil
+    }
+    let labelRangeInBody = NSRange(location: 2, length: end - 3)
+    let label = body.substring(with: labelRangeInBody)
+    guard let kind = MarkdownCalloutKind(label: label) else { return nil }
+    return MarkdownCalloutHeader(
+      kind: kind,
+      label: label,
+      labelRange: NSRange(
+        location: context.quotePrefixLength + labelRangeInBody.location,
+        length: labelRangeInBody.length))
+  }
+
   private static func protectedRangeBlocksReplacement(
     _ protected: NSRange,
     match: NSRange,
@@ -2906,6 +3046,17 @@ enum TextDocumentSyntaxHighlighter {
     let rawID = referenceText.isEmpty ? label : referenceText
     guard let normalized = markdownReferenceIdentifier(rawID) else { return nil }
     return definitions[normalized]
+  }
+
+  private static func markdownShortcutReferenceLinkDestination(
+    for match: NSTextCheckingResult,
+    in text: NSString,
+    definitions: [String: String]
+  ) -> String? {
+    markdownReferenceLinkDestination(
+      label: text.substring(with: match.range(at: 1)),
+      referenceText: "",
+      definitions: definitions)
   }
 
   private static func markdownReferenceIdentifier(_ raw: String) -> String? {
@@ -3370,6 +3521,28 @@ enum TextDocumentSyntaxHighlighter {
       } else {
         fenceOpening = (index, fence)
       }
+    }
+
+    var calloutKind: MarkdownCalloutKind?
+    var isInsideQuoteRun = false
+    for index in lines.indices {
+      let state = states[index]
+      let isQuoted =
+        state.quoteDepth > 0
+        && !state.insideFence
+        && !state.insideFrontMatter
+        && !state.isFenceDelimiter
+      guard isQuoted else {
+        calloutKind = nil
+        isInsideQuoteRun = false
+        continue
+      }
+
+      if !isInsideQuoteRun, state.quoteDepth == 1 {
+        calloutKind = markdownCalloutHeader(in: lines[index])?.kind
+      }
+      states[index].quoteCalloutKind = calloutKind
+      isInsideQuoteRun = true
     }
 
     var listIndentStack: [Int] = []
@@ -4835,6 +5008,8 @@ enum TextDocumentSyntaxHighlighter {
   private static let renderedLinkExpression = markdownRegex(
     #"(?<!!)\[([^\]\n]+)\]\(((?:[^()\n]|\([^()\n]*\))+)\)"#)
   private static let referenceLinkExpression = markdownRegex(#"(?<!!)\[([^\]\n]+)\]\[([^\]\n]*)\]"#)
+  private static let shortcutReferenceLinkExpression = markdownRegex(
+    #"(?<!!)(?<!\])\[(?!\^)([^\]\n]+)\](?![\(\[\:])"#)
   private static let referenceDefinitionExpression = markdownRegex(
     #"^\s{0,3}\[(?!\^)[^\]\n]+\]:\s+\S+"#)
   private static let referenceDefinitionPartsExpression = markdownRegex(

@@ -73,6 +73,12 @@
 		1A00000100000000000000E4 /* TextBufferTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000E5 /* TextBufferTests.swift */; };
 		1A00000100000000000000E8 /* TextViewportLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000E9 /* TextViewportLayoutTests.swift */; };
 		1A0000010000000000000F34 /* TextWrapTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000F35 /* TextWrapTests.swift */; };
+		1A0000010000000000000FE0 /* DocumentFindEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FE5 /* DocumentFindEngine.swift */; };
+		1A0000010000000000000FE1 /* DocumentFindEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FE2 /* DocumentFindEngineTests.swift */; };
+		1A0000010000000000000FE6 /* DocumentDiffEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FE7 /* DocumentDiffEngine.swift */; };
+		1A0000010000000000000FE8 /* DocumentDiffEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FE9 /* DocumentDiffEngineTests.swift */; };
+		1A0000010000000000000FEA /* DocumentChangeReviewStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FEB /* DocumentChangeReviewStateTests.swift */; };
+		1A0000010000000000000FE3 /* DocumentFindUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000FE4 /* DocumentFindUITests.swift */; };
 		1A00000100000000000000CA /* WorkspaceEntryPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000CB /* WorkspaceEntryPresentation.swift */; };
 		1A00000100000000000000CC /* WorkspaceSidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000CD /* WorkspaceSidebarView.swift */; };
 		1A00000100000000000000CE /* WorkspaceSidebarSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000100000000000000CF /* WorkspaceSidebarSelection.swift */; };
@@ -199,6 +205,12 @@
 		1A00000100000000000000E5 /* TextBufferTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextBufferTests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000E9 /* TextViewportLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextViewportLayoutTests.swift; sourceTree = "<group>"; };
 		1A0000010000000000000F35 /* TextWrapTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextWrapTests.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FE5 /* DocumentFindEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentFindEngine.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FE2 /* DocumentFindEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentFindEngineTests.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FE7 /* DocumentDiffEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentDiffEngine.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FE9 /* DocumentDiffEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentDiffEngineTests.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FEB /* DocumentChangeReviewStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentChangeReviewStateTests.swift; sourceTree = "<group>"; };
+		1A0000010000000000000FE4 /* DocumentFindUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentFindUITests.swift; sourceTree = "<group>"; };
 		1A00000100000000000000CB /* WorkspaceEntryPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEntryPresentation.swift; sourceTree = "<group>"; };
 		1A00000100000000000000CD /* WorkspaceSidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSidebarView.swift; sourceTree = "<group>"; };
 		1A00000100000000000000CF /* WorkspaceSidebarSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSidebarSelection.swift; sourceTree = "<group>"; };
@@ -312,6 +324,9 @@
 				1A00000100000000000000E5 /* TextBufferTests.swift */,
 				1A00000100000000000000E9 /* TextViewportLayoutTests.swift */,
 				1A0000010000000000000F35 /* TextWrapTests.swift */,
+				1A0000010000000000000FE2 /* DocumentFindEngineTests.swift */,
+				1A0000010000000000000FE9 /* DocumentDiffEngineTests.swift */,
+				1A0000010000000000000FEB /* DocumentChangeReviewStateTests.swift */,
 				1A0000010000000000000F03 /* TextBufferStoreTests.swift */,
 				1A0000010000000000000FA3 /* TerminalBridgeTests.swift */,
 				1A0000010000000000000FAC /* TerminalPaneViewTests.swift */,
@@ -346,6 +361,7 @@
 			isa = PBXGroup;
 			children = (
 				1A0000010000000000000053 /* WorkspaceSearchUITests.swift */,
+				1A0000010000000000000FE4 /* DocumentFindUITests.swift */,
 			);
 			path = LocusUITests;
 			sourceTree = "<group>";
@@ -433,6 +449,8 @@
 				1A00000100000000000000DB /* NativeSidebarToggle.swift */,
 				1A00000100000000000000BF /* TextDocumentSyntaxHighlighter.swift */,
 				1A0000010000000000000F72 /* MarkdownLinkNavigation.swift */,
+				1A0000010000000000000FE5 /* DocumentFindEngine.swift */,
+				1A0000010000000000000FE7 /* DocumentDiffEngine.swift */,
 				1A0000010000000000000099 /* WorkspaceDocumentSurface.swift */,
 				1A00000100000000000000E7 /* VirtualizedTextDocumentView.swift */,
 				1A0000010000000000000F31 /* LineRenderingTextView.swift */,
@@ -639,6 +657,8 @@
 				1A00000100000000000000C0 /* DocumentChangeMonitor.swift in Sources */,
 				1A00000100000000000000BE /* TextDocumentSyntaxHighlighter.swift in Sources */,
 				1A0000010000000000000F73 /* MarkdownLinkNavigation.swift in Sources */,
+				1A0000010000000000000FE0 /* DocumentFindEngine.swift in Sources */,
+				1A0000010000000000000FE6 /* DocumentDiffEngine.swift in Sources */,
 				1A0000010000000000000F00 /* TextBufferStore.swift in Sources */,
 				1A0000010000000000000F04 /* TextEncoding.swift in Sources */,
 				1A000001000000000000008A /* WorkspaceDirectoryMonitor.swift in Sources */,
@@ -696,6 +716,9 @@
 				1A00000100000000000000E4 /* TextBufferTests.swift in Sources */,
 				1A00000100000000000000E8 /* TextViewportLayoutTests.swift in Sources */,
 				1A0000010000000000000F34 /* TextWrapTests.swift in Sources */,
+				1A0000010000000000000FE1 /* DocumentFindEngineTests.swift in Sources */,
+				1A0000010000000000000FE8 /* DocumentDiffEngineTests.swift in Sources */,
+				1A0000010000000000000FEA /* DocumentChangeReviewStateTests.swift in Sources */,
 				1A0000010000000000000F02 /* TextBufferStoreTests.swift in Sources */,
 				1A0000010000000000000FA2 /* TerminalBridgeTests.swift in Sources */,
 				1A0000010000000000000FAB /* TerminalPaneViewTests.swift in Sources */,
@@ -720,6 +743,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1A0000010000000000000051 /* WorkspaceSearchUITests.swift in Sources */,
+				1A0000010000000000000FE3 /* DocumentFindUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

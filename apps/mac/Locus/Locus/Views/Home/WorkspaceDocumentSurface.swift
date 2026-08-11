@@ -45,6 +45,7 @@ struct WorkspaceDocumentSurface: View {
   /// Retains opened buffers across file switches so unsaved edits survive
   /// navigating away and back (persists for the surface's lifetime).
   @StateObject private var openDocuments = OpenDocumentCache()
+  @StateObject private var documentChangeReviewState = DocumentChangeReviewState()
 
   var body: some View {
     VStack(spacing: 0) {
@@ -103,6 +104,7 @@ struct WorkspaceDocumentSurface: View {
         .frame(width: 0, height: 0)
     )
     .task(id: entry?.id) {
+      documentChangeReviewState.selectDocument(entry?.url)
       // Start before and after preparing so external writes during the prepare
       // path still trigger a sync without relying on the later refresh token.
       startDocumentMonitoringIfNeeded(for: entry)
@@ -113,6 +115,7 @@ struct WorkspaceDocumentSurface: View {
       startDocumentMonitoringIfNeeded(for: entry)
     }
     .onChange(of: entry?.id) {
+      documentChangeReviewState.selectDocument(entry?.url)
       cancelAutoSave()
       isEditorFocused = false
       knownDocumentFingerprint = nil
@@ -199,9 +202,13 @@ struct WorkspaceDocumentSurface: View {
           onDirtyChange: { isDirty in handleDocumentDirtyChange(isDirty) },
           onFocusChange: { isFocused in isEditorFocused = isFocused },
           onOpenLinkedFile: onOpenLinkedFile,
-          documentCache: openDocuments
+          documentCache: openDocuments,
+          documentChangeReviewState: documentChangeReviewState,
+          onEditableDocumentLoaded: { buffer in
+            reconcileDocumentChangeReview(buffer: buffer, for: entry)
+          }
         )
-        if syntax == .markdown {
+        if syntax == .markdown, !documentChangeReviewState.isReviewVisible {
           MarkdownViewModeToggleButton(mode: $markdownViewMode)
             .padding(.top, MarkdownViewModeToggleMetrics.topPadding)
             .padding(.trailing, MarkdownViewModeToggleMetrics.trailingPadding)
@@ -280,8 +287,7 @@ struct WorkspaceDocumentSurface: View {
       openDocuments.setFingerprint(current, forKey: key)
       openDocuments.setPendingConflict(false, forKey: key)
       documentConflict = false
-      openDocuments.drop(forKey: key)  // clean → reopen to show the new disk content
-      documentReloadGeneration &+= 1
+      reloadFromDisk(entry)
     }
   }
 
@@ -367,9 +373,8 @@ struct WorkspaceDocumentSurface: View {
     // Drop the retained (edited) buffer so the reopen reads fresh disk content.
     if let entry {
       openDocuments.setPendingConflict(false, forKey: entry.url.locusStandardizedPath)
-      openDocuments.drop(forKey: entry.url.locusStandardizedPath)
+      reloadFromDisk(entry)
     }
-    documentReloadGeneration &+= 1
   }
 
   @MainActor
@@ -456,9 +461,36 @@ struct WorkspaceDocumentSurface: View {
     } else {
       documentConflict = false
       openDocuments.setPendingConflict(false, forKey: entry.url.locusStandardizedPath)
-      openDocuments.drop(forKey: entry.url.locusStandardizedPath)
-      documentReloadGeneration &+= 1
+      reloadFromDisk(entry)
     }
+  }
+
+  /// Captures the exact in-memory document the user last saw before the cache is
+  /// discarded. All text reload paths pass through here, so clean automatic
+  /// reloads and explicit conflict resolution share the same review baseline.
+  @MainActor
+  private func reloadFromDisk(_ entry: WorkspaceEntry) {
+    let key = entry.url.locusStandardizedPath
+    if WorkspaceTextDocumentSupport.canOpenInTextSurface(entry) {
+      let backend = WorkspaceDocumentSurfaceSupport.textBackend(
+        byteCount: WorkspaceDocumentSurfaceSupport.fileByteCount(at: entry.url),
+        recognizedTextType: WorkspaceTextDocumentSupport.isRecognizedTextType(entry))
+      if backend == .editable, let currentText = openDocuments.currentText(forKey: key) {
+        documentChangeReviewState.captureBaseline(currentText, for: entry.url)
+      } else if backend == .readOnlyWindowed {
+        documentChangeReviewState.discardReview(for: entry.url)
+      }
+    }
+    openDocuments.drop(forKey: key)
+    documentReloadGeneration &+= 1
+  }
+
+  @MainActor
+  private func reconcileDocumentChangeReview(buffer: TextBuffer, for entry: WorkspaceEntry) {
+    guard documentChangeReviewState.hasPendingBaseline(for: entry.url) else { return }
+    documentChangeReviewState.reconcileReloadedText(
+      buffer.text(forLineRange: 0, count: buffer.lineCount),
+      for: entry.url)
   }
 
 }
@@ -500,8 +532,7 @@ extension WorkspaceDocumentSurface {
       // reads fresh disk content (a no-op for non-text entries).
       documentConflict = false
       openDocuments.setPendingConflict(false, forKey: entry.url.locusStandardizedPath)
-      openDocuments.drop(forKey: entry.url.locusStandardizedPath)
-      documentReloadGeneration &+= 1
+      reloadFromDisk(entry)
     }
   }
 }

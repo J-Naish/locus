@@ -292,3 +292,26 @@ Entities: &amp; &lt; &gt; &copy;
 - [ ] Links are readable without hiding the destination forever.
 - [ ] Front matter is visually distinct.
 - [ ] Markdown markers are removed from the rendered view.
+
+## Callouts And Document Navigation
+
+> [!NOTE]
+> Callout bodies stay readable as ordinary quoted prose.
+
+> [!TIP]
+
+> [!IMPORTANT]
+
+> [!WARNING]
+
+> [!CAUTION]
+
+Shortcut reference: [locus-site]
+
+Anchor to an existing section: [Review headings](#headings)
+
+### 日本語 見出し
+
+Japanese anchor: [日本語の見出しへ](#%E6%97%A5%E6%9C%AC%E8%AA%9E-%E8%A6%8B%E5%87%BA%E3%81%97)
+
+[locus-site]: https://example.com/locus

@@ -3,6 +3,7 @@ import Foundation
 enum MarkdownLinkOpenRequest: Equatable {
   case external(URL)
   case file(URL)
+  case anchor(String)
 }
 
 enum MarkdownLinkVisualState: Equatable, Sendable {
@@ -24,7 +25,8 @@ enum MarkdownLinkNavigation {
       return nil
     }
     if isAnchorDestination(cleaned) {
-      return nil
+      guard let fragments = anchorFragments(for: cleaned) else { return nil }
+      return .anchor(fragments.decoded)
     }
 
     if let url = externalURL(for: cleaned) {
@@ -138,5 +140,89 @@ enum MarkdownLinkNavigation {
 
   private static func isAnchorDestination(_ destination: String) -> Bool {
     destination.hasPrefix("#") && destination.dropFirst().isEmpty == false
+  }
+
+  static func anchorFragments(for destination: String) -> (decoded: String, raw: String)? {
+    guard let cleaned = primaryDestination(in: destination),
+      isAnchorDestination(cleaned)
+    else {
+      return nil
+    }
+    let raw = String(cleaned.dropFirst())
+    return (raw.removingPercentEncoding ?? raw, raw)
+  }
+}
+
+struct MarkdownHeadingAnchor: Equatable, Sendable {
+  let line: Int
+  let slug: String
+}
+
+enum MarkdownHeadingAnchorTable {
+  static func anchors(
+    lines: [String],
+    states: [MarkdownLineStyleState]
+  ) -> [MarkdownHeadingAnchor] {
+    var slugCounts: [String: Int] = [:]
+    var anchors: [MarkdownHeadingAnchor] = []
+    for index in lines.indices {
+      guard index < states.count,
+        states[index].headingLevel != nil,
+        !states[index].isSetextUnderline
+      else {
+        continue
+      }
+      let rendered = TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        lines[index],
+        font: TextDocumentSyntax.markdown.font,
+        state: states[index])
+      let base = slug(for: rendered)
+      guard !base.isEmpty else { continue }
+      let duplicateIndex = slugCounts[base, default: 0]
+      slugCounts[base] = duplicateIndex + 1
+      let unique = duplicateIndex == 0 ? base : "\(base)-\(duplicateIndex)"
+      anchors.append(MarkdownHeadingAnchor(line: index, slug: unique))
+    }
+    return anchors
+  }
+
+  static func resolve(
+    decodedFragment: String,
+    rawFragment: String,
+    in anchors: [MarkdownHeadingAnchor]
+  ) -> Int? {
+    if let anchor = anchors.first(where: { $0.slug == decodedFragment }) {
+      return anchor.line
+    }
+    return anchors.first(where: { $0.slug == rawFragment })?.line
+  }
+
+  static func slug(for text: String) -> String {
+    var result = ""
+
+    for scalar in text.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars {
+      if CharacterSet.whitespacesAndNewlines.contains(scalar) {
+        result.append("-")
+        continue
+      }
+
+      let value: String?
+      switch scalar.value {
+      case 65...90:
+        value = UnicodeScalar(scalar.value + 32).map(String.init)
+      case 97...122, 48...57:
+        value = String(scalar)
+      case 45, 95:
+        value = String(scalar)
+      default:
+        value =
+          CharacterSet.letters.contains(scalar) || CharacterSet.decimalDigits.contains(scalar)
+          ? String(scalar)
+          : nil
+      }
+      guard let value else { continue }
+      result.append(value)
+    }
+    return result
   }
 }

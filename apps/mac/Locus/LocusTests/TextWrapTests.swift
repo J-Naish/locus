@@ -940,6 +940,86 @@ final class TextWrapTests: XCTestCase {
   }
 
   @MainActor
+  func testMarkdownEnterContinuesQuoteAtContentStart() throws {
+    let view = try makeEditableMarkdownViewer("> quoted text")
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: "quoted text".utf16.count))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+
+    XCTAssertEqual(content(of: view), "> quoted text\n> ")
+    XCTAssertEqual(view.selection?.head, .init(line: 1, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testMarkdownEnterSplitsQuoteAndPreservesBothPrefixes() throws {
+    let view = try makeEditableMarkdownViewer("> quoted text")
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: "quoted".utf16.count))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+
+    XCTAssertEqual(content(of: view), "> quoted\n>  text")
+  }
+
+  @MainActor
+  func testMarkdownEnterOnEmptyQuoteRemovesPrefixWithoutAddingLine() throws {
+    let view = try makeEditableMarkdownViewer("> ")
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 0))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+
+    XCTAssertEqual(content(of: view), "")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testMarkdownEnterOnNestedEmptyQuotePeelsOneLevel() throws {
+    let view = try makeEditableMarkdownViewer(">> ")
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 0))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+
+    XCTAssertEqual(content(of: view), "> ")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+  }
+
+  @MainActor
+  func testMarkdownEnterContinuesQuotedListKindsAndExitsEmptyItem() throws {
+    let cases: [(source: String, continuation: String)] = [
+      ("> - item", "> - "),
+      ("> 3. x", "> 4. "),
+      ("> - [ ] task", "> - [ ] "),
+    ]
+    for testCase in cases {
+      let view = try makeEditableMarkdownViewer(testCase.source)
+      let displayedContent = TextDocumentSyntaxHighlighter.renderedMarkdownLineText(
+        testCase.source,
+        font: TextDocumentSyntax.markdown.font,
+        state: TextDocumentSyntaxHighlighter.markdownLineStates(for: [testCase.source])[0])
+      view.beginCaretSelection(
+        at: .init(line: 0, columnUTF16: (displayedContent as NSString).length))
+
+      view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+
+      XCTAssertEqual(content(of: view), testCase.source + "\n" + testCase.continuation)
+    }
+
+    let empty = try makeEditableMarkdownViewer("> - ")
+    empty.beginCaretSelection(at: .init(line: 0, columnUTF16: 0))
+    empty.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+    XCTAssertEqual(content(of: empty), "> ")
+  }
+
+  @MainActor
+  func testMarkdownEnterDoesNotContinueQuoteInsideFence() throws {
+    let view = try makeEditableMarkdownViewer("```\n> quoted\n```")
+    view.beginCaretSelection(at: .init(line: 1, columnUTF16: "> quoted".utf16.count))
+
+    view.doCommand(by: #selector(NSStandardKeyBindingResponding.insertNewline(_:)))
+
+    XCTAssertEqual(content(of: view), "```\n> quoted\n\n```")
+  }
+
+  @MainActor
   func testMarkdownBackspaceAtLineAfterFenceDoesNotConcealParagraph() throws {
     let text = """
       ```

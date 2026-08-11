@@ -352,6 +352,96 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testOutOfBandAttributedLineMemoReusesTheLastLine() throws {
+    let contents = (0..<60).map { "line \($0)" }.joined(separator: "\n")
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+    view.setBuffer(buffer)
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<10)
+
+    let first = view.attributedLineForTesting(forLine: 30)
+    let second = view.attributedLineForTesting(forLine: 30)
+
+    XCTAssertEqual(first.string, second.string)
+    XCTAssertEqual(view.outOfBandAttributedLineComputationCountForTesting, 1)
+  }
+
+  @MainActor
+  func testOutOfBandAttributedLineMemoRecomputesAfterEdit() throws {
+    let contents = (0..<60).map { "line \($0)" }.joined(separator: "\n")
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+    view.setBuffer(buffer)
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<10)
+    _ = view.attributedLineForTesting(forLine: 30)
+
+    let offset = try buffer.position(forLine: 30, columnUTF16: 0).utf16
+    try buffer.insert("updated ", atUTF16: offset)
+    let updated = view.attributedLineForTesting(forLine: 30)
+
+    XCTAssertEqual(updated.string, "updated line 30")
+    XCTAssertEqual(view.outOfBandAttributedLineComputationCountForTesting, 2)
+  }
+
+  @MainActor
+  func testOutOfBandAttributedLineMemoKeepsOnlyTheLastLine() throws {
+    let contents = (0..<60).map { "line \($0)" }.joined(separator: "\n")
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+    view.setBuffer(buffer)
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<10)
+
+    _ = view.attributedLineForTesting(forLine: 30)
+    _ = view.attributedLineForTesting(forLine: 31)
+    _ = view.attributedLineForTesting(forLine: 30)
+
+    XCTAssertEqual(view.outOfBandAttributedLineComputationCountForTesting, 3)
+  }
+
+  @MainActor
+  func testInBandAttributedLineDoesNotTouchOutOfBandMemoCounter() throws {
+    let contents = (0..<60).map { "line \($0)" }.joined(separator: "\n")
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+    view.setBuffer(buffer)
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<10)
+
+    _ = view.attributedLineForTesting(forLine: 5)
+    _ = view.attributedLineForTesting(forLine: 5)
+
+    XCTAssertEqual(view.outOfBandAttributedLineComputationCountForTesting, 0)
+  }
+
+  @MainActor
+  func testComposingLineBypassesOutOfBandAttributedLineMemo() throws {
+    let contents = (0..<60).map { "line \($0)" }.joined(separator: "\n")
+    let buffer = try TextBuffer.open(bytes: Data(contents.utf8))
+    let view = LineRenderingTextView()
+    view.syntax = .plainText
+    view.isEditable = true
+    view.setBuffer(buffer)
+    _ = view.attributedBandLineObjectsForTesting(buffer: buffer, range: 0..<10)
+    view.beginCaretSelection(at: .init(line: 30, columnUTF16: 0))
+    view.setMarkedText(
+      "かな",
+      selectedRange: NSRange(location: 2, length: 0),
+      replacementRange: Self.noReplacement)
+    view.resetLineRenderCacheForTesting()
+    let countBeforeRequests = view.outOfBandAttributedLineComputationCountForTesting
+
+    _ = view.attributedLineForTesting(forLine: 30)
+    _ = view.attributedLineForTesting(forLine: 30)
+
+    XCTAssertEqual(
+      view.outOfBandAttributedLineComputationCountForTesting - countBeforeRequests,
+      2)
+  }
+
+  @MainActor
   func testLineRenderCacheReusesVisualRowStartsAcrossRepeatedAccess() throws {
     let markdown = String(
       repeating: "A wrapped markdown paragraph with table-like prose. ", count: 8)
@@ -3395,6 +3485,32 @@ final class TextViewportLayoutTests: XCTestCase {
   }
 
   @MainActor
+  func testDeletingLastVisibleCalloutLabelCharacterRemovesCalloutMarkers() throws {
+    let view = try makeEditableViewer("> [!NOTE]")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: "NOTE".utf16.count))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), "> ")
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+    XCTAssertTrue(view.undoEdit())
+    XCTAssertEqual(content(of: view), "> [!NOTE]")
+  }
+
+  @MainActor
+  func testDeletingWholeVisibleCalloutLabelRemovesCalloutMarkers() throws {
+    let view = try makeEditableViewer("> [!NOTE]")
+    view.syntax = .markdown
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 0))
+    view.extendSelection(to: .init(line: 0, columnUTF16: "NOTE".utf16.count))
+
+    view.deleteBackward()
+
+    XCTAssertEqual(content(of: view), "> ")
+  }
+
+  @MainActor
   func testDeletingOnlyVisibleImageCaptionRemovesEntireMarkdownImage() throws {
     let view = try makeEditableViewer("![x](image.png)")
     view.syntax = .markdown
@@ -4173,6 +4289,59 @@ final class TextViewportLayoutTests: XCTestCase {
     let actual = try XCTUnwrap(view.markdownLineStatesForTesting())
     let expected = try coldMarkdownLineStates(of: view)
     assertMarkdownLineStates(actual, equalTo: expected, step: 0, edit: "reference image")
+  }
+
+  @MainActor
+  func testSpliceBelowCalloutMatchesFullRecompute() throws {
+    let lines =
+      [
+        "> [!TIP]",
+        "> Keep the feedback loop short.",
+        "",
+      ] + (0..<120).map { "Stable paragraph \($0)." }
+    let view = try makeEditableMarkdownViewer(lines.joined(separator: "\n"), width: 720)
+    _ = try XCTUnwrap(view.markdownLineStatesForTesting())
+
+    let buffer = try XCTUnwrap(view.editableBuffer)
+    let editedLine = 80
+    let offset = try buffer.position(forLine: editedLine, columnUTF16: 8).utf16
+    view.setSelectionForTesting(globalStartUTF16: offset, globalEndUTF16: offset)
+    view.insertText("x")
+
+    let actual = try XCTUnwrap(view.markdownLineStatesForTesting())
+    let expected = try coldMarkdownLineStates(of: view)
+    assertMarkdownLineStates(actual, equalTo: expected, step: 0, edit: "below callout")
+    XCTAssertEqual(actual[0].quoteCalloutKind, .tip)
+    XCTAssertEqual(actual[1].quoteCalloutKind, .tip)
+  }
+
+  @MainActor
+  func testMarkdownHeadingAnchorScrollsToTopMarginAndUnresolvedAnchorIsInert() throws {
+    let lines =
+      ["# Start"]
+      + (0..<40).map { "Paragraph \($0)." }
+      + ["## Target Heading", "After target."]
+    let headingLine = lines.count - 2
+    let view = try makeEditableMarkdownViewer(lines.joined(separator: "\n"), width: 520)
+    let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: 180))
+    scrollView.contentInsets = NSEdgeInsets(top: 24, left: 0, bottom: 0, right: 0)
+    scrollView.documentView = view
+    view.updateLayout()
+    view.beginCaretSelection(at: .init(line: 0, columnUTF16: 0))
+
+    XCTAssertTrue(view.activateMarkdownAnchorForTesting(destination: "#target-heading"))
+
+    let headingY = try XCTUnwrap(view.endpointYForTesting(line: headingLine))
+    XCTAssertEqual(
+      scrollView.documentVisibleRect.minY,
+      headingY - scrollView.contentInsets.top,
+      accuracy: 1.0)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
+
+    let settledY = scrollView.documentVisibleRect.minY
+    XCTAssertFalse(view.activateMarkdownAnchorForTesting(destination: "#missing"))
+    XCTAssertEqual(scrollView.documentVisibleRect.minY, settledY, accuracy: 0.01)
+    XCTAssertEqual(view.selection?.head, .init(line: 0, columnUTF16: 0))
   }
 
   @MainActor

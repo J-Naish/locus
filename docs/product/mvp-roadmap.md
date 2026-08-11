@@ -58,7 +58,8 @@ Round out the MVP with the minimum review capabilities needed for local document
   is implemented in the prototype; conflict review remains deferred
 - an on-demand terminal panel (⌘J / Ctrl+`) for running and reviewing
   agent CLI sessions is implemented (ADR 0012, `docs/specs/terminal.md`)
-- Markdown diff view for changed text documents
+- inline external-change review for text documents is implemented
+  (`docs/specs/document-change-review.md`)
 - basic PDF highlights and comments
 - workspace state restoration for the current location
 - performance and size smoke checks for the full app are covered by

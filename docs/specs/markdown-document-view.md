@@ -90,6 +90,12 @@ only Markdown styling path.
 - Honest structure: ordered numbers come from the file (never
   renumbered); unsupported constructs render as plain text, never an
   error state.
+- Find-in-document searches the rendered display text that the user sees,
+  not hidden Markdown markers. Cmd-F opens a compact in-surface find bar;
+  matches are highlighted in the document, Return/Shift-Return move
+  through results, Escape closes the bar and returns focus to editing.
+  Regex, replace, and app/menu-wide find commands are intentionally
+  outside this surface for now.
 
 ### Layout and type scale
 
@@ -137,7 +143,11 @@ content. Wrap width per line = measure − indent.
 - **Blockquotes** (≤3): stacked bars; **the quoted remainder is
   re-classified for block constructs** — `> ### Title`, `> - item`,
   `> - [ ] task` render as a heading/list/task inside the quote (one
-  nesting level), indents composed.
+  nesting level), indents composed. A depth-one quote run whose first
+  line is exactly one of GitHub's `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`,
+  `[!WARNING]`, or `[!CAUTION]` callout headers renders that source label
+  semibold with a matching quiet tinted bar across the run; invalid,
+  nested, lowercase, or mid-run headers stay literal.
 - **Fenced code**: a **rounded card** (no border), flush with the text
   column (composed with any quote/list indent), code inset 12 pt on both
   sides, breathing 10 pt above and below. A *labeled* opener is a quiet
@@ -237,11 +247,13 @@ content. Wrap width per line = measure − indent.
   forms), inline code chips, links (label in accent; plain click opens
   valid `http`/`https`/`mailto`/`tel` destinations or local file paths
   inside Locus; invalid destinations use the invalid-link tint),
-  **fragment anchors** (`#section`) styled as valid but inert until
-  document anchors exist, **reference links** `[text][label]` resolved
-  through a document-wide definitions map (`[label]: url` definition
-  lines render as small muted mono; unresolved references stay plain
-  literal text with no invalid tint and no target), **autolinks**
+  **fragment anchors** (`#section`) resolved to in-document ATX or setext
+  headings with GitHub slug and duplicate-suffix rules, scrolling the
+  heading to the viewport top while unresolved anchors stay inert,
+  **reference links** `[text][label]` and shortcut references `[label]`
+  resolved through a document-wide definitions map (`[label]: url`
+  definition lines render as small muted mono; unresolved references
+  stay plain literal text with no invalid tint and no target), **autolinks**
   `<https://…>` (URL as the visible label, brackets removed; clickable
   per the scheme rule) and email autolinks (plain non-link text with
   brackets dropped), in-paragraph images as secondary alt text
@@ -332,8 +344,11 @@ prefix.
    (existing lines never renumbered), task = unchecked box. On an empty
    item: depth > 1 outdents one level per press (mirroring Backspace);
    depth 1 removes the marker, leaving an empty paragraph line — no
-   newline is inserted in either case. Inside fences it is a plain
-   newline.
+   newline is inserted in either case. Inside a quote it preserves the
+   source quote prefix verbatim and composes quoted-list continuation;
+   an empty quoted list drops its list marker while an empty plain quote
+   peels one quote level, without inserting a newline. Inside fences it
+   is a plain newline.
 7. **Emphasis keys**: Cmd+B / Cmd+I, one undo step, byte-honest. A
    selection fully inside a span unwraps it; a selection that overlaps or
    abuts same-kind spans **merges** them: inner markers are removed and
@@ -362,9 +377,10 @@ prefix.
     selection). **Links: plain click opens valid destinations**:
     external `http`/`https`/`mailto`/`tel` URLs leave Locus through the
     system opener, local file paths open in Locus, `#fragment` anchors
-    are styled but inert, and invalid links do not open. The pointing
-    hand shows over all link spans; validity affects activation and tint,
-    not the cursor. A quiet link editor, Cmd+K, and
+    scroll to resolved in-document headings without changing selection,
+    unresolved anchors remain inert, and invalid links do not open. The
+    pointing hand shows over all link spans; validity affects activation
+    and tint, not the cursor. A quiet link editor, Cmd+K, and
     paste-URL-over-selection are named deferrals.
 11. **Accessibility reads the rendered document**; ranges convert through
     the map. VoiceOver editing announcements follow the buffer edits.
@@ -388,10 +404,13 @@ The current rendering/editing status is summarized in
 Phase A (variable row heights, full type scale), typeset tables with
 cell wrapping and table-local horizontal scroll, image/video blocks,
 clickable links, task checkbox toggles, and the code card (language
-label, copy control, comments/strings tint) have shipped. Later:
+label, copy control, comments/strings tint), plus document find over
+rendered display text with mapped highlights, have shipped. External
+rewrites use the inline review defined in
+[document-change-review.md](document-change-review.md). Later:
 Phase R (optional raw editor surface), Phase B (Rust-core
-classification), polish backlog (theme slots, find-in-document with
-mapped highlights, link editor, copy-as-rich-text, richer in-paragraph
+classification), polish backlog (theme slots, link editor,
+copy-as-rich-text, richer in-paragraph
 media, animated GIF playback).
 
 ## Performance
